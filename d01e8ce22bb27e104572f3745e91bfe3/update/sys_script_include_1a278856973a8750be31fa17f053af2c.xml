@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLMRfiManager</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLMRfiManager</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var CLMRfiManager = Class.create();
+CLMRfiManager.prototype = {
+    initialize: function() {},
+
+    /**
+     * Raise a new RFI against a request, targeting a previous (manually
+     * approved) participant in the chain. Does NOT touch state,
+     * sysapproval_approver, or any flow context — the Flow keeps waiting
+     * on the current approver's approval record exactly as it does today.
+     *
+     * params: {
+     *   request_sys_id, raised_by_sys_id, raised_by_role,
+     *   target_sys_id, target_role, question
+     * }
+     * returns: { success, error, rfi_sys_id }
+     */
+    createRfi: function(params) {
+        params = params || {};
+        var requestSysId  = params.request_sys_id;
+        var raisedBySysId = params.raised_by_sys_id;
+        var raisedByRole  = params.raised_by_role || '';
+        var targetSysId   = params.target_sys_id;
+        var targetRole    = params.target_role || '';
+        var question      = (params.question || '').trim();
+
+        if (!requestSysId || !targetSysId || !question) {
+            return { success: false, error: 'Missing required fields.' };
+        }
+
+        var reqGr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        if (!reqGr.get(requestSysId)) {
+            return { success: false, error: 'Request not found.' };
+        }
+
+        // One open RFI at a time per request
+        var existing = new GlideRecord('x_birl3_clm_clm_rfi');
+        existing.addQuery('u_request', requestSysId);
+        existing.addQuery('u_status', 'open');
+        existing.query();
+        if (existing.next()) {
+            return {
+                success: false,
+                error: 'An RFI is already open on this request. It must be answered before another can be sent.'
+            };
+        }
+
+        var rfi = new GlideRecord('x_birl3_clm_clm_rfi');
+        rfi.initialize();
+        rfi.setValue('u_request', requestSysId);
+        rfi.setValue('u_raised_by', raisedBySysId);
+        rfi.setValue('u_raised_by_role', raisedByRole);
+        rfi.setValue('u_target_user', targetSysId);
+        rfi.setValue('u_target_role', targetRole);
+        rfi.setValue('u_question', question);
+        rfi.setValue('u_status', 'open');
+        rfi.setValue('u_token', gs.generateGUID());
+        var rfiSysId = rfi.insert();
+
+        if (!rfiSysId) {
+            return { success: false, error: 'Failed to create RFI record.' };
+        }
+
+        reqGr.setValue('u_open_rfi', true);
+        reqGr.setWorkflow(false);
+        reqGr.autoSysFields(false);
+        reqGr.update();
+
+        // Notify target by email with the tokenized link
+        var targetGr = new GlideRecord('sys_user');
+        if (targetGr.get(targetSysId)) {
+            var targetEmail = targetGr.getValue('email');
+            if (targetEmail) {
+                gs.eventQueue('x_birl3_clm.rfi_raised', reqGr, targetEmail, rfi.getValue('u_token'));
+            } else {
+                gs.warn('CLM RFI: target user ' + targetSysId + ' has no email on file.');
+            }
+        }
+
+        gs.info('CLM RFI: raised RFI ' + rfiSysId + ' on request ' + requestSysId +
+                 ' (' + raisedByRole + ' -> ' + targetRole + ')');
+
+        return { success: true, rfi_sys_id: rfiSysId + '' };
+    },
+
+    /**
+     * Look up an open RFI by token — used by the public response widget.
+     * Returns null if not found / already answered (do not distinguish
+     * the two reasons in the response, to avoid leaking record existence).
+     */
+    // getByToken: function(token) {
+    //     if (!token) return null;
+
+    //     var rfi = new GlideRecord('x_birl3_clm_clm_rfi');
+    //     rfi.addQuery('u_token', token);
+    //     rfi.addQuery('u_status', 'open');
+    //     rfi.query();
+
+    //     if (!rfi.next()) return null;
+
+    //     var reqGr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+    //     var custName = '', reqNumber = '';
+    //     if (reqGr.get(rfi.getValue('u_request'))) {
+    //         reqNumber = reqGr.getValue('number');
+    //         try { custName = reqGr.customer.getDisplayValue() + ''; } catch (e) {}
+    //     }
+
+    //     return {
+    //         sys_id:          rfi.getUniqueValue(),
+    //         request_number:  reqNumber,
+    //         customer_name:   custName,
+    //         raised_by_role:  rfi.getValue('u_raised_by_role'),
+    //         target_role:     rfi.getValue('u_target_role'),
+    //         question:        rfi.getValue('u_question')
+    //     };
+    // },
+/**
+     * Look up an open RFI by token — used by the public response widget.
+     * Returns null if not found / already answered.
+     */
+    getByToken: function(token) {
+        if (!token) return null;
+
+        var rfi = new GlideRecord('x_birl3_clm_clm_rfi');
+        rfi.addQuery('u_token', token);
+        rfi.addQuery('u_status', 'open');
+        rfi.query();
+
+        if (!rfi.next()) return null;
+
+        var reqGr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        var custName = '', reqNumber = '', segment = '', custType = '', reqLimit = 0, netExp = 0;
+        
+        if (reqGr.get(rfi.getValue('u_request'))) {
+            reqNumber = reqGr.getValue('number');
+            try { custName = reqGr.customer.getDisplayValue() + ''; } catch (e) {}
+            
+            // Fetch extra contextual data for the UI
+            segment  = reqGr.getValue('segment') || 'N/A';
+            custType = reqGr.getValue('customer_type') || 'N/A';
+            
+            var rawReqLimit = parseFloat(reqGr.getValue('requested_limit')) || 0;
+            var rawNetExp   = parseFloat(reqGr.getValue('net_exposure')) || 0;
+            reqLimit = rawReqLimit / 100000; // Convert to Lakhs
+            netExp   = rawNetExp / 100000;   // Convert to Lakhs
+        }
+
+        return {
+            sys_id:          rfi.getUniqueValue(),
+            request_number:  reqNumber,
+            customer_name:   custName,
+            segment:         segment,
+            customer_type:   custType,
+            requested_limit: reqLimit.toFixed(2),
+            net_exposure:    netExp.toFixed(2),
+            raised_by_role:  rfi.getValue('u_raised_by_role'),
+            raised_by_name:  rfi.u_raised_by.getDisplayValue() || 'Approver',
+            target_role:     rfi.getValue('u_target_role'),
+            target_name:     rfi.u_target_user.getDisplayValue() || 'Approver',
+            question:        rfi.getValue('u_question')
+        };
+    },
+    /**
+     * Submit a response to an open RFI by token.
+     * Clears u_open_rfi on the parent request and notifies the raiser.
+     * Does not touch approval chain state — request simply becomes
+     * "unblocked" again for whoever already had it in their queue.
+     */
+    submitResponse: function(token, responseText) {
+        responseText = (responseText || '').trim();
+
+        if (!token || !responseText) {
+            return { success: false, error: 'Response text is required.' };
+        }
+
+        var rfi = new GlideRecord('x_birl3_clm_clm_rfi');
+        rfi.addQuery('u_token', token);
+        rfi.addQuery('u_status', 'open');
+        rfi.query();
+
+        if (!rfi.next()) {
+            return { success: false, error: 'This request for information has already been answered, or the link is invalid.' };
+        }
+
+        rfi.setValue('u_status', 'answered');
+        rfi.setValue('u_response', responseText);
+        rfi.setValue('u_responded_on', new GlideDateTime());
+        rfi.update();
+
+        var rfiSysId = rfi.getUniqueValue();
+        var requestSysId = rfi.getValue('u_request');
+
+        var reqGr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        if (reqGr.get(requestSysId)) {
+            reqGr.setValue('u_open_rfi', false);
+            reqGr.setWorkflow(false);
+            reqGr.autoSysFields(false);
+            reqGr.update();
+
+            var raiserGr = new GlideRecord('sys_user');
+            if (raiserGr.get(rfi.getValue('u_raised_by'))) {
+                var raiserEmail = raiserGr.getValue('email');
+                if (raiserEmail) {
+                    gs.eventQueue('x_birl3_clm.rfi_answered', reqGr, raiserEmail, responseText);
+                }
+            }
+        }
+
+        gs.info('CLM RFI: response submitted for RFI ' + rfiSysId);
+
+        return { success: true, rfi_sys_id: rfiSysId + '' };
+    },
+
+    type: 'CLMRfiManager'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-08-21 06:23:42</sys_created_on>
+        <sys_id>1a278856973a8750be31fa17f053af2c</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>CLMRfiManager</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_1a278856973a8750be31fa17f053af2c</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-16 04:22:06</sys_updated_on>
+    </sys_script_include>
+</record_update>

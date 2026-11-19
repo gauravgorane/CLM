@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sn_aia_agent">
+    <sn_aia_agent action="INSERT_OR_UPDATE">
+        <advanced_mode>false</advanced_mode>
+        <agent_type>internal</agent_type>
+        <applicability_script><![CDATA[/** 
+ * Function to process inputs related to ServiceNow change request operations 
+ * 
+ * @param {Object} inputs - The input parameters object 
+ * @param {string} inputs.objective - The purpose or goal of the operation 
+ * @param {string} inputs.execution_plan_id - Unique identifier for the execution plan 
+ * @param {Object} inputs.context - Context information about the ServiceNow change request 
+ * @param {string} inputs.context.url - The URL of the change request in Service Operations Workspace 
+ * @param {string} inputs.context.table - The ServiceNow table name (e.g., 'change_request') 
+ * @param {string} inputs.context.record_sys_id - The sys ID of the record 
+ * @param {string} inputs.context.route - The route type (e.g., 'record') 
+ * @param {string} inputs.context.additional_context - Additional contextual information in JSON format 
+ * @param {string} inputs.context.experience - The UI experience name (e.g., 'Service Operations Workspace') 
+ * @param {string} inputs.context.number - The request number 
+ * @param {string} inputs.context.portal - The portal ID 
+ * @param {string} inputs.context.device_type - The device type from which the experience is accessed, e.g.'mweb' 
+ * @param {string} inputs.context.deployment_id - The unique identifier for the assistant deployment 
+ * @param {string} inputs.context.assistant_type - The type of assistant, e.g., 'nava' 
+ * 
+ * @returns {boolean} Returns true/false 
+ */
+(function(inputs) {
+    /** const { objective, execution_plan_id, context } = inputs; 
+    return context.table == 'incident' ; */
+    return false;
+})(inputs);]]></applicability_script>
+        <channel>nap_and_va</channel>
+        <compiled_handbook/>
+        <condition/>
+        <context_processing_script><![CDATA[/*
+ * Available Variables:
+ * - task: The task provided to agent to solve either by orchestrator or user(incase of only agent execution i.e agent is invoked as seperate entity instead from a workflow).
+ * - user_utterance: The user utterance provided. and task = user_utterance in case of individual agent execution.
+ * - agent_id: The agent id.
+ * - context: An object that carries additional contextual information for the agent.
+ *          It always includes a "pageContext" and may include a "triggerContext",
+ *          depending on how and from where the agent is invoked.
+ *
+ *          Behavior by invocation type:
+ *          ---------------------------------
+ *          - When invoked via the startAiAgentConversation API:
+ *                If a "contextMemory" parameter is provided in the API request,
+ *                it will be available here as the "triggerContext".
+ *                The "pageContext" is always present in this call, regardless
+ *                of whether the agent is executed individually or as part of a use case.
+ *                Example:
+ *                    {
+ *                        pageContext: { ... },
+ *                        triggerContext: { ... } // Derived from contextMemory (if passed)
+ *                    }
+ *
+ *          - When invoked as part of a use case or workflow:
+ *                The "pageContext" and "triggerContext" objects available here
+ *                may have been *modified* by the use case’s context processing script.
+ *                This means the use case may alter, extend, or overwrite values
+ *                from the original "pageContext" or "triggerContext"
+ *                before the context reaches the agent.
+ *                If the use case was originally triggered via the API,
+ *                the initial "triggerContext" is still derived from the
+ *                "contextMemory" parameter, but its contents may have been updated
+ *                by the use case logic.
+ *
+ *          - When executed directly (standalone agent execution):
+ *                The "pageContext" will always be present (default or empty),
+ *                and the "triggerContext" will only be populated if explicitly
+ *                passed through the API call.
+ * Return an modified context like: { pageContext : {},triggerContext:{} }
+ */
+(function(task, user_utterance, agent_id, context) {
+    return {
+        pageContext : context?.pageContext,
+		triggerContext : context?.triggerContext
+    };
+})(task,user_utterance, agent_id, context);]]></context_processing_script>
+        <description>Fetch real-time stock data, latest news, and generate actionable insights for a given company. This agent is designed for the Ultratech CLM portal to help evaluate vendors and third parties by analyzing market trends, financial performance, and recent developments. It provides a concise summary along with risk and stability assessment to support contract lifecycle and business decision-making.</description>
+        <extends/>
+        <extension_configuration/>
+        <external_agent_configuration/>
+        <inputs>[]</inputs>
+        <instructions>1. Accept the company name from user
+
+2. Use available tools (such as web search) to fetch the latest company news and market updates for the customer name captured .
+3. Identify key financial indicators such as stock performance and major announcements.
+4. Extract 3–5 relevant and recent news highlights.
+5. Analyze the company's market position and determine overall sentiment (positive, neutral, or negative).
+6. Evaluate potential business risk or reliability based on recent performance and news.
+7. Generate a concise summary tailored for contract and vendor evaluation.
+8. Present the output in a structured format including:
+   - Company Name
+   - Current stock price
+   - Market/Stock Insight
+   - Key News Highlights
+   - Risk &amp; Stability Assessment
+   - Final Recommendation (Low Risk / Moderate Risk / High Risk)
+10. Use Perform Record creation to create record
+10. a. Use initial inputs as customer name
+10. b, Use outcome of previous step as input for final recommendation, current stock price, key news highlights and market stock insight
+11. Display the record created</instructions>
+        <internal_name>Ultratech.x_birl3_clm.Copy of CLM Market News Agent (Copy)</internal_name>
+        <name>Copy of CLM Market News Agent (Copy)</name>
+        <outputs>""</outputs>
+        <parent/>
+        <post_processing_message/>
+        <processing_message/>
+        <proficiency>- Expertly analyzes and delivers comprehensive company insights—including financial performance, recent news, and market position—tailored to contract lifecycle management decisions. Supports stakeholders in evaluating vendor stability, business reliability, and risk, ensuring that contract and vendor selection is based on up-to-date, accurate information.
+- Utilizes advanced search and scraping functions to fetch and synthesize the latest company news and market updates. Capable of targeting specific countries, domains, and customizing the number and depth of results, ensuring that stakeholders receive the most relevant and up-to-date information for vendor evaluation and contract decisions.
+- Interprets and synthesizes key financial indicators (such as stock performance and major announcements), extracts 3–5 relevant and recent news highlights, analyzes market position, and determines overall sentiment (positive, neutral, or negative). Provides a structured assessment of business risk and reliability, supporting contract and vendor evaluation.
+- Creates structured performance records in the customer performance table, capturing company name, final recommendation, current stock price, key news highlights, and market/stock insight. Ensures that all relevant analysis is documented for contract lifecycle management and vendor evaluation processes.
+- Automates the end-to-end workflow by combining real-time data fetching, financial and news analysis, risk assessment, and structured record creation. Presents the final output in a standardized format, including company name, current stock price, market/stock insight, key news highlights, risk &amp; stability assessment, and final recommendation, ensuring seamless support for contract lifecycle management decisions.
+- Displays the created performance record to stakeholders, providing immediate access to structured company insights, risk assessments, and recommendations. Facilitates informed decision-making in contract lifecycle management by ensuring transparency and accessibility of the agent's analysis.</proficiency>
+        <record_type>custom</record_type>
+        <required_translations/>
+        <research>false</research>
+        <role>You are a financial insights assistant designed for the Ultratech CLM portal. Your role is to provide accurate and up-to-date company insights to support contract lifecycle decisions. 
+
+When a user provides a company name, analyze its financial performance, recent news, and market position. Focus on delivering insights that help stakeholders assess vendor stability, risk, and business reliability.</role>
+        <root_agent_id/>
+        <source_id display_value="CLM Market News Agent">e8380286973f7a90be31fa17f053af49</source_id>
+        <strategy display_value="ReAct">f0bff21f9f13c6108f431597d90a1c74</strategy>
+        <sys_class_name>sn_aia_agent</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-25 10:15:03</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>4f77e19697f77e90be31fa17f053affb</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>Copy of CLM Market News Agent (Copy)</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sn_aia_agent_4f77e19697f77e90be31fa17f053affb</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-03-25 19:18:12</sys_updated_on>
+    </sn_aia_agent>
+</record_update>

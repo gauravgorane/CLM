@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sysauto_script">
+    <sysauto_script action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <advanced>false</advanced>
+        <business_calendar/>
+        <can_iterate>false</can_iterate>
+        <condition/>
+        <conditional>false</conditional>
+        <entered_run_end/>
+        <entered_run_start/>
+        <entered_time>1970-01-01 00:00:00</entered_time>
+        <max_drift/>
+        <name>CLM NT BG Expiry Daily Reminder Job</name>
+        <offset/>
+        <offset_type>0</offset_type>
+        <repeat_every/>
+        <run_as display_value="Gaurav Vijay Gorane">5837759f2b83b6904572f3745e91bf77</run_as>
+        <run_as_tz/>
+        <run_dayofmonth>1</run_dayofmonth>
+        <run_dayofweek>1</run_dayofweek>
+        <run_daysofweek/>
+        <run_end/>
+        <run_month>1</run_month>
+        <run_period/>
+        <run_start>2026-11-12 08:50:24</run_start>
+        <run_time>1970-01-01 02:00:00</run_time>
+        <run_type>daily</run_type>
+        <run_weekinmonth>1</run_weekinmonth>
+        <script><![CDATA[(function runNtBgExpiryReminderJob() {
+    var T_CUST   = 'x_birl3_clm_clm_customer_master1';
+    var T_MATRIX = 'x_birl3_clm_approval_matrix';
+    var EVENT_NAME = 'x_birl3_clm.nt_bg_expiry_reminder';
+
+    // Helper: Get YYYY-MM-DD date string offset by N days from today
+    function getOffsetDateStr(days) {
+        var gd = new GlideDate();
+        if (days !== 0) {
+            gd.addDaysLocalTime(days);
+        }
+        return gd.getValue(); // YYYY-MM-DD
+    }
+
+    // 1. Define the 4 Target Milestone Dates (T-30, T-15, T-7, Expired Day T-0)
+    var milestones = [
+        { code: 'T30', daysLeft: 30, label: '30 Days to Expiry', dateStr: getOffsetDateStr(30) },
+        { code: 'T15', daysLeft: 15, label: '15 Days to Expiry', dateStr: getOffsetDateStr(15) },
+        { code: 'T7',  daysLeft: 7,  label: '7 Days to Expiry',  dateStr: getOffsetDateStr(7)  },
+        { code: 'EXP', daysLeft: 0,  label: 'Expired Today',     dateStr: getOffsetDateStr(0)  }
+    ];
+
+    var dateToMilestone = {};
+    var targetDates = [];
+    for (var i = 0; i < milestones.length; i++) {
+        dateToMilestone[milestones[i].dateStr] = milestones[i];
+        targetDates.push(milestones[i].dateStr);
+    }
+
+    // 2. Cache ZCH Recipients by Zone (plus PAN-India ZCH / HO Commercial)
+    var zoneZchMap = {};
+    var panIndiaUsers = [];
+
+    var mGr = new GlideRecord(T_MATRIX);
+    var rqc = mGr.addQuery('role_name', 'CONTAINS', 'ZCH');
+    rqc.addOrCondition('role_name', 'CONTAINS', 'Zonal');
+    var ctqc = mGr.addQuery('customer_type', 'CONTAINS', 'Non-Trade');
+    ctqc.addOrCondition('customer_type', 'CONTAINS', 'non_trade');
+    ctqc.addOrCondition('customer_type', 'CONTAINS', 'non-trade');
+    mGr.query();
+
+    while (mGr.next()) {
+        var uId = (mGr.getValue('approver_user') || '').trim();
+        if (!uId) continue;
+
+        var pIndia = mGr.getValue('pan_india');
+        if (pIndia === '1' || pIndia === 'true' || pIndia === true) {
+            if (panIndiaUsers.indexOf(uId) === -1) panIndiaUsers.push(uId);
+        }
+
+        var z = (mGr.getValue('zone') || '').trim();
+        if (z) {
+            if (!zoneZchMap[z]) zoneZchMap[z] = [];
+            if (zoneZchMap[z].indexOf(uId) === -1) zoneZchMap[z].push(uId);
+        }
+    }
+
+    function getRecipientsForZone(zoneCode) {
+        var list = [];
+        var zList = (zoneCode && zoneZchMap[zoneCode]) ? zoneZchMap[zoneCode] : [];
+        for (var a = 0; a < zList.length; a++) {
+            if (list.indexOf(zList[a]) === -1) list.push(zList[a]);
+        }
+        // Fallback to PAN-India ZCH if zone has no specific mapping
+        if (list.length === 0) {
+            for (var b = 0; b < panIndiaUsers.length; b++) {
+                if (list.indexOf(panIndiaUsers[b]) === -1) list.push(panIndiaUsers[b]);
+            }
+        }
+        return list;
+    }
+
+    // 3. Query Non-Trade Sites Matching Any of the 4 Milestone Dates
+    var custGr = new GlideRecord(T_CUST);
+    custGr.addQuery('cg1', 'N01'); // Non-Trade
+    custGr.addQuery('bank_guarantee', '>', 0);
+    custGr.addQuery('bg_expiry_date', 'IN', targetDates.join(','));
+    custGr.orderBy('pan');
+    custGr.orderBy('customer_code_sap');
+    custGr.query();
+
+    // Group matching sites by (PAN + Zone + MilestoneCode) to send consolidated emails
+    var batches = {};
+
+    while (custGr.next()) {
+        var rawExp = (custGr.getValue('bg_expiry_date') || '').split(' ')[0];
+        var ms = dateToMilestone[rawExp];
+        if (!ms) continue;
+
+        var pan = (custGr.getValue('pan') || '').trim();
+        var zone = (custGr.getValue('zone') || '').trim();
+        var siteCode = (custGr.getValue('customer_code_sap') || '').trim();
+        var groupKey = (pan || siteCode) + '|' + zone + '|' + ms.code;
+
+        if (!batches[groupKey]) {
+            batches[groupKey] = {
+                anchorSysId: custGr.getUniqueValue(),
+                pan: pan,
+                zone: zone,
+                milestone: ms,
+                siteSysIds: []
+            };
+        }
+        batches[groupKey].siteSysIds.push(custGr.getUniqueValue());
+    }
+
+    // 4. Fire One Event per Consolidated Batch
+    var firedCount = 0;
+    for (var key in batches) {
+        if (!batches.hasOwnProperty(key)) continue;
+        var b = batches[key];
+
+        var recipients = getRecipientsForZone(b.zone);
+        if (recipients.length === 0) {
+            gs.warn('CLM BG Expiry Reminder: No ZCH recipient found for Zone ' + b.zone + ' (PAN: ' + b.pan + ')');
+            continue;
+        }
+
+        var anchorGr = new GlideRecord(T_CUST);
+        if (anchorGr.get(b.anchorSysId)) {
+            var payload = {
+                code: b.milestone.code,
+                daysLeft: b.milestone.daysLeft,
+                expiryDate: b.milestone.dateStr,
+                pan: b.pan,
+                zone: b.zone,
+                siteSysIds: b.siteSysIds
+            };
+
+            gs.eventQueue(
+                EVENT_NAME,
+                anchorGr,
+                recipients.join(','),
+                JSON.stringify(payload)
+            );
+            firedCount++;
+        }
+    }
+
+    gs.info('CLM NT BG Expiry Daily Reminder Job completed. Batches queued: ' + firedCount);
+})();]]></script>
+        <source_filter/>
+        <source_table>cmdb_ci_appl_dot_net</source_table>
+        <sys_class_name>sysauto_script</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-12 08:50:24</sys_created_on>
+        <sys_id>7db4c0013be4df5087401044c3e45ada</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>CLM NT BG Expiry Daily Reminder Job</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sysauto_script_7db4c0013be4df5087401044c3e45ada</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-12 10:22:43</sys_updated_on>
+        <time_zone/>
+        <upgrade_safe>false</upgrade_safe>
+    </sysauto_script>
+</record_update>

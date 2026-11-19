@@ -1,0 +1,950 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[function widgetcontroller($scope, $rootScope) {
+    var c = this;
+    c.loading = false;
+
+    // Formatter used in HTML
+    c.formatLakh = function(v) {
+        if (v === undefined || v === null || v === '') return '';
+        var n = parseFloat(v);
+        if (isNaN(n)) return v;
+        var abs = Math.abs(n);
+        var sign = n < 0 ? '-' : '';
+        return sign + '\u20B9' + (abs / 100000).toFixed(1) + 'L';
+    };
+
+    // Badge colour mappings
+    c.getStatusBadgeClass = function(status) {
+        var s = (status || '').toLowerCase();
+        if (s.indexOf('submit') > -1 || s.indexOf('pend') > -1) return 'badge-yellow';
+        if (s.indexOf('approv') > -1) return 'badge-green';
+        if (s.indexOf('reject') > -1) return 'badge-red';
+        if (s.indexOf('return') > -1 || s.indexOf('send') > -1) return 'badge-purple';
+        return 'badge-default';
+    };
+
+    c.getRiskBadgeClass = function(risk) {
+        var r = (risk || '').toLowerCase();
+        if (r === 'low') return 'badge-green';
+        if (r === 'medium') return 'badge-amber';
+        if (r === 'high') return 'badge-red';
+        return 'badge-default';
+    };
+
+    // Central fetch function
+    function loadRequestDetails(reqNumber) {
+        if (!reqNumber) return;
+        c.loading = true;
+        c.server.get({ action: 'load_request', number: reqNumber }).then(function(r) {
+            c.data.record = r.data.record;
+            c.data.error = r.data.error;
+            c.loading = false;
+        });
+    }
+
+    // 1. Listen for the drill‑down event from the Approval Requests table
+    var removeListener = $rootScope.$on('clm.request.selected', function(event, payload) {
+        if (payload && payload.number) {
+            loadRequestDetails(payload.number);
+        }
+    });
+
+    // Clean up the listener when the widget is destroyed
+    $scope.$on('$destroy', removeListener);
+
+    // 2. Failsafe: if a request was already selected before this tab loaded
+    if ($rootScope.clmPendingRequestNumber) {
+        loadRequestDetails($rootScope.clmPendingRequestNumber);
+    }
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* ===================== BASE PORTAL &amp; TYPOGRAPHY ===================== */
+.clm-detail-portal {
+    font-family: "Helvetica Neue", Arial, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #1a1a1a;
+    width: 100%;
+    padding: 8px;
+    font-size: 12.5px;
+}
+
+/* ===================== RIBBON ===================== */
+.clm-ribbon {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    padding: 8px 14px;
+    margin-bottom: 8px;
+}
+
+.clm-label {
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: #9ca3af;
+    text-transform: uppercase;
+}
+
+.clm-number {
+    font-size: 17px;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-top: 1px;
+    line-height: 1.2;
+}
+
+.clm-subline {
+    font-size: 11.5px;
+    color: #6b7280;
+    margin-top: 2px;
+}
+
+.clm-subline .clm-dot {
+    margin: 0 6px;
+    color: #d1d5db;
+}
+
+.clm-ribbon-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.clm-badge {
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 3px;
+    white-space: nowrap;
+}
+
+.clm-badge-red {
+    background: #fde3e3;
+    color: #b3261e;
+}
+
+/* ===================== LIMIT BANNER ===================== */
+.clm-limit-banner {
+    background: #eef4fe;
+    border: 1px solid #e0eafc;
+    border-radius: 8px;
+    padding: 20px 32px;
+    margin-bottom: 8px;
+}
+
+.clm-limit-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    max-width: 620px;
+    margin: 0 auto;
+}
+
+.clm-limit-block {
+    text-align: left;
+}
+
+.clm-limit-block-right {
+    text-align: right;
+}
+
+.clm-limit-label {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: #64748b;
+    text-transform: uppercase;
+}
+
+.clm-limit-pct {
+    color: #1c4e9c;
+    font-weight: 700;
+    font-size: 12px;
+    margin-left: 4px;
+    text-transform: none;
+    letter-spacing: normal;
+}
+
+.clm-pct-neg {
+    color: #b3261e;
+}
+
+.clm-limit-value {
+    font-size: 28px;
+    font-weight: 700;
+    color: #334155;
+    margin-top: 4px;
+    line-height: 1.2;
+}
+
+.clm-limit-value-blue {
+    color: #1c4e9c;
+}
+
+.clm-limit-arrow {
+    font-size: 18px;
+    color: #7c93b8;
+    padding: 0 12px;
+}
+
+/* ===================== COLUMN LAYOUT ===================== */
+.clm-columns {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+}
+
+.clm-col-left {
+    flex: 1 1 58%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.clm-col-right {
+    flex: 1 1 42%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+@media (max-width: 860px) {
+    .clm-columns {
+        flex-direction: column;
+    }
+}
+
+/* ===================== CARDS &amp; DATA ROWS ===================== */
+.clm-card {
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+
+.clm-card-title {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 2px;
+}
+
+.clm-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px solid #f1f2f4;
+    font-size: 12px;
+}
+
+.clm-row-last {
+    border-bottom: none;
+}
+
+.clm-row-label {
+    color: #6b7280;
+}
+
+.clm-row-value {
+    font-weight: 600;
+    color: #1a1a1a;
+}
+
+.clm-text-blue {
+    color: #1c4e9c;
+}
+
+.clm-text-red {
+    color: #b3261e;
+}
+
+/* ===================== PILLS (Dynamic Status &amp; Risk) ===================== */
+.clm-pill {
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 3px;
+    display: inline-block;
+    white-space: nowrap;
+}
+
+/* Status colors */
+.clm-pill.badge-yellow {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.clm-pill.badge-green {
+    background: #d4edda;
+    color: #155724;
+}
+
+.clm-pill.badge-red {
+    background: #f8d7da;
+    color: #721c24;
+}
+
+.clm-pill.badge-purple {
+    background: #e2d9f3;
+    color: #5a3e85;
+}
+
+/* Risk colors */
+.clm-pill.badge-amber {
+    background: #ffeaa7;
+    color: #9a7d0a;
+}
+
+.clm-pill.badge-default {
+    background: #e9ecef;
+    color: #495057;
+}
+
+/* ===================== JUSTIFICATION BOX ===================== */
+.clm-justification-box {
+    border-left: 2px solid #1c4e9c;
+    background: #f8f9fb;
+    padding: 7px 11px;
+    font-size: 12px;
+    color: #374151;
+    border-radius: 0 3px 3px 0;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    white-space: pre-wrap;
+}
+
+/* ===================== WORKFLOW TRAIL ===================== */
+.clm-workflow {
+    position: relative;
+    padding-left: 2px;
+}
+
+.clm-workflow-step {
+    display: flex;
+    gap: 9px;
+    position: relative;
+    padding-bottom: 12px;
+}
+
+.clm-workflow-step:not(:last-child)::before {
+    content: "";
+    position: absolute;
+    left: 3px;
+    top: 13px;
+    bottom: 0;
+    width: 1px;
+    background: #e5e7eb;
+}
+
+.clm-workflow-dot {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    margin-top: 4px;
+    background: #1c4e9c;
+}
+
+.clm-workflow-dot.clm-dot-rejected {
+    background: #b3261e;
+}
+
+.clm-workflow-dot.clm-dot-approved {
+    background: #1f9d55;
+}
+
+.clm-workflow-content {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.clm-workflow-header {
+    font-size: 12px;
+    font-weight: 700;
+    color: #1a1a1a;
+}
+
+.clm-workflow-role {
+    color: #1a1a1a;
+}
+
+.clm-workflow-meta {
+    font-size: 10.5px;
+    color: #9ca3af;
+    margin-top: 1px;
+}
+
+.clm-workflow-comment {
+    margin-top: 6px;
+    background: #fde3e3;
+    color: #7f1d1d;
+    font-size: 11.5px;
+    font-style: normal;
+    border-left: 2px solid #b3261e;
+    padding: 5px 9px;
+    border-radius: 0 3px 3px 0;
+}
+
+.clm-workflow-banner {
+    margin-top: 4px;
+    background: #fde3e3;
+    color: #b3261e;
+    font-weight: 700;
+    font-size: 11.5px;
+    text-align: center;
+    letter-spacing: 0.03em;
+    padding: 7px;
+    border-radius: 3px;
+}
+
+/* ===================== EMPTY STATE ===================== */
+.clm-empty {
+    text-align: center;
+    color: #6b7280;
+    padding: 60px 20px;
+    font-size: 13.5px;
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    margin-top: 20px;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>copy_real_clm_zhm_request_details</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>copy_real_clm_zhm_request_details</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    data.record = null;
+    data.error = '';
+
+    // Only run server logic when specifically asked by the drill-down Client Script
+    if (!input || input.action !== 'load_request' || !input.number) {
+        return; 
+    }
+
+    var currentUserId = gs.getUserID();
+    var currentUserName = gs.getUserName();
+
+    // =========================================================
+    // 1. Role‑Based Access – ZHM, ZH_RMC, ZH_BPD, ZCH
+    // =========================================================
+    var AUTHORIZED_ROLES = {
+        'ZHM':    'Cement',
+        'ZH_RMC': 'RMC',
+        'ZH_BPD': 'BPD',
+        'ZCH':    null   // ZCH sees all segments
+    };
+
+    var forcedSegmentLabel = null;   // 'Cement', 'RMC', 'BPD', or null
+    var forcedSegmentRaw = null;
+    var userZone = '';
+    var roleFound = null;
+
+    var grRole = new GlideRecord('x_birl3_clm_role_user_mapping');
+    var qcUser = grRole.addQuery('u_user', currentUserId);
+    qcUser.addOrCondition('u_user', currentUserName);
+    grRole.addQuery('u_role', 'IN', Object.keys(AUTHORIZED_ROLES));
+    grRole.query();
+    
+    if (grRole.next()) {
+        roleFound = grRole.getValue('u_role');
+        // Segment determination
+        if (roleFound === 'ZCH') {
+            forcedSegmentLabel = null;   // no restriction
+        } else {
+            var segFromMapping = grRole.getValue('u_segment') || '';
+            forcedSegmentLabel = segFromMapping || AUTHORIZED_ROLES[roleFound];
+        }
+        // Zone capture for any role (ZCH may or may not have zone)
+        var zoneVal = grRole.getValue('u_zone') || '';
+        if (zoneVal) {
+            userZone = zoneVal;
+        }
+    }
+
+    // If no authorized role found -> access denied
+    if (!roleFound) {
+        data.error = 'You do not have permission to view this request.';
+        return;
+    }
+
+    // Resolve raw segment value from request table (for filtering)
+    if (forcedSegmentLabel) {
+        var gaSeg = new GlideAggregate('x_birl3_clm_clm_new_credit_request');
+        gaSeg.addAggregate('COUNT', 'segment');
+        gaSeg.groupBy('segment');
+        gaSeg.query();
+        while (gaSeg.next()) {
+            if (gaSeg.getDisplayValue('segment').toLowerCase() === forcedSegmentLabel.toLowerCase()) {
+                forcedSegmentRaw = gaSeg.getValue('segment');
+                break;
+            }
+        }
+        if (!forcedSegmentRaw) forcedSegmentRaw = forcedSegmentLabel; // fallback
+    }
+
+    // =========================================================
+    // 2. LIVE SAP CREDIT API HELPER (same as CCH Customer 360)
+    // =========================================================
+    function getLiveCreditData(customerCode, salesOrg) {
+        var out = {
+            creditLimit: 0,
+            outstandingAmount: 0,
+            availableCredit: 0,
+            asdAmount: 0,
+            state: '',
+            raw: null,
+            success: false
+        };
+
+        if (!customerCode) {
+            gs.error('[ZHM Request Details] getLiveCreditData called with no customer code.');
+            return out;
+        }
+
+        try {
+            var apiCall = new x_birl3_clm.CLM_NEW_WSDL1();
+            var rawResult = apiCall.getCreditDetails(customerCode, salesOrg || '');
+
+            if (!rawResult) {
+                gs.error('[ZHM Request Details] CLM_NEW_WSDL1 returned an empty string for ' + customerCode + '/' + salesOrg);
+                return out;
+            }
+
+            var parsed = JSON.parse(rawResult);
+
+            out.creditLimit       = parseFloat(parsed.creditLimit) || 0;
+            out.outstandingAmount = parseFloat(parsed.outstandingAmount) || 0;
+            out.availableCredit   = parseFloat(parsed.availableCredit) || 0;
+            out.asdAmount         = parseFloat(parsed.ASDAmount) || 0;
+            out.state             = parsed.state || '';
+            out.raw = parsed;
+
+            var allBlank = true;
+            for (var k in parsed) {
+                if (parsed[k]) { allBlank = false; break; }
+            }
+            if (allBlank) {
+                gs.error('[ZHM Request Details] CLM_NEW_WSDL1 returned blank data for ' + customerCode + '/' + salesOrg);
+            } else {
+                out.success = true;
+            }
+
+        } catch (e) {
+            gs.error('[ZHM Request Details] CLM_NEW_WSDL1 call threw exception for ' + customerCode + '/' + salesOrg + ': ' + e.message);
+        }
+
+        return out;
+    }
+
+    // =========================================================
+    // 3. Fetch the specific Request using the Number passed from the UI
+    // =========================================================
+    var grReq = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+    grReq.addQuery('number', input.number);
+    
+    // Apply zone security (if the user has a zone assigned)
+    if (userZone) {
+        grReq.addQuery('customer.zone', userZone);
+    }
+    // Apply segment security (if forced segment is set)
+    if (forcedSegmentRaw) {
+        grReq.addQuery('customer.segment', forcedSegmentRaw);
+    }
+    
+    grReq.setLimit(1);
+    grReq.query();
+
+    if (grReq.next()) {
+        data.record = buildRecordPayload(grReq);
+    } else {
+        data.error = 'Request not found or you do not have permission to view it.';
+    }
+
+    // 4. Helper to format data and query related Master tables
+    function buildRecordPayload(gr) {
+        var reqSysId = gr.getUniqueValue();
+        // Original request-based values (used as fallback)
+        var reqCurrentLimit = parseFloat(gr.getValue('current_credit_limit')) || 0;
+        var requestedLimit = parseFloat(gr.getValue('requested_limit')) || 0;
+        var reqOutstanding = parseFloat(gr.getValue('outstanding_amount')) || 0;
+        var activeSd = parseFloat(gr.getValue('active_sd')) || 0;
+        var approvedLimit = parseFloat(gr.getValue('approved_limit')) || 0;
+
+        // Retrieve customer code and salesorg for the live API call
+        var customerId = gr.getValue('customer');
+        var customerCode = '';
+        var customerSalesOrg = '';
+
+        // Customer Master (respect zone and segment for extra safety)
+        var grMaster = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        if (grMaster.get(customerId)) {
+            // Verify the customer belongs to the user's zone/segment
+            var customerZone = grMaster.getValue('zone') || '';
+            if (userZone && customerZone !== userZone) {
+                data.error = 'Request not found or you do not have permission to view it.';
+                return;
+            }
+            customerCode = grMaster.getValue('customer_code_sap') || '';
+            customerSalesOrg = grMaster.getValue('salesorg') || '';
+        }
+
+        // --- LIVE API CALL ---
+        var live = getLiveCreditData(customerCode, customerSalesOrg);
+        // Use live data when successful, otherwise fallback to request values
+        var currentLimit = live.success ? live.creditLimit : reqCurrentLimit;
+        var outstanding = live.success ? live.outstandingAmount : reqOutstanding;
+
+        // --- Calculations based on the chosen values ---
+        var increaseAmount = requestedLimit - currentLimit;
+        var increasePct = (currentLimit !== 0) ? Math.round((increaseAmount / currentLimit) * 100) : 0;
+        var utilisationPctStr = (currentLimit > 0) ? ((outstanding / currentLimit) * 100).toFixed(1) + '%' : 'N/A';
+
+        // Date & Days Left Calculation
+        var reviewDateStr = gr.getValue('next_review_date');
+        var reviewIn = 'No date set';
+        if (reviewDateStr) {
+            var reviewDate = new GlideDateTime(reviewDateStr);
+            var today = new GlideDateTime();
+            var daysDiff = GlideDateTime.subtract(today, reviewDate).getRoundedDayPart();
+            
+            if (daysDiff > 0) reviewIn = reviewDateStr + ' / ' + daysDiff + ' days left';
+            else if (daysDiff === 0) reviewIn = reviewDateStr + ' / Due today';
+            else reviewIn = reviewDateStr + ' / ' + Math.abs(daysDiff) + ' days overdue';
+        }
+
+        var overdue90 = 0;
+        var customerName = '';
+        var customerPan = '';
+        var commodity = gr.getDisplayValue('segment');
+
+        var riskClassification = 'Low';
+        var accountStatusStr = gr.getDisplayValue('state') || 'Unknown';
+
+        if (customerId) {
+            var grOut = new GlideRecord('x_birl3_clm_customer_outstanding');
+            if (grOut.get('customer', customerId)) {
+                overdue90 = parseFloat(grOut.getValue('ageing_gt90')) || 0;
+            }
+
+            // Risk Classification from Aging Snapshot
+            var agingGr = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+            agingGr.addQuery('customer', customerId);
+            agingGr.query();
+            if (agingGr.next()) {
+                var over90Sum = (parseFloat(agingGr.getValue('bucket_91_120_days')) || 0) +
+                                (parseFloat(agingGr.getValue('bucket_121_180_days')) || 0) +
+                                (parseFloat(agingGr.getValue('bucket_181_365_days')) || 0) +
+                                (parseFloat(agingGr.getValue('bucket_366_730_days')) || 0) +
+                                (parseFloat(agingGr.getValue('bucket_730_above')) || 0) +
+                                (parseFloat(agingGr.getValue('bucket_gt120_days')) || 0);
+
+                var over60to90Sum = (parseFloat(agingGr.getValue('bucket_61_75_days')) || 0) +
+                                    (parseFloat(agingGr.getValue('bucket_76_90_days')) || 0);
+
+                if (over90Sum > 0) riskClassification = 'High';
+                else if (over60to90Sum > 0) riskClassification = 'Medium';
+            }
+
+            // Already have master record from above; reuse it for customer details
+            customerName = grMaster.getValue('customer_name') || '';
+            customerPan  = grMaster.getValue('pan') || '';
+            customerCode = grMaster.getValue('customer_code_sap') || '';
+            if (!commodity) commodity = grMaster.getDisplayValue('segment');
+        }
+
+        // Approval Workflow Trail & Pending Stage
+        var workflowTrail = [];
+        var finalDecision = '';
+        var activePendingApprovers = [];
+
+        workflowTrail.push({
+            role: 'Initiator',
+            actor: gr.getDisplayValue('sys_created_by'),
+            action: 'Submitted',
+            date: gr.getDisplayValue('sys_created_on'),
+            duration: '',
+            comment: '',
+            dotClass: 'clm-dot-approved'
+        });
+
+        var grApp = new GlideRecord('sysapproval_approver');
+        var qc = grApp.addQuery('sysapproval', reqSysId);
+        qc.addOrCondition('document_id', reqSysId);
+        grApp.orderBy('sys_created_on'); 
+        grApp.query();
+
+        while (grApp.next()) {
+            var appState = (grApp.getValue('state') || '').toLowerCase();
+            var actionLabel = 'Pending';
+            var dotClass = '';
+            var actionDate = grApp.getDisplayValue('sys_created_on');
+            var approverName = grApp.getDisplayValue('approver');
+
+            if (appState === 'approved') {
+                actionLabel = 'Approved';
+                dotClass = 'clm-dot-approved';
+                actionDate = grApp.getDisplayValue('sys_updated_on');
+            } else if (appState === 'rejected') {
+                actionLabel = 'Rejected';
+                dotClass = 'clm-dot-rejected';
+                actionDate = grApp.getDisplayValue('sys_updated_on');
+                finalDecision = 'Request Rejected by ' + approverName;
+            } else if (appState === 'requested') {
+                actionLabel = 'Pending Approval';
+                activePendingApprovers.push(approverName);
+            } else if (appState === 'not_required' || appState === 'cancelled') {
+                actionLabel = 'Skipped / Cancelled';
+                actionDate = grApp.getDisplayValue('sys_updated_on');
+            }
+
+            workflowTrail.push({
+                role: 'Approver',
+                actor: approverName,
+                action: actionLabel,
+                date: actionDate,
+                duration: '',
+                comment: '', 
+                dotClass: dotClass
+            });
+        }
+
+        var reqState = (gr.getValue('state') || '').toLowerCase();
+        var calculatedPendingStage = '';
+
+        if (reqState.indexOf('approv') > -1) {
+            finalDecision = 'Request Fully Approved';
+            calculatedPendingStage = 'Approved';
+        } else if (reqState.indexOf('reject') > -1) {
+            calculatedPendingStage = 'Rejected';
+        } else if (activePendingApprovers.length > 0) {
+            calculatedPendingStage = 'Pending at ' + activePendingApprovers.join(', ');
+        } else {
+            calculatedPendingStage = accountStatusStr;
+        }
+
+        // Approved amount logic: show approved limit only when state is 'approved', otherwise 'Pending'
+        var approvedAmount = (reqState.indexOf('approv') > -1) ? approvedLimit : 'Pending';
+
+        return {
+            number: gr.getValue('number'),
+            customerName: customerName,
+            customerPan: customerPan,
+            customerCode: customerCode,
+            commodity: commodity,
+
+            previousLimit: currentLimit,        // live credit limit (or fallback)
+            requestedLimit: requestedLimit,
+            increaseAmount: increaseAmount,
+            increasePct: increasePct,
+
+            pendingStage: calculatedPendingStage,
+            tshJustification: gr.getValue('business_justification'),
+
+            approvedAmount: approvedAmount,     // 'Pending' or the actual approved limit
+            securityDeposit: activeSd,
+            utilisationPct: utilisationPctStr,
+
+            accountStatus: accountStatusStr,
+            riskClassification: riskClassification,
+            
+            outstandingAmount: outstanding,     // live outstanding (or fallback)
+            overdue90: overdue90,
+            reviewIn: reviewIn,
+
+            statusBadge1: '',
+            statusBadge2: '',
+
+            workflowTrail: workflowTrail,
+            finalDecisionLabel: finalDecision
+        };
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-06 21:13:23</sys_created_on>
+        <sys_id>332c041597330310be31fa17f053af25</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>copy_real_clm_zhm_request_details</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_332c041597330310be31fa17f053af25</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-06 21:13:23</sys_updated_on>
+        <template><![CDATA[<div class="clm-detail-portal">
+
+  <div class="clm-detail-body" ng-if="c.data.record && !c.loading">
+
+    <div class="clm-ribbon">
+      <div class="clm-ribbon-left">
+        <div class="clm-label">REQUEST DETAIL</div>
+        <div class="clm-number">{{c.data.record.number}}</div>
+        <div class="clm-subline">
+          {{c.data.record.customerName}}
+          <span class="clm-dot">&middot;</span>
+          {{c.data.record.customerPan}}
+          <span class="clm-dot">&middot;</span>
+          {{c.data.record.commodity}}
+        </div>
+      </div>
+      <div class="clm-ribbon-right">
+        <span class="clm-badge clm-badge-red" ng-if="c.data.record.statusBadge1">{{c.data.record.statusBadge1}}</span>
+        <span class="clm-badge clm-badge-red" ng-if="c.data.record.statusBadge2">{{c.data.record.statusBadge2}}</span>
+      </div>
+    </div>
+
+    <div class="clm-limit-banner">
+      <div class="clm-limit-inner">
+        <div class="clm-limit-block">
+          <div class="clm-limit-label">PREVIOUS LIMIT</div>
+          <div class="clm-limit-value">{{c.formatLakh(c.data.record.previousLimit)}}</div>
+        </div>
+        <div class="clm-limit-arrow">&rarr;</div>
+        <div class="clm-limit-block clm-limit-block-right">
+          <div class="clm-limit-label">
+            REQUESTED
+            <span class="clm-limit-pct" ng-class="{'clm-pct-neg': c.data.record.increasePct < 0}">
+              {{c.data.record.increasePct >= 0 ? '+' : ''}}{{c.data.record.increasePct}}%
+            </span>
+          </div>
+          <div class="clm-limit-value clm-limit-value-blue">{{c.formatLakh(c.data.record.requestedLimit)}}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="clm-columns">
+
+      <div class="clm-col-left">
+
+        <div class="clm-card">
+          <div class="clm-card-title">Request Financials</div>
+
+          <div class="clm-row">
+            <span class="clm-row-label">Previous Limit</span>
+            <span class="clm-row-value">{{c.formatLakh(c.data.record.previousLimit)}}</span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Requested Limit</span>
+            <span class="clm-row-value clm-text-blue">{{c.formatLakh(c.data.record.requestedLimit)}}</span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Increase</span>
+            <span class="clm-row-value clm-text-blue">
+              {{c.data.record.increaseAmount >= 0 ? '+' : ''}}{{c.formatLakh(c.data.record.increaseAmount)}}
+              ({{c.data.record.increasePct >= 0 ? '+' : ''}}{{c.data.record.increasePct}}%)
+            </span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Approved Amount</span>
+            <span class="clm-row-value">{{c.data.record.approvedAmount}}</span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Security Deposit (SD)</span>
+            <span class="clm-row-value">{{c.formatLakh(c.data.record.securityDeposit)}}</span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Utilisation at Request</span>
+            <span class="clm-row-value clm-text-red">{{c.data.record.utilisationPct}}</span>
+          </div>
+          <div class="clm-row clm-row-last">
+            <span class="clm-row-label">Pending Stage</span>
+            <span class="clm-pill" ng-class="c.getStatusBadgeClass(c.data.record.accountStatus)">
+              {{c.data.record.pendingStage}}
+            </span>
+          </div>
+        </div>
+
+        <div class="clm-card">
+          <div class="clm-card-title">Customer Snapshot at Submission</div>
+
+          <div class="clm-row">
+            <span class="clm-row-label">Account Status</span>
+            <span class="clm-pill" ng-class="c.getStatusBadgeClass(c.data.record.accountStatus)">
+              {{c.data.record.accountStatus}}
+            </span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Risk</span>
+            <span class="clm-pill" ng-class="c.getRiskBadgeClass(c.data.record.riskClassification)">
+              {{c.data.record.riskClassification}}
+            </span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Outstanding</span>
+            <span class="clm-row-value clm-text-blue">{{c.formatLakh(c.data.record.outstandingAmount)}}</span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Overdue &gt;90 Days</span>
+            <span class="clm-row-value clm-text-red">{{c.formatLakh(c.data.record.overdue90)}}</span>
+          </div>
+          <div class="clm-row clm-row-last">
+            <span class="clm-row-label">Review In</span>
+            <span class="clm-row-value clm-text-red">{{c.data.record.reviewIn}}</span>
+          </div>
+        </div>
+
+        <div class="clm-card">
+          <div class="clm-card-title">TSH Justification</div>
+          <div class="clm-justification-box">{{c.data.record.tshJustification || 'No justification provided.'}}</div>
+        </div>
+
+      </div>
+
+      <div class="clm-col-right">
+        <div class="clm-card">
+          <div class="clm-card-title">Approval Workflow Trail</div>
+          <div class="clm-workflow">
+            <div class="clm-workflow-step" ng-repeat="step in c.data.record.workflowTrail">
+              <div class="clm-workflow-dot" ng-class="step.dotClass"></div>
+              <div class="clm-workflow-content">
+                <div class="clm-workflow-header">
+                  <span class="clm-workflow-role">{{step.role}}</span>
+                  <span ng-if="step.actor">&mdash; {{step.actor}}</span>
+                </div>
+                <div class="clm-workflow-meta">{{step.action}} <span ng-if="step.date">&middot; {{step.date}}</span> <span ng-if="step.duration">&middot; {{step.duration}}</span></div>
+                <div class="clm-workflow-comment" ng-if="step.comment">&ldquo;{{step.comment}}&rdquo;</div>
+              </div>
+            </div>
+            <div class="clm-workflow-banner" ng-if="c.data.record.finalDecisionLabel">
+              {{c.data.record.finalDecisionLabel}}
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="clm-empty" ng-if="!c.data.record && !c.loading">
+    <i class="fa fa-hand-pointer-o" style="font-size: 24px; margin-bottom: 12px; color: #a0aec0; display: block;"></i>
+    Please click on a Request ID from the <strong>Approval Requests</strong> tab to view its details.
+  </div>
+  
+  <div class="clm-empty" ng-if="c.loading">
+    <i class="fa fa-spinner fa-spin fa-2x" style="color: #1c4e9c; margin-bottom: 12px; display: block;"></i>
+    Loading request details...
+  </div>
+</div>]]></template>
+    </sp_widget>
+</record_update>

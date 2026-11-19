@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>false</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_nt_pan_request</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition table="x_birl3_clm_nt_pan_request">panISNOTEMPTY^EQ<item endquery="false" field="pan" goto="false" newquery="false" operator="ISNOTEMPTY" or="false" value=""/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>CLM: Pre-fetch Gen AI News</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous /*null when async*/) {
+
+    var pan = current.getValue('pan');
+    if (!pan) return;
+
+    var PERF_TABLE = 'x_birl3_clm_customer_performance';
+    var CUST_TABLE = 'x_birl3_clm_clm_customer_master1';
+    var REUSE_HOURS = 24;
+    var STALE_MINUTES = 10;
+
+    // 1. Check if a performance record already exists for this PAN
+    var pGr = new GlideRecord(PERF_TABLE);
+    pGr.addQuery('customer_name.pan', pan);
+    pGr.orderByDesc('sys_updated_on');
+    pGr.setLimit(1);
+    pGr.query();
+
+    var exists = pGr.next();
+    if (exists) {
+        var updatedGDT = new GlideDateTime(pGr.getValue('sys_updated_on'));
+        var nowGDT = new GlideDateTime();
+        var diffHours = (nowGDT.getNumericValue() - updatedGDT.getNumericValue()) / 3600000;
+        var isCurrentDay = (updatedGDT.getLocalDate().getValue() === nowGDT.getLocalDate().getValue());
+        var status = pGr.getValue('assessment_status');
+
+        // DO NOT re-trigger if already assessed today, within 24 hours, or currently running
+        if ((status === 'completed' && (isCurrentDay || diffHours < REUSE_HOURS)) || 
+            (status === 'requested' && (diffHours * 60) < STALE_MINUTES)) {
+            return;
+        }
+    }
+
+    // 2. Resolve Customer Master sys_id for the reference field 'customer_name'
+    var custSysId = '';
+    var compName = current.getValue('company_name') || '';
+
+    var cmGr = new GlideRecord(CUST_TABLE);
+    cmGr.addQuery('pan', pan);
+    cmGr.setLimit(1);
+    cmGr.query();
+    if (cmGr.next()) {
+        custSysId = cmGr.getUniqueValue();
+        if (!compName) {
+            compName = cmGr.getValue('customer_name') || cmGr.getValue('name') || '';
+        }
+    }
+
+    // 3. Update existing record if older than 24h, or insert a single new row
+    var targetGr = exists ? pGr : new GlideRecord(PERF_TABLE);
+    if (!exists) {
+        targetGr.initialize();
+        if (custSysId) {
+            targetGr.setValue('customer_name', custSysId); // Sets reference to customer master
+        }
+    }
+
+    targetGr.setValue('company_name', compName);
+    targetGr.setValue('current_stock_price', '');
+    targetGr.setValue('market_stock_insight', '');
+    targetGr.setValue('financial_highlights', '');
+    targetGr.setValue('major_developments', '');
+    targetGr.setValue('key_news_highlights', '');
+    targetGr.setValue('final_recommendation', '');
+    targetGr.setValue('requested_by', gs.getUserID());
+    targetGr.setValue('assessment_status', 'requested');
+
+    if (exists) {
+        targetGr.update();
+    } else {
+        targetGr.insert();
+    }
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-31 15:30:45</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>5fbcaf813bd45b9087401044c3e45a86</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>CLM: Pre-fetch Gen AI News</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_5fbcaf813bd45b9087401044c3e45a86</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-31 15:34:50</sys_updated_on>
+        <template/>
+        <when>after</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=5fbcaf813bd45b9087401044c3e45a86"/>
+</record_update>

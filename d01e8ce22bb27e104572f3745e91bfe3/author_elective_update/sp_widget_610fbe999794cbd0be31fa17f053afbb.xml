@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope) {
+
+    var c = this;
+
+    c.getCredit = function() {
+
+        if (!c.customer_code) {
+            alert("Please enter customer code");
+            return;
+        }
+
+        c.server.get({
+            customer_code: c.customer_code
+        }).then(function(response) {
+
+            c.data.credit = response.data.credit;
+
+        });
+    };
+
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.panel {
+    border-radius: 10px;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>fetch_limit</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>fetch limit</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+    if (input && input.customer_code) {
+
+        var obj = new global.CLM_WSDL();  // ✅ FIX
+        var credit = obj.getlimit(input.customer_code);
+
+        data.credit = credit;
+    }
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-04-16 10:34:59</sys_created_on>
+        <sys_id>610fbe999794cbd0be31fa17f053afbb</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_name>fetch limit</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_610fbe999794cbd0be31fa17f053afbb</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-05-11 19:32:20</sys_updated_on>
+        <template><![CDATA[<div class="panel panel-default" style="padding:20px;">
+
+    <h3>Customer Credit Lookup</h3>
+
+    <div class="form-group">
+        <label>Customer Code</label>
+        <input type="text" class="form-control" ng-model="c.customer_code" placeholder="Enter Customer Code"/>
+    </div>
+
+    <button class="btn btn-primary" ng-click="c.getCredit()">Search</button>
+
+    <br/><br/>
+
+    <div ng-if="c.data.credit">
+        <h4>Credit Limit:</h4>
+        <p style="font-size:18px; color:green;">
+            {{c.data.credit}}
+        </p>
+    </div>
+
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>610fbe999794cbd0be31fa17f053afbb</id>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-04-16 10:34:59</sys_created_on>
+        <sys_id>a90fbe999794cbd0be31fa17f053afbf</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-04-16 10:34:59</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_610fbe999794cbd0be31fa17f053afbb</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function($scope) {
+
+    var c = this;
+
+    c.getCredit = function() {
+
+        if (!c.customer_code) {
+            alert("Please enter customer code");
+            return;
+        }
+
+        c.server.get({
+            customer_code: c.customer_code
+        }).then(function(response) {
+
+            c.data.credit = response.data.credit;
+
+        });
+    };
+
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;.panel {
+    border-radius: 10px;
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id&gt;fetch_limit&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;fetch limit&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+
+    if (input &amp;&amp; input.customer_code) {
+
+        var obj = new global.CLM_WSDL();  // ✅ FIX
+        var credit = obj.getlimit(input.customer_code);
+
+        data.credit = credit;
+    }
+
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;vedant.salunke@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-04-16 10:34:59&lt;/sys_created_on&gt;&lt;sys_id&gt;610fbe999794cbd0be31fa17f053afbb&lt;/sys_id&gt;&lt;sys_mod_count&gt;4&lt;/sys_mod_count&gt;&lt;sys_name&gt;fetch limit&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_610fbe999794cbd0be31fa17f053afbb&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;vedant.salunke@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-05-11 19:32:20&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="panel panel-default" style="padding:20px;"&gt;
+
+    &lt;h3&gt;Customer Credit Lookup&lt;/h3&gt;
+
+    &lt;div class="form-group"&gt;
+        &lt;label&gt;Customer Code&lt;/label&gt;
+        &lt;input type="text" class="form-control" ng-model="c.customer_code" placeholder="Enter Customer Code"/&gt;
+    &lt;/div&gt;
+
+    &lt;button class="btn btn-primary" ng-click="c.getCredit()"&gt;Search&lt;/button&gt;
+
+    &lt;br/&gt;&lt;br/&gt;
+
+    &lt;div ng-if="c.data.credit"&gt;
+        &lt;h4&gt;Credit Limit:&lt;/h4&gt;
+        &lt;p style="font-size:18px; color:green;"&gt;
+            {{c.data.credit}}
+        &lt;/p&gt;
+    &lt;/div&gt;
+
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;610fbe999794cbd0be31fa17f053afbb&lt;/id&gt;&lt;sys_created_by&gt;vedant.salunke@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-04-16 10:34:59&lt;/sys_created_on&gt;&lt;sys_id&gt;a90fbe999794cbd0be31fa17f053afbf&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;vedant.salunke@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-04-16 10:34:59&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>-179633790</payload_hash>
+        <record_name>fetch limit</record_name>
+        <reverted_from/>
+        <source>57b38f622b2303104572f3745e91bf2a</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by/>
+        <sys_created_on>2026-09-28 21:32:03</sys_created_on>
+        <sys_id>f1e38c503b08531087401044c3e45ae1</sys_id>
+        <sys_mod_count/>
+        <sys_recorded_at>1a0e9ee98380000000</sys_recorded_at>
+        <sys_updated_by/>
+        <sys_updated_on/>
+        <type>Widget</type>
+        <update_guid>b1e38c509e085310dc443756e89a8fe1</update_guid>
+        <update_guid_history>b1e38c509e085310dc443756e89a8fe1:-179633790</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="fetch limit">31e38c503b08531087401044c3e45ae2</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-16 04:18:59</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>36b8542deedb4c64bec44b401e66a010</sys_id>
+        <sys_metadata>610fbe999794cbd0be31fa17f053afbb</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>fetch limit</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_610fbe999794cbd0be31fa17f053afbb</sys_update_name>
+        <sys_update_version display_value="sp_widget_610fbe999794cbd0be31fa17f053afbb">f1e38c503b08531087401044c3e45ae1</sys_update_version>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-16 04:18:59</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

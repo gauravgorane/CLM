@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_di_key">
+    <sys_di_key action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <additional_details/>
+        <description>Analyze the ENTIRE uploaded report/document and identify all legal/court cases.
+
+Extract:
+- Court Name
+- Court Type
+- Case Status
+- Case Amount (if available)
+
+Normalize statuses:
+Open statuses:
+- Open
+- Pending
+- Ongoing
+- Under Hearing
+- Active
+
+Closed statuses:
+- Disposed
+- Closed
+- Settled
+- Withdrawn
+- Dismissed
+
+----------------------------------------------------
+SEVERITY RULES
+----------------------------------------------------
+
+1. NCLT + Open/Pending
+   Severity = "Major"
+
+2. DRT or District Court + Open/Pending
+   Severity = "Medium"
+
+3. Local Court / Civil Court / Consumer Court / Labour Court / Others + Open/Pending
+   Severity = "Minor"
+
+4. Any Disposed/Closed/Settled/Dismissed case
+   Severity = "Nil"
+
+----------------------------------------------------
+FINAL OUTPUT RULES
+----------------------------------------------------
+
+1. If no cases found OR all cases are Nil:
+   Final Output = "No Cases"
+
+2. If only Minor severity cases exist:
+   Final Output = "Minor Civil"
+
+3. If Medium severity cases exist and active cases are between 1-2:
+   Final Output = "1-2 Active"
+
+4. If any Major severity case exists
+   OR more than 2 active cases exist
+   OR fraud/criminal keywords found:
+   Final Output = "Multiple/Fraud"
+
+Return ONLY one final value from:
+- No Cases
+- Minor Civil
+- 1-2 Active
+- Multiple/Fraud</description>
+        <display_name>Court Cases</display_name>
+        <group_index>0</group_index>
+        <key_config/>
+        <key_group/>
+        <mandatory>false</mandatory>
+        <metadata>{"hybridFieldType":"Field","key_prediction_type":"extraction"}</metadata>
+        <name>Court Cases</name>
+        <order>20</order>
+        <prediction_method/>
+        <stp_threshold/>
+        <synonym/>
+        <sys_class_name>sys_di_key</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-05-26 18:31:59</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>7ecb66d62b89c3104572f3745e91bf95</sys_id>
+        <sys_mod_count>3</sys_mod_count>
+        <sys_name>Court Cases</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_di_key_7ecb66d62b89c3104572f3745e91bf95</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-09 05:55:00</sys_updated_on>
+        <target_field>court_cases</target_field>
+        <target_table>x_birl3_clm_ocr_test</target_table>
+        <task_definition display_value="OCR Test">8320aa4e97afba10be31fa17f053af7e</task_definition>
+        <total_used_positive_samples>0</total_used_positive_samples>
+        <type>Text</type>
+    </sys_di_key>
+</record_update>

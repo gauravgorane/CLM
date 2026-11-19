@@ -1,0 +1,577 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.KeyLimitSwapUtil</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description>Utility script for processing Key Customer Limit Swaps. Handles classification, validation, matrix approver mapping, and post-approval limit rollups.</description>
+        <mobile_callable>false</mobile_callable>
+        <name>KeyLimitSwapUtil</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[/**
+ * Script Include: KeyLimitSwapUtil   (v6)
+ * Application : CLM      Client callable: false
+ * ES5 only (Rhino). All table / field names and switches are in this.CFG.
+ * v6: enhancement lock now checks ALL enhancement tables (SPOC request, CRM submission, optional CRM site draft)
+ *     with case-insensitive state matching; the swap block message names the exact request.
+ */
+var KeyLimitSwapUtil = Class.create();
+KeyLimitSwapUtil.prototype = {
+
+    initialize: function () {
+        this.CFG = {
+            // ===== SWITCHES: TESTING vs GO-LIVE (change only these) =====
+            ADMIN_BYPASS: true,                    // TESTING: admins see every site and skip the purview check.   GO-LIVE: false
+            ALLOW_MANUAL_DONOR_AVAILABLE: true,    // TESTING: allow typed Donor Available Limit when no snapshot. GO-LIVE: false
+            SAP_ENABLED: false,                    // GO-LIVE: true, after _pushToSap is implemented
+            ENFORCE_PURVIEW: true,                 // initiator must be the donee's CRM (TSM for RMC)
+            STRICT_APPROVER_CHECK: true,
+            DEBUG: false,
+
+            // ---- Tables ----
+            SWAP_TABLE:   'x_birl3_clm_key_limit_swap',
+            SITE_TABLE:   'x_birl3_clm_clm_customer_master1',
+            MATRIX_TABLE: 'x_birl3_clm_approval_matrix',
+            ZONE_TABLE:   '',   // only if a table STORES zone limits; blank = rollup skipped
+            GROUP_TABLE:  '',   // only if a table STORES group limits; blank = rollup skipped
+
+            // Every table that can hold a live Key enhancement.
+            // OPEN = states that block a swap (lowercase; matched against the stored value AND the label,
+            // with spaces/underscores treated the same, e.g. pending_spoc == "Pending SPOC").
+            ENH_SOURCES: [
+                { LABEL: 'Central SPOC request', TABLE: 'x_birl3_clm_key_group_code_request', GP: 'grandparent_code', STATE: 'state',  OPEN: ['submitted', 'returned'], ENABLED: true  },
+                { LABEL: 'CRM submission',       TABLE: 'x_birl3_clm_clm_key_crm_gp_request', GP: 'grandparent_code', STATE: 'state',  OPEN: ['submitted'],             ENABLED: true  },
+                { LABEL: 'CRM site draft',       TABLE: 'x_birl3_clm_p1_crm_site_draft',      GP: 'grandparent_code', STATE: 'status', OPEN: ['pending spoc'],          ENABLED: false }
+            ],
+
+            // ---- Swap table columns ----
+            SW: {
+                donor: 'donor', donee: 'donee',
+                amount: 'requested_amount',
+                swap_type: 'swap_type',
+                donor_segment: 'donor_segment', donee_segment: 'donee_segment',
+                grandparent: 'grandparent_code',
+                auto_approve: 'auto_approve', applied: 'applied',
+                donor_before: 'donor_limit_before', donor_after: 'donor_limit_after',
+                donee_before: 'donee_limit_before', donee_after: 'donee_limit_after',
+                donor_available: 'donor_available_limit',
+                donor_current: 'donor_current_limit', donee_current: 'donee_current_limit',
+                donor_os: 'donor_outstanding', donee_os: 'donee_outstanding'
+            },
+
+            TYPE_VALUE: { A: 'intra-region', B: 'inter-region', C: 'inter-zone', D: 'inter-segment' },
+            MATRIX_CUSTOMER_TYPE: 'key',
+
+            SITE: {
+                segment: 'segment', zone_code: 'zonalparentcode', group_code: 'groupcode', grandparent: 'grand_parent',
+                crm: '', tsm: '',
+                region: 'region', zone: 'zone', depot: 'depot',
+                cg1: 'cg1', cg3: 'cg3', active: 'is_active',
+                limit: 'cr_limit', code: 'customer_code_sap'
+            },
+            ZONE_FIELDS:  { code: 'zone_code',  group_code: 'group_code', limit: 'credit_limit' },
+            GROUP_FIELDS: { code: 'group_code', limit: 'credit_limit' },
+
+            OS: { SOURCES: [
+                { TABLE: 'x_birl3_clm_key_ageing_snapshot', FIELD: 'site_code', BY: 'code',  AMOUNT: 'total_outstanding', ORDER: 'snapshot_month' },
+                { TABLE: 'x_birl3_clm_clm_aging_snapshot',   FIELD: 'customer',  BY: 'sysid', AMOUNT: 'total_outstanding', ORDER: 'snapshot_month' }
+            ] },
+
+            KEY_CG1: 'N00',
+            CONTRACTOR_CG3: 'N09',
+            STATE: { OPEN: '1', WIP: '2', DONE: '3', REJECTED: '4' }
+        };
+
+        this.CHAIN = {
+            cement: { A: [],               B: ['crm'],         C: ['crm', 'zh_key'],       D: ['crm', 'zh_key', 'head_ka'] },
+            bpd:    { A: [],               B: ['crm'],         C: ['crm', 'zk_hbpd'],      D: ['crm', 'zk_hbpd', 'hs_bpd', 'hbpd'] },
+            rmc:    { A: ['tsm', 'rh_ch'], B: ['tsm', 'rh_ch'], C: ['tsm', 'rh_ch', 'zh'],  D: ['tsm', 'rh_ch', 'zh', 'head_rmc'] }
+        };
+
+        this.FIELD = {
+            cement: { crm: 'ls_donor_crm', zh_key: 'ls_donor_zh_key', head_ka: 'ls_donor_head_ka' },
+            bpd:    { crm: 'ls_donor_crm', zk_hbpd: 'ls_donor_zk_hbpd', hs_bpd: 'ls_donor_hsbpd', hbpd: 'ls_donor_hbpd' },
+            rmc:    { tsm: 'ls_donor_tsm', rh_ch: 'ls_donor_rh_rmc', zh: 'ls_donor_zh_rmc', head_rmc: 'ls_donor_head_rmc' }
+        };
+
+        this.ROLE_SHORT = {
+            cement: { 'CRM': 'crm', 'ZH KEY': 'zh_key', 'HEAD KA': 'head_ka' },
+            bpd:    { 'CRM': 'crm', 'ZK HBPD': 'zk_hbpd', 'HS BPD': 'hs_bpd', 'HSBPD': 'hs_bpd', 'HBPD': 'hbpd' },
+            rmc:    { 'TSM': 'tsm', 'RH CH': 'rh_ch', 'RH': 'rh_ch', 'ZH': 'zh', 'HEAD RMC': 'head_rmc' }
+        };
+
+        this.ROLE_LOOKUP = {
+            'KEY CEMENT CRM':     { seg: 'cement', key: 'crm' },
+            'KEY CEMENT ZH KEY':  { seg: 'cement', key: 'zh_key' },
+            'KEY CEMENT HEAD KA': { seg: 'cement', key: 'head_ka' },
+            'KEY BPD CRM':        { seg: 'bpd',    key: 'crm' },
+            'KEY BPD ZK HBPD':    { seg: 'bpd',    key: 'zk_hbpd' },
+            'KEY BPD HS BPD':     { seg: 'bpd',    key: 'hs_bpd' },
+            'KEY BPD HBPD':       { seg: 'bpd',    key: 'hbpd' },
+            'KEY RMC TSM':        { seg: 'rmc',    key: 'tsm' },
+            'KEY RMC RH CH':      { seg: 'rmc',    key: 'rh_ch' },
+            'KEY RMC ZH':         { seg: 'rmc',    key: 'zh' },
+            'KEY RMC HEAD RMC':   { seg: 'rmc',    key: 'head_rmc' }
+        };
+    },
+
+    // ===================== Helpers =====================
+    _log: function (msg) { if (this.CFG.DEBUG) gs.info('[KeyLimitSwap] ' + msg); },
+
+    _isTrue: function (gr, field) {
+        var v = String(gr.getValue(field)).toLowerCase();
+        return v === '1' || v === 'true';
+    },
+
+    _num: function (gr, field) {
+        var v = gr.getValue(field);
+        if (v === null || v === undefined || v === '') return 0;
+        v = String(v);
+        if (v.indexOf(';') > -1) v = v.split(';')[1];
+        var n = parseFloat(v);
+        return isNaN(n) ? 0 : n;
+    },
+
+    _set: function (gr, field, val) {
+        if (field && gr.isValidField(field)) gr.setValue(field, val);
+    },
+
+    _normSeg: function (raw) {
+        var s = String(raw || '').toLowerCase();
+        if (s.indexOf('cement') > -1) return 'cement';
+        if (s.indexOf('rmc') > -1) return 'rmc';
+        if (s.indexOf('bpd') > -1) return 'bpd';
+        return s.replace(/^\s+|\s+$/g, '');
+    },
+
+    _normRole: function (name) {
+        return String(name || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').replace(/^\s+|\s+$/g, '');
+    },
+
+    _lookupRole: function (roleName, rowSeg) {
+        var n = this._normRole(roleName);
+        var short = this.ROLE_SHORT[rowSeg];
+        if (short && short[n]) return { seg: rowSeg, key: short[n] };
+        if (this.ROLE_LOOKUP[n]) return this.ROLE_LOOKUP[n];
+        if (this.ROLE_LOOKUP['KEY ' + n]) return this.ROLE_LOOKUP['KEY ' + n];
+        if (n.indexOf('KEY ') === 0 && this.ROLE_LOOKUP[n.substring(4)]) return this.ROLE_LOOKUP[n.substring(4)];
+        return null;
+    },
+
+    _typeLetter: function (val) {
+        var v = String(val || '').toLowerCase().replace(/^\s+|\s+$/g, '');
+        var tv = this.CFG.TYPE_VALUE;
+        for (var k in tv) { if (tv[k] === v || k.toLowerCase() === v) return k; }
+        return '';
+    },
+
+    _getSite: function (sysId) {
+        var gr = new GlideRecord(this.CFG.SITE_TABLE);
+        if (sysId && gr.get(sysId)) return gr;
+        return null;
+    },
+
+    _siteVal: function (site, key) {
+        var f = this.CFG.SITE[key];
+        if (!f) return '';
+        return site.getValue(f) || '';
+    },
+
+    _isAdminBypass: function () {
+        return !!(this.CFG.ADMIN_BYPASS && gs.hasRole('admin'));
+    },
+
+    // Best matrix approver per role for a SITE. Matches on segment + zone + region.
+    // Depot only improves the score; it never excludes a CRM row (CRM is a regional persona).
+    // Other roles with a different depot are skipped.
+    _matrixBest: function (segment, site, allowed) {
+        var best = {};
+        var mx = new GlideRecord(this.CFG.MATRIX_TABLE);
+        mx.addQuery('customer_type', this.CFG.MATRIX_CUSTOMER_TYPE);
+        mx.addEncodedQuery(
+            'segment=' + segment + '^ORsegmentISEMPTY' +
+            '^zone=' + this._siteVal(site, 'zone') + '^ORzoneISEMPTY' +
+            '^region=' + this._siteVal(site, 'region') + '^ORregionISEMPTY');
+        mx.addNotNullQuery('approver_user');
+        mx.orderBy('sequence_order');
+        mx.query();
+        var sd = this._siteVal(site, 'depot');
+        while (mx.next()) {
+            var def = this._lookupRole(mx.getValue('role_name'), this._normSeg(mx.getValue('segment')));
+            if (!def) { this._log('Unmapped matrix role: ' + mx.getValue('role_name')); continue; }
+            if (def.seg !== segment) continue;
+            if (allowed.indexOf(def.key) === -1) continue;
+            var md = mx.getValue('depot');
+            if (md && sd && md !== sd && def.key !== 'crm') continue;
+            var score = ((md && md === sd) ? 4 : 0) + (mx.getValue('region') ? 2 : 0) + (mx.getValue('zone') ? 1 : 0);
+            if (!best[def.key] || score >= best[def.key].score) best[def.key] = { uid: mx.getValue('approver_user'), score: score };
+        }
+        var cc = this._siteVal(site, 'crm'), tt = this._siteVal(site, 'tsm');
+        if (cc && allowed.indexOf('crm') > -1) best.crm = { uid: cc, score: 99 };
+        if (tt && allowed.indexOf('tsm') > -1) best.tsm = { uid: tt, score: 99 };
+        return best;
+    },
+
+    // CRM of a site: only rows specific to the site's zone/region count (a generic row is not this site's CRM)
+    _crmFor: function (site, segment) {
+        var b = this._matrixBest(segment, site, ['crm']);
+        return (b.crm && b.crm.score > 0) ? b.crm.uid : '';
+    },
+
+    _isOwner: function (site, segment, uid) {
+        if (segment === 'rmc') {
+            var t = this._matrixBest('rmc', site, ['tsm']);
+            return !!(t.tsm && t.tsm.uid === uid);
+        }
+        return this._crmFor(site, segment) === uid;
+    },
+
+    // latest outstanding from the first snapshot source that has a row. null = no row
+    _outstanding: function (site) {
+        var src = (this.CFG.OS && this.CFG.OS.SOURCES) || [];
+        for (var i = 0; i < src.length; i++) {
+            var O = src[i];
+            if (!O.TABLE) continue;
+            var key = (O.BY === 'sysid') ? site.getUniqueValue() : this._siteVal(site, 'code');
+            if (!key) continue;
+            var gr = new GlideRecord(O.TABLE);
+            if (!gr.isValid()) continue;
+            gr.addQuery(O.FIELD, key);
+            gr.orderByDesc(O.ORDER);
+            gr.setLimit(1);
+            gr.query();
+            if (gr.next()) return this._num(gr, O.AMOUNT);
+        }
+        return null;
+    },
+
+    // donor headroom = limit - outstanding. No snapshot: typed Donor Available Limit (only if ALLOW_MANUAL_DONOR_AVAILABLE). null = unknown
+    _unutilized: function (sw, donor, os) {
+        var C = this.CFG;
+        if (os !== null) return this._num(donor, C.SITE.limit) - os;
+        var f = C.SW.donor_available;
+        if (!C.ALLOW_MANUAL_DONOR_AVAILABLE || !f || !sw.isValidField(f)) return null;
+        var v = this._num(sw, f);
+        return v > 0 ? v : null;
+    },
+
+    // ===================== BR1 - classify =====================
+    classify: function (current) {
+        var SW = this.CFG.SW;
+        var donee = this._getSite(current.getValue(SW.donee));
+        var donor = this._getSite(current.getValue(SW.donor));
+        if (!donee || !donor) return '';
+
+        var doneeSeg = this._normSeg(this._siteVal(donee, 'segment'));
+        var donorSeg = this._normSeg(this._siteVal(donor, 'segment'));
+        var type;
+
+        if (doneeSeg !== donorSeg || this._siteVal(donee, 'group_code') !== this._siteVal(donor, 'group_code')) {
+            type = 'D';
+        } else if (this._siteVal(donee, 'zone_code') !== this._siteVal(donor, 'zone_code')) {
+            type = 'C';
+        } else if (donorSeg === 'rmc') {
+            var r1 = this._siteVal(donee, 'region'), r2 = this._siteVal(donor, 'region');
+            type = (r1 && r1 === r2) ? 'A' : 'B';
+        } else {
+            var c1 = this._crmFor(donee, donorSeg), c2 = this._crmFor(donor, donorSeg);
+            type = (c1 && c1 === c2) ? 'A' : 'B';   // blank CRM must never count as "same"
+        }
+
+        current.setValue(SW.swap_type, this.CFG.TYPE_VALUE[type]);
+        this._set(current, SW.donee_segment, doneeSeg);
+        this._set(current, SW.donor_segment, donorSeg);
+        this._set(current, SW.grandparent, this._siteVal(donee, 'grandparent'));
+        return type;
+    },
+
+    // ===================== BR2 - validate =====================
+    validate: function (current) {
+        var C = this.CFG;
+        var donee = this._getSite(current.getValue(C.SW.donee));
+        var donor = this._getSite(current.getValue(C.SW.donor));
+        if (!donee || !donor) return 'Select a valid donee and donor site.';
+
+        if (current.getValue(C.SW.donee) === current.getValue(C.SW.donor))
+            return 'Donor and donee cannot be the same site.';
+
+        var gp = this._siteVal(donee, 'grandparent');
+        if (!gp || gp !== this._siteVal(donor, 'grandparent'))
+            return 'Donor and donee must be under the same Grandparent Code.';
+
+        var sites = [donee, donor];
+        for (var i = 0; i < sites.length; i++) {
+            var s = sites[i];
+            if (this._siteVal(s, 'cg1') !== C.KEY_CG1 ||
+                this._siteVal(s, 'cg3') === C.CONTRACTOR_CG3 ||
+                !this._isTrue(s, C.SITE.active)) {
+                return 'Site ' + s.getDisplayValue() + ' is not eligible for a Key limit swap (must be active, CG1 ' +
+                    C.KEY_CG1 + ', and not a contractor site).';
+            }
+        }
+
+        if (C.ENFORCE_PURVIEW && !this._isAdminBypass() &&
+            !this._isOwner(donee, this._normSeg(this._siteVal(donee, 'segment')), gs.getUserID()))
+            return 'You can only raise a swap for sites under your own purview.';
+
+        var amt = this._num(current, C.SW.amount);
+        if (!(amt > 0)) return 'Swap amount must be greater than zero.';
+
+        // locks first, so the user sees the most important reason
+        var active = this._activeSwap(gp, current.getUniqueValue());
+        if (active) return 'Swap ' + active + ' is already active on this Grandparent Code.';
+
+        var enh = this.enhancementLock(gp);
+        if (enh)
+            return 'A credit limit request is active on this Grandparent Code (' + enh.source + ' ' + enh.number + ', ' + enh.state +
+                '). A swap cannot be raised until it is closed.';
+
+        var osDonor = this._outstanding(donor);
+        var unutilized = this._unutilized(current, donor, osDonor);
+        if (unutilized === null)
+            return 'Donor outstanding could not be found in the ageing snapshot.' +
+                (C.ALLOW_MANUAL_DONOR_AVAILABLE ? ' Enter a Donor Available Limit greater than zero, or ask the CLM admin to check the snapshot for this site.' : ' Please contact the CLM admin.');
+        if (amt > unutilized)
+            return 'Donor has insufficient unutilized limit. Available: ' + unutilized + ', requested: ' + amt + '.';
+
+        // audit / display fields
+        var osDonee = this._outstanding(donee);
+        this._set(current, C.SW.donor_before, this._num(donor, C.SITE.limit));
+        this._set(current, C.SW.donee_before, this._num(donee, C.SITE.limit));
+        this._set(current, C.SW.donor_current, this._num(donor, C.SITE.limit));
+        this._set(current, C.SW.donee_current, this._num(donee, C.SITE.limit));
+        if (osDonor !== null) this._set(current, C.SW.donor_os, osDonor);
+        if (osDonee !== null) this._set(current, C.SW.donee_os, osDonee);
+        return '';
+    },
+
+    _activeSwap: function (gp, excludeSysId) {
+        var sw = new GlideRecord(this.CFG.SWAP_TABLE);
+        sw.addQuery(this.CFG.SW.grandparent, gp);
+        sw.addQuery('active', true);
+        if (excludeSysId) sw.addQuery('sys_id', '!=', excludeSysId);
+        sw.setLimit(1);
+        sw.query();
+        return sw.next() ? sw.getValue('number') : '';
+    },
+
+    hasActiveSwap: function (gp) { return !!this._activeSwap(gp, ''); },
+
+    // Returns { source, number, state } for the first live enhancement on the Grandparent Code, or null
+    enhancementLock: function (gp) {
+        var src = this.CFG.ENH_SOURCES || [];
+        var norm = function (s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/^\s+|\s+$/g, ''); };
+        for (var i = 0; i < src.length; i++) {
+            var S = src[i];
+            if (!S.ENABLED || !S.TABLE) continue;
+            var gr = new GlideRecord(S.TABLE);
+            if (!gr.isValid()) { gs.warn('[KeyLimitSwap] Enhancement table "' + S.TABLE + '" is not valid - skipped.'); continue; }
+            if (!gr.isValidField(S.GP) || !gr.isValidField(S.STATE)) {
+                gs.warn('[KeyLimitSwap] ' + S.TABLE + ' is missing ' + S.GP + ' or ' + S.STATE + ' - skipped.');
+                continue;
+            }
+            gr.addQuery(S.GP, gp);
+            gr.addNotNullQuery(S.STATE);          // a blank state is not an open request
+            gr.query();
+            while (gr.next()) {
+                var v = norm(gr.getValue(S.STATE));
+                var d = norm(gr.getDisplayValue(S.STATE));
+                if (S.OPEN.indexOf(v) > -1 || S.OPEN.indexOf(d) > -1) {
+                    return { source: S.LABEL, number: gr.getValue('number') || '', state: gr.getDisplayValue(S.STATE) };
+                }
+            }
+        }
+        return null;
+    },
+
+    hasActiveEnhancement: function (gp) { return !!this.enhancementLock(gp); },
+
+    // ===================== BR3 - resolve approvers =====================
+    resolveApprovers: function (current) {
+        var seg, k, f;
+        for (seg in this.FIELD) {
+            for (k in this.FIELD[seg]) {
+                f = this.FIELD[seg][k];
+                if (current.isValidField(f)) current.setValue(f, '');
+            }
+        }
+        this._set(current, this.CFG.SW.auto_approve, false);
+
+        var swapType = this._typeLetter(current.getValue(this.CFG.SW.swap_type));
+        var segment = this._normSeg(current.getValue(this.CFG.SW.donor_segment));
+        if (!swapType || !this.CHAIN[segment] || !this.CHAIN[segment][swapType]) return { missing: [], autoApprove: false };
+
+        var allowed = this.CHAIN[segment][swapType];
+        if (allowed.length === 0) {
+            this._set(current, this.CFG.SW.auto_approve, true);
+            return { missing: [], autoApprove: true };
+        }
+
+        var donor = this._getSite(current.getValue(this.CFG.SW.donor));
+        if (!donor) return { missing: allowed.slice(), autoApprove: false };
+
+        var best = this._matrixBest(segment, donor, allowed);
+        if (best.crm && best.crm.score === 0) delete best.crm;
+
+        var missing = [];
+        for (var i = 0; i < allowed.length; i++) {
+            var fn = this.FIELD[segment][allowed[i]];
+            if (best[allowed[i]]) {
+                if (current.isValidField(fn)) current.setValue(fn, best[allowed[i]].uid);
+            } else {
+                missing.push(allowed[i]);
+            }
+        }
+        return { missing: missing, autoApprove: false };
+    },
+
+    // ===================== BR4 - apply =====================
+    apply: function (swapSysId) {
+        var C = this.CFG;
+        var sw = new GlideRecord(C.SWAP_TABLE);
+        if (!sw.get(swapSysId)) return false;
+        if (this._isTrue(sw, C.SW.applied)) return true;
+        if (sw.getValue('state') !== C.STATE.DONE || sw.getValue('approval') !== 'approved') return false;
+
+        var donor = this._getSite(sw.getValue(C.SW.donor));
+        var donee = this._getSite(sw.getValue(C.SW.donee));
+        if (!donor || !donee) return this._fail(sw, 'Donor or donee site not found.');
+
+        var amt = this._num(sw, C.SW.amount);
+        var donorOld = this._num(donor, C.SITE.limit);
+        var doneeOld = this._num(donee, C.SITE.limit);
+
+        // limits may have moved while the swap was pending
+        var enough = (amt <= donorOld);
+        var osNow = this._outstanding(donor);
+        if (enough && osNow !== null) enough = (amt <= donorOld - osNow);
+        if (!enough) return this._fail(sw, 'Donor no longer has sufficient unutilized limit. Swap not applied.');
+
+        var zoneIds = {}, groupIds = {};
+        zoneIds[this._siteVal(donor, 'zone_code')] = 1;   zoneIds[this._siteVal(donee, 'zone_code')] = 1;
+        groupIds[this._siteVal(donor, 'group_code')] = 1; groupIds[this._siteVal(donee, 'group_code')] = 1;
+
+        this._writeLimits(donor, donee, donorOld - amt, doneeOld + amt, zoneIds, groupIds);
+
+        if (C.SAP_ENABLED) {
+            var ok = this._pushToSap(donor, donee, amt);
+            if (!ok) {
+                this._writeLimits(donor, donee, donorOld, doneeOld, zoneIds, groupIds);
+                return this._fail(sw, 'SAP update failed. CLM limits were rolled back.');
+            }
+        } else {
+            this._set(sw, 'work_notes', 'Limits updated in CLM. SAP update is not enabled yet (CFG.SAP_ENABLED = false).');
+        }
+
+        this._set(sw, C.SW.donor_after, donorOld - amt);
+        this._set(sw, C.SW.donee_after, doneeOld + amt);
+        sw.setValue(C.SW.applied, true);
+        sw.setWorkflow(false);
+        sw.update();
+        return true;
+    },
+
+    _writeLimits: function (donor, donee, donorLimit, doneeLimit, zoneIds, groupIds) {
+        var L = this.CFG.SITE.limit, id;
+        donor.setValue(L, donorLimit);  donor.update();
+        donee.setValue(L, doneeLimit);  donee.update();
+        for (id in zoneIds)  if (id) this._rollupZone(id);
+        for (id in groupIds) if (id) this._rollupGroup(id);
+    },
+
+    _rollupZone: function (zoneCode) {
+        var C = this.CFG;
+        if (!C.ZONE_TABLE) return;
+        var zc = new GlideRecord(C.ZONE_TABLE);
+        if (!zc.isValid()) return;
+        var ga = new GlideAggregate(C.SITE_TABLE);
+        ga.addQuery(C.SITE.zone_code, zoneCode);
+        ga.addQuery(C.SITE.active, true);
+        ga.addQuery(C.SITE.cg3, '!=', C.CONTRACTOR_CG3);
+        ga.addAggregate('SUM', C.SITE.limit);
+        ga.query();
+        var total = ga.next() ? parseFloat(ga.getAggregate('SUM', C.SITE.limit)) || 0 : 0;
+        zc.addQuery(C.ZONE_FIELDS.code, zoneCode);
+        zc.query();
+        while (zc.next()) { zc.setValue(C.ZONE_FIELDS.limit, total); zc.update(); }
+    },
+
+    _rollupGroup: function (groupCode) {
+        var C = this.CFG;
+        if (!C.GROUP_TABLE || !C.ZONE_TABLE) return;
+        var gc = new GlideRecord(C.GROUP_TABLE);
+        if (!gc.isValid()) return;
+        var ga = new GlideAggregate(C.ZONE_TABLE);
+        ga.addQuery(C.ZONE_FIELDS.group_code, groupCode);
+        ga.addAggregate('SUM', C.ZONE_FIELDS.limit);
+        ga.query();
+        var total = ga.next() ? parseFloat(ga.getAggregate('SUM', C.ZONE_FIELDS.limit)) || 0 : 0;
+        gc.addQuery(C.GROUP_FIELDS.code, groupCode);
+        gc.query();
+        while (gc.next()) { gc.setValue(C.GROUP_FIELDS.limit, total); gc.update(); }
+    },
+
+    _pushToSap: function (donor, donee, amt) {
+        // TODO: call the SAP outbound used by the Key enhancement approval. Send donor DECREASE first, then donee increase.
+        // Return true only if both succeed. Until implemented this returns false so enabling SAP_ENABLED fails safe (rolls back).
+        return false;
+    },
+
+    _fail: function (sw, msg) {
+        if (sw.isValidField('work_notes')) sw.setValue('work_notes', msg);
+        sw.setValue('state', this.CFG.STATE.REJECTED);
+        sw.setValue('approval', 'rejected');
+        sw.setValue('active', false);
+        sw.setWorkflow(false);
+        sw.update();
+        gs.error('[KeyLimitSwap] ' + sw.getValue('number') + ': ' + msg);
+        return false;
+    },
+
+    // ===================== Reference qualifiers =====================
+    doneeQualifier: function () {
+        var S = this.CFG.SITE, uid = gs.getUserID();
+        var base = S.active + '=true^' + S.cg1 + '=' + this.CFG.KEY_CG1 + '^' + S.cg3 + '!=' + this.CFG.CONTRACTOR_CG3;
+        if (this._isAdminBypass()) return base;
+        var parts = [], seen = {};
+        var mx = new GlideRecord(this.CFG.MATRIX_TABLE);
+        mx.addEncodedQuery('customer_type=' + this.CFG.MATRIX_CUSTOMER_TYPE + '^approver_user=' + uid + '^role_name=CRM^ORrole_name=TSM');
+        mx.query();
+        while (mx.next()) {
+            var seg = this._normSeg(mx.getValue('segment'));
+            if (!seg) continue;
+            var c = base + '^' + S.segment + '=' + seg;
+            if (mx.getValue('zone'))   c += '^' + S.zone + '=' + mx.getValue('zone');
+            if (mx.getValue('region')) c += '^' + S.region + '=' + mx.getValue('region');
+            if (!seen[c]) { seen[c] = 1; parts.push(c); }
+        }
+        if (S.tsm) parts.push(base + '^' + S.tsm + '=' + uid);
+        return parts.length ? parts.join('^NQ') : 'sys_id=-1';
+    },
+
+    donorQualifier: function (current) {
+        var S = this.CFG.SITE;
+        var donee = this._getSite(current.getValue(this.CFG.SW.donee));
+        if (!donee) return 'sys_id=-1';
+        return S.active + '=true^' + S.cg1 + '=' + this.CFG.KEY_CG1 + '^' + S.cg3 + '!=' + this.CFG.CONTRACTOR_CG3 +
+            '^' + S.grandparent + '=' + this._siteVal(donee, 'grandparent') +
+            '^sys_id!=' + current.getValue(this.CFG.SW.donee);
+    },
+
+    type: 'KeyLimitSwapUtil'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-27 14:36:20</sys_created_on>
+        <sys_id>2fd676b33b84df5087401044c3e45a87</sys_id>
+        <sys_mod_count>6</sys_mod_count>
+        <sys_name>KeyLimitSwapUtil</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy>read</sys_policy>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_2fd676b33b84df5087401044c3e45a87</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-05 11:43:13</sys_updated_on>
+    </sys_script_include>
+</record_update>

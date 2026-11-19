@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>false</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_corpository_ocr</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition/>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>Corpository OCR</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous /*null when async*/) {
+
+    gs.info('CORPOSITORY OCR BR: Started for record ' + current.getDisplayValue());
+
+    // =========================================
+    // SAFE NUMBER FUNCTION
+    // =========================================
+    function num(fieldName) {
+
+        var val = current.getValue(fieldName);
+
+        // Handle blank, NA, dash
+        if (!val || val == 'NA' || val == '-') {
+            return 0;
+        }
+
+        return parseFloat(val) || 0;
+    }
+
+    // =========================================
+    // FETCH VALUES
+    // =========================================
+    var totalRevenue        = num('total_revenue');
+    var costOfGoodsSold     = num('cost_of_goods_sold');
+    var purchasesOfStock    = num('purchases_of_stock');
+    var accountsPayable     = num('acc_payable');
+    var workingCapTurnover  = num('wcc_turnover');
+
+    // =========================================
+    // GROSS PROFIT MARGIN %
+    // Formula:
+    // ((Revenue - (COGS + Purchases))
+    // / Revenue) * 100
+    // =========================================
+    var grossProfitPercent = 0;
+
+    if (totalRevenue > 0) {
+
+        grossProfitPercent =
+            (
+                (
+                    totalRevenue -
+                    (
+                        costOfGoodsSold +
+                        purchasesOfStock
+                    )
+                ) / totalRevenue
+            ) * 100;
+    }
+
+    // =========================================
+    // A/P DAYS
+    // Formula:
+    // (Accounts Payable / Cost Of Goods Sold) * 365
+    // =========================================
+    var apDays = 0;
+
+    if (costOfGoodsSold > 0) {
+
+        apDays =
+            (
+                accountsPayable /
+                costOfGoodsSold
+            ) * 365;
+    }
+
+    // =========================================
+    // NET WCC DAYS
+    // Formula:
+    // 365 / Working Capital Turnover
+    // =========================================
+    var netWccDays = 0;
+
+    if (workingCapTurnover !== 0) {
+
+        netWccDays =
+            365 / workingCapTurnover;
+    }
+
+    // =========================================
+    // ROUND VALUES
+    // =========================================
+    grossProfitPercent = parseFloat(grossProfitPercent.toFixed(2));
+    apDays             = parseFloat(apDays.toFixed(2));
+    netWccDays         = parseFloat(netWccDays.toFixed(2));
+
+    // =========================================
+    // STORE VALUES
+    // =========================================
+    current.setValue('gross_profit', grossProfitPercent);
+    current.setValue('ap_days', apDays);
+    current.setValue('net_wcc_days', netWccDays);
+
+    gs.info('Gross Profit % Calculated: ' + grossProfitPercent);
+    gs.info('AP Days Calculated: ' + apDays);
+    gs.info('Net WCC Days Calculated: ' + netWccDays);
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-05-27 12:10:23</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>ea0e12622b8987104572f3745e91bf97</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>Corpository OCR</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_ea0e12622b8987104572f3745e91bf97</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-05-27 12:14:26</sys_updated_on>
+        <template/>
+        <when>before</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=ea0e12622b8987104572f3745e91bf97"/>
+</record_update>

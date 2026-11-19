@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm.review.expiry.details</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function mailBody(current, template, email, email_action, event) {
+    var CUST = 'x_birl3_clm_clm_customer_master1';
+    var MAP  = 'x_birl3_clm_role_user_mapping';
+    var MAX_ROWS = 50;      // rows shown in the email table
+    var MAX_CC   = 100;     // safety cap on CC recipients
+    var BULK_PAGE_ID = 'clm_bulk_review_date';   // <-- change to your Bulk Review Date page id
+
+    function esc(s) {
+      return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // parm2 = "yyyy-MM-dd|days" (+ "|T" in test mode = no CC)
+    var parts  = String(event.parm2 || '').split('|');
+    var expiry = parts[0];
+    var days   = parseInt(parts[1], 10) || 0;
+    var skipCc = (parts[2] === 'T');
+
+    var zchId    = current.getValue('u_user');
+    var zchName  = current.u_user.getDisplayValue();
+    var zchEmail = String(current.u_user.email || '').toLowerCase();
+
+    // all zones mapped to this ZCH
+    var zones = [];
+    var m = new GlideRecord(MAP);
+    m.addQuery('u_role', 'ZCH');
+    m.addQuery('u_user', zchId);
+    m.addQuery('u_active', 'true');
+    m.query();
+    while (m.next()) {
+      var z = m.getValue('u_zone');
+      if (z && zones.indexOf(z) < 0) zones.push(z);
+    }
+
+    // customers expiring on that date in those zones
+    var gr = new GlideRecord(CUST);
+    gr.addQuery('zone', 'IN', zones.join(','));
+    gr.addQuery('next_review_date', expiry);
+    gr.addQuery('is_active', 'true');
+    gr.addQuery('cg1', 'IN', 'T00,N01,N07,N00');
+    gr.orderBy('segment');
+    gr.orderBy('customer_name');
+    gr.query();
+
+    var total = 0, rows = [], bySeg = {}, cc = {}, ccCount = 0;
+    while (gr.next()) {
+      total++;
+      var seg = gr.getValue('segment') || '-';
+      bySeg[seg] = (bySeg[seg] || 0) + 1;
+
+      var tshName = gr.tsh.getDisplayValue();
+      if (rows.length < MAX_ROWS) {
+        rows.push({
+          name: gr.getValue('customer_name'),
+          code: gr.getValue('customer_code_sap'),
+          seg: seg,
+          zone: gr.getValue('zone'),
+          tsh: tshName
+        });
+      }
+
+      if (!skipCc && gr.getValue('tsh') && ccCount < MAX_CC) {
+        var tEmail = String(gr.tsh.email || '').toLowerCase();
+        if (tEmail && tEmail !== zchEmail && String(gr.tsh.active) === 'true' && !cc[tEmail]) {
+          cc[tEmail] = true;
+          ccCount++;
+          email.addAddress('cc', tEmail, tshName);
+        }
+      }
+    }
+
+    // date + wording
+    var mn = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var p = expiry.split('-');
+    var nice = p[2] + '-' + mn[parseInt(p[1], 10) - 1] + '-' + p[0];
+    var when = (days === 1) ? 'tomorrow' : 'in ' + days + ' days';
+    var accent = days <= 1 ? '#c0392b' : days <= 7 ? '#E87722' : days <= 15 ? '#b58105' : '#1782c5';
+
+    email.setSubject('Reminder: CLM Review Date expires ' + when + ' (' + nice + ') | ' + total + ' customer(s)');
+
+    var segTxt = Object.keys(bySeg).map(function(k) { return esc(k) + ': ' + bySeg[k]; }).join(' &middot; ');
+    var url = (gs.getProperty('glide.servlet.uri') || '') + 'uclm?id=' + BULK_PAGE_ID;
+
+    var h = [];
+    h.push('<p style="margin:0 0 4px 0;font-size:14px;color:#5a6a7a;">Dear ' + esc(zchName) + ',</p>');
+
+    if (total === 0) {
+      h.push('<p style="margin:12px 0;font-size:14px;color:#1a1a1a;">The review dates due on <b>' + nice + '</b> have since been updated. No action is needed.</p>');
+      template.print(h.join(''));
+      return;
+    }
+
+    h.push('<p style="margin:12px 0 16px 0;font-size:14px;line-height:1.6;color:#1a1a1a;">The credit limit review date for <b>' + total +
+           ' customer(s)</b> in your zone(s) expires <b>' + when + '</b>. Please set a new review date before it lapses.</p>');
+
+    h.push('<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #e0e6ed;border-left:5px solid ' + accent +
+           ';border-radius:6px;background-color:#fafbfc;margin:0 0 18px 0;"><tr><td style="padding:14px 18px;">' +
+           '<div style="font-size:11px;letter-spacing:.8px;text-transform:uppercase;color:#5a6a7a;font-weight:bold;">Review date expiry</div>' +
+           '<div style="font-size:22px;font-weight:bold;color:' + accent + ';margin-top:4px;">' + nice + '</div>' +
+           '<div style="font-size:12px;color:#5a6a7a;margin-top:2px;">' + when + ' &middot; ' + segTxt + '</div>' +
+           '</td></tr></table>');
+
+    var th = 'style="background-color:#eef1f5;color:#2b3440;padding:9px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;text-align:left;border:1px solid #dde3ea;"';
+    var td = 'style="padding:9px 10px;font-size:13px;color:#1a1a1a;border:1px solid #e6eaef;"';
+    h.push('<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:0 0 8px 0;"><thead><tr>' +
+           '<th ' + th + '>Customer</th><th ' + th + '>Segment</th><th ' + th + '>Zone</th><th ' + th + '>TSH</th></tr></thead><tbody>');
+    rows.forEach(function(r) {
+      h.push('<tr><td ' + td + '><b>' + esc(r.name) + '</b><br><span style="font-size:12px;color:#5a6a7a;">(' + esc(r.code) + ')</span></td>' +
+             '<td ' + td + '>' + esc(r.seg) + '</td><td ' + td + '>' + esc(r.zone) + '</td><td ' + td + '>' + esc(r.tsh || '-') + '</td></tr>');
+    });
+    h.push('</tbody></table>');
+
+    if (total > rows.length) {
+      h.push('<p style="margin:0 0 8px 0;font-size:12px;color:#5a6a7a;">Showing the first ' + rows.length + ' of ' + total + ' customers. Open the Bulk Review Date Update page to see the full list.</p>');
+    }
+
+    h.push('<p style="margin:16px 0 0 0;"><a href="' + url + '" style="display:inline-block;background-color:#E87722;color:#ffffff;font-weight:bold;' +
+           'font-size:14px;text-decoration:none;padding:10px 22px;border-radius:6px;">Update review dates</a></p>');
+
+    template.print(h.join(''));
+  })(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-16 03:47:43</sys_created_on>
+        <sys_id>08ccbb803bc4531087401044c3e45a09</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm.review.expiry.details</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_08ccbb803bc4531087401044c3e45a09</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-16 03:47:43</sys_updated_on>
+    </sys_script_email>
+</record_update>

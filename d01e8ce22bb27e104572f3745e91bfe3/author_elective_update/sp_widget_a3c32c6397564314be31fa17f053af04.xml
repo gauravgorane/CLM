@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[function($scope, $rootScope) {
+  var c = this;
+  c.activeTab = 'overview';
+  c.loading = false;
+
+  // Bridge: child widgets (Approval Requests, Request Detail, Customer 360)
+  // broadcast this event to ask the dashboard to switch tabs. Tab id strings
+  // below MUST match the ng-click values used in the dashboard HTML exactly.
+  $rootScope.$on('ntclm.switch.tab', function(event, tabId) {
+    var validTabs = ['overview', 'approval_requests', 'customer360', 'request_detail'];
+    if (validTabs.indexOf(tabId) > -1) {
+      c.activeTab = tabId;
+    }
+  });
+	$rootScope.$on('clm.switch.tab', function(event, tabId) {
+  var validTabs = ['overview', 'approval_requests', 'customer360', 'request_detail'];
+  if (validTabs.indexOf(tabId) > -1) { c.activeTab = tabId; }
+});
+	
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.clm-dash {
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  color: #1f2933;
+  background: #f4f5f7;
+  padding-bottom: 24px;
+}
+
+/* ---------- Breadcrumb ---------- */
+.clm-breadcrumb {
+  padding: 10px 20px;
+  font-size: 13px;
+  color: #5b6470;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- Tabs ---------- */
+.clm-tabs {
+  display: flex;
+  gap: 28px;
+  padding: 0 20px;
+  background: #fff;
+  border-bottom: 1px solid #e3e6eb;
+}
+.clm-tab {
+  padding: 12px 2px;
+  color: #6b7280;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  text-decoration: none;
+}
+.clm-tab:hover {
+  color: #374151;
+  text-decoration: none;
+}
+.clm-tab.active {
+  color: #14141a;
+  border-bottom-color: #f5c500;
+}
+
+/* ---------- Loading ---------- */
+.clm-loading {
+  text-align: center;
+  padding: 20px;
+  color: #8a93a0;
+  font-size: 13px;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>false</has_preview>
+        <id>clm_nt_nsh_dashboard</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>clm_nt_nsh_dashboard</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+    data.viewLabel = 'NT Cement TSH';
+    data.userName  = gs.getUserDisplayName();
+
+    // ---- Embed all four live widgets. Confirm these IDs exactly match
+    // the "ID" field on each widget record in sp_widget. ----
+    data.portfolioWidget      = $sp.getWidget('clm_nt_nsh_portfolio', {});
+    data.customer360Widget = $sp.getWidget('clm_nt_nsh_customer_360', {
+    search: $sp.getParameter('search') || $sp.getParameter('customer_code') || ''
+});
+    data.approvalRequestsWidget = $sp.getWidget('clm_nt_nsh_approval_requests', {});
+    data.requestDetailWidget  = $sp.getWidget('clm_nt_nsh_request_details', {});
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-31 09:08:44</sys_created_on>
+        <sys_id>a3c32c6397564314be31fa17f053af04</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>clm_nt_nsh_dashboard</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_a3c32c6397564314be31fa17f053af04</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-31 09:16:10</sys_updated_on>
+        <template><![CDATA[<div class="clm-dash" ng-cloak ng-if="c.data">
+
+  <div class="clm-breadcrumb">
+  </div>
+
+  <div class="clm-tabs">
+    <a class="clm-tab"
+       ng-class="{active: c.activeTab === 'overview'}"
+       ng-click="c.activeTab = 'overview'">
+      Portfolio Overview
+    </a>
+    <a class="clm-tab"
+       ng-class="{active: c.activeTab === 'approval_requests'}"
+       ng-click="c.activeTab = 'approval_requests'">
+      Approval Requests
+    </a>
+    <a class="clm-tab"
+       ng-class="{active: c.activeTab === 'customer360'}"
+       ng-click="c.activeTab = 'customer360'">
+      Customer 360
+    </a>
+    <a class="clm-tab"
+       ng-class="{active: c.activeTab === 'request_detail'}"
+       ng-click="c.activeTab = 'request_detail'">
+      Request Detail
+    </a>
+  </div>
+
+  <!-- Portfolio Overview -->
+  <div ng-if="c.activeTab === 'overview'">
+    <sp-widget widget="c.data.portfolioWidget"></sp-widget>
+  </div>
+
+  <!-- Approval Requests -->
+  <div ng-show="c.activeTab === 'approval_requests'">
+    <sp-widget widget="c.data.approvalRequestsWidget"></sp-widget>
+  </div>
+
+  <!-- Customer 360 -->
+  <div ng-if="c.activeTab === 'customer360'">
+    <sp-widget widget="c.data.customer360Widget"></sp-widget>
+  </div>
+
+  <!-- Request Detail -->
+  <div ng-show="c.activeTab === 'request_detail'">
+    <sp-widget widget="c.data.requestDetailWidget"></sp-widget>
+  </div>
+
+  <div class="clm-loading" ng-if="c.loading">
+    Loading CLM data&hellip;
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>a3c32c6397564314be31fa17f053af04</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-31 09:08:44</sys_created_on>
+        <sys_id>27c36c6397564314be31fa17f053af73</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-31 09:08:44</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_a3c32c6397564314be31fa17f053af04</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[function($scope, $rootScope) {
+  var c = this;
+  c.activeTab = 'overview';
+  c.loading = false;
+
+  // Bridge: child widgets (Approval Requests, Request Detail, Customer 360)
+  // broadcast this event to ask the dashboard to switch tabs. Tab id strings
+  // below MUST match the ng-click values used in the dashboard HTML exactly.
+  $rootScope.$on('ntclm.switch.tab', function(event, tabId) {
+    var validTabs = ['overview', 'approval_requests', 'customer360', 'request_detail'];
+    if (validTabs.indexOf(tabId) &gt; -1) {
+      c.activeTab = tabId;
+    }
+  });
+	$rootScope.$on('clm.switch.tab', function(event, tabId) {
+  var validTabs = ['overview', 'approval_requests', 'customer360', 'request_detail'];
+  if (validTabs.indexOf(tabId) &gt; -1) { c.activeTab = tabId; }
+});
+	
+}]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;.clm-dash {
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  color: #1f2933;
+  background: #f4f5f7;
+  padding-bottom: 24px;
+}
+
+/* ---------- Breadcrumb ---------- */
+.clm-breadcrumb {
+  padding: 10px 20px;
+  font-size: 13px;
+  color: #5b6470;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- Tabs ---------- */
+.clm-tabs {
+  display: flex;
+  gap: 28px;
+  padding: 0 20px;
+  background: #fff;
+  border-bottom: 1px solid #e3e6eb;
+}
+.clm-tab {
+  padding: 12px 2px;
+  color: #6b7280;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  text-decoration: none;
+}
+.clm-tab:hover {
+  color: #374151;
+  text-decoration: none;
+}
+.clm-tab.active {
+  color: #14141a;
+  border-bottom-color: #f5c500;
+}
+
+/* ---------- Loading ---------- */
+.clm-loading {
+  text-align: center;
+  padding: 20px;
+  color: #8a93a0;
+  font-size: 13px;
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;false&lt;/has_preview&gt;&lt;id&gt;clm_nt_nsh_dashboard&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;clm_nt_nsh_dashboard&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+
+    data.viewLabel = 'NT Cement TSH';
+    data.userName  = gs.getUserDisplayName();
+
+    // ---- Embed all four live widgets. Confirm these IDs exactly match
+    // the "ID" field on each widget record in sp_widget. ----
+    data.portfolioWidget      = $sp.getWidget('clm_nt_nsh_portfolio', {});
+    data.customer360Widget = $sp.getWidget('clm_nt_nsh_customer_360', {
+    search: $sp.getParameter('search') || $sp.getParameter('customer_code') || ''
+});
+    data.approvalRequestsWidget = $sp.getWidget('clm_nt_nsh_approval_requests', {});
+    data.requestDetailWidget  = $sp.getWidget('clm_nt_nsh_request_details', {});
+
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-07-31 09:08:44&lt;/sys_created_on&gt;&lt;sys_id&gt;a3c32c6397564314be31fa17f053af04&lt;/sys_id&gt;&lt;sys_mod_count&gt;1&lt;/sys_mod_count&gt;&lt;sys_name&gt;clm_nt_nsh_dashboard&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_a3c32c6397564314be31fa17f053af04&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-07-31 09:16:10&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="clm-dash" ng-cloak ng-if="c.data"&gt;
+
+  &lt;div class="clm-breadcrumb"&gt;
+  &lt;/div&gt;
+
+  &lt;div class="clm-tabs"&gt;
+    &lt;a class="clm-tab"
+       ng-class="{active: c.activeTab === 'overview'}"
+       ng-click="c.activeTab = 'overview'"&gt;
+      Portfolio Overview
+    &lt;/a&gt;
+    &lt;a class="clm-tab"
+       ng-class="{active: c.activeTab === 'approval_requests'}"
+       ng-click="c.activeTab = 'approval_requests'"&gt;
+      Approval Requests
+    &lt;/a&gt;
+    &lt;a class="clm-tab"
+       ng-class="{active: c.activeTab === 'customer360'}"
+       ng-click="c.activeTab = 'customer360'"&gt;
+      Customer 360
+    &lt;/a&gt;
+    &lt;a class="clm-tab"
+       ng-class="{active: c.activeTab === 'request_detail'}"
+       ng-click="c.activeTab = 'request_detail'"&gt;
+      Request Detail
+    &lt;/a&gt;
+  &lt;/div&gt;
+
+  &lt;!-- Portfolio Overview --&gt;
+  &lt;div ng-if="c.activeTab === 'overview'"&gt;
+    &lt;sp-widget widget="c.data.portfolioWidget"&gt;&lt;/sp-widget&gt;
+  &lt;/div&gt;
+
+  &lt;!-- Approval Requests --&gt;
+  &lt;div ng-show="c.activeTab === 'approval_requests'"&gt;
+    &lt;sp-widget widget="c.data.approvalRequestsWidget"&gt;&lt;/sp-widget&gt;
+  &lt;/div&gt;
+
+  &lt;!-- Customer 360 --&gt;
+  &lt;div ng-if="c.activeTab === 'customer360'"&gt;
+    &lt;sp-widget widget="c.data.customer360Widget"&gt;&lt;/sp-widget&gt;
+  &lt;/div&gt;
+
+  &lt;!-- Request Detail --&gt;
+  &lt;div ng-show="c.activeTab === 'request_detail'"&gt;
+    &lt;sp-widget widget="c.data.requestDetailWidget"&gt;&lt;/sp-widget&gt;
+  &lt;/div&gt;
+
+  &lt;div class="clm-loading" ng-if="c.loading"&gt;
+    Loading CLM data&amp;hellip;
+  &lt;/div&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;a3c32c6397564314be31fa17f053af04&lt;/id&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-07-31 09:08:44&lt;/sys_created_on&gt;&lt;sys_id&gt;27c36c6397564314be31fa17f053af73&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-07-31 09:08:44&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>-798998466</payload_hash>
+        <record_name>clm_nt_nsh_dashboard</record_name>
+        <reverted_from/>
+        <source>0d1e00262bb27e104572f3745e91bf51</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-31 09:16:10</sys_created_on>
+        <sys_id>688520a797564314be31fa17f053afb5</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>19fb775aefe0000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-31 09:16:10</sys_updated_on>
+        <type>Widget</type>
+        <update_guid>a48520a7cd5643143c81f735ce3345b4</update_guid>
+        <update_guid_history>a48520a7cd5643143c81f735ce3345b4:-798998466,27c36c633e564314035f7d9cb77c0571:1205007736</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="">6329841f2bcf03104572f3745e91bfe2</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-05 19:21:02</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>1496e12202d74c588984364ef43cfe90</sys_id>
+        <sys_metadata>a3c32c6397564314be31fa17f053af04</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_nt_nsh_dashboard</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_a3c32c6397564314be31fa17f053af04</sys_update_name>
+        <sys_update_version display_value="sp_widget_a3c32c6397564314be31fa17f053af04">688520a797564314be31fa17f053afb5</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-05 19:21:02</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

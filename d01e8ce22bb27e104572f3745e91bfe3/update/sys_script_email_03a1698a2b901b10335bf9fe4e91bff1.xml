@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>CLM Key: Approval Pending</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function runMailScript(current, template, email, email_action, event) {
+    var req = new GlideRecord(current.getValue('source_table'));
+    if (!req.get(current.getValue('document_id'))) return;
+
+    // role of this approver in the chain
+    var role = '';
+    var st = new GlideRecord('x_birl3_clm_key_approval_step');
+    st.addQuery('request', req.getUniqueValue());
+    st.addQuery('approver', current.getValue('approver'));
+    st.addQuery('state', 'pending');
+    st.orderBy('sequence');
+    st.setLimit(1);
+    st.query();
+    if (st.next()) role = st.getDisplayValue('role_name') || st.getDisplayValue('level');
+
+    var td = 'style="padding:9px 12px;font-size:13px;border:1px solid #e0e6ed;"';
+    var tl = 'style="padding:9px 12px;font-size:13px;border:1px solid #e0e6ed;background:#fffcf0;color:#3a4451;width:40%;"';
+    template.print('<p style="font-size:14px;">Hello,</p>');
+    template.print('<p style="font-size:14px;">A Key customer credit limit request is waiting for your approval.</p>');
+    template.print('<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">');
+    template.print('<tr><td ' + tl + '>Request</td><td ' + td + '><b>' + req.getValue('number') + '</b></td></tr>');
+    template.print('<tr><td ' + tl + '>Grandparent / Group Code</td><td ' + td + '>' + req.getValue('grandparent_code') + ' / ' + req.getValue('group_code') + '</td></tr>');
+    template.print('<tr><td ' + tl + '>Segment</td><td ' + td + '>' + req.getValue('segment') + '</td></tr>');
+    template.print('<tr><td ' + tl + '>Requested Limit</td><td ' + td + '>' + req.getDisplayValue('total_requested_limit') + '</td></tr>');
+    template.print('<tr><td ' + tl + '>Group Net Exposure</td><td ' + td + '>' + req.getDisplayValue('group_net_exposure') + '</td></tr>');
+    template.print('<tr><td ' + tl + '>Deviation</td><td ' + td + '>' + (req.getValue('is_deviation') == '1' ? 'Yes' : 'No') + '</td></tr>');
+    if (role) template.print('<tr><td ' + tl + '>Your approval level</td><td ' + td + '>' + role + '</td></tr>');
+    template.print('</table>');
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-03 07:54:31</sys_created_on>
+        <sys_id>03a1698a2b901b10335bf9fe4e91bff1</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>CLM Key: Approval Pending</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_03a1698a2b901b10335bf9fe4e91bff1</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-03 07:54:31</sys_updated_on>
+    </sys_script_email>
+</record_update>

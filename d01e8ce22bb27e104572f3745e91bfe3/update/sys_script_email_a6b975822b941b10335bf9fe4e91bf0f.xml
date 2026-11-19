@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_key_outcome</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function runMailScript(current, template, email, email_action, event) {
+    var state = current.getDisplayValue('state');
+    var approved = (state.toLowerCase() == 'approved');
+    var td = 'style="padding:9px 12px;font-size:13px;border:1px solid #e0e6ed;"';
+    var tl = 'style="padding:9px 12px;font-size:13px;border:1px solid #e0e6ed;background:#fffcf0;color:#3a4451;width:40%;"';
+
+    template.print('<p style="font-size:14px;">Hello,</p>');
+    template.print('<p style="font-size:14px;">Your Key customer credit limit request <b>' + current.getValue('number') + '</b> has been <b>' + state.toLowerCase() + '</b>.</p>');
+    template.print('<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">');
+    template.print('<tr><td ' + tl + '>Grandparent / Group Code</td><td ' + td + '>' + current.getValue('grandparent_code') + ' / ' + current.getValue('group_code') + '</td></tr>');
+    template.print('<tr><td ' + tl + '>Requested Limit</td><td ' + td + '>' + current.getDisplayValue('total_requested_limit') + '</td></tr>');
+    if (approved) {
+        template.print('<tr><td ' + tl + '>Approved Limit</td><td ' + td + '>' + current.getDisplayValue('approved_limit') + '</td></tr>');
+        template.print('<tr><td ' + tl + '>Next Review Date</td><td ' + td + '>' + current.getDisplayValue('next_review_date') + '</td></tr>');
+    } else {
+        template.print('<tr><td ' + tl + '>Rejected by</td><td ' + td + '>' + current.getDisplayValue('approver') + '</td></tr>');
+        template.print('<tr><td ' + tl + '>Reason</td><td ' + td + '>' + (current.getValue('rejection_reason') || '-') + '</td></tr>');
+    }
+    template.print('</table>');
+
+    // cc the CRM/TSM who submitted the site data behind this request
+    var seen = {};
+    var d = new GlideRecord('x_birl3_clm_p1_crm_site_draft');
+    d.addQuery('target_request', current.getUniqueValue());
+    d.addNotNullQuery('crm_gp_request');
+    d.query();
+    while (d.next()) {
+        var p = new GlideRecord('x_birl3_clm_clm_key_crm_gp_request');
+        if (!p.get(d.getValue('crm_gp_request'))) continue;
+        var uid = p.getValue('submitted_by');
+        if (!uid || seen[uid]) continue;
+        seen[uid] = true;
+        var u = new GlideRecord('sys_user');
+        if (u.get(uid) && u.getValue('email')) email.addAddress('cc', u.getValue('email'), u.getValue('name'));
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-03 09:39:44</sys_created_on>
+        <sys_id>a6b975822b941b10335bf9fe4e91bf0f</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_key_outcome</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_a6b975822b941b10335bf9fe4e91bf0f</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-03 09:39:44</sys_updated_on>
+    </sys_script_email>
+</record_update>

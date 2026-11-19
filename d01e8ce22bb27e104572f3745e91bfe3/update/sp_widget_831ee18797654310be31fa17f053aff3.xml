@@ -1,0 +1,1737 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, spUtil, $timeout, $interval, $window) {
+    var c = this;
+
+    // ==================== INITIALIZATION ====================
+    c.data.currentStep       = 1;
+    c.data.customers         = [];
+    c.data.panNumber         = '';
+    c.data.panSuggestions    = [];
+    c.data.isFetching        = false;
+    c.data.selectedCustomers = [];
+    c.data.panLevel          = { companyType: 'Unlisted' };
+    c.data.isSubmitting      = false;
+    c.data.localSearch       = '';
+    c.data.currentPage       = 1;
+    c.data.itemsPerPage      = 10;
+
+    c.rawFile           = null;
+    c.data.fileData     = null;
+    c.data.fileName     = '';
+    c.data.fileType     = '';
+    c.data.sysId        = null;
+    c.data.targetTable  = '';
+    c.data.processing   = false;
+    c.data.statusMsg    = '';
+    c.data.result       = {};
+    c.data.isManualMode = false;
+    c.data.auditLogs    = [];
+    c.data.externalRating = '';
+    c.data.documentType = '';
+    c.data.aiSummaryPoints = [];
+
+    // NEW: Vendor Assessment Data
+    c.data.showVendorAssessment = false;
+    c.data.vendorLoading        = false;
+    c.data.vendorRisk           = {
+        category:    '',
+        stockPrice:  '',
+        latestNews:  '',
+        companyName: ''
+    };
+
+    var pollTimer  = null;
+    var pollCount  = 0;
+    var MAX_POLLS  = 12;
+
+    // ==================== UTILITY FUNCTIONS ====================
+    c.formatINR = function(val) {
+        if (val === undefined || val === null || val === '') return '0.00';
+        var num = parseFloat(val);
+        if (isNaN(num)) return '0.00';
+        return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+
+    c.goToDashboard = function() {
+        $window.location.href = '?id=uclm_dashboard';
+    };
+
+    // ==================== PAN SEARCH ====================
+    c.handlePanInput = function() {
+        var query = c.data.panNumber ? c.data.panNumber.toUpperCase() : '';
+        if (query.length === 10 && /^[A-Z0-9]+$/.test(query)) {
+            c.data.panSuggestions = [];
+            c.fetchCustomers();
+        } else if (query.length >= 3) {
+            c.data.action = 'fetch_pan_suggestions';
+            c.server.update().then(function() { c.data.action = ''; });
+        } else {
+            c.data.panSuggestions = [];
+            c.data.customers      = [];
+        }
+    };
+
+    c.selectPan = function(selectedPan) {
+        c.data.panNumber      = selectedPan;
+        c.data.panSuggestions = [];
+        c.fetchCustomers();
+    };
+
+    c.fetchCustomers = function() {
+        c.data.isFetching = true;
+        c.data.action     = 'fetch_customers';
+        c.server.update().then(function() {
+            c.data.action     = '';
+            c.data.isFetching = false;
+        });
+    };
+
+    // ==================== CUSTOMER SELECTION ====================
+    c.hasSelection = function() {
+        if (!c.data.customers) return false;
+        return c.data.customers.some(function(cust) { return cust.selected === true; });
+    };
+
+    // ✅ SINGLE DEFINITION - Merged with vendor assessment
+    c.checkSegmentMatch = function(clickedCust) {
+        if (!clickedCust.selected) return;
+        
+        var activeSegment = '';
+        for (var i = 0; i < c.data.customers.length; i++) {
+            if (c.data.customers[i].selected && c.data.customers[i].sys_id !== clickedCust.sys_id) {
+                activeSegment = c.data.customers[i].segment;
+                break;
+            }
+        }
+        
+        if (activeSegment !== '' && clickedCust.segment !== activeSegment) {
+            clickedCust.selected = false;
+            spUtil.addErrorMessage('Validation Error: You can only select sites belonging to the same Segment (' + activeSegment + ').');
+            return;
+        }
+        
+        // ✅ TRIGGER VENDOR ASSESSMENT on selection
+        if (clickedCust.selected) {
+            c.triggerVendorAssessment(clickedCust.name);
+        }
+    };
+
+    // ✅ NEW: Trigger vendor assessment
+    c.triggerVendorAssessment = function(companyName) {
+        if (!companyName) return;
+        
+        c.data.vendorLoading = true;
+        c.data.showVendorAssessment = true;
+        c.data.vendorRisk.companyName = companyName;
+        
+        c.data.action = 'assess_vendor';
+        c.data.vendorCompanyName = companyName;
+        
+        c.server.update().then(function(response) {
+            c.data.action = '';
+            c.data.vendorLoading = false;
+            
+            if (response.data.vendorRisk) {
+                c.data.vendorRisk = response.data.vendorRisk;
+            } else {
+                c.data.vendorRisk = {
+                    category: '',
+                    stockPrice: '',
+                    latestNews: '',
+                    companyName: companyName
+                };
+            }
+        }).catch(function(err) {
+            c.data.vendorLoading = false;
+            c.data.vendorRisk = {
+                category: '',
+                stockPrice: '',
+                latestNews: '',
+                companyName: companyName
+            };
+        });
+    };
+
+    c.proceedToNextStep = function() {
+        c.data.selectedCustomers = c.data.customers.filter(function(cust) { return cust.selected; });
+        c.data.currentStep = 2;
+    };
+
+    c.goBackToStep1 = function() { c.data.currentStep = 1; };
+
+    c.getFilteredCustomers = function() {
+        if (!c.data.customers) return [];
+        var searchStr = (c.data.localSearch || '').toLowerCase();
+        return c.data.customers.filter(function(cust) {
+            return cust.name.toLowerCase().includes(searchStr) ||
+                   cust.code.toLowerCase().includes(searchStr) ||
+                   cust.city.toLowerCase().includes(searchStr);
+        });
+    };
+
+    c.getPaginatedCustomers = function() {
+        var filtered   = c.getFilteredCustomers();
+        var startIndex = (c.data.currentPage - 1) * c.data.itemsPerPage;
+        return filtered.slice(startIndex, startIndex + c.data.itemsPerPage);
+    };
+
+    c.totalPages = function() {
+        return Math.ceil(c.getFilteredCustomers().length / c.data.itemsPerPage) || 1;
+    };
+
+    c.selectAllInView = function(selectAll) {
+        c.getPaginatedCustomers().forEach(function(cust) {
+            cust.selected = selectAll;
+            if (selectAll) c.checkSegmentMatch(cust);
+        });
+    };
+
+    // ==================== STEP 2: DOCUMENT HANDLING ====================
+    c.handleDocTypeChange = function() {
+        c.rawFile = null;
+        c.data.fileName = '';
+        c.data.fileData = null;
+        c.data.fileType = '';
+        var fileEl = document.getElementById('financialReport');
+        if (fileEl) fileEl.value = '';
+    };
+
+    c.isFormValid = function() {
+        if (!c.data.panLevel.companyType) return false;
+        if (c.data.panLevel.companyType === 'Listed') {
+            if (!c.data.panLevel.netWorth || !c.data.panLevel.loansAdvances) return false;
+        }
+        if (!c.data.selectedCustomers || c.data.selectedCustomers.length === 0) return false;
+        for (var i = 0; i < c.data.selectedCustomers.length; i++) {
+            var cust = c.data.selectedCustomers[i];
+            if (!cust.desiredLimit || !cust.expectedPotential || !cust.expectedSob || !cust.justification) return false;
+            if (c.data.panLevel.companyType !== 'Listed' && !cust.orderRate) return false;
+        }
+        if (!c.data.documentType) return false;
+        if (c.data.documentType !== 'No Document' && !c.rawFile) return false;
+        return true;
+    };
+
+    c.handleFileUpload = function(element) {
+        var file = element.files[0];
+        if (!file) return;
+
+        var maxSizeInBytes = 5 * 1024 * 1024;
+        if (file.size > maxSizeInBytes) {
+            spUtil.addErrorMessage("File size exceeds the 5MB limit. Please compress or upload a smaller document.");
+            c.handleDocTypeChange();
+            return;
+        }
+
+        $timeout(function() {
+            c.rawFile        = file;
+            c.data.fileName  = file.name;
+            c.data.fileType  = file.type;
+        });
+
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            $timeout(function() {
+                c.data.fileData = e.target.result.split(',')[1];
+            });
+        };
+        reader.readAsDataURL(file);
+    };
+
+    // ==================== STEP 3: AI PROCESSING ====================
+    c.generateAiDraft = function() {
+        c.data.isSubmitting = true;
+        
+        if (c.data.documentType === 'No Document') {
+            c.data.action       = 'fetch_parameters'; 
+            c.server.update().then(function() {
+                c.data.action       = '';
+                c.data.currentStep  = 3;
+                c.data.processing   = false;
+                c.data.isManualMode = true;
+                c.data.error        = 'Manual Entry Mode: No Document uploaded. Please fill all parameters manually.';
+                c.data.result       = {};
+                c.autoMapMatrix();
+                c.data.isSubmitting = false;
+            });
+            return;
+        }
+
+        c.data.action       = 'create_record';
+        c.data.currentStep  = 3;
+        c.data.processing   = true;
+        c.data.statusMsg    = 'Uploading attachment and linking securely...';
+
+        c.server.update().then(function() {
+            if (c.data.serverError) {
+                spUtil.addErrorMessage(c.data.serverError);
+                c.data.isSubmitting = false;
+                c.data.action       = '';
+                c.data.currentStep  = 2;
+                c.data.processing   = false;
+                return;
+            }
+            c.data.isSubmitting = false;
+            c.data.action       = '';
+            c.data.statusMsg    = 'Invoking AI engine scanning models...';
+            c.startPolling();
+        }).catch(function(err) {
+            spUtil.addErrorMessage("Server configuration error: Unable to communicate with the table.");
+            c.data.isSubmitting = false;
+            c.data.action       = '';
+            c.data.currentStep  = 2;
+            c.data.processing   = false;
+        });
+    };
+
+    var stopPolling = function() {
+        if (angular.isDefined(pollTimer)) {
+            $interval.cancel(pollTimer);
+            pollTimer = undefined;
+        }
+    };
+
+    c.startPolling = function() {
+        pollCount = 0;
+        stopPolling(); 
+
+        pollTimer = $interval(function() {
+            pollCount++;
+            c.server.get({ action: 'poll', sysId: c.data.sysId, targetTable: c.data.targetTable }).then(function(response) {
+                var isDone = (response.data.ocrStatus === 'failed'  ||
+                              response.data.ocrStatus === 'success' ||
+                              pollCount >= MAX_POLLS);
+
+                if (isDone) {
+                    stopPolling();
+                    
+                    $timeout(function() {
+                        c.data.processing = false;
+                        c.data.statusMsg = ''; 
+
+                        if (response.data.ocrStatus === 'success') {
+                            c.data.result       = response.data.result;
+                            c.data.isManualMode = false;
+                            c.data.aiSummaryPoints = c.getSummaryPoints(c.data.result.ai_summary);
+                        } else {
+                            var cleanError = 'AI Processing timeout or failure. Form has been unlocked for manual parameter entry.';
+                            c.data.error        = 'System Notice: ' + cleanError;
+                            c.data.result       = {};
+                            c.data.isManualMode = true;
+                        }
+                        c.autoMapMatrix();
+                    });
+                } else {
+                    if (c.data.processing) {
+                        c.data.statusMsg = 'Extracting fields (' + (pollCount * 10) + 's elapsed)...';
+                    }
+                }
+            });
+        }, 10000);
+    };
+
+    c.applyMap = function(paramObj, matchSysId, rawValueStr, mappingType) {
+        if (rawValueStr !== undefined && rawValueStr !== null && rawValueStr !== '') {
+            paramObj.extractedValue = rawValueStr;
+        }
+        if (matchSysId) {
+            paramObj.selectedValue = matchSysId;
+            paramObj.autoMapped    = true;
+            paramObj.mappingType   = mappingType || 'AI'; 
+            paramObj.originalValue = matchSysId;
+            var matchedOpt = paramObj.options.find(function(o) { return o.sys_id === matchSysId; });
+            paramObj.originalLabel = matchedOpt ? matchedOpt.label : 'Unknown';
+            paramObj.isChanged     = false;
+        }
+    };
+
+    c.autoMapMatrix = function() {
+        var companyAge        = c.data.customers[0] ? c.data.customers[0].age : 0;
+        var expectedPotential = c.data.selectedCustomers[0] ? c.data.selectedCustomers[0].expectedPotential : 0;
+        var netWorth          = parseFloat(c.data.panLevel.netWorth) || 0;
+        var currentShare      = c.data.selectedCustomers[0] ? parseFloat(c.data.selectedCustomers[0].currentSob) || 0 : 0;
+
+        var isAiActive = (!c.data.isManualMode && c.data.documentType !== 'No Document');
+
+        angular.forEach(c.data.groupedParameters, function(paramsArray) {
+            for (var i = 0; i < paramsArray.length; i++) {
+                var p     = paramsArray[i];
+                var pName = p.name.toLowerCase();
+
+                if (isAiActive) {
+                    var courtCases     = c.data.result.court_cases      || '';
+                    var externalRating = c.data.result.rating           || '';
+                    var riskIndex      = c.data.result.risk_index       || '';
+                    
+                    if (pName.indexOf('rating') !== -1 && (externalRating || riskIndex)) {
+                        var rOpt;
+                        var combinedStr = (externalRating + ' ' + riskIndex).toLowerCase();
+                        
+                        if (combinedStr.indexOf('4/5') > -1 || combinedStr.indexOf('5/5') > -1 || combinedStr.indexOf('low') > -1) {
+                            rOpt = p.options.find(function(o) { return o.label.indexOf('AAA') > -1; });
+                        } else if (combinedStr.indexOf('3/5') > -1 || combinedStr.indexOf('medium') > -1) {
+                            rOpt = p.options.find(function(o) { return o.label.indexOf('BBB') > -1; });
+                        } else if (combinedStr.indexOf('2/5') > -1 || combinedStr.indexOf('unrated') > -1) {
+                            rOpt = p.options.find(function(o) { return o.label.indexOf('BB ') > -1 || o.label.indexOf('BB (') > -1; });
+                        } else if (combinedStr.indexOf('1/5') > -1 || combinedStr.indexOf('prop') > -1) {
+                            rOpt = p.options.find(function(o) { return o.label.indexOf('B ') > -1 || o.label.indexOf('B (') > -1; });
+                        }
+                        if (rOpt) {
+                            var displayVal = externalRating + (riskIndex ? ' (' + riskIndex + ')' : '');
+                            c.applyMap(p, rOpt.sys_id, displayVal, 'AI');
+                        }
+                    } 
+                    else if (pName.indexOf('court') !== -1 || pName.indexOf('legal') !== -1) {
+                        var courtStr = (courtCases || '').toLowerCase();
+                        if (courtStr.indexOf('no') > -1 || courtStr.indexOf('none') > -1 || courtStr.indexOf('0') > -1) {
+                            var cOpt = p.options.find(function(o) { return o.label.toLowerCase().indexOf('no') > -1 || o.label.toLowerCase().indexOf('none') > -1; });
+                            if (cOpt) c.applyMap(p, cOpt.sys_id, courtCases || 'No Cases found', 'AI');
+                        }
+                    } 
+                    else {
+                        var mapNumericAi = function(valKey, labelSuffix) {
+                            if (c.data.result[valKey] !== undefined && c.data.result[valKey] !== null && c.data.result[valKey] !== '') {
+                                var num = parseFloat(c.data.result[valKey]);
+                                if (!isNaN(num)) {
+                                    c.applyMap(p, c.evaluateNumberCondition(p.options, num), num + labelSuffix, 'AI');
+                                }
+                            }
+                        };
+
+                        if (pName.indexOf('ap days') !== -1 || pName.indexOf('a/p') !== -1 || pName.indexOf('creditor') !== -1 || pName.indexOf('payable') !== -1) mapNumericAi('ap_days', ' Days');
+                        else if (pName.indexOf('ar days') !== -1 || pName.indexOf('a/r') !== -1 || pName.indexOf('debtor') !== -1 || pName.indexOf('receivable') !== -1) mapNumericAi('ar_days', ' Days');
+                        else if (pName.indexOf('debt equity') !== -1 || pName.indexOf('d/e') !== -1 || pName.indexOf('debt to equity') !== -1 || pName.indexOf('debt/equity') !== -1) mapNumericAi('debt_equity', ' Ratio');
+                        else if (pName.indexOf('ebitda') !== -1) mapNumericAi('ebitda', ' %');
+                        else if (pName.indexOf('gross profit') !== -1 || pName.indexOf('gp margin') !== -1) mapNumericAi('gross_profit', ' %');
+                        else if (pName.indexOf('interest coverage') !== -1 || pName.indexOf('icr') !== -1 || pName.indexOf('int. coverage') !== -1 || pName.indexOf('int coverage') !== -1) mapNumericAi('int_coverage', ' Ratio');
+                        else if (pName.indexOf('inventory days') !== -1) mapNumericAi('inventory_days', ' Days');
+                        else if (pName.indexOf('revenue') !== -1 || pName.indexOf('turnover') !== -1) {
+                            if (c.data.result.net_revenue !== undefined && c.data.result.net_revenue !== '') {
+                                var nr = parseFloat(c.data.result.net_revenue);
+                                if (!isNaN(nr)) c.applyMap(p, c.evaluateNumberCondition(p.options, nr), '₹ ' + nr + ' Cr', 'AI');
+                            }
+                        }
+                        else if (pName.indexOf('wcc') !== -1 || pName.indexOf('working capital cycle') !== -1) mapNumericAi('net_wcc_days', ' Days');
+                        else if (pName.indexOf('sales growth') !== -1 || pName.indexOf('growth') !== -1) mapNumericAi('sales_growth', ' %');
+                        else if (pName.indexOf('roce') !== -1 || pName.indexOf('return on capital') !== -1) mapNumericAi('roce', ' %');
+                        else if (pName.indexOf('roe') !== -1 || pName.indexOf('return on equity') !== -1) mapNumericAi('roe', ' %');
+                        else if (pName.indexOf('current ratio') !== -1) mapNumericAi('current_ratio', ' Ratio');
+                    }
+                }
+
+                if (pName.indexOf('share') !== -1 || pName.indexOf('sob') !== -1) {
+                    c.applyMap(p, c.evaluateNumberCondition(p.options, currentShare), currentShare + ' %', 'Input');
+                } else if (pName.indexOf('age') !== -1 || pName.indexOf('vintage') !== -1) {
+                    c.applyMap(p, c.evaluateNumberCondition(p.options, companyAge), companyAge + ' Years', 'Input');
+                } else if (pName.indexOf('potential') !== -1) {
+                    c.applyMap(p, c.evaluateNumberCondition(p.options, expectedPotential), expectedPotential + ' MT', 'Input');
+                } else if (pName.indexOf('net worth') !== -1 && c.data.panLevel.companyType === 'Listed') {
+                    c.applyMap(p, c.evaluateNumberCondition(p.options, netWorth), '₹ ' + netWorth, 'Input');
+                }
+            }
+        });
+    };
+
+    c.evaluateNumberCondition = function(optionsArray, valueToCheck) {
+        var val = parseFloat(valueToCheck);
+        if (isNaN(val)) return '';
+
+        for (var i = 0; i < optionsArray.length; i++) {
+            var rawLabel = optionsArray[i].label.toLowerCase();
+            var cleanLabel = rawLabel.split('(score')[0].trim();
+
+            if (cleanLabel.indexOf('>') !== -1 || cleanLabel.indexOf('greater') !== -1 || cleanLabel.indexOf('above') !== -1 || cleanLabel.indexOf('more') !== -1) {
+                var match = cleanLabel.match(/[\d.]+/);
+                if (match && val > parseFloat(match[0])) return optionsArray[i].sys_id;
+            }
+            else if (cleanLabel.indexOf('<') !== -1 || cleanLabel.indexOf('less') !== -1 || cleanLabel.indexOf('below') !== -1) {
+                var match = cleanLabel.match(/[\d.]+/);
+                if (match && val < parseFloat(match[0])) return optionsArray[i].sys_id;
+            }
+            else if (cleanLabel.indexOf('-') !== -1 || cleanLabel.indexOf('to') !== -1 || cleanLabel.indexOf('between') !== -1) {
+                var match = cleanLabel.match(/([\d.]+)\s*(?:-|to|and)\s*([\d.]+)/);
+                if (match) {
+                    var min = parseFloat(match[1]);
+                    var max = parseFloat(match[2]);
+                    if (val >= min && val <= max) return optionsArray[i].sys_id;
+                }
+            }
+        }
+        return '';
+    };
+
+    c.trackChange = function(param) {
+        if (param.autoMapped) {
+            if (param.selectedValue !== param.originalValue) {
+                param.isChanged = true;
+                var newOpt      = param.options.find(function(o) { return o.sys_id == param.selectedValue; });
+                var newLabel    = newOpt ? newOpt.label : 'None Selected';
+                param.changeLog = '• ' + param.name + ': Override tracked from [' + param.originalLabel + '] to [' + newLabel + ']';
+            } else {
+                param.isChanged = false;
+                param.changeLog = '';
+            }
+        }
+    };
+
+    c.getTotalParams = function() {
+        var total = 0;
+        angular.forEach(c.data.groupedParameters, function(arr) { total += arr.length; });
+        return total;
+    };
+
+    c.getCompletedCount = function() {
+        var count = 0;
+        angular.forEach(c.data.groupedParameters, function(arr) {
+            arr.forEach(function(p) { if(p.selectedValue) count++; });
+        });
+        return count;
+    };
+
+    c.getSummaryPoints = function(summary) {
+        if (!summary) return [];
+        var points = [];
+        var parts = summary.split(/(?:^|\n)- /);
+        if (parts.length <= 1) parts = summary.split(/\s*-\s*/);
+
+        parts.forEach(function(pt) {
+            if (pt.trim().length > 3) {
+                var splitIdx = pt.indexOf(':');
+                if(splitIdx > -1) {
+                    points.push({ key: pt.substring(0, splitIdx).trim(), val: pt.substring(splitIdx+1).trim() });
+                } else {
+                    points.push({ key: "Key Insight", val: pt.trim() });
+                }
+            }
+        });
+        return points;
+    };
+
+    // ==================== STEP 4: SUBMIT ====================
+    c.submitFinalRequest = function() {
+        c.data.isSubmitting = true;
+        var selectedMatrixIds  = [];
+        var auditLogsArray     = [];
+        var totalParamsRequired = c.getTotalParams();
+
+        angular.forEach(c.data.groupedParameters, function(paramsArray) {
+            for (var i = 0; i < paramsArray.length; i++) {
+                if (paramsArray[i].selectedValue) {
+                    selectedMatrixIds.push(paramsArray[i].selectedValue);
+                }
+                if (paramsArray[i].isChanged && paramsArray[i].changeLog) {
+                    auditLogsArray.push(paramsArray[i].changeLog);
+                }
+            }
+        });
+
+        if (selectedMatrixIds.length < totalParamsRequired) {
+            spUtil.addErrorMessage('Validation Failed: You must complete all ' + totalParamsRequired + ' parameters.');
+            c.data.isSubmitting = false;
+            return;
+        }
+
+        c.data.externalRating    = c.data.result.rating || '';
+        c.data.selectedMatrixIds = selectedMatrixIds;
+        c.data.auditLogsPayload  = auditLogsArray.join('\n');
+        c.data.action            = 'submit_credit_request';
+
+        c.server.update().then(function() {
+            c.data.isSubmitting = false;
+            c.data.action       = '';
+            c.data.currentStep  = 4;
+        });
+    };
+
+    c.resetForm = function() {
+        stopPolling();
+        c.data.currentStep       = 1;
+        c.data.panNumber         = '';
+        c.data.customers         = [];
+        c.data.selectedCustomers = [];
+        c.data.panLevel          = { companyType: 'Unlisted' };
+        c.rawFile                = null;
+        c.data.fileData          = null;
+        c.data.fileName          = '';
+        c.data.documentType      = '';
+        c.data.result            = {};
+        c.data.aiSummaryPoints   = [];
+        c.data.externalRating    = '';
+        c.data.isManualMode      = false;
+        c.data.error             = '';
+        c.data.vendorRisk        = { category: '', stockPrice: '', latestNews: '', companyName: '' };
+    };
+
+    $scope.$on('$destroy', function() {
+        stopPolling();
+    });
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* Container &amp; Fonts */
+.abg-widget-container { 
+    background-color: #FFFFFF; 
+    padding: 30px; 
+    border-radius: 8px; 
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06); 
+    font-family: 'Oxygen', Arial, sans-serif; 
+}
+
+/* Base Layout Tools */
+.abg-header h2 { color: #333333; font-weight: 700; margin-top: 0; margin-bottom: 8px; font-size: 24px; }
+.abg-header p { color: #666666; font-size: 14px; margin-bottom: 25px; }
+.position-relative { position: relative; }
+.header-divider { border-bottom: 2px solid #f0f0f0; padding-bottom: 15px; margin-bottom: 20px; }
+.section-title { font-size: 13px; color: #666; letter-spacing: 0.5px; }
+
+/* FIX: Flexbox Layout Helpers */
+.flex-align-center { display: flex; flex-wrap: wrap; align-items: center; }
+.flex-cards { display: flex; flex-wrap: wrap; }
+.flex-cards &gt; div { display: flex; flex-direction: column; margin-bottom: 15px; }
+
+/* Forms &amp; Typeahead */
+.abg-input-group label { font-weight: 600; color: #4A4A4A; }
+.abg-input-group .form-control { border: 1px solid #D1D1D1; border-radius: 4px; padding: 10px 15px; height: auto; font-size: 16px; transition: border-color 0.3s ease; }
+.abg-input-group .form-control:focus { border-color: #C8102E; box-shadow: 0 0 0 2px rgba(200, 16, 46, 0.1); }
+.abg-typeahead-dropdown { position: absolute; top: 100%; left: 0; z-index: 1000; width: 100%; background-color: #ffffff; border: 1px solid #D1D1D1; border-top: none; border-radius: 0 0 4px 4px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin: 0; padding: 0; list-style: none; max-height: 200px; overflow-y: auto; }
+.abg-typeahead-dropdown li a { display: block; padding: 10px 15px; color: #333333; text-decoration: none; font-weight: 600; letter-spacing: 1px; transition: background-color 0.2s ease; }
+.abg-typeahead-dropdown li a:hover { background-color: #F8F9FA; color: #C8102E; }
+
+/* Table Styling */
+.widget-table-wrapper { 
+    border-radius: 6px; 
+    border: 1px solid #EAEAEA; 
+    overflow-x: auto; 
+    -webkit-overflow-scrolling: touch; 
+    margin-bottom: 15px;
+}
+.abg-table { margin-bottom: 0; width: 100%; }
+.abg-table thead th { background-color: #F8F9FA; color: #333; font-weight: 600; border-bottom: 2px solid #EAEAEA; text-transform: uppercase; font-size: 12px; white-space: nowrap; }
+.abg-table tbody td { vertical-align: middle; border-top: 1px solid #EAEAEA; }
+.selected-row { background-color: #fce8ea !important; border-left: 4px solid #C8102E; }
+.abg-input-grid th { font-size: 11px; color: #666; vertical-align: bottom; }
+.abg-input-grid td { padding: 12px 8px !important; vertical-align: top; }
+.abg-input-grid .form-control { border: 1px solid #E0E0E0; border-radius: 3px; padding: 6px 10px; font-size: 14px; box-shadow: none; height: 34px; min-width: 100px; }
+.abg-input-grid .form-control:focus { border-color: #C8102E; }
+
+/* Buttons */
+.abg-btn-primary { background-color: #C8102E; color: #FFFFFF; font-weight: 600; padding: 10px 24px; border-radius: 4px; border: none; transition: background 0.2s; white-space: nowrap;}
+.abg-btn-primary:hover { background-color: #A00D25; color: #FFFFFF; }
+.abg-btn-primary[disabled] { background-color: #E0E0E0; color: #9E9E9E; cursor: not-allowed; }
+.abg-btn-outline { background: transparent; border: 2px solid #C8102E; color: #C8102E; font-weight: 600; padding: 8px 20px; border-radius: 4px; white-space: nowrap; transition: background 0.2s;}
+.abg-btn-outline:hover { background: #C8102E; color: #FFF; }
+.success-icon { font-size: 64px; color: #2E7D32; line-height: 1; }
+
+/* Elegant Table-Driven Matrix UI Formats */
+.abg-matrix-table tbody tr:hover { background-color: #fcfcfc !important; }
+.ai-highlight-row { background-color: #f7fbfe !important; }
+.ai-highlight-row td:first-child { border-left: 4px solid #1782c5; }
+.input-highlight-row { background-color: #fcf9ff !important; }
+.input-highlight-row td:first-child { border-left: 4px solid #800080; }
+.edit-highlight-row { background-color: #fffdf6 !important; }
+.edit-highlight-row td:first-child { border-left: 4px solid #ffc107; }
+.missing-param-row { background-color: #fffafb !important; }
+.missing-param-row td:first-child { border-left: 4px solid #C8102E; }
+.border-danger { border-color: #C8102E !important; box-shadow: 0 0 3px rgba(200, 16, 46, 0.3) !important; }
+
+/* Badge Layout Designs */
+.ai-badge { background-color: #eef6fb; color: #1782c5; border: 1px solid #1782c5; font-size: 11px; font-weight: bold; padding: 4px 8px; border-radius: 4px; white-space: nowrap;}
+.input-badge { background-color: #f6eefe; color: #800080; border: 1px solid #800080; font-size: 11px; font-weight: bold; padding: 4px 8px; border-radius: 4px; white-space: nowrap;}
+.text-purple { color: #800080 !important; }
+.edit-badge { background-color: #fffbeb; color: #b58105; border: 1px solid #ffc107; font-size: 11px; font-weight: bold; padding: 4px 8px; border-radius: 4px; white-space: nowrap;}
+.manual-badge { background-color: #f5f5f5; color: #666; border: 1px solid #ddd; font-size: 11px; font-weight: bold; padding: 4px 8px; border-radius: 4px; white-space: nowrap;}
+.badge-danger { background-color: #C8102E !important; color: #ffffff !important; }
+.badge-warning { background-color: #ffc107 !important; color: #333333 !important; }
+.badge-success { background-color: #28a745 !important; color: #ffffff !important; }
+
+.spec-matrix-select:focus { border-color: #C8102E !important; box-shadow: 0 0 4px rgba(200, 16, 46, 0.15) !important; }
+.slide-down { animation: slideDownFade 0.4s ease-out; }
+@keyframes slideDownFade { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+
+/* =========================================================
+   TABLET &amp; MOBILE RESPONSIVE FIXES
+   ========================================================= */
+
+/* Tablet Optimization (768px to 991px) */
+@media (max-width: 991px) {
+  .mobile-left { text-align: right; }
+  .page-size-box { width: 100% !important; max-width: 140px; }
+}
+
+/* Mobile Devices (Under 767px) */
+@media (max-width: 767px) {
+  .abg-widget-container { padding: 15px; }
+  
+  /* Flex direction overrides for mobile stacking */
+  .flex-align-center { flex-direction: column; align-items: stretch; }
+  
+  /* Header specific overrides */
+  .m-b-sm-mobile { margin-bottom: 15px !important; }
+  .m-t-sm-mobile { margin-top: 15px !important; }
+  .mobile-left { text-align: left !important; }
+  .display-block-mobile { display: block; }
+  
+  /* Pagination spacing and centering */
+  .text-center-mobile { text-align: center !important; }
+  .page-size-box { width: 100% !important; max-width: 100%; }
+
+  /* Ensure buttons wrap */
+  .w-100-mobile { display: block; width: 100%; margin-right: 0 !important; margin-bottom: 10px; }
+}
+
+/* Vendor Assessment Card */
+.vendor-assessment-card {
+  border-radius: 6px;
+  border: 1px solid #e0e0e0;
+  background: #ffffff;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.vendor-assessment-card.risk-Low {
+  border-left: 4px solid #28a745;
+}
+
+.vendor-assessment-card.risk-Medium {
+  border-left: 4px solid #ffc107;
+}
+
+.vendor-assessment-card.risk-High {
+  border-left: 4px solid #dc3545;
+}
+
+.vendor-assessment-card.risk-unknown {
+  border-left: 4px solid #6c757d;
+}
+
+.assessment-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.badge-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+.badge-warning { background-color: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
+.badge-danger  { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>risk_assesment_agent</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>risk assesment agent</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    if (!input) return;
+    var action = input.action;
+
+    function getSafeValue(gr, fieldsArray) {
+        for (var i = 0; i < fieldsArray.length; i++) {
+            if (gr.isValidField(fieldsArray[i])) {
+                var val = gr.getValue(fieldsArray[i]);
+                if (val !== null && val !== undefined && val.toString().trim() !== '') {
+                    return val.toString().trim();
+                }
+            }
+        }
+        return '';
+    }
+
+    function loadMatrixParameters() {
+        data.groupedParameters = {};
+        var paramMap = {};
+        var grMatrix = new GlideRecord('x_birl3_clm_risk_parameter_matrix');
+        grMatrix.orderBy('category');
+        grMatrix.orderBy('parameter_name');
+        grMatrix.orderBy('order');
+        grMatrix.query();
+
+        while (grMatrix.next()) {
+            var catName = grMatrix.getValue('category');
+            var pName   = grMatrix.getValue('parameter_name');
+            if (!data.groupedParameters[catName]) {
+                data.groupedParameters[catName] = [];
+            }
+            if (!paramMap[pName]) {
+                paramMap[pName] = {
+                    name:          pName,
+                    options:       [],
+                    selectedValue: '',
+                    autoMapped:    false,
+                    isChanged:     false,
+                    originalValue: '',
+                    originalLabel: ''
+                };
+                data.groupedParameters[catName].push(paramMap[pName]);
+            }
+            // NEW: Hide Score logic from UI label
+            paramMap[pName].options.push({
+                sys_id: grMatrix.getUniqueValue(),
+                label:  grMatrix.getValue('option_label') 
+            });
+        }
+    }
+
+    if (action == 'fetch_pan_suggestions') {
+        var searchString = input.panNumber ? input.panNumber.toUpperCase() : '';
+        data.panSuggestions = [];
+        var ga = new GlideRecord('x_birl3_clm_customer');
+        ga.addEncodedQuery('panSTARTSWITH' + searchString + '^ORnameLIKE' + searchString);
+        ga.orderBy('pan');
+        ga.setLimit(15);
+        ga.query();
+        var addedPans = {};
+        while (ga.next()) {
+            var panVal = ga.getValue('pan');
+            var nameVal = ga.getValue('name');
+            if (panVal && !addedPans[panVal]) {
+                data.panSuggestions.push({ pan: panVal, name: nameVal });
+                addedPans[panVal] = true;
+            }
+        }
+        return;
+    }
+
+    if (action == 'fetch_customers') {
+        var custSearchString = input.panNumber ? input.panNumber.toUpperCase() : '';
+        data.customers = [];
+        var gr = new GlideRecord('x_birl3_clm_customer');
+        gr.addQuery('pan', custSearchString);
+        gr.addQuery('account_group', '!=', 'ZTRD');
+        gr.orderBy('city');
+        gr.query();
+
+        var nowYear = new GlideDateTime().getYearLocalTime();
+
+        while (gr.next()) {
+            var custSysId = gr.getUniqueValue();
+            
+            var createdOnDate = gr.getValue('created_on');
+            var ageInYears = 0;
+            if (createdOnDate) {
+                var createdGDT = new GlideDateTime(createdOnDate);
+                ageInYears = nowYear - createdGDT.getYearLocalTime();
+            }
+
+            // NEW: Calculate Total Outstanding from Ageing Buckets
+            var totalOs = 0;
+            var outGr = new GlideRecord('x_birl3_clm_customer_outstanding');
+            outGr.addQuery('customer', custSysId);
+            outGr.query();
+            while (outGr.next()) {
+                totalOs += (parseFloat(outGr.getValue('ageing0_3')) || 0) +
+                           (parseFloat(outGr.getValue('ageing4_7')) || 0) +
+                           (parseFloat(outGr.getValue('ageing8_21')) || 0) +
+                           (parseFloat(outGr.getValue('ageing22_30')) || 0) +
+                           (parseFloat(outGr.getValue('ageing31_45')) || 0) +
+                           (parseFloat(outGr.getValue('ageing46_60')) || 0) +
+                           (parseFloat(outGr.getValue('ageing61_75')) || 0) +
+                           (parseFloat(outGr.getValue('ageing76_90')) || 0) +
+                           (parseFloat(outGr.getValue('ageing_gt90')) || 0);
+            }
+
+            data.customers.push({
+                sys_id:      custSysId,
+                code:        gr.getValue('customer_code'),
+                name:        gr.getValue('name'),
+                city:        gr.getValue('city')            || 'N/A',
+                limit:       parseFloat(gr.getValue('credit_limit')) || 0.00,
+                bg:          parseFloat(gr.getValue('bank_guarantee')) || 0.00, // Extracted BG
+                outstanding: totalOs, // Calculated outstanding
+                segment:     gr.getValue('company_code')   || '',
+                zone:        gr.getValue('customer_group') || '',
+                region:      gr.getValue('cg4')            || '',
+                depot:       gr.getValue('sales_office')   || '',
+                age:         ageInYears,
+                selected:    false
+            });
+        }
+        return;
+    }
+    
+    if (action == 'fetch_parameters') {
+        loadMatrixParameters();
+        return;
+    }
+
+    if (action == 'create_record') {
+        try {
+            var tableName = 'x_birl3_clm_ocr_test'; // Default CRIF
+            if (input.documentType === 'Corpository') {
+                tableName = 'x_birl3_clm_corpository_ocr';
+            } else if (input.documentType === 'Balance Sheet') {
+                tableName = 'x_birl3_clm_bs_ocr';
+            }
+
+            var ocr = new GlideRecord(tableName);
+            
+            if (!ocr.isValid()) {
+                data.serverError = "Table Error: The backend table named '" + tableName + "' does not exist. Please check your ServiceNow 'Tables' dictionary and update the script with the exact name.";
+                return;
+            }
+
+            ocr.initialize();
+            var sysId = ocr.insert();
+            if (!sysId) {
+                data.serverError = 'Failed to create tracking session record.';
+                return;
+            }
+            if (input.fileData && input.fileName && input.fileType) {
+                var attachment = new GlideSysAttachment();
+                attachment.writeBase64(ocr, input.fileName, input.fileType, input.fileData);
+            }
+            data.sysId = sysId;
+            data.targetTable = tableName; 
+        } catch (e) {
+            data.serverError = 'Session creation error: ' + e.message;
+            return;
+        }
+
+        loadMatrixParameters();
+        return;
+    }
+	// NEW: Vendor Assessment - Corrected for Workflow Integration
+if (action == 'assess_vendor') {
+    var companyName = input.vendorCompanyName || '';
+    
+    if (!companyName) {
+        data.vendorRisk = {};
+        return;
+    }
+    
+    try {
+        // Step 1: Create assessment request record (this triggers the workflow)
+        var assessReq = new GlideRecord('x_birl3_clm_vendor_assessment_request');
+        assessReq.initialize();
+        assessReq.company_name = companyName;
+        assessReq.requested_by = gs.getUserID();
+        assessReq.status = 'Pending';
+        var assessSysId = assessReq.insert();
+        
+        if (!assessSysId) {
+            data.vendorRisk = {
+                category: '',
+                stockPrice: '',
+                latestNews: '',
+                companyName: companyName
+            };
+            return;
+        }
+        
+        gs.info('Created assessment request: ' + assessSysId + ' for company: ' + companyName);
+        
+        // Step 2: Poll for workflow completion (max 20 seconds - workflow should complete faster)
+        var pollAttempts = 0;
+        var maxAttempts = 4; // 4 attempts × 5 sec = max 20 sec
+        var vendorResult = null;
+        
+        while (pollAttempts < maxAttempts && !vendorResult) {
+            gs.sleep(5000); // Wait 5 seconds before polling
+            pollAttempts++;
+            
+            // Check if assessment request status is "Completed"
+            var reqCheck = new GlideRecord('x_birl3_clm_vendor_assessment_request');
+            if (reqCheck.get(assessSysId)) {
+                var status = reqCheck.getValue('status');
+                gs.info('Assessment request status: ' + status + ' (attempt ' + pollAttempts + ')');
+                
+                if (status === 'Completed' || status === 'completed') {
+                    // Step 3: Fetch results from customer_performance table
+                    var perfRec = new GlideRecord('x_birl3_clm_customer_performance');
+                    perfRec.addQuery('company_name', 'CONTAINS', companyName);
+                    perfRec.orderByDesc('sys_created_on');
+                    perfRec.setLimit(1);
+                    perfRec.query();
+                    
+                    if (perfRec.next()) {
+                        var recommendation = perfRec.getValue('final_recommendation') || '';
+                        var stockPrice = perfRec.getValue('current_stock_price') || 'N/A';
+                        var newsHighlights = perfRec.getValue('key_news_highlights') || '';
+                        
+                        // Extract just first line of news (if multiple)
+                        if (newsHighlights && newsHighlights.indexOf('\n') > -1) {
+                            newsHighlights = newsHighlights.split('\n')[0];
+                        }
+                        
+                        // Map recommendation to risk category
+                        var riskCategory = '';
+                        var rec = (recommendation || '').toLowerCase();
+                        if (rec.indexOf('low') > -1) {
+                            riskCategory = 'Low';
+                        } else if (rec.indexOf('moderate') > -1 || rec.indexOf('medium') > -1) {
+                            riskCategory = 'Medium';
+                        } else if (rec.indexOf('high') > -1) {
+                            riskCategory = 'High';
+                        }
+                        
+                        vendorResult = {
+                            category: riskCategory,
+                            stockPrice: stockPrice,
+                            latestNews: newsHighlights,
+                            companyName: companyName
+                        };
+                        
+                        gs.info('Assessment completed successfully for: ' + companyName);
+                    } else {
+                        gs.info('No customer_performance record found for: ' + companyName);
+                    }
+                    
+                    break;
+                }
+            }
+        }
+        
+        // Step 4: Return results (or empty if timeout)
+        if (vendorResult) {
+            data.vendorRisk = vendorResult;
+        } else {
+            gs.info('Assessment request timed out after ' + (pollAttempts * 5) + ' seconds for: ' + companyName);
+            data.vendorRisk = {
+                category: '',
+                stockPrice: '',
+                latestNews: '',
+                companyName: companyName
+            };
+        }
+        
+    } catch (e) {
+        gs.error('Error in assess_vendor action: ' + e.message);
+        data.vendorRisk = {
+            category: '',
+            stockPrice: '',
+            latestNews: '',
+            companyName: companyName
+        };
+    }
+    
+    return;
+}
+
+    if (action === 'poll') {
+        if (!input.sysId) {
+            data.pollError = 'Context tracking reference session ID is missing.';
+            return;
+        }
+        
+        var targetTable = input.targetTable || 'x_birl3_clm_ocr_test';
+
+        var diTask = new GlideRecord('sys_di_task');
+        diTask.addQuery('source_record', input.sysId);
+        diTask.orderByDesc('sys_created_on');
+        diTask.query();
+
+        if (diTask.next()) {
+            var diStatus = (diTask.getValue('status') || '').toLowerCase();
+            if (diStatus === 'error' || diStatus === 'skipped' || diStatus === 'failed') {
+                data.ocrStatus   = 'failed';
+                data.ocrErrorMsg = diTask.getValue('error_message')   ||
+                    diTask.getValue('warning_message') ||
+                    'DocIntel session task was bypassed or skipped.';
+                return;
+            }
+        }
+
+
+        var rec = new GlideRecord(targetTable);
+        if (rec.get(input.sysId)) {
+            
+            var nameVal = getSafeValue(rec, ['name_of_company', 'customer_name', 'u_customer_name']);
+            var sumVal  = getSafeValue(rec, ['ai_summary', 'u_ai_summary']);
+            var revVal  = getSafeValue(rec, ['net_revenue', 'total_revenue', 'u_sales']);
+            var rateVal = getSafeValue(rec, ['rating', 'u_rating']);
+            var riskVal = getSafeValue(rec, ['risk_index', 'u_risk_index']);
+            var apVal   = getSafeValue(rec, ['ap_days', 'payable_days', 'u_ap_days']);
+
+            var hasDataExtracted = nameVal || sumVal || revVal || rateVal || riskVal || apVal;
+
+            if (hasDataExtracted !== '') {
+                data.ocrStatus = 'success';
+                
+                data.result = {
+                    court_cases:    getSafeValue(rec, ['court_cases', 'u_court_cases']),
+                    rating:         getSafeValue(rec, ['rating', 'u_rating']),
+                    risk_index:     getSafeValue(rec, ['risk_index', 'u_risk_index']),
+                    ai_summary:     getSafeValue(rec, ['ai_summary', 'u_ai_summary']),
+                    ap_days:        getSafeValue(rec, ['ap_days', 'payable_days', 'u_ap_days']),
+                    ar_days:        getSafeValue(rec, ['ar_days', 'receivable_days', 'u_ar_days']),
+                    debt_equity:    getSafeValue(rec, ['debt_equity', 'debt_to_equity', 'u_debt_to_equity', 'u_debt_equity']),
+                    ebitda:         getSafeValue(rec, ['ebitda', 'u_ebitda_percent', 'u_ebitda']),
+                    gross_profit:   getSafeValue(rec, ['gross_profit', 'u_gross_profit_percent', 'u_gross_profit']),
+                    int_coverage:   getSafeValue(rec, ['int_coverage', 'u_interest_coverage']),
+                    inventory_days: getSafeValue(rec, ['inventory_days', 'u_inventory_days']),
+                    net_revenue:    getSafeValue(rec, ['net_revenue', 'total_revenue', 'u_sales']), 
+                    net_wcc_days:   getSafeValue(rec, ['net_wcc_days', 'u_net_wcc_days']),
+                    sales_growth:   getSafeValue(rec, ['sales_growth', 'u_sales_growth_pct']),
+                    roce:           getSafeValue(rec, ['roce', 'u_roce']),
+                    roe:            getSafeValue(rec, ['roe', 'u_roe']),
+                    current_ratio:  getSafeValue(rec, ['current_ratio', 'u_current_ratio'])
+                };
+            } else {
+                data.ocrStatus = 'processing';
+            }
+        } else {
+            data.pollError = 'Tracking entity not found.';
+        }
+        return;
+    }
+
+    if (action == 'submit_credit_request') {
+
+        var siteCount             = input.selectedCustomers.length;
+        var totalPanLimit         = 0;
+        var totalPotential        = 0;
+        var totalCurrSob          = 0;
+        var totalExpSob           = 0;
+        var totalNod              = 0;
+        var combinedJustification = '';
+        var isListed              = (input.panLevel.companyType === 'Listed'); // Natively handles 'Other' perfectly
+
+        var panP1 = 0;
+        if (isListed) {
+            var nw = parseFloat(input.panLevel.netWorth)      || 0;
+            var la = parseFloat(input.panLevel.loansAdvances) || 0;
+            panP1  = 0.05 * (nw - (0.5 * la));
+            if (panP1 < 0) panP1 = 0;
+        }
+
+        var totalUnlistedP1 = 0;
+        for (var p = 0; p < siteCount; p++) {
+            var st = input.selectedCustomers[p];
+            totalPanLimit         += parseFloat(st.desiredLimit)      || 0;
+            totalPotential        += parseFloat(st.expectedPotential) || 0;
+            totalCurrSob          += parseFloat(st.currentSob)        || 0;
+            totalExpSob           += parseFloat(st.expectedSob)       || 0;
+            totalNod              += parseFloat(st.existingNod)       || 0;
+            combinedJustification += st.code + ' - ' + st.justification + '\n';
+
+            var siteP1 = 0;
+            if (isListed) {
+                siteP1 = panP1;
+            } else {
+                var siteMpq  = parseFloat(st.expectedPotential) || 0;
+                var siteRate = parseFloat(st.orderRate)         || 0;
+                siteP1       = (siteMpq * siteRate * 45 / 30);
+            }
+            if (isNaN(siteP1) || siteP1 < 0) siteP1 = 0;
+            st.calculatedP1  = siteP1;
+            totalUnlistedP1 += siteP1;
+        }
+        if (!isListed) panP1 = totalUnlistedP1;
+
+        var grBatch = new GlideRecord('x_birl3_clm_batch_request');
+        grBatch.initialize();
+        grBatch.setValue('short_description',         'Holistic PAN Limit Request: ' + input.panNumber);
+        grBatch.setValue('pan',                       input.panNumber);
+        if (siteCount > 0) {
+            grBatch.setValue('segment', input.selectedCustomers[0].segment);
+        }
+        grBatch.setValue('total_desired_limit',        totalPanLimit);
+        grBatch.setValue('expected_monthly_potential', totalPotential);
+        grBatch.setValue('current_sob',                siteCount > 0 ? (totalCurrSob / siteCount) : 0);
+        grBatch.setValue('expected_sob',               siteCount > 0 ? (totalExpSob  / siteCount) : 0);
+        grBatch.setValue('existing_nod',               siteCount > 0 ? (totalNod     / siteCount) : 0);
+        grBatch.setValue('justification',              combinedJustification);
+        grBatch.setValue('company_type',               input.panLevel.companyType);
+        grBatch.setValue('macl_p1',                    parseFloat(panP1));
+        
+        if (isListed) {
+            grBatch.setValue('net_worths',     input.panLevel.netWorth);
+            grBatch.setValue('loans_advances', input.panLevel.loansAdvances);
+        }
+        var newBatchSysId = grBatch.insert();
+
+        if (input.fileData && input.fileName && input.fileType) {
+            var batchAttachment = new GlideSysAttachment();
+            batchAttachment.writeBase64(grBatch, input.fileName, input.fileType, input.fileData);
+        }
+
+        if (input.auditLogsPayload && input.auditLogsPayload.length > 0) {
+            var auditGr = new GlideRecord('x_birl3_clm_batch_request');
+            if (auditGr.get(newBatchSysId)) {
+                auditGr.work_notes = 'AI Auto-Mapping Modifications Logged by Initiator:\n' + input.auditLogsPayload;
+                auditGr.update();
+            }
+        }
+
+        var insertedRequestIds = [];
+        for (var i = 0; i < siteCount; i++) {
+            var row          = input.selectedCustomers[i];
+            var desiredLimit = parseFloat(row.desiredLimit) || 0;
+
+            var grReq = new GlideRecord('x_birl3_clm_non_trade_clr');
+            grReq.initialize();
+            grReq.setValue('batch_id',                   newBatchSysId);
+            grReq.setValue('customer_code',              row.sys_id);
+            grReq.setValue('rate_mt',                    parseFloat(row.orderRate) || 0);
+            grReq.setValue('macl_p1',                    parseFloat(row.calculatedP1));
+            grReq.setValue('site_desired_limit',         desiredLimit);
+            grReq.setValue('expected_monthly_potential', row.expectedPotential);
+            grReq.setValue('current_sob',                row.currentSob);
+            grReq.setValue('expected_sob',               row.expectedSob);
+            grReq.setValue('existing_nod',               row.existingNod);
+            grReq.setValue('justification',              row.justification);
+            var newRequestId = grReq.insert();
+
+            if (input.selectedMatrixIds && input.selectedMatrixIds.length > 0) {
+                for (var j = 0; j < input.selectedMatrixIds.length; j++) {
+                    var grParam = new GlideRecord('x_birl3_clm_request_parameters');
+                    grParam.initialize();
+                    grParam.setValue('request',        newRequestId);
+                    grParam.setValue('risk_parameter', input.selectedMatrixIds[j]);
+                    grParam.insert();
+                }
+            }
+
+            insertedRequestIds.push({
+                requestId: newRequestId,
+                custSysId: row.sys_id,
+                p1:        row.calculatedP1
+            });
+        }
+
+        (function runProcessBatch(batchSysId, externalRatingInput, siteDataArray) {
+
+            function calculateP2(reqSysId) {
+                var rawScore = 0, totalMax = 0;
+                var pGr = new GlideRecord('x_birl3_clm_request_parameters');
+                pGr.addQuery('request', reqSysId);
+                pGr.query();
+                while (pGr.next()) {
+                    var mGr = new GlideRecord('x_birl3_clm_risk_parameter_matrix');
+                    if (mGr.get(pGr.getValue('risk_parameter'))) {
+                        rawScore += (parseFloat(mGr.getValue('score_value'))       || 0) *
+                                    (parseFloat(mGr.getValue('weight_percentage')) || 0);
+                        totalMax += 10 * (parseFloat(mGr.getValue('weight_percentage')) || 0);
+                    }
+                }
+                return totalMax > 0 ? parseFloat((rawScore / totalMax).toFixed(4)) : 0;
+            }
+
+            function getInternalRating(sapCode) {
+                if (!sapCode) return 'B';
+                var safeL = 0, critN = 0, toxO = 0, recCount = 0;
+                var oGr = new GlideRecord('x_birl3_clm_customer_outstanding');
+                oGr.addQuery('customer', sapCode);
+                oGr.orderByDesc('sys_created_on');
+                oGr.setLimit(6);
+                oGr.query();
+                while (oGr.next()) {
+                    recCount++;
+                    safeL += (parseFloat(oGr.getValue('ageing0_3'))   || 0)
+                           + (parseFloat(oGr.getValue('ageing4_7'))   || 0)
+                           + (parseFloat(oGr.getValue('ageing8_21'))  || 0)
+                           + (parseFloat(oGr.getValue('ageing22_30')) || 0)
+                           + (parseFloat(oGr.getValue('ageing31_45')) || 0)
+                           + (parseFloat(oGr.getValue('ageing46_60')) || 0);
+                    critN += parseFloat(oGr.getValue('ageing76_90')) || 0;
+                    toxO  += parseFloat(oGr.getValue('ageing_gt90')) || 0;
+                }
+                var grand = safeL + critN + toxO;
+                if (grand === 0 || recCount === 0) return 'B';
+                var pctL  = (safeL / grand) * 100;
+                var pctCT = ((critN + toxO) / grand) * 100;
+                if (pctL >= 80 && pctCT <= 10) return 'A';
+                if (pctL >= 60 && pctCT <= 20) return 'B';
+                return 'C';
+            }
+
+            function getExternalRating(ratingStr, p2Score) {
+                ratingStr = (ratingStr || '').toUpperCase().trim();
+                if (ratingStr) {
+                    var gA = ['AAA','AA+','AA','AA-','A+','A','A-'];
+                    var gB = ['BBB+','BBB','BBB-','BB+','BB','BB-'];
+                    var gC = ['BB-','B+','B','B-','CCC','CC','C','D'];
+                    var k;
+                    for (k = 0; k < gA.length; k++) { if (ratingStr.indexOf(gA[k]) > -1) return 'A'; }
+                    for (k = 0; k < gB.length; k++) { if (ratingStr.indexOf(gB[k]) > -1) return 'B'; }
+                    for (k = 0; k < gC.length; k++) { if (ratingStr.indexOf(gC[k]) > -1) return 'C'; }
+                }
+                var p2Pct = p2Score * 100;
+                if (p2Pct >= 61) return 'A';
+                if (p2Pct >= 31) return 'B';
+                return 'C';
+            }
+
+            function getP3Grid(extR, intR) {
+                var grid = {
+                    'A': {'A':1.00, 'B':0.75, 'C':0.00},
+                    'B': {'A':0.75, 'B':0.60, 'C':0.00},
+                    'C': {'A':0.00, 'B':0.00, 'C':0.00}
+                };
+                return (grid[extR] && grid[extR][intR] !== undefined) ? grid[extR][intR] : 0.00;
+            }
+
+            var batchP2 = 0;
+            if (siteDataArray.length > 0) {
+                batchP2 = calculateP2(siteDataArray[0].requestId);
+            }
+
+            var batchSafeLimit = 0;
+            var aggregatedP1   = 0;
+            var totalP3        = 0;
+            var siteProcessed  = 0;
+
+            for (var s = 0; s < siteDataArray.length; s++) {
+                var siteData  = siteDataArray[s];
+                var requestId = siteData.requestId;
+                var custSysId = siteData.custSysId;
+                var p1        = parseFloat(siteData.p1) || 0;
+
+                var sapCode = '';
+                var cGr = new GlideRecord('x_birl3_clm_customer');
+                if (cGr.get(custSysId)) {
+                    sapCode = cGr.getValue('customer_code');
+                }
+
+                var intR = getInternalRating(sapCode);
+                var extR = getExternalRating(externalRatingInput, batchP2);
+
+                var p3   = getP3Grid(extR, intR);
+                var safe = parseFloat((p1 * batchP2 * p3).toFixed(4));
+
+                var updateGr = new GlideRecord('x_birl3_clm_non_trade_clr');
+                if (updateGr.get(requestId)) {
+                    updateGr.setValue('composite_index_p2',  parseFloat(batchP2).toFixed(4));
+                    updateGr.setValue('credit_index_p3',     parseFloat(p3));
+                    updateGr.setValue('safe_allowable_limit',parseFloat(safe));
+                    updateGr.update();
+                }
+
+                batchSafeLimit += safe;
+                aggregatedP1   += p1;
+                totalP3        += p3;
+                siteProcessed++;
+            }
+
+            var avgP3 = siteProcessed > 0 ? parseFloat((totalP3 / siteProcessed).toFixed(4)) : 0;
+
+            var bGr = new GlideRecord('x_birl3_clm_batch_request');
+            if (bGr.get(batchSysId)) {
+                var isListedBatch = (bGr.getValue('company_type') === 'Listed');
+                var finalSafe     = 0;
+
+                if (isListedBatch) {
+                    var listedPanP1 = parseFloat(bGr.getValue('macl_p1')) || 0;
+                    finalSafe = parseFloat((listedPanP1 * batchP2 * avgP3).toFixed(4));
+                } else {
+                    bGr.setValue('macl_p1', parseFloat(aggregatedP1));
+                    finalSafe = parseFloat(batchSafeLimit.toFixed(4));
+                }
+
+                bGr.setValue('composite_index_p2',   parseFloat(batchP2).toFixed(4));
+                bGr.setValue('credit_index_p3',      parseFloat(avgP3));
+                bGr.setValue('safe_allowable_limit', parseFloat(finalSafe));
+                
+                var tDesired = parseFloat(bGr.getValue('total_desired_limit')) || 0;
+                bGr.setValue('is_deviation', tDesired > finalSafe ? 1 : 0);
+                bGr.update();
+            }
+
+        })(newBatchSysId, input.externalRating || '', insertedRequestIds);
+
+        data.success = true;
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-22 18:29:19</sys_created_on>
+        <sys_id>831ee18797654310be31fa17f053aff3</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_name>risk assesment agent</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_831ee18797654310be31fa17f053aff3</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-22 18:57:33</sys_updated_on>
+        <template><![CDATA[<div class="abg-widget-container">
+
+  <div ng-if="c.data.currentStep == 1">
+    <div class="abg-header">
+      <h2>Initiate Non-Trade Limit Request</h2>
+      <p>Enter or search for a Corporate PAN or Company Name to retrieve associated Customer Codes.</p>
+    </div>
+
+    <div class="form-group abg-input-group position-relative">
+      <label for="panInput">Customer PAN or Name <span class="text-danger">*</span></label>
+      <input type="text" id="panInput" class="form-control text-uppercase" 
+             ng-model="c.data.panNumber" 
+             ng-change="c.handlePanInput()" 
+             placeholder="Type at least 3 characters of PAN or Name to search..." 
+             autocomplete="off">
+
+      <ul class="abg-typeahead-dropdown" ng-if="c.data.panSuggestions.length > 0">
+        <li ng-repeat="suggested in c.data.panSuggestions">
+          <a href="javascript:void(0)" ng-click="c.selectPan(suggested.pan)">
+            <strong>{{::suggested.pan}}</strong> <span class="text-muted">- {{::suggested.name}}</span>
+          </a>
+        </li>
+      </ul>
+    </div>
+
+    <div class="slide-down" ng-if="c.data.customers.length > 0">
+      <div class="row m-b-sm flex-align-center">
+        <div class="col-xs-12 col-sm-6 col-md-6 m-b-sm-mobile">
+          <input type="text" class="form-control" ng-model="c.data.localSearch" ng-change="c.data.currentPage = 1" placeholder="Filter by Name, Code, or City...">
+        </div>
+        <div class="col-xs-12 col-sm-6 col-md-6 text-right mobile-left text-muted">
+          Showing Page {{c.data.currentPage}} of {{c.totalPages()}} 
+          ({{c.getFilteredCustomers().length}} Total Sites)
+        </div>
+      </div>
+
+      <div class="table-responsive widget-table-wrapper shadow-sm">
+        <table class="table abg-table">
+          <thead>
+            <tr>
+              <th width="5%">
+                <input type="checkbox" class="abg-checkbox" ng-model="c.selectAll" ng-change="c.selectAllInView(c.selectAll)" title="Select all on this page">
+              </th>
+              <th width="12%">Customer Code</th>
+              <th width="20%">Customer Name</th>
+              <th width="10%">Segment</th>
+              <th width="10%">City</th>
+              <th width="14%">Credit Limit</th>
+              <th width="14%">Bank Guarantee</th>
+              <th width="15%">Outstanding</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr ng-repeat="cust in c.getPaginatedCustomers()" 
+                ng-click="cust.selected = !cust.selected; c.checkSegmentMatch(cust);" 
+                ng-class="{'selected-row': cust.selected}"
+                style="cursor: pointer;">
+              <td class="vertical-middle">
+                <input type="checkbox" class="abg-checkbox" ng-model="cust.selected" ng-change="c.checkSegmentMatch(cust)" ng-click="$event.stopPropagation()">
+              </td>
+              <td class="vertical-middle"><strong>{{::cust.code}}</strong></td>
+              <td class="vertical-middle">{{::cust.name}}</td>
+              <td class="vertical-middle"><span class="badge" style="background:#666;">{{::cust.segment}}</span></td>
+              <td class="vertical-middle">{{::cust.city}}</td>
+              <td class="vertical-middle font-weight-bold">₹ {{::c.formatINR(cust.limit)}}</td>
+              <td class="vertical-middle text-success">₹ {{::c.formatINR(cust.bg)}}</td>
+              <td class="vertical-middle text-danger">₹ {{::c.formatINR(cust.outstanding)}}</td>
+            </tr>
+          </tbody>
+        </table>
+        
+        
+        
+        
+        
+        
+        
+        <!-- VENDOR RISK ASSESSMENT CARD -->
+<div class="slide-down" ng-if="c.data.showVendorAssessment">  <div class="vendor-assessment-card m-t-lg m-b-lg shadow-sm" ng-class="'risk-' + (c.data.vendorRisk.category || 'unknown')">
+    
+    <!-- Header -->
+    <div class="assessment-header p-sm" style="background: #f8f9fa; border-bottom: 1px solid #e0e0e0; border-radius: 4px 4px 0 0;">
+      <h5 class="m-n" style="color: #333; font-weight: 600;">
+        <i class="fa fa-shield m-r-xs"></i> Vendor Risk Assessment
+        <small class="text-muted" style="font-weight: 400;">({{c.data.vendorRisk.companyName || 'Processing...'}})
+        </small>
+      </h5>
+    </div>
+
+    <!-- Loading -->
+    <div ng-if="c.data.vendorLoading" class="text-center p-md">
+      <i class="fa fa-spinner fa-spin text-primary m-r-sm"></i>
+      <small class="text-muted">Analyzing vendor profile...</small>
+    </div>
+
+    <!-- Results -->
+    <div ng-if="!c.data.vendorLoading && c.data.vendorRisk.category" class="p-md">
+      <div class="row flex-align-center">
+        <!-- Risk Category -->
+        <div class="col-xs-12 col-sm-4 col-md-4 text-center m-b-sm-mobile">
+          <div style="font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">Risk Category</div>
+          <span class="badge" ng-class="{
+            'badge-success': c.data.vendorRisk.category == 'Low',
+            'badge-warning': c.data.vendorRisk.category == 'Medium',
+            'badge-danger': c.data.vendorRisk.category == 'High'
+          }" style="font-size: 12px; padding: 6px 12px;">
+            {{c.data.vendorRisk.category || 'N/A'}}
+          </span>
+        </div>
+
+        <!-- Stock Price -->
+        <div class="col-xs-12 col-sm-4 col-md-4 text-center m-b-sm-mobile">
+          <div style="font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">Stock Price</div>
+          <div style="font-weight: 700; color: #2563eb; font-size: 15px;">
+            {{c.data.vendorRisk.stockPrice || 'N/A'}}
+          </div>
+        </div>
+
+        <!-- Latest News -->
+        <div class="col-xs-12 col-sm-4 col-md-4 text-center m-b-sm-mobile">
+          <div style="font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">Latest News</div>
+          <small class="text-muted" style="display: block; word-break: break-word;" title="{{c.data.vendorRisk.latestNews}}">
+            {{c.data.vendorRisk.latestNews | limitTo:45}}{{c.data.vendorRisk.latestNews.length > 45 ? '...' : ''}}
+          </small>
+        </div>
+      </div>
+    </div>
+
+    <!-- No Data -->
+    <div ng-if="!c.data.vendorLoading && !c.data.vendorRisk.category" class="alert alert-info m-b-none m-t-none p-sm">
+      <i class="fa fa-info-circle m-r-xs"></i> <small>Assessment unavailable. You can proceed without vendor analysis.</small>
+    </div>
+  </div>
+</div>
+        
+        
+        
+        
+        
+        
+        
+      </div>
+
+      <div class="row flex-align-center m-t-md">
+        <div class="col-xs-12 col-sm-4 col-md-4 m-b-sm-mobile">
+          <div class="input-group page-size-box">
+            <span class="input-group-addon bg-light">Show</span>
+            <select class="form-control" ng-model="c.data.itemsPerPage" ng-change="c.data.currentPage = 1" ng-options="size for size in [5, 10, 25, 50, 100]"></select>
+          </div>
+        </div>
+        <div class="col-xs-12 col-sm-4 col-md-4 text-center text-muted hidden-xs">
+          </div>
+        <div class="col-xs-12 col-sm-4 col-md-4 text-right text-center-mobile m-t-sm-mobile">
+          <button class="btn btn-default btn-sm" ng-click="c.data.currentPage = c.data.currentPage - 1" ng-disabled="c.data.currentPage == 1"><i class="fa fa-chevron-left"></i> Prev</button>
+          <span class="m-l-sm m-r-sm font-weight-bold">Page {{c.data.currentPage}}</span>
+          <button class="btn btn-default btn-sm" ng-click="c.data.currentPage = c.data.currentPage + 1" ng-disabled="c.data.currentPage == c.totalPages()">Next <i class="fa fa-chevron-right"></i></button>
+        </div>
+      </div>
+      
+      <div class="text-right m-t-lg border-top p-t-md">
+        <button class="btn abg-btn-primary" ng-click="c.proceedToNextStep()" ng-disabled="!c.hasSelection()">
+          Proceed to Data Entry
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="slide-down" ng-if="c.data.currentStep == 2">
+    <div class="abg-header">
+      <button class="btn btn-link text-muted p-l-0 m-b-sm" ng-click="c.goBackToStep1()">&#8592; Back to Site Selection</button>
+      <h2 class="m-t-xs">Commercial Projections & Justification</h2>
+      <p>Enter the holistic PAN-level corporate status, then assign operational projections for each selected site.</p>
+    </div>
+
+    <div class="panel panel-default mb-4" style="border: 1px solid #C8102E;">
+      <div class="panel-heading" style="background-color: #fce8ea; color: #C8102E;"><strong>Corporate Entity Status (PAN-Level)</strong></div>
+      <div class="panel-body row pb-0 flex-align-center">
+        <div class="col-xs-12 col-sm-4 col-md-4 form-group abg-input-group m-b-sm-mobile">
+          <label>Company Type (SAP) <span class="text-danger">*</span></label>
+          <select class="form-control" ng-model="c.data.panLevel.companyType">
+            <option value="Unlisted">Unlisted</option>
+            <option value="Listed">Listed</option>
+            <option value="Other">Other Entity</option>
+          </select>
+        </div>
+        <div class="col-xs-12 col-sm-4 col-md-4 form-group abg-input-group slide-down m-b-sm-mobile" ng-if="c.data.panLevel.companyType == 'Listed'">
+          <label>Net Worth (₹ Absolute) <span class="text-danger">*</span></label>
+          <input type="number" class="form-control" ng-model="c.data.panLevel.netWorth" placeholder="e.g. 500000000">
+        </div>
+        <div class="col-xs-12 col-sm-4 col-md-4 form-group abg-input-group slide-down m-b-sm-mobile" ng-if="c.data.panLevel.companyType == 'Listed'">
+          <label>Loans & Advances (₹ Absolute) <span class="text-danger">*</span></label>
+          <input type="number" class="form-control" ng-model="c.data.panLevel.loansAdvances" placeholder="e.g. 100000000">
+        </div>
+      </div>
+    </div>
+
+    <h4 class="m-t-md m-b-sm section-title">Site-Specific Projections & Limits</h4>
+    <div class="table-responsive widget-table-wrapper shadow-sm">
+      <table class="table abg-table abg-input-grid">
+        <thead>
+          <tr>
+            <th width="15%">Customer Site Code</th>
+            <th width="10%">Current Limit</th>
+            <th width="11%">Exp. Potential <span class="text-danger">*</span></th>
+            <th width="10%">SOB% (Cur/Exp) <span class="text-danger">*</span></th>
+            <th width="9%">Exist. NOD</th>
+            <th width="10%" ng-if="c.data.panLevel.companyType != 'Listed'">Rate/MT (₹) <span class="text-danger">*</span></th>
+            <th width="13%">Desired Limit (₹) <span class="text-danger">*</span></th>
+            <th width="22%">Business Justification <span class="text-danger">*</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr ng-repeat="cust in c.data.selectedCustomers">
+            <td><strong>{{::cust.code}}</strong><br><small class="text-muted">{{::cust.name}}</small></td>
+            <td class="font-weight-bold">₹ {{::c.formatINR(cust.limit)}}</td>
+            <td><input type="number" class="form-control" ng-model="cust.expectedPotential" placeholder="MT/Cum"></td>
+            <td>
+              <input type="number" class="form-control" style="margin-bottom:4px;" ng-model="cust.currentSob" placeholder="Cur %">
+              <input type="number" class="form-control" ng-model="cust.expectedSob" placeholder="Exp %">
+            </td>
+            <td><input type="number" class="form-control" ng-model="cust.existingNod" placeholder="Days"></td>
+            <td ng-if="c.data.panLevel.companyType != 'Listed'">
+              <input type="number" class="form-control" ng-model="cust.orderRate" placeholder="₹">
+            </td>
+            <td><input type="number" class="form-control font-weight-bold" ng-model="cust.desiredLimit" placeholder="₹ Absolute"></td>
+            <td><textarea class="form-control" rows="3" ng-model="cust.justification" placeholder="Provide strategic rationale..."></textarea></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="form-group m-t-lg p-md" style="background-color: #F8F9FA; border: 1px dashed #C8102E; border-radius: 4px;">
+      <label>Financial Document Source <span class="text-danger">*</span></label>
+      <select class="form-control m-b-sm" ng-model="c.data.documentType" ng-change="c.handleDocTypeChange()" style="max-width: 300px;">
+        <option value="">-- Select Document Type --</option>
+        <option value="CRIF">CRIF Report</option>
+        <option value="Corpository">Corpository Report</option>
+        <option value="Balance Sheet">Balance Sheet</option>
+        <option value="No Document">No Document / Manual Entry</option>
+      </select>
+
+      <div class="slide-down" ng-if="c.data.documentType && c.data.documentType != 'No Document'">
+        <label>Upload Document (PDF) <span class="text-danger">*</span></label>
+        <p class="text-muted small">Upload the selected report. AI will extract parameters for the P2 Risk Matrix. <strong class="text-danger">(Max Size: 5MB)</strong></p>
+        <input type="file" id="financialReport" accept=".pdf" class="form-control-file" onchange="angular.element(this).scope().c.handleFileUpload(this)">
+        <div class="m-t-sm text-success" ng-if="c.data.fileName"><i class="fa fa-check-circle"></i> <strong>Selected File:</strong> {{c.data.fileName}}</div>
+      </div>
+    </div>
+
+    <div class="text-right m-t-lg border-top p-t-md">
+      <button class="btn btn-default m-r-sm m-b-sm-mobile w-100-mobile" ng-click="c.goBackToStep1()">Back</button>
+      <button class="btn abg-btn-primary m-b-sm-mobile w-100-mobile" ng-click="c.generateAiDraft()" ng-disabled="!c.isFormValid() || c.data.isSubmitting">
+        {{ c.data.documentType == 'No Document' ? 'Proceed to Manual Entry' : 'Run AI Analysis & Review Draft' }}
+      </button>
+    </div>
+  </div>
+
+  <div class="slide-down p-md" ng-if="c.data.currentStep == 3">
+    <div class="abg-header">
+      <h2>Draft Review: Risk & AI Parameters</h2>
+      <p>Verify auto-populated evaluations from internal systems/OCR. Provide manual assessments where required.</p>
+    </div>
+
+    <div ng-if="c.data.processing" class="text-center p-xl">
+      <i class="fa fa-spinner fa-spin fa-3x text-primary m-b-md" style="color: #C8102E;"></i>
+      <h4>{{c.data.statusMsg || 'Parsing Document via Now Assist AI...'}}</h4>
+      <p class="text-muted">Analyzing document structures and internal attributes. Please keep this browser window active.</p>
+    </div>
+
+    <div class="slide-down" ng-if="!c.data.processing">
+
+      <div class="alert alert-success" ng-if="!c.data.isManualMode && !c.data.error">
+        <span class="glyphicon glyphicon-ok-circle"></span>
+        <strong> OCR Analysis Complete!</strong> Financial ratios have been parsed and mapped successfully.
+      </div>
+      <div class="alert alert-warning" ng-if="c.data.error">
+        <span class="glyphicon glyphicon-exclamation-sign"></span> {{c.data.error}}
+      </div>
+
+      <div class="panel panel-default shadow-sm" ng-show="c.data.result.ai_summary && !c.data.isManualMode" style="border-left: 4px solid #1782c5; margin-bottom: 25px;">
+        <div class="panel-body p-sm" style="background:#fcfdfd;">
+          <h5 class="text-primary font-weight-bold m-t-none m-b-md"><i class="fa fa-magic"></i> AI Document Extraction Summary</h5>
+          <div class="row">
+            <div class="col-xs-12 col-sm-6 col-md-6" ng-repeat="point in c.data.aiSummaryPoints track by $index">
+              <p class="m-b-xs text-muted" style="font-size: 13px;">
+                <i class="fa fa-check-square-o text-success m-r-xs"></i> 
+                <strong style="color:#333;">{{point.key}}:</strong> {{point.val}}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row flex-align-center m-t-lg m-b-md">
+        <div class="col-xs-12 col-sm-6 col-md-6">
+          <h4 class="m-n font-weight-bold">Risk Matrix Parameters (P2 Index)</h4>
+        </div>
+        <div class="col-xs-12 col-sm-6 col-md-6 text-right mobile-left m-t-sm-mobile">
+          <span class="badge" ng-class="{'badge-success': c.getCompletedCount() == c.getTotalParams(), 'badge-warning': c.getCompletedCount() < c.getTotalParams()}" style="font-size: 14px; padding: 8px 12px;">
+            {{c.getCompletedCount()}} / {{c.getTotalParams()}} Parameters Completed
+          </span>
+        </div>
+      </div>
+
+      <div ng-repeat="(categoryName, params) in c.data.groupedParameters" class="panel panel-default m-b-md shadow-sm" style="border-radius: 4px; overflow: hidden;">
+        <div class="panel-heading p-sm" style="background-color: #f8f9fa; border-bottom: 2px solid #C8102E;">
+          <h5 class="m-n font-weight-bold text-uppercase" style="color: #333; letter-spacing: 0.5px; font-size: 13px;">{{categoryName}}</h5>
+        </div>
+        <div class="panel-body p-0 table-responsive widget-table-wrapper" style="margin:0; border:none; border-radius:0;">
+          <table class="table abg-matrix-table m-b-none" style="background: #fff;">
+            <thead>
+              <tr style="background: #fafafa; font-size: 11px; text-transform: uppercase; color: #666; border-bottom: 1px solid #eee;">
+                <th width="45%" style="padding: 10px 15px;">Risk Parameter Metric</th>
+                <th width="35%" style="padding: 10px 15px;">Assigned Score Selection</th>
+                <th width="20%" class="text-right" style="padding: 10px 15px;">Population Type</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr ng-repeat="param in params" 
+                  ng-class="{
+                            'ai-highlight-row': param.autoMapped && !param.isChanged && param.mappingType == 'AI', 
+                            'input-highlight-row': param.autoMapped && !param.isChanged && param.mappingType == 'Input', 
+                            'edit-highlight-row': param.isChanged,
+                            'missing-param-row': !param.selectedValue
+                            }">
+                <td style="padding: 12px 15px; vertical-align: middle;">
+                  <span style="font-weight: 600; color: #333; font-size: 13px;">{{::param.name}}</span>
+                </td>
+                <td style="vertical-align: middle; padding: 12px 15px;">
+                  <select class="form-control input-sm spec-matrix-select" 
+                          ng-class="{'border-danger': !param.selectedValue}"
+                          ng-model="param.selectedValue" 
+                          ng-options="opt.sys_id as opt.label for opt in param.options" 
+                          ng-change="c.trackChange(param)">
+                    <option value="">-- Click to select / review --</option>
+                  </select>
+
+                  <div ng-if="param.extractedValue" style="margin-top: 6px; font-size: 11.5px; font-weight: 500;"
+                       ng-class="{'text-primary': param.mappingType == 'AI', 'text-purple': param.mappingType == 'Input'}">
+                    <i class="fa fa-info-circle"></i> Source Value: <span style="color:#333;">{{param.extractedValue}}</span>
+                  </div>
+                  <small class="text-muted" ng-if="param.isChanged" style="display:block; margin-top:4px; font-size:11px;">
+                    Original Selection: <i>{{param.originalLabel}}</i>
+                  </small>
+
+                  <div ng-if="!param.selectedValue" class="text-danger m-t-xs" style="font-size: 11px; font-weight: bold;">
+                    <i class="fa fa-exclamation-triangle"></i> Mandatory Input Required
+                  </div>
+                </td>
+                <td class="text-right" style="vertical-align: middle; padding: 12px 15px;">
+                  <span ng-if="!param.selectedValue" class="badge badge-danger">Missing Input</span>
+                  <span ng-if="param.selectedValue && param.autoMapped && !param.isChanged && param.mappingType == 'AI'" class="badge ai-badge"><i class="fa fa-magic"></i> AI Mapped</span>
+                  <span ng-if="param.selectedValue && param.autoMapped && !param.isChanged && param.mappingType == 'Input'" class="badge input-badge"><i class="fa fa-desktop"></i> Input Mapped</span>
+                  <span ng-if="param.selectedValue && param.isChanged" class="badge edit-badge"><i class="fa fa-pencil"></i> Overridden</span>
+                  <span ng-if="param.selectedValue && !param.autoMapped && !param.isChanged" class="badge manual-badge"><i class="fa fa-hand-o-up"></i> Manual Entry</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="text-right m-t-lg border-top p-t-md">
+        <span class="text-muted m-r-md display-block-mobile m-b-sm-mobile" ng-if="c.data.isSubmitting"><i class="fa fa-spinner fa-spin"></i> Creating Batch Request & Stamping Activity Audit Trail...</span>
+        <button class="btn btn-default m-r-sm m-b-sm-mobile w-100-mobile" ng-click="c.data.currentStep = 2" ng-disabled="c.data.isSubmitting">Back</button>
+        <button class="btn abg-btn-primary m-b-sm-mobile w-100-mobile" ng-click="c.submitFinalRequest()" ng-disabled="c.data.isSubmitting || c.getCompletedCount() < c.getTotalParams()">
+          Confirm & Submit Final Request
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="slide-down text-center p-xl" ng-if="c.data.currentStep == 4">
+    <div class="success-icon m-b-md">&#10003;</div>
+    <h2>Batch Request Submitted Successfully!</h2>
+    <p class="text-muted">Your Non-Trade Credit Limit Request has been grouped and routed for Commercial Validation.</p>
+
+    <div class="m-t-lg">
+      <button class="btn abg-btn-outline m-r-sm m-b-sm-mobile w-100-mobile" ng-click="c.resetForm()"><i class="fa fa-plus-circle"></i> Initiate Another Request</button>
+      <button class="btn abg-btn-outline m-r-sm m-b-sm-mobile w-100-mobile" ng-click="c.goToDashboard()"><i class="fa fa-list-alt"></i> View My Requests Dashboard</button>
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+</record_update>

@@ -1,0 +1,2701 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[/*
+  CLM ZHM Non-Trade Portfolio Overview - Client Script
+  v1.0
+  - This widget is always Non-Trade (CG1 = N01 on the server). The Business dropdown lists only the businesses the
+    user has access to (server). Picking another business broadcasts 'clm.business.changed' to the dashboard widget
+    and the dropdown resets to Non-Trade.
+  - Segment / Zone / Region / Depot options come from the server (user's role mapping + customer master).
+    Region -> Depot cascade is client side. Zone empty = all of the user's mapped zones.
+  - If the server says the user has no Non-Trade access but has another business, the dashboard is asked to switch.
+*/
+function widgetcontroller($scope, $timeout, $rootScope, $document, $window, $ocLazyLoad, $element) {
+  var c = this;
+  var OWN_BUSINESS = 'nonTrade';
+  var OWN_CG1 = 'N01';
+
+  c.loading = false;
+  c.initialLoadComplete = false;
+  c.chartLoading = false;
+  c.tableLoading = false;
+  c.needsFilters = true;
+
+  c.tableSearch = '';
+  c.filteredList = [];
+  c.tableTotal = 0;
+  c.limit = 10;
+  c.page = 0;
+
+  c.counts = { total: 0, overdue: 0, review15: 0, review30: 0, highRisk: 0, highGrowth: 0, pending: 0, sendBack: 0, rejected: 0, expiring: 0, osGreaterThanZero: 0 };
+  c.filters = { business: OWN_BUSINESS, segments: [], zones: [], regions: [], depots: [], period: '' };
+  c.data = c.data || {};
+
+  c.displaySegments = [];
+  c.displayZones = [];
+  c.displayRegions = [];
+  c.displayDepots = [];
+
+  // ===================== BUSINESS FILTER =====================
+  var FALLBACK_BUSINESS_OPTIONS = [ { value: 'nonTrade', label: 'Non-Trade', cg1: 'N01', enabled: true } ];
+  c.businessOptions = (c.data.businessOptions && c.data.businessOptions.length) ? c.data.businessOptions : FALLBACK_BUSINESS_OPTIONS;
+
+  function getBusinessOption(value) {
+      for (var i = 0; i < c.businessOptions.length; i++) { if (c.businessOptions[i].value === value) return c.businessOptions[i]; }
+      return null;
+  }
+  c.getBusinessLabel = function() { var b = getBusinessOption(OWN_BUSINESS); return b ? b.label : 'Non-Trade'; };
+  c.getBusinessOptionText = function(b) { return b.label + (b.enabled ? '' : ' (Coming soon)'); };
+
+  c.onBusinessChange = function() {
+      var target = getBusinessOption(c.filters.business);
+      if (!target || !target.enabled) { c.filters.business = OWN_BUSINESS; return; }
+      if (target.value === OWN_BUSINESS) return;
+      $rootScope.$broadcast('clm.business.changed', { business: target.value, cg1: target.cg1, from: OWN_BUSINESS });
+      $timeout(function() { c.filters.business = OWN_BUSINESS; });
+  };
+
+  // ===================== UTILITY FORMATTERS =====================
+  c.fmtCurrency = function(value) {
+      if (value === undefined || value === null || isNaN(value)) return '—';
+      var abs = Math.abs(value);
+      var sign = value < 0 ? '-' : '';
+      if (abs === 0) return '₹0.0L';
+      if (abs >= 1e7) return sign + '₹' + (abs / 1e7).toFixed(1) + ' Cr';
+      return sign + '₹' + (abs / 1e5).toFixed(1) + 'L';
+  };
+  c.fmtDash = function(val) { if (!val || isNaN(val) || val === 0) return '—'; return c.fmtCurrency(val); };
+  c.fmtRatio = function(value) { if (value === undefined || value === null || isNaN(value) || value === 0) return '0.00'; return Number(value).toFixed(2); };
+  c.capPct = function(pct) { if (pct === undefined || pct === null || isNaN(pct)) return 0; return Math.max(0, Math.min(100, pct)); };
+
+  function trimNum(n, dp) { var s = Number(n).toFixed(dp); return s.indexOf('.') > -1 ? s.replace(/\.?0+$/, '') : s; }
+  c.fmtQty = function(value) {
+      if (value === undefined || value === null || isNaN(value)) return '—';
+      var abs = Math.abs(value), sign = value < 0 ? '-' : '';
+      if (abs >= 1e7) return sign + trimNum(abs / 1e7, 1) + ' Cr';
+      if (abs >= 1e5) return sign + trimNum(abs / 1e5, 1) + ' L';
+      if (abs >= 1e3) return sign + trimNum(abs / 1e3, 1) + ' K';
+      return sign + trimNum(abs, 0);
+  };
+  c.fmtAxisCurrency = function(value) {
+      if (value === undefined || value === null || isNaN(value)) return '—';
+      if (Number(value) === 0) return '₹0';
+      return (value < 0 ? '-' : '') + '₹' + c.fmtQty(Math.abs(value));
+  };
+
+  function niceScale(maxVal, targetTicks) {
+      targetTicks = targetTicks || 5;
+      if (!maxVal || maxVal <= 0) return { max: 1, step: 0.25 };
+      var rough = maxVal / (targetTicks - 1);
+      var mag = Math.pow(10, Math.floor(Math.log(rough) / Math.LN10));
+      var norm = rough / mag;
+      var mult = norm <= 1 ? 1 : (norm <= 2 ? 2 : (norm <= 2.5 ? 2.5 : (norm <= 5 ? 5 : 10)));
+      var step = mult * mag;
+      var max = Math.ceil(maxVal / step) * step;
+      if (max - maxVal < step * 0.15) max += step;
+      return { max: max, step: step };
+  }
+
+  var refreshTimer = null;
+
+  // Segment / zone / region / depot changes: KPIs + table + charts
+  c.debouncedRefresh = function() {
+      if (refreshTimer) $timeout.cancel(refreshTimer);
+      refreshTimer = $timeout(function() { c.page = 0; c.refresh(false); }, 500);
+  };
+  // Period change: KPIs + table only (charts always show the last 6 months)
+  c.onPeriodChange = function() {
+      if (refreshTimer) $timeout.cancel(refreshTimer);
+      refreshTimer = $timeout(function() { c.page = 0; c.refresh(true); }, 500);
+  };
+
+  // ===================== PERIOD (last 6 months) =====================
+  var MONTH_SHORT_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  var todayForPeriod = new Date();
+  var anchorDateForPeriod = new Date(todayForPeriod.getFullYear(), todayForPeriod.getMonth() - 1, 1);
+
+  function buildLast6Months() {
+      var arr = [];
+      for (var i = 5; i >= 0; i--) {
+          var d = new Date(anchorDateForPeriod.getFullYear(), anchorDateForPeriod.getMonth() - i, 1);
+          var y = d.getFullYear();
+          var mIdx = d.getMonth();
+          var monthStr = (mIdx + 1) < 10 ? ('0' + (mIdx + 1)) : String(mIdx + 1);
+          arr.push({ value: y + '-' + monthStr, label: MONTH_SHORT_NAMES[mIdx] + ' ' + String(y).slice(-2) });
+      }
+      return arr;
+  }
+  c.last6Months = buildLast6Months();
+  c.defaultPeriod = c.last6Months[c.last6Months.length - 1].value;
+  c.filters.period = c.defaultPeriod;
+
+  c.getPeriodDisplayText = function() {
+      var match = c.last6Months.filter(function(m) { return m.value === c.filters.period; })[0];
+      if (match) return match.label;
+      var parts = (c.filters.period || '').split('-');
+      if (parts.length !== 2) return c.filters.period || '';
+      return MONTH_SHORT_NAMES[parseInt(parts[1], 10) - 1] + ' ' + String(parts[0]).slice(-2);
+  };
+
+  c.msItemDisplay = function(item) {
+      if (!item) return '';
+      if (item.value === undefined || item.value === null || item.value === '' || item.label === item.value) { return item.label; }
+      return item.label + ' (' + item.value + ')';
+  };
+
+  // ===================== FILTER OPTION HELPERS =====================
+  function optsOf(key) { return (c.data && c.data.filterOpts && c.data.filterOpts[key]) || []; }
+
+  function labelsFor(key, values) {
+      var list = optsOf(key);
+      return (values || []).map(function(v) {
+          for (var i = 0; i < list.length; i++) { if (list[i].value === v) return list[i].label; }
+          return v;
+      });
+  }
+  function syncLabels() {
+      c.selectedSegmentLabels = labelsFor('segments', c.filters.segments);
+      c.selectedZoneLabels    = labelsFor('zones',    c.filters.zones);
+      c.selectedRegionLabels  = labelsFor('regions',  c.filters.regions);
+      c.selectedDepotLabels   = labelsFor('depots',   c.filters.depots);
+  }
+
+  c.updateSegmentList = function() {
+      var all = optsOf('segments');
+      var term = (c.segmentSearch || '').toLowerCase();
+      c.displaySegments = term ? all.filter(function(s) { return String(s.label || '').toLowerCase().indexOf(term) !== -1; }) : all;
+  };
+  c.updateZoneList = function() {
+      var all = optsOf('zones');
+      var term = (c.zoneSearch || '').toLowerCase();
+      c.displayZones = term ? all.filter(function(z) { return String(z.label || '').toLowerCase().indexOf(term) !== -1 || String(z.value || '').toLowerCase().indexOf(term) !== -1; }) : all;
+  };
+  c.updateRegionList = function() {
+      var all = optsOf('regions');
+      var term = (c.regionSearch || '').toLowerCase();
+      c.displayRegions = term ? all.filter(function(r) { return String(r.label || '').toLowerCase().indexOf(term) !== -1 || String(r.value || '').toLowerCase().indexOf(term) !== -1; }) : all;
+  };
+  c.updateDepotList = function() {
+      var all = optsOf('depots');
+      var regs = c.filters.regions || [];
+      var term = (c.depotSearch || '').toLowerCase();
+      c.displayDepots = all.filter(function(d) {
+          if (regs.length && regs.indexOf(d.regionValue) === -1) return false;
+          if (!term) return true;
+          return String(d.label || '').toLowerCase().indexOf(term) !== -1 || String(d.value || '').toLowerCase().indexOf(term) !== -1;
+      });
+  };
+
+  function handleClickOutside(event) {
+      var target = event.target;
+      if (target.closest('.clm-multiselect-container')) return;
+      $timeout(function() {
+          c.segmentDropdownOpen = false; c.zoneDropdownOpen = false; c.regionDropdownOpen = false; c.depotDropdownOpen = false;
+      });
+  }
+  $document.on('click', handleClickOutside);
+  $scope.$on('$destroy', function() { $document.off('click', handleClickOutside); });
+
+  // ===================== SEGMENT =====================
+  c.segmentDropdownOpen = false; c.segmentSearch = ''; c.selectedSegmentLabels = [];
+  c.openSegmentDropdown = function() { c.segmentDropdownOpen = true; c.zoneDropdownOpen = false; c.regionDropdownOpen = false; c.depotDropdownOpen = false; c.updateSegmentList(); };
+  c.closeSegmentDropdown = function() { $timeout(function() { c.segmentDropdownOpen = false; }, 200); };
+
+  function cascadeResetBelowSegment() {
+      c.filters.zones = [];
+      c.filters.regions = []; c.filters.depots = [];
+      c.zoneSearch = ''; c.regionSearch = ''; c.depotSearch = '';
+      c.needsFilters = true;
+  }
+  c.toggleSegment = function(s) {
+      var idx = c.filters.segments.indexOf(s.value);
+      if (idx === -1) c.filters.segments.push(s.value); else c.filters.segments.splice(idx, 1);
+      cascadeResetBelowSegment(); syncLabels(); c.segmentSearch = ''; c.debouncedRefresh();
+  };
+  c.selectAllSegments = function() {
+      c.filters.segments = optsOf('segments').map(function(s) { return s.value; });
+      cascadeResetBelowSegment(); syncLabels(); c.segmentSearch = ''; c.debouncedRefresh();
+  };
+  c.clearAllSegments = function() {
+      c.filters.segments = [];
+      cascadeResetBelowSegment(); syncLabels(); c.segmentSearch = ''; c.debouncedRefresh();
+  };
+  c.isSegmentSelected = function(s) { return c.filters.segments.indexOf(s.value) !== -1; };
+  c.getSegmentDisplayText = function() {
+      if (!c.selectedSegmentLabels || c.selectedSegmentLabels.length === 0) return 'All Segments';
+      if (c.selectedSegmentLabels.length === 1) return c.selectedSegmentLabels[0];
+      return c.selectedSegmentLabels.length + ' segments selected';
+  };
+
+  // ===================== ZONE =====================
+  c.zoneDropdownOpen = false; c.zoneSearch = ''; c.selectedZoneLabels = [];
+  c.openZoneDropdown = function() { c.zoneDropdownOpen = true; c.segmentDropdownOpen = false; c.regionDropdownOpen = false; c.depotDropdownOpen = false; c.updateZoneList(); };
+  c.closeZoneDropdown = function() { $timeout(function() { c.zoneDropdownOpen = false; }, 200); };
+
+  function onZonesChanged() {
+      c.filters.regions = []; c.filters.depots = [];
+      c.regionSearch = ''; c.depotSearch = ''; c.zoneSearch = '';
+      c.needsFilters = true;
+      syncLabels();
+      c.debouncedRefresh();
+  }
+  c.toggleZone = function(z) {
+      var idx = c.filters.zones.indexOf(z.value);
+      if (idx === -1) c.filters.zones.push(z.value); else c.filters.zones.splice(idx, 1);
+      onZonesChanged();
+  };
+  c.selectAllZones = function() { c.filters.zones = optsOf('zones').map(function(z) { return z.value; }); onZonesChanged(); };
+  c.clearAllZones  = function() { c.filters.zones = []; onZonesChanged(); };
+  c.isZoneSelected = function(z) { return c.filters.zones.indexOf(z.value) !== -1; };
+  function zoneTexts() {
+      var list = optsOf('zones');
+      return (c.filters.zones || []).map(function(v) {
+          for (var i = 0; i < list.length; i++) { if (list[i].value === v) return c.msItemDisplay(list[i]); }
+          return v;
+      });
+  }
+  c.getZoneDisplayText = function() {
+      var t = zoneTexts();
+      if (t.length === 0) {
+          var all = optsOf('zones');
+          if (all.length === 1) return c.msItemDisplay(all[0]);       // single mapped zone: show it
+          return 'All Zones';
+      }
+      if (t.length === 1) return t[0];
+      return t.length + ' zones selected';
+  };
+  c.getZoneTooltip = function() {
+      var t = zoneTexts();
+      return t.length ? t.join(', ') : optsOf('zones').map(c.msItemDisplay).join(', ');
+  };
+
+  // ===================== REGION =====================
+  c.regionDropdownOpen = false; c.regionSearch = ''; c.selectedRegionLabels = [];
+  c.openRegionDropdown = function() { c.regionDropdownOpen = true; c.segmentDropdownOpen = false; c.zoneDropdownOpen = false; c.depotDropdownOpen = false; c.updateRegionList(); };
+  c.closeRegionDropdown = function() { $timeout(function() { c.regionDropdownOpen = false; }, 200); };
+
+  function pruneDepotsToRegions() {
+      var regs = c.filters.regions || [];
+      if (!regs.length) return;
+      var allowed = {};
+      optsOf('depots').forEach(function(d) { if (regs.indexOf(d.regionValue) !== -1) allowed[d.value] = true; });
+      c.filters.depots = c.filters.depots.filter(function(v) { return allowed[v]; });
+  }
+  function onRegionsChanged() {
+      pruneDepotsToRegions();
+      syncLabels();
+      c.regionSearch = ''; c.depotSearch = '';
+      c.updateRegionList(); c.updateDepotList();
+      c.debouncedRefresh();
+  }
+  c.toggleRegion = function(r) {
+      var idx = c.filters.regions.indexOf(r.value);
+      if (idx === -1) c.filters.regions.push(r.value); else c.filters.regions.splice(idx, 1);
+      onRegionsChanged();
+  };
+  c.selectAllRegions = function() { c.filters.regions = optsOf('regions').map(function(r) { return r.value; }); onRegionsChanged(); };
+  c.clearAllRegions = function() { c.filters.regions = []; onRegionsChanged(); };
+  c.isRegionSelected = function(r) { return c.filters.regions.indexOf(r.value) !== -1; };
+  c.getRegionDisplayText = function() {
+      if (!c.selectedRegionLabels || c.selectedRegionLabels.length === 0) return 'All Regions';
+      if (c.selectedRegionLabels.length === 1) return c.selectedRegionLabels[0];
+      return c.selectedRegionLabels.length + ' regions selected';
+  };
+
+  // ===================== DEPOT =====================
+  c.depotDropdownOpen = false; c.depotSearch = ''; c.selectedDepotLabels = [];
+  c.openDepotDropdown = function() { c.depotDropdownOpen = true; c.segmentDropdownOpen = false; c.zoneDropdownOpen = false; c.regionDropdownOpen = false; c.updateDepotList(); };
+  c.closeDepotDropdown = function() { $timeout(function() { c.depotDropdownOpen = false; }, 200); };
+  c.toggleDepot = function(d) {
+      var idx = c.filters.depots.indexOf(d.value);
+      if (idx === -1) c.filters.depots.push(d.value); else c.filters.depots.splice(idx, 1);
+      syncLabels(); c.depotSearch = ''; c.debouncedRefresh();
+  };
+  c.selectAllDepots = function() {
+      c.updateDepotList();
+      c.filters.depots = c.displayDepots.map(function(d) { return d.value; });
+      syncLabels(); c.depotSearch = ''; c.debouncedRefresh();
+  };
+  c.clearAllDepots = function() { c.filters.depots = []; syncLabels(); c.depotSearch = ''; c.debouncedRefresh(); };
+  c.isDepotSelected = function(d) { return c.filters.depots.indexOf(d.value) !== -1; };
+  c.getDepotDisplayText = function() {
+      if (!c.selectedDepotLabels || c.selectedDepotLabels.length === 0) return 'All Depots';
+      if (c.selectedDepotLabels.length === 1) return c.selectedDepotLabels[0];
+      return c.selectedDepotLabels.length + ' depots selected';
+  };
+
+  // ===================== QUICK FILTERS =====================
+  c.quickFilter = 'all';
+  c.riskFilter = '';
+  c.kpiFilter = '';
+  c.largeExposureSortOrder = 'desc';
+
+  function scrollToTable() {
+      $timeout(function() {
+          var el = $element[0].querySelector('#ntzTableContainer');
+          if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      }, 100);
+  }
+
+  c.setQuickFilter = function(f) { c.quickFilter = f; c.page = 0; if (f === 'largeExposure') c.largeExposureSortOrder = 'desc'; c.loadTableOnly(); };
+  c.setKpiFilter = function(filterName) { c.kpiFilter = (c.kpiFilter === filterName) ? '' : filterName; c.page = 0; c.loadTableOnly(); scrollToTable(); };
+  c.setRiskKpiFilter = function() { c.riskFilter = (c.riskFilter === 'High') ? '' : 'High'; c.page = 0; c.loadTableOnly(); scrollToTable(); };
+  c.setExpiringKpiFilter = function() { c.quickFilter = (c.quickFilter === 'review15') ? 'all' : 'review15'; c.page = 0; c.loadTableOnly(); scrollToTable(); };
+  c.toggleLargeExposureSort = function() { c.largeExposureSortOrder = c.largeExposureSortOrder === 'desc' ? 'asc' : 'desc'; if (c.quickFilter === 'largeExposure') { c.page = 0; c.loadTableOnly(); } };
+  c.getLargeExposureIcon = function() { return c.largeExposureSortOrder === 'desc' ? 'fa-sort-amount-desc' : 'fa-sort-amount-asc'; };
+
+  var tableReqId = 0;
+  var searchTimer = null;
+
+  function tableParams() {
+      return { page: c.page, limit: c.limit, search: c.tableSearch || '', quick: c.quickFilter, risk: c.riskFilter, kpi: c.kpiFilter, largeSort: c.largeExposureSortOrder };
+  }
+
+  function preFormatTableData(rows) {
+      return rows.map(function(row) {
+          row.fmtOutstanding = c.fmtCurrency(row.outstanding);
+          row.fmtLimit = c.fmtCurrency(row.limit);
+          row.fmtAvailable = c.fmtCurrency(row.available);
+          row.fmtActiveBg = c.fmtDash(row.activeBg);
+          row.cappedUtil = c.capPct(row.util);
+          row.fmtOsSalesRatio = c.fmtRatio(row.osSalesRatio);
+          row.fmtOd90 = c.fmtDash(row.od90);
+          return row;
+      });
+  }
+
+  c.loadTableOnly = function() {
+      if (c.data.accessDenied) return;
+      var myId = ++tableReqId;
+      c.tableLoading = true;
+      c.server.get({ action: 'table', filters: angular.copy(c.filters), table: tableParams() }).then(function(r) {
+          if (myId !== tableReqId) return;
+          var d = r.data || {};
+          if (d.error && !d.accessDenied) { console.warn('ZHM Non-Trade widget table error:', d.error); }
+          c.filteredList = preFormatTableData(d.tableData || []);
+          c.tableTotal = d.tableTotal || 0;
+          c.tableLoading = false;
+      }, function() {
+          if (myId !== tableReqId) return;
+          c.tableLoading = false;
+      });
+  };
+
+  c.applyLocalFilters = function() { c.page = 0; c.loadTableOnly(); };
+  c.onSearchChange = function() { if (searchTimer) $timeout.cancel(searchTimer); searchTimer = $timeout(function() { c.page = 0; c.loadTableOnly(); }, 400); };
+  c.updatePagination = function() { c.page = 0; c.loadTableOnly(); };
+  c.goToPage = function(p) { var maxPage = c.getTotalPages() - 1; p = Math.max(0, Math.min(maxPage, p)); if (p === c.page) return; c.page = p; c.loadTableOnly(); };
+  c.getTotalPages = function() { return Math.max(1, Math.ceil((c.tableTotal || 0) / c.limit)); };
+  c.getShowingTo = function() { return Math.min(c.tableTotal, (c.page + 1) * c.limit); };
+  c.getPageArray = function() {
+      var maxPage = c.getTotalPages() - 1;
+      var start = Math.max(0, c.page - 2);
+      var end = Math.min(maxPage, c.page + 2);
+      var arr = []; for (var i = start; i <= end; i++) { arr.push(i); } return arr;
+  };
+
+  // ===================== CHARTS =====================
+  var CHART_COLORS = { text: '#3a4451', muted: '#5a6a7a', grid: '#e6eaef', bar: '#0b5394', barHover: '#073b6b', line: '#E87722' };
+  var CHART_FONT = '"Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif';
+  function normLabel(l) { return String(l || '').replace('-', ' '); }
+
+  function emptyTrend() {
+      return { points: [], activePoints: [], yTicks: [], linePoints: '', areaPath: '', width: 1550, height: 300, padLeft: 96, padRight: 60, padY: 30, drawHeight: 225, baselineY: 255 };
+  }
+  c.trendChart = emptyTrend();
+
+  c.buildTrendChart = function() {
+      if (!c.data || !c.data.trend) return;
+      var trend = c.data.trend.points || [];
+      if (trend.length === 0) { trend = c.last6Months.map(function(m) { return { label: m.label, value: 0 }; }); }
+
+      var width = 1550, height = 300, padLeft = 96, padRight = 60, padY = 30, padBottom = 45;
+      var drawHeight = height - padY - padBottom;
+      var baselineY = padY + drawHeight;
+      var values = trend.map(function(p) { return p.value || 0; });
+      var dataMax = Math.max.apply(null, values.concat([0]));
+      var scale = niceScale(dataMax, 5);
+      var minVal = 0, maxVal = scale.max;
+      var n = trend.length;
+      var stepX = (width - padLeft - padRight) / (n > 1 ? (n - 1) : 1);
+
+      var pts = trend.map(function(p, i) {
+          var plotValue = Math.max(0, p.value || 0);
+          var x = padLeft + 20 + i * ((width - padLeft - padRight - 40) / (n > 1 ? (n - 1) : 1));
+          var y = padY + (1 - (plotValue - minVal) / (maxVal - minVal)) * drawHeight;
+          return { x: x, y: y, label: p.label, value: p.value || 0, formattedValue: c.fmtCurrency(p.value || 0) };
+      });
+      var yTicks = [];
+      for (var tickVal = 0; tickVal <= maxVal + scale.step / 1000; tickVal += scale.step) {
+          var tickY = padY + (1 - (tickVal - minVal) / (maxVal - minVal)) * drawHeight;
+          yTicks.push({ y: tickY, label: c.fmtAxisCurrency(tickVal) });
+      }
+      var linePoints = pts.map(function(p) { return p.x + ',' + p.y; }).join(' ');
+      var areaPath = 'M ' + pts[0].x + ',' + baselineY + ' ';
+      pts.forEach(function(p) { areaPath += 'L ' + p.x + ',' + p.y + ' '; });
+      areaPath += 'L ' + pts[pts.length - 1].x + ',' + baselineY + ' Z';
+
+      c.trendChart = { points: pts, activePoints: pts.slice(), yTicks: yTicks, linePoints: linePoints, areaPath: areaPath, width: width, height: height, padLeft: padLeft, padRight: padRight, padY: padY, drawHeight: drawHeight, baselineY: baselineY, stepX: stepX };
+  };
+
+  window.__clmChartVisibilityTargets = window.__clmChartVisibilityTargets || [];
+  function isElementVisible(el) {
+      if (!el || !document.body.contains(el)) return false;
+      var rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+  }
+  function ensureChartVisibilityWatcher() {
+      if (window.__clmChartVisibilityWatcher) return;
+      window.__clmChartVisibilityWatcher = new MutationObserver(function() {
+          window.__clmChartVisibilityTargets.forEach(function(target) {
+              var nowVisible = isElementVisible(target.canvas);
+              if (nowVisible && !target.wasVisible) {
+                  var inst = target.getInstance();
+                  if (inst) { inst.resize(); }
+              }
+              target.wasVisible = nowVisible;
+          });
+      });
+      window.__clmChartVisibilityWatcher.observe(document.body, { attributes: true, subtree: true, attributeFilter: ['class', 'style'] });
+  }
+  function registerChartVisibilityTarget(canvas, getChartInstance) {
+      if (!canvas) return;
+      window.__clmChartVisibilityTargets = window.__clmChartVisibilityTargets.filter(function(t) { return document.body.contains(t.canvas); });
+      var already = window.__clmChartVisibilityTargets.some(function(t) { return t.canvas === canvas; });
+      if (!already) { window.__clmChartVisibilityTargets.push({ canvas: canvas, getInstance: getChartInstance, wasVisible: isElementVisible(canvas) }); }
+      ensureChartVisibilityWatcher();
+  }
+
+  var AGEING_BUCKET_DEFS = [
+    { key: '0-30D',  color: '#27ae60', match: ['0-30 Days'] },
+    { key: '31-60D', color: '#8fd19e', match: ['31-60 Days'] },
+    { key: '61-90D', color: '#f0a030', match: ['61-90 Days'] },
+    { key: '>90D',   color: '#E23D28', match: ['>90 Days'] }
+  ];
+  function consolidateAgeingMonth(month) {
+    return AGEING_BUCKET_DEFS.map(function(def) {
+      var sum = 0;
+      (month.buckets || []).forEach(function(b) { if (def.match.indexOf(b.label) !== -1) { sum += (b.value || 0); } });
+      return sum;
+    });
+  }
+
+  var salesChartInstance = null;
+  var ageingChartInstance = null;
+  c.ageingLegend = AGEING_BUCKET_DEFS.map(function(def) { return { label: def.key, color: def.color }; });
+
+  function applyChartDefaults() {
+      if (typeof Chart === 'undefined' || !Chart.defaults) return;
+      try { Chart.defaults.font.family = CHART_FONT; Chart.defaults.color = CHART_COLORS.muted; } catch (e) {}
+  }
+  function axisTitle(text) { return { display: true, text: text, font: { size: 12, weight: '700' }, color: CHART_COLORS.text, padding: { bottom: 6, top: 6 } }; }
+  var TOOLTIP_BASE = { backgroundColor: '#1a1a1a', titleColor: '#F3D54E', bodyColor: '#ffffff', padding: 10, cornerRadius: 6, titleFont: { weight: '700' }, boxPadding: 4 };
+
+  c.renderCharts = function() { applyChartDefaults(); renderSalesChart(); renderAgeingChart(); };
+
+  function renderSalesChart() {
+      var canvas = $element[0].querySelector('#ntzSalesChart');
+      if (salesChartInstance) { try { salesChartInstance.destroy(); } catch(e) {} salesChartInstance = null; }
+      if (!canvas || !c.data || !c.data.salesTrend || !c.data.salesTrend.points) return;
+
+      var recent = c.data.salesTrend.points.slice(-6);
+      var labels = recent.map(function(p) { return normLabel(p.label); });
+      var volumes = recent.map(function(p) { return p.volume || 0; });
+      var values  = recent.map(function(p) { return p.value || 0; });
+
+      salesChartInstance = new Chart(canvas.getContext('2d'), {
+          type: 'bar',
+          data: {
+              labels: labels,
+              datasets: [
+                  { type: 'bar', label: 'Credit Sales Volume (MT)', data: volumes, backgroundColor: CHART_COLORS.bar, hoverBackgroundColor: CHART_COLORS.barHover, yAxisID: 'yVolume', borderRadius: 4, maxBarThickness: 48, categoryPercentage: 0.6, order: 2 },
+                  { type: 'line', label: 'Credit Sales Value (₹)', data: values, borderColor: CHART_COLORS.line, backgroundColor: CHART_COLORS.line, pointBackgroundColor: '#fff', pointBorderColor: CHART_COLORS.line, pointBorderWidth: 2.5, pointRadius: 4.5, pointHoverRadius: 6, borderWidth: 2.5, tension: 0.25, fill: false, yAxisID: 'yValue', order: 1 }
+              ]
+          },
+          options: {
+              responsive: true, maintainAspectRatio: false, resizeDelay: 0,
+              interaction: { mode: 'index', intersect: false },
+              plugins: {
+                  legend: { display: false },
+                  tooltip: angular.extend({}, TOOLTIP_BASE, { callbacks: {
+                      label: function(ctx) {
+                          return ctx.dataset.yAxisID === 'yValue'
+                              ? ' Value: ' + c.fmtCurrency(ctx.parsed.y)
+                              : ' Volume: ' + c.fmtQty(ctx.parsed.y) + ' MT';
+                      }
+                  } })
+              },
+              scales: {
+                  yVolume: { type: 'linear', position: 'left', beginAtZero: true, grace: '8%', title: axisTitle('Volume (MT)'),
+                             ticks: { maxTicksLimit: 6, font: { size: 11.5 }, color: CHART_COLORS.muted, callback: function(v) { return c.fmtQty(v); } },
+                             grid: { color: CHART_COLORS.grid }, border: { display: false } },
+                  yValue:  { type: 'linear', position: 'right', beginAtZero: true, grace: '8%', title: axisTitle('Value (₹)'),
+                             ticks: { maxTicksLimit: 6, font: { size: 11.5 }, color: CHART_COLORS.line, callback: function(v) { return c.fmtAxisCurrency(v); } },
+                             grid: { drawOnChartArea: false }, border: { display: false } },
+                  x: { ticks: { font: { size: 12, weight: '700' }, color: CHART_COLORS.text }, grid: { display: false } }
+              }
+          }
+      });
+      registerChartVisibilityTarget(canvas, function() { return salesChartInstance; });
+  }
+
+  function renderAgeingChart() {
+      var canvas = $element[0].querySelector('#ntzAgeingChart');
+      if (ageingChartInstance) { try { ageingChartInstance.destroy(); } catch(e) {} ageingChartInstance = null; }
+      if (!canvas || !c.data || !c.data.ageingTrend) return;
+
+      var months = c.data.ageingTrend.months || [];
+      if (months.length === 0) {
+          months = c.last6Months.map(function(m) {
+              return { label: m.label, buckets: [ { label: '0-30 Days', value: 0 }, { label: '31-60 Days', value: 0 }, { label: '61-90 Days', value: 0 }, { label: '>90 Days', value: 0 } ] };
+          });
+      }
+
+      var labels = months.map(function(m) { return normLabel(m.label); });
+      var consolidated = months.map(consolidateAgeingMonth);
+      var datasets = AGEING_BUCKET_DEFS.map(function(def, idx) {
+          return { label: def.key, backgroundColor: def.color, borderColor: '#ffffff', borderWidth: { top: 1 }, maxBarThickness: 48, categoryPercentage: 0.6,
+                   data: consolidated.map(function(monthValues) { return monthValues[idx]; }) };
+      });
+
+      ageingChartInstance = new Chart(canvas.getContext('2d'), {
+          type: 'bar',
+          data: { labels: labels, datasets: datasets },
+          options: {
+              responsive: true, maintainAspectRatio: false, resizeDelay: 0,
+              interaction: { mode: 'index', intersect: false },
+              plugins: {
+                  legend: { display: false },
+                  tooltip: angular.extend({}, TOOLTIP_BASE, { itemSort: function(a, b) { return b.datasetIndex - a.datasetIndex; }, callbacks: {
+                      label: function(ctx) { return ' ' + ctx.dataset.label + ': ' + c.fmtCurrency(ctx.parsed.y); },
+                      footer: function(items) {
+                          var total = 0; items.forEach(function(i) { total += i.parsed.y || 0; });
+                          return 'Total: ' + c.fmtCurrency(total);
+                      }
+                  } })
+              },
+              scales: {
+                  x: { stacked: true, ticks: { font: { size: 12, weight: '700' }, color: CHART_COLORS.text }, grid: { display: false } },
+                  y: { stacked: true, beginAtZero: true, grace: '5%', title: axisTitle('Outstanding (₹)'),
+                       ticks: { maxTicksLimit: 6, font: { size: 11.5 }, color: CHART_COLORS.muted, callback: function(v) { return c.fmtAxisCurrency(v); } },
+                       grid: { color: CHART_COLORS.grid }, border: { display: false } }
+              }
+          }
+      });
+      registerChartVisibilityTarget(canvas, function() { return ageingChartInstance; });
+  }
+
+  var onResize = function() { if (salesChartInstance) salesChartInstance.resize(); if (ageingChartInstance) ageingChartInstance.resize(); };
+  angular.element($window).on('resize', onResize);
+
+  $scope.$on('$destroy', function() {
+      angular.element($window).off('resize', onResize);
+      if (searchTimer) $timeout.cancel(searchTimer);
+      if (refreshTimer) $timeout.cancel(refreshTimer);
+      if (salesChartInstance) { try { salesChartInstance.destroy(); } catch(e) {} }
+      if (ageingChartInstance) { try { ageingChartInstance.destroy(); } catch(e) {} }
+  });
+
+  c.getActiveFilterCount = function() {
+      var count = 0;
+      if (c.filters.segments && c.filters.segments.length > 0) count++;
+      if (c.filters.zones && c.filters.zones.length > 0) count++;
+      if (c.filters.regions && c.filters.regions.length > 0) count++;
+      if (c.filters.depots && c.filters.depots.length > 0) count++;
+      if (c.filters.period && c.filters.period !== c.defaultPeriod) count++;
+      if (c.riskFilter) count++; if (c.kpiFilter) count++; if (c.quickFilter !== 'all') count++;
+      return count;
+  };
+
+  c.filterWrapperClass = '';
+  c.clearAllFilters = function() {
+      c.filterWrapperClass = 'collapsing';
+      $timeout(function() {
+          c.filters.segments = []; c.filters.zones = []; c.filters.regions = []; c.filters.depots = [];
+          c.segmentSearch = ''; c.zoneSearch = ''; c.regionSearch = ''; c.depotSearch = '';
+          c.filters.period = c.defaultPeriod; c.riskFilter = ''; c.kpiFilter = ''; c.quickFilter = 'all'; c.tableSearch = '';
+          c.largeExposureSortOrder = 'desc';
+          c.page = 0;
+          c.needsFilters = true;
+          syncLabels();
+          c.filterWrapperClass = '';
+          c.refresh(false);
+      }, 350);
+  };
+
+  // ===================== MAIN REFRESH =====================
+  var portfolioLoadedAnnounced = false;
+  var redirectAnnounced = false;
+
+  c.refresh = function(skipCharts) {
+      c.loading = true;
+      c.tableLoading = true;
+      if (!skipCharts) c.chartLoading = true;
+
+      var reqId = ++tableReqId;
+      var reqFilters = angular.copy(c.filters);
+      c.data = c.data || {};
+
+      c.server.get({ action: 'kpis', filters: reqFilters, fetchFilters: c.needsFilters }).then(function(r) {
+          if (reqId !== tableReqId) return;
+          var data = r.data || {};
+
+          // No Non-Trade access: show the card and, if the user has another business, ask the dashboard to switch
+          if (data.accessDenied) {
+              c.data.accessDenied = true;
+              c.data.error = data.error;
+              c.loading = false; c.tableLoading = false; c.chartLoading = false;
+              c.initialLoadComplete = true;
+              if (data.redirectBusiness && !redirectAnnounced) {
+                  redirectAnnounced = true;
+                  var opts = data.businessOptions || [];
+                  for (var i = 0; i < opts.length; i++) {
+                      if (opts[i].value === data.redirectBusiness) {
+                          $rootScope.$broadcast('clm.business.changed', { business: opts[i].value, cg1: opts[i].cg1, from: OWN_BUSINESS });
+                          break;
+                      }
+                  }
+              }
+              return;
+          }
+          c.data.accessDenied = false;
+          if (data.error) console.warn('ZHM Non-Trade server error:', data.error);
+
+          c.data.kpis = data.kpis || {};
+          c.data.kpis.fmtLimit = c.fmtCurrency(c.data.kpis.limit);
+          c.data.kpis.fmtAvailable = c.fmtCurrency(c.data.kpis.available);
+          c.data.kpis.fmtOutstanding = c.fmtCurrency(c.data.kpis.outstanding);
+          c.data.kpis.fmtOverdue = c.fmtCurrency(c.data.kpis.overdueExposure);
+          c.data.kpis.fmtOd90 = c.fmtCurrency(c.data.kpis.od90);
+          c.data.kpis.fmtRatio = c.fmtRatio(c.data.kpis.osSalesRatioSum);
+          c.data.kpis.fmtActiveBg = c.fmtCurrency(c.data.kpis.activeBg);
+          c.data.kpis.fmtNetExposure = c.fmtCurrency(c.data.kpis.netExposure);
+
+          if (c.needsFilters && data.filterOpts) {
+              c.data.filterOpts = data.filterOpts;
+              c.updateSegmentList(); c.updateZoneList(); c.updateRegionList(); c.updateDepotList();
+              syncLabels();
+              c.needsFilters = false;
+          }
+
+          c.counts = angular.extend({ total: 0, overdue: 0, review15: 0, review30: 0, highRisk: 0, highGrowth: 0, pending: 0, sendBack: 0, rejected: 0, expiring: 0, osGreaterThanZero: 0 }, data.counts || {});
+
+          c.loading = false;
+          c.initialLoadComplete = true;
+
+          c.server.get({ action: 'table', filters: reqFilters, table: tableParams() }).then(function(r3) {
+              if (reqId !== tableReqId) return;
+              var tData = r3.data || {};
+              c.filteredList = preFormatTableData(tData.tableData || []);
+              c.tableTotal = tData.tableTotal || 0;
+              c.tableLoading = false;
+          });
+
+          if (!skipCharts) {
+              c.server.get({ action: 'charts', filters: reqFilters }).then(function(r2) {
+                  if (reqId !== tableReqId) return;
+                  var cData = r2.data || {};
+                  c.data.trend = cData.trend || { points: [] };
+                  c.data.salesTrend = cData.salesTrend || { points: [] };
+                  c.data.ageingTrend = cData.ageingTrend || { months: [] };
+                  c.buildTrendChart();
+                  c.chartLoading = false;
+                  $timeout(function() { c.renderCharts(); });
+              }, function() { c.chartLoading = false; });
+          }
+
+          if (!portfolioLoadedAnnounced) {
+              portfolioLoadedAnnounced = true;
+              $rootScope.$broadcast('clm.portfolio.loaded', { business: OWN_BUSINESS });
+          }
+      }, function() {
+          c.loading = false; c.tableLoading = false; c.chartLoading = false;
+          c.initialLoadComplete = true;
+      });
+  };
+
+  c.selectCustomer = function(row) {
+      if (!row || !row.code) return;
+      $rootScope.clmPendingCustomerSysId = row.sysId || null;
+      $rootScope.clmPendingCustomerCode = row.code;
+      $rootScope.clmPendingCustomerPan = row.pan || null;
+      $rootScope.clmPendingCustomerBusiness = OWN_BUSINESS;
+      $rootScope.$broadcast('clm.customer.selected', { sysId: row.sysId || null, code: row.code, pan: row.pan || null, business: OWN_BUSINESS, cg1: OWN_CG1 });
+      $rootScope.$broadcast('clm.switch.tab', 'customer360');
+  };
+
+  // ===================== EXPORT LOGIC =====================
+  function escapeCSV(val) {
+      if (val === null || val === undefined) return '""';
+      return '"' + String(val).replace(/"/g, '""') + '"';
+  }
+
+  c.exportToCSV = function() {
+      var params = tableParams();
+      params.page = 0;
+      params.limit = 5000;
+      c.server.get({ action: 'export', filters: angular.copy(c.filters), table: params }).then(function(r) {
+          var dataToExport = (r.data && r.data.tableData) || [];
+          if (!dataToExport.length) { alert('No rows to export.'); return; }
+          var BOM = "\uFEFF";
+          var csvContent = BOM + "PAN,Customer Code,Name,Segment,Zone,Region,Depot,Status,Outstanding,Current Credit Limit,Available,Active BG,Utilisation %,OS/Sales,Overdue >90D,Risk,Review In,High Growth 20\n";
+          dataToExport.forEach(function(row) {
+              csvContent += [
+                  escapeCSV(row.pan), escapeCSV(row.code), escapeCSV(row.name), escapeCSV(row.segment),
+                  escapeCSV(row.zoneName), escapeCSV(row.regionName), escapeCSV(row.depotName), escapeCSV(row.status),
+                  escapeCSV(row.outstanding), escapeCSV(row.limit), escapeCSV(row.available), escapeCSV(row.activeBg), escapeCSV(row.util),
+                  escapeCSV(row.osSalesRatio), escapeCSV(row.od90), escapeCSV(row.risk),
+                  escapeCSV(row.reviewIn), escapeCSV(row.highGrowth20 || 'No')
+              ].join(",") + "\n";
+          });
+          var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+          var link = document.createElement('a');
+          link.href = URL.createObjectURL(blob);
+          link.download = 'ZHM_Portfolio_Data_NonTrade_' + new Date().toISOString().slice(0, 10) + '.csv';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(link.href);
+      }, function() { alert('Export failed. Check console for details.'); });
+  };
+
+  c.isExporting = false;
+  c.exportToPDF = function() {
+      c.isExporting = true;
+      $ocLazyLoad.load([
+          'https://cdnjs.cloudflare.com/ajax/libs/dom-to-image-more/3.10.0/dom-to-image-more.min.js',
+          'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'
+      ]).then(function() {
+          var libDomToImage = window.domtoimage;
+          var jsPDFConstructor = window.jspdf ? window.jspdf.jsPDF : window.jsPDF;
+          if (!libDomToImage || !jsPDFConstructor) { alert("Could not load export libraries properly."); $scope.$applyAsync(function() { c.isExporting = false; }); return; }
+
+          var element = $element[0].querySelector('#ntz-dashboard-capture');
+          var fileName = 'ZHM_Portfolio_Report_NonTrade_' + new Date().toISOString().slice(0, 10) + '.pdf';
+          element.classList.add('pdf-export-mode');
+
+          function cleanup() { element.classList.remove('pdf-export-mode'); $scope.$applyAsync(function() { c.isExporting = false; }); }
+
+          $timeout(function() {
+              try {
+                  libDomToImage.toPng(element, { bgcolor: '#ffffff', width: 1920 }).then(function (dataUrl) {
+                      var img = new Image();
+                      img.onload = function() { var pdf = new jsPDFConstructor('l', 'pt', [img.width, img.height + 60]); pdf.addImage(dataUrl, 'PNG', 0, 0, img.width, img.height); pdf.save(fileName); cleanup(); };
+                      img.src = dataUrl;
+                  }).catch(function () { cleanup(); });
+              } catch (e) { cleanup(); }
+          }, 150);
+      }).catch(function() { $scope.$applyAsync(function() { c.isExporting = false; }); });
+  };
+
+  c.refresh(false);
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/*
+  CLM ZHM Non-Trade Portfolio Overview - CSS
+  v1.0 - Same look and feel as the Trade ZHM / MD widgets
+  - 17-column table (Active BG column), min-width 1620px
+*/
+@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+/* ---------- Page ---------- */
+.clm-pf { color: #1a1a1a; }
+.clm-portfolio-overview { padding-bottom: 24px; }
+.clm-initial-loader { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 100px 20px; text-align: center; }
+.clm-initial-loader i { color: #1a1a1a; }
+.clm-initial-loader h3 { margin: 20px 0 6px; font-size: 18px; font-weight: 700; color: #1a1a1a; }
+.clm-initial-loader p { margin: 0; font-size: 13px; color: #5a6a7a; }
+.is-busy { opacity: .6; pointer-events: none; }
+.clm-pf-body { transition: opacity .3s; }
+
+/* ---------- Section ---------- */
+.clm-pf-section { margin: 0 0 18px; padding: 18px 20px 20px; background: #f4f4f1; border: 1px solid #e0e6ed; border-radius: 10px; }
+.clm-section-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 14px;
+  font-size: 14px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; letter-spacing: 1px; }
+.clm-section-num { width: 26px; height: 26px; border-radius: 50%; background: #F3D54E; color: #1a1a1a;
+  font-size: 13px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.clm-section-sub { font-size: 12px; font-weight: 400; color: #5a6a7a; text-transform: none; letter-spacing: 0; }
+.clm-section-sub::before { content: "\2014"; margin-right: 8px; color: #b0b9c4; }
+
+/* ---------- Card (block) ---------- */
+.clm-block { background: #fff; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden; position: relative; }
+.clm-block-head { display: flex; align-items: center; justify-content: space-between; gap: 10px 20px; flex-wrap: wrap;
+  padding: 14px 20px; background: #fafbfc; border-bottom: 1px solid #dde3ea; }
+.clm-block-title { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 700; color: #1a1a1a;
+  text-transform: uppercase; letter-spacing: .8px; }
+.clm-block-title::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: #F3D54E; flex-shrink: 0; }
+.clm-block-sub { margin: 4px 0 0 14px; font-size: 12px; color: #5a6a7a; }
+.clm-block-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.clm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: #fff;
+  border: 1px solid #dde3ea; border-radius: 12px; font-size: 12px; font-weight: 700; color: #1a1a1a; white-space: nowrap; }
+.clm-chip-k { font-weight: 400; color: #5a6a7a; }
+.clm-tw-body { padding: 16px 18px; }
+
+/* ---------- Filters ---------- */
+.clm-filter-card { margin: 0 0 18px; background: #fff; border: 1px solid #dde3ea; border-radius: 10px; position: relative; z-index: 20; transition: opacity .3s; }
+.clm-filter-head .clm-btn { height: 30px; }
+.clm-filter-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 20px;
+  background: #fafbfc; border-bottom: 1px solid #dde3ea; border-radius: 10px 10px 0 0; }
+.clm-filter-row { display: grid; grid-template-columns: minmax(150px, .8fr) repeat(4, minmax(0, 1fr)) minmax(140px, .7fr); gap: 14px; padding: 14px 20px 16px; }
+.clm-filter-field { display: flex; flex-direction: column; gap: 6px; margin: 0; font-weight: normal; position: relative; min-width: 0; }
+.clm-filter-label { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-filter-field select { width: 100%; height: 36px; font-size: 13px; color: #1a1a1a; border-radius: 6px; border: 1px solid #cdd4dc;
+  background-color: #fff; padding: 0 10px; outline: none; cursor: pointer; box-shadow: none; transition: border-color .2s; }
+.clm-filter-field select:hover, .clm-filter-field select:focus { border-color: #1a1a1a; }
+.clm-filter-business select option:disabled { color: #b0b9c4; }
+
+/* ===================== Multiselect ===================== */
+.clm-multiselect-container { position: relative; width: 100%; }
+.clm-multiselect-trigger { display: flex; align-items: center; justify-content: space-between; width: 100%; height: 36px; padding: 0 10px;
+  font-size: 13px; border: 1px solid #cdd4dc; border-radius: 6px; background: #fff; cursor: pointer; box-sizing: border-box; transition: border-color .2s; }
+.clm-multiselect-trigger:hover { border-color: #1a1a1a; }
+.clm-multiselect-container.open .clm-multiselect-trigger { border-color: #1a1a1a; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.clm-multiselect-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #1a1a1a; flex: 1; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.clm-multiselect-arrow { color: #7f8c9a; font-size: 10px; margin-left: 6px; }
+.clm-multiselect-dropdown { position: absolute; top: 36px; left: 0; right: 0; z-index: 60; background: #fff; border: 1px solid #1a1a1a; border-top: none;
+  border-radius: 0 0 6px 6px; box-shadow: 0 8px 18px rgba(0,0,0,.12); max-height: 290px; display: flex; flex-direction: column; overflow: hidden; }
+.clm-multiselect-actions { display: flex; justify-content: space-between; padding: 7px 10px; border-bottom: 1px solid #e6eaef; background: #fafbfc; }
+.clm-multiselect-actions a { font-size: 12px; color: #1a1a1a; cursor: pointer; font-weight: 700; }
+.clm-multiselect-actions a:hover { text-decoration: underline; }
+.clm-multiselect-search { width: 100%; height: 32px; padding: 0 10px; border: none; border-bottom: 1px solid #e6eaef; font-size: 12px; outline: none; box-sizing: border-box; }
+.clm-multiselect-list { list-style: none; margin: 0; padding: 4px 0; overflow-y: auto; max-height: 190px; }
+.clm-multiselect-list li { display: flex; align-items: flex-start; gap: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer; color: #1a1a1a; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.clm-multiselect-list li:hover { background: #f6f7f9; }
+.clm-multiselect-list li.selected { background: #fffcf0; }
+.clm-dropdown-empty { color: #7f8c9a !important; cursor: default !important; font-style: italic; }
+.clm-checkbox { width: 14px; height: 14px; border: 2px solid #cdd4dc; border-radius: 3px; display: inline-block; flex-shrink: 0; position: relative; margin-top: 2px; background: #fff; }
+.clm-checkbox.checked { background: #1a1a1a; border-color: #1a1a1a; }
+.clm-checkbox.checked::after { content: ''; position: absolute; left: 3px; top: 0; width: 4px; height: 7px; border: solid #F3D54E; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.clm-multiselect-item-text { font-size: 13px; color: #1a1a1a; line-height: 1.3; white-space: normal; word-break: break-word; }
+
+/* ---------- KPI tiles ---------- */
+.clm-pf-tiles { display: grid; gap: 14px; }
+.clm-pf-tiles-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.clm-pf-tiles-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.clm-pf-tiles-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.clm-pf-tiles-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.clm-pf-tiles-6 .clm-pf-tile-v { font-size: 24px; }
+.clm-pf-tile { box-sizing: border-box; position: relative; display: flex; flex-direction: column; gap: 6px; min-height: 108px; padding: 14px 16px 30px;
+  background: #fff; border: 1px solid #dde3ea; border-top: 4px solid #cdd4dc; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  transition: background-color .2s, box-shadow .2s, border-color .2s; }
+.clm-pf-section &gt; .clm-pf-tiles .clm-pf-tile { min-height: 128px; }
+.clm-tw-body .clm-pf-tile { background: #fafbfc; box-shadow: none; min-height: 0; padding-bottom: 14px; }
+.clm-pf-tile.edge-green  { border-top-color: #27ae60; }
+.clm-pf-tile.edge-orange { border-top-color: #E87722; }
+.clm-pf-tile.edge-red    { border-top-color: #E23D28; }
+.clm-pf-tile-k { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; padding-right: 22px; }
+.clm-pf-tile-v { font-size: 26px; font-weight: 700; line-height: 1.15; color: #1a1a1a; white-space: nowrap; }
+.clm-pf-tile-hint { font-size: 11px; color: #7f8c9a; }
+.v-green  { color: #1e8449; }
+.v-orange { color: #c95f0e; }
+.v-red    { color: #c0392b; }
+.clm-pf-tile.is-click { cursor: pointer; }
+.clm-pf-tile.is-click:hover { border-color: #c9d1db; border-top-color: inherit; box-shadow: 0 3px 10px rgba(0,0,0,.08); }
+.clm-pf-tile.edge-green.is-click:hover  { border-top-color: #27ae60; }
+.clm-pf-tile.edge-orange.is-click:hover { border-top-color: #E87722; }
+.clm-pf-tile.is-active, .clm-tw-body .clm-pf-tile.is-active { background: #fffcf0; border-color: #F3D54E; box-shadow: 0 0 0 2px rgba(243,213,78,.45); }
+.clm-pf-tile.edge-green.is-active  { border-top-color: #27ae60; }
+.clm-pf-tile.edge-orange.is-active { border-top-color: #E87722; }
+.clm-kpi-info { position: absolute; top: 12px; right: 12px; color: #7f8c9a; font-size: 15px; cursor: pointer; transition: color .2s, transform .2s; }
+.clm-pf-tile.is-click:hover .clm-kpi-info, .clm-kpi-info:hover { color: #1a1a1a; transform: scale(1.1); }
+.clm-pf-util-bar { height: 5px; border-radius: 3px; background: #e6eaef; overflow: hidden; margin-top: 2px; }
+.clm-pf-util-fill { height: 100%; border-radius: 3px; background: #27ae60; transition: width .4s; }
+
+/* Live Data marker */
+.clm-tile-subtitle { position: absolute; right: 12px; bottom: 10px; display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px; border-radius: 10px; background: #eaf7ee; border: 1px solid #b9e3c6;
+  font-size: 10.5px; font-weight: 700; color: #1e8449; text-transform: uppercase; letter-spacing: .5px; }
+.clm-live-dot { width: 6px; height: 6px; border-radius: 50%; background: #27ae60; box-shadow: 0 0 0 0 rgba(39,174,96,.6); animation: clmLivePulse 1.8s infinite; }
+@keyframes clmLivePulse { 0% { box-shadow: 0 0 0 0 rgba(39,174,96,.55); } 70% { box-shadow: 0 0 0 6px rgba(39,174,96,0); } 100% { box-shadow: 0 0 0 0 rgba(39,174,96,0); } }
+
+/* Section 2 split */
+.clm-pf-split { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; }
+
+/* ---------- Charts ---------- */
+.clm-chart-card { margin: 0; }
+.clm-chart-card + .clm-charts-row { margin-top: 16px; }
+.clm-trend-body { padding: 14px 18px 8px; width: 100%; box-sizing: border-box; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.clm-trend-svg { display: block; width: 100% !important; min-width: 680px; height: auto !important; max-height: none !important; aspect-ratio: 1550 / 300; overflow: visible; }
+.clm-trend-area { fill: rgba(232,119,34,.10); }
+.clm-trend-line { fill: none; stroke: #E87722; stroke-width: 2.5px; stroke-linejoin: round; }
+.clm-trend-dot { fill: #fff; stroke: #E87722; stroke-width: 2.5px; cursor: pointer; pointer-events: all; }
+.clm-trend-dot:hover { fill: #E87722; }
+.clm-trend-dot.last { fill: #E87722; stroke: #fff; stroke-width: 2px; }
+.clm-trend-grid line { stroke: #e6eaef; stroke-dasharray: 4 4; stroke-width: 1px; }
+.clm-axis-line { stroke: #c9d1db; stroke-width: 1.5px; }
+.clm-trend-yaxis text { font-size: 12px; fill: #5a6a7a; }
+.clm-trend-xaxis text { font-size: 12px; font-weight: 700; fill: #3a4451; }
+.clm-trend-vals text { font-size: 12px; font-weight: 700; fill: #3a4451; }
+.clm-trend-vals text.last { fill: #c95f0e; font-size: 13px; }
+.clm-trend-axis-title { font-size: 12px; font-weight: 700; fill: #3a4451; }
+
+.clm-charts-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.clm-chart-half { margin: 0; }
+.clm-charts-row .clm-chart-wrapper { position: relative; height: 280px; width: 100%; padding: 14px 16px 4px; box-sizing: border-box; }
+.clm-charts-row .clm-chart-wrapper canvas { width: 100% !important; height: 100% !important; }
+.clm-ageing-legend { display: flex; justify-content: center; gap: 8px 20px; flex-wrap: wrap; padding: 10px 16px 14px; border-top: 1px solid #eef1f5; margin-top: 6px; }
+.clm-legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #3a4451; font-weight: 700; }
+.clm-legend-color { width: 12px; height: 12px; border-radius: 3px; display: inline-block; flex-shrink: 0; }
+.clm-legend-line { width: 18px; height: 3px; border-radius: 2px; display: inline-block; flex-shrink: 0; }
+.clm-chart-empty { text-align: center; color: #7f8c9a; padding: 20px; font-style: italic; }
+.clm-chart-loader { position: absolute; top: 56px; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,.75);
+  display: flex; align-items: center; justify-content: center; z-index: 10; }
+.clm-chart-loader i { color: #7f8c9a !important; font-size: 18px !important; }
+
+/* ---------- Table card ---------- */
+.clm-table-container { transition: opacity .3s; }
+.clm-chip-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 12px 20px; border-bottom: 1px solid #e6eaef; }
+.clm-qf { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 13px; font-size: 12px; font-weight: 700; color: #3a4451;
+  background: #fff; border: 1px solid #dde3ea; border-radius: 16px; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
+.clm-qf:hover { border-color: #9aa5b1; background: #fafbfc; }
+.clm-qf .clm-qf-count { padding: 1px 8px; border-radius: 10px; background: #eef1f5; color: #1a1a1a; font-size: 11px; }
+.clm-qf.qf-red i    { color: #E23D28; }
+.clm-qf.qf-orange i { color: #E87722; }
+.clm-qf.qf-blue i   { color: #2e86c1; }
+.clm-qf.qf-purple i { color: #6a3fb5; }
+.clm-qf.qf-green i  { color: #27ae60; }
+.clm-qf.active { background: #1a1a1a; border-color: #1a1a1a; color: #F3D54E; }
+.clm-qf.active i { color: #F3D54E !important; }
+.clm-qf.active .clm-qf-count { background: #F3D54E; color: #1a1a1a; }
+.clm-qf-sort { margin-left: 2px; padding-left: 7px; border-left: 1px solid #dde3ea; }
+.clm-qf-select { height: 32px; padding: 0 12px; font-size: 12px; font-weight: 700; color: #3a4451; background: #fff; border: 1px solid #dde3ea;
+  border-radius: 16px; outline: none; cursor: pointer; margin-left: auto; }
+.clm-qf-select:hover, .clm-qf-select:focus { border-color: #1a1a1a; }
+
+.clm-filters-transition-wrapper { max-height: 200px; overflow: hidden; opacity: 1; padding: 10px 20px; background: #fffcf0; border-bottom: 1px solid #f1e2a0;
+  transition: max-height .35s ease, opacity .35s ease, padding .35s ease; }
+.clm-filters-transition-wrapper.collapsing { max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; border-bottom: none; }
+.clm-active-filters-inline { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.clm-af-label { font-size: 12px; font-weight: 700; color: #3a4451; margin-right: 2px; }
+.clm-filter-chip { display: inline-flex; align-items: center; gap: 6px; background: #fff; border: 1px solid #e6d58a; border-radius: 12px; padding: 3px 10px;
+  font-size: 12px; font-weight: 700; color: #1a1a1a; white-space: nowrap; animation: fadeInChip .25s ease; }
+@keyframes fadeInChip { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.clm-filter-chip i { cursor: pointer; color: #7f8c9a; font-size: 11px; }
+.clm-filter-chip i:hover { color: #E23D28; }
+.clm-clear-all-inline { background: #fff; border: 1px solid #f5c2bc; border-radius: 12px; padding: 3px 10px; font-size: 12px; font-weight: 700; color: #c0392b;
+  cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.clm-clear-all-inline:hover { background: #fef5f4; }
+
+.clm-table-toolbar-top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 20px; border-bottom: 1px solid #e6eaef; }
+.clm-search-box { position: relative; display: flex; align-items: center; flex: 1; max-width: 380px; min-width: 220px; }
+.clm-search-box i { position: absolute; left: 12px; color: #7f8c9a; font-size: 13px; }
+.clm-search-box input { width: 100%; height: 36px; padding: 0 10px 0 34px; border: 1px solid #cdd4dc; border-radius: 6px; font-size: 13px; outline: none; transition: border-color .2s; }
+.clm-search-box input:focus { border-color: #1a1a1a; }
+.clm-table-controls-right { display: flex; align-items: center; gap: 8px; margin-left: auto; font-size: 12px; color: #3a4451; }
+.clm-table-controls-right select { height: 34px; padding: 0 8px; border: 1px solid #cdd4dc; border-radius: 6px; background: #fff; outline: none; cursor: pointer; font-size: 13px; }
+.clm-rows-label { margin-left: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; }
+.clm-btn { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px;
+  border-radius: 6px; cursor: pointer; transition: all .2s ease; white-space: nowrap; }
+.clm-btn-csv { background: #fff; color: #1e8449; border: 1px solid #b9e3c6; }
+.clm-btn-csv:hover { background: #eaf7ee; border-color: #27ae60; }
+.clm-btn-export { background: #1a1a1a; color: #F3D54E; border: 1px solid #1a1a1a; }
+.clm-btn-export:hover:not(:disabled) { background: #333; }
+.clm-btn-export:disabled { background: #cdd4dc; border-color: #cdd4dc; color: #fff; cursor: not-allowed; }
+
+/* ---------- Data table ---------- */
+.clm-table-wrapper { max-height: 520px; overflow: auto; -webkit-overflow-scrolling: touch; width: 100%; transition: opacity .3s; }
+.clm-table { width: 100%; min-width: 1620px; border-collapse: separate; border-spacing: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+.clm-table th { position: sticky; z-index: 10; background: #eef1f5; color: #2b3440; padding: 0 12px; height: 40px; box-sizing: border-box;
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; text-align: center; white-space: nowrap;
+  border-bottom: 1px solid #dde3ea; border-right: 1px solid #dde3ea; vertical-align: middle; }
+.clm-table thead tr.super th { top: 0; height: 36px; letter-spacing: 1px; }
+.clm-table thead tr.cols th { top: 36px; border-bottom: 2px solid #c9d1db; }
+.clm-table th.bg-code   { background: #e3eefa; color: #0b5394; }
+.clm-table th.bg-pan    { background: #fdf3e1; color: #a35400; }
+.clm-table th.bg-seg    { background: #f1f3f7; color: #3a4451; }
+.clm-table th.bg-assess { background: #efe9f9; color: #6a3fb5; }
+.clm-table td { padding: 11px 12px; color: #1a1a1a; text-align: center; white-space: nowrap; vertical-align: middle;
+  border-bottom: 1px solid #e6eaef; border-right: 1px solid #eef1f5; background: #fff; }
+.clm-table tr &gt; :last-child { border-right: 0; }
+.clm-table tbody tr:nth-child(even) td { background: #fbfcfd; }
+.clm-table tbody tr:hover td { background: #fffcf0; }
+.clm-table thead tr.cols th:first-child, .clm-table td:first-child { text-align: left; }
+.clm-table td.num { text-align: right; }
+.clm-table td.clm-loc { text-align: left; }
+.clm-cust-cell { min-width: 230px; max-width: 300px; white-space: normal !important; }
+.clm-cust-link { display: block; text-decoration: none !important; cursor: pointer; }
+.clm-cust-name { display: block; font-weight: 700; color: #0b5394; line-height: 1.3;
+  text-decoration: underline; text-decoration-color: #9cc3e6; text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+.clm-cust-code { display: block; margin-top: 2px; font-size: 12px; font-weight: 600; color: #5a6a7a; }
+.clm-cust-go { display: inline-flex; align-items: center; gap: 4px; margin-top: 5px; padding: 1px 8px; border-radius: 10px;
+  background: #e3eefa; border: 1px solid #bcd2ec; color: #0b5394; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; }
+.clm-cust-go .fa { font-size: 9px; }
+.clm-cust-link:hover .clm-cust-name { color: #073b6b; text-decoration-color: #0b5394; }
+.clm-cust-link:hover .clm-cust-go { background: #0b5394; border-color: #0b5394; color: #fff; }
+.clm-code { font-weight: 700; color: #1a1a1a; letter-spacing: .3px; }
+.clm-sub-code { display: block; font-size: 11px; color: #7f8c9a; margin-top: 2px; }
+.clm-empty-row { text-align: center !important; padding: 34px !important; color: #5a6a7a !important; font-size: 13px; }
+.clm-strong { font-weight: 700; }
+.clm-od90 { color: #c0392b; font-weight: 700; }
+.clm-util { display: inline-flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.clm-mini-progress { width: 40px; height: 5px; background: #e6eaef; border-radius: 3px; overflow: hidden; }
+.clm-mini-fill { height: 100%; border-radius: 3px; background: currentColor; }
+
+/* pills */
+.clm-pill-status { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11.5px; font-weight: 700; border: 1px solid #dde3ea; background: #f6f7f9; color: #3a4451; }
+.status-approved  { background: #eaf7ee; color: #1e8449; border-color: #b9e3c6; }
+.status-submitted { background: #e8f2fa; color: #2e86c1; border-color: #bcd8ee; }
+.status-active    { background: #f1f3f7; color: #1a1a1a; border-color: #dde3ea; }
+.status-rejected  { background: #fdecea; color: #b3261e; border-color: #f5c2bc; }
+.seg-cement { background: #fff8e1; color: #7a5a00; border-color: #f3d54e; }
+.seg-bpd    { background: #fdf3e1; color: #a35400; border-color: #f6d39a; }
+.seg-rmc    { background: #e3eefa; color: #0b5394; border-color: #bcd2ec; }
+.clm-hg-yes { background: #eaf7ee; color: #1e8449; border-color: #b9e3c6; }
+.clm-hg-no  { background: #f6f7f9; color: #7f8c9a; border-color: #e6eaef; }
+.clm-risk-pill { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11.5px; font-weight: 700; background: #f6f7f9; color: #5a6a7a; border: 1px solid #e6eaef; }
+.clm-risk-pill.clm-text-red    { background: #fdecea; border-color: #f5c2bc; }
+.clm-risk-pill.clm-text-orange { background: #fff4e0; border-color: #f6d39a; }
+.clm-risk-pill.clm-text-green  { background: #eaf7ee; border-color: #b9e3c6; }
+.clm-text-red    { color: #c0392b !important; font-weight: 700; }
+.clm-text-orange { color: #c95f0e !important; font-weight: 700; }
+.clm-text-green  { color: #1e8449 !important; font-weight: 700; }
+
+/* footer */
+.clm-table-footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 20px; background: #fafbfc; border-top: 1px solid #dde3ea; }
+.clm-showing { font-size: 12px; color: #5a6a7a; }
+.clm-showing b { color: #1a1a1a; }
+.clm-page-numbers { display: flex; gap: 4px; margin-left: auto; }
+.clm-page-btn { min-width: 32px; height: 32px; padding: 0 8px; background: #fff; border: 1px solid #cdd4dc; border-radius: 6px; color: #3a4451; font-size: 12px; font-weight: 700;
+  cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.clm-page-btn:hover:not(:disabled) { border-color: #1a1a1a; }
+.clm-page-btn.active { background: #1a1a1a; border-color: #1a1a1a; color: #F3D54E; }
+.clm-page-btn:disabled { color: #b0b9c4; background: #f6f7f9; border-color: #e6eaef; cursor: not-allowed; }
+
+/* ---------- Responsive ---------- */
+@media (max-width: 1600px) {
+  .clm-pf-tiles-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 1440px) {
+  .clm-filter-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 1280px) {
+  .clm-pf-split { grid-template-columns: 1fr; }
+}
+@media (max-width: 1100px) {
+  .clm-filter-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .clm-pf-tiles-4, .clm-pf-tiles-5, .clm-pf-tiles-6 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .clm-charts-row { grid-template-columns: 1fr; }
+}
+@media (max-width: 768px) {
+  .clm-pf-section { padding: 14px 12px; }
+  .clm-qf-select { margin-left: 0; }
+  .clm-search-box { max-width: none; flex-basis: 100%; }
+  .clm-table-controls-right { margin-left: 0; flex-wrap: wrap; }
+}
+@media (max-width: 640px) {
+  .clm-filter-row, .clm-pf-tiles-4, .clm-pf-tiles-5, .clm-pf-tiles-6, .clm-pf-tiles-2 { grid-template-columns: 1fr; }
+  .clm-pf-tile-v { font-size: 22px; }
+  .clm-pf-section &gt; .clm-pf-tiles .clm-pf-tile { min-height: 92px; }
+  .clm-section-sub { flex-basis: 100%; }
+  .clm-section-sub::before { display: none; }
+  .clm-charts-row .clm-chart-wrapper { height: 240px; padding: 10px 8px 4px; }
+  .clm-table-footer { justify-content: center; }
+  .clm-page-numbers { margin-left: 0; flex-wrap: wrap; }
+}
+
+/* ---------- EXPORT MODE (PDF SNAPSHOT) ---------- */
+.pdf-export-mode { width: 1920px !important; min-width: 1920px !important; max-width: 1920px !important; padding: 20px !important; background: #fff !important; box-sizing: border-box !important; }
+.pdf-export-mode .clm-filter-card, .pdf-export-mode .clm-table-section, .pdf-export-mode .clm-btn-export, .pdf-export-mode .clm-kpi-info { display: none !important; }
+.pdf-export-mode .clm-pf-tiles-4 { grid-template-columns: repeat(4, 1fr) !important; }
+.pdf-export-mode .clm-pf-tiles-5 { grid-template-columns: repeat(5, 1fr) !important; }
+.pdf-export-mode .clm-pf-tiles-6 { grid-template-columns: repeat(6, 1fr) !important; }
+.pdf-export-mode .clm-pf-tiles-2 { grid-template-columns: repeat(2, 1fr) !important; }
+.pdf-export-mode .clm-pf-split { grid-template-columns: 2fr 1fr !important; }
+.pdf-export-mode .clm-charts-row { grid-template-columns: 1fr 1fr !important; }
+.pdf-export-mode .clm-live-dot { animation: none !important; }
+.pdf-export-mode .clm-trend-svg { min-width: 0 !important; }
+
+/* ---------- FULL-SCREEN LOADING OVERLAY ---------- */
+.pdf-loading-overlay { position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; width: 100vw !important; height: 100vh !important;
+  background: rgba(255,255,255,.95) !important; z-index: 2147483647 !important; display: flex !important; flex-direction: column !important;
+  align-items: center !important; justify-content: center !important; color: #1a1a1a !important; backdrop-filter: blur(4px); }
+.pdf-spinner-box { text-align: center; }
+.pdf-loading-text { font-size: 22px; font-weight: 700; margin-top: 20px; color: #1a1a1a; }
+.pdf-loading-sub { font-size: 13px; color: #5a6a7a; margin-top: 8px; }
+
+/* ---------- Access Restricted ---------- */
+.clm-access-denied { max-width: 620px; margin: 40px auto; padding: 32px 28px; text-align: center; background: #fff;
+  border: 1px solid #dde3ea; border-top: 4px solid #E23D28; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+.clm-ad-icon { width: 48px; height: 48px; margin: 0 auto 14px; border-radius: 50%; background: #fdecea; color: #c0392b;
+  display: flex; align-items: center; justify-content: center; font-size: 20px; }
+.clm-ad-title { font-size: 16px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+.clm-ad-text { font-size: 13px; color: #3a4451; line-height: 1.5; }
+
+/* ---------- One font family (keep last) ---------- */
+.clm-widget, .clm-widget *, .clm-widget input, .clm-widget select,
+.clm-widget textarea, .clm-widget button, .clm-widget table, .clm-widget svg text {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}
+.clm-widget .fa { font-family: FontAwesome !important; }</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>false</has_preview>
+        <id>clm_nt_zhm_portfolio</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>clm_nt_zhm_portfolio</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[/*
+  CLM ZHM Non-Trade Portfolio Overview - Server Script
+  v1.2
+  ACCESS: rows of the logged-in user are read from BOTH
+      x_birl3_clm_role_user_mapping  (u_user / u_role / u_zone)
+      x_birl3_clm_approval_matrix    (approver_user / role_name / zone column - see ZONE_FIELD_CANDIDATES)
+    Trade roles     : ZHM, ZH_RMC, ZH_BPD, ZCH                      -> business 'trade'
+    Non-Trade roles : NT CEMENT ZHM / NT CEMENT ZCH -> Cement
+                      NT RMC ZH     / NT RMC ZCH    -> RMC
+                      NT BPD ZH BPD / NT BPD ZCH    -> BPD            -> business 'nonTrade'
+    Role strings are normalised (case, spaces, '_' and '-' are equivalent).
+  SCOPE: segments = segments of the user's NT roles; zones = the user's mapped zones; region / depot = whatever exists
+         in the customer master (CG1 = N01) inside those zones.
+  v1.2: the new credit request table is NOT used in Non-Trade.
+      Expected potential = expected_sob (site request, customer_site_code = master customer_code_sap)
+      Status             = pan request state via the site request's pan_request reference (else "Active")
+      Review In / CL Validity = customer master next_review_date
+  The denial message says WHY access was refused (no NT role / role without zone).
+*/
+(function() {
+    if (typeof data === 'undefined') return;
+
+    var OWN_BUSINESS = 'nonTrade';
+    var CG1 = 'N01';
+
+    // true = also merge CLMBusinessAccess().getAccess('ZHM') into the Business dropdown options
+    var USE_SCRIPT_INCLUDE = false;
+
+    // If an NT role has NO zone on its own row, fall back to the zones on ANY of the user's role-mapping rows.
+    // Leave false unless that is really how your data is meant to work.
+    var FALLBACK_TO_ANY_MAPPED_ZONE = false;
+
+    var BUSINESS_CONFIG = {
+        trade:    { key: 'trade',    label: 'Trade',        cg1: 'T00', layout: 'trade',    built: true,  order: 1 },
+        nonTrade: { key: 'nonTrade', label: 'Non-Trade',    cg1: 'N01', layout: 'nonTrade', built: true,  order: 2 },
+        key:      { key: 'key',      label: 'Key Customer', cg1: 'N00', layout: 'key',      built: true, order: 3 }
+    };
+
+    var TABLES = {
+        master:      'x_birl3_clm_clm_customer_master1',
+        siteRequest: 'x_birl3_clm_nt_site_request',
+        panRequest:  'x_birl3_clm_nt_pan_request',      // reached through site request.pan_request (status only)
+        snapshot:    'x_birl3_clm_clm_aging_snapshot',
+        roleMap:     'x_birl3_clm_role_user_mapping',
+        matrix:      'x_birl3_clm_approval_matrix',
+        salesData:   'x_birl3_clm_clm_cement_rmc_bpd_values',
+        salesVolume: 'x_birl3_clm_clm_sales_data'
+    };
+
+    // Where the user's role rows live. >>> Check the zone column name on the approval matrix <<<
+    var ROLE_SOURCES = [
+        { name: 'roleMap', table: TABLES.roleMap, userField: 'u_user',        roleField: 'u_role'    },
+        { name: 'matrix',  table: TABLES.matrix,  userField: 'approver_user', roleField: 'role_name' }
+    ];
+    // Put YOUR real zone column first if it is not one of these
+    var ZONE_FIELD_CANDIDATES = ['u_zone', 'zone', 'zones', 'u_zones', 'zone_code', 'u_zone_code'];
+
+    // customer master field names
+    var ZONE_FIELD        = 'zone';
+    var ZONE_NAME_FIELD   = 'zone_name';
+    var REGION_FIELD      = 'region';
+    var REGION_NAME_FIELD = 'region_name';
+
+    // ---------- Role configuration (normalised: UPPERCASE, words joined with '_') ----------
+    var TRADE_ROLES = ['ZHM', 'ZH_RMC', 'ZH_BPD', 'ZCH'];
+    var KEY_ROLES   = ['ZH', 'ZK_HBPD', 'ZH_KEY', 'ZCH'];
+    var NT_ROLE_SEGMENT = {
+        'NT_CEMENT_ZHM':  'Cement',
+        'NT_CEMENT_ZCH':  'Cement',
+        'NT_RMC_ZH':      'RMC',
+        'NT_RMC_ZCH':     'RMC',
+        'NT_BPD_ZH_BPD':  'BPD',
+        'NT_BPD_ZCH':     'BPD'
+    };
+
+    var SALES_FIELDS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    var BUCKETS = ['bucket_0_30_days', 'bucket_31_45_days', 'bucket_46_60_days', 'bucket_61_75_days', 'bucket_76_90_days', 'bucket_91_120_days', 'bucket_gt120_days'];
+    var HIGH_GROWTH_THRESHOLD_PCT = 110;
+    var MAX_EXPORT_ROWS = 5000;
+    var MAX_PAGE_ROWS = 200;
+    var NUMERIC_TYPES = ['decimal', 'integer', 'float', 'currency', 'price', 'longint', 'double'];
+    var MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var MONTH_ABBR  = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+
+    // ---------- helpers ----------
+    function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+    function firstOfMonth(y, m) { var d = new Date(y, m, 1); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-01'; }
+    function fastNum(v) {
+        if (!v) return 0;
+        var n = parseFloat(v.toString().replace(/,/g, ''));
+        return isNaN(n) ? 0 : n;
+    }
+    function monthFieldName(year, month) { return MONTH_ABBR[month]; }
+    function normRole(r) { return String(r || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, ''); }
+    function splitList(raw) {
+        return String(raw || '').split(',').map(function(z) { return z.trim(); }).filter(function(z) { return z; });
+    }
+    function safeVal(gr, field) {
+        var val = gr.getValue(field) || '';
+        if (val.length === 32 && /^[0-9a-f]{32}$/i.test(val)) { val = gr.getDisplayValue(field) || val; }
+        return val;
+    }
+    // zone(s) of a mapping row: first candidate column that has a value
+    function readZones(gr) {
+        for (var i = 0; i < ZONE_FIELD_CANDIDATES.length; i++) {
+            var fld = ZONE_FIELD_CANDIDATES[i];
+            if (!gr.isValidField(fld)) continue;
+            var raw = String(gr.getValue(fld) || '');
+            if (!raw) continue;
+            if (/[0-9a-f]{32}/i.test(raw)) raw = String(gr.getDisplayValue(fld) || '');   // reference / list -> display text
+            var z = splitList(raw);
+            if (z.length) return z;
+        }
+        return [];
+    }
+    // 'NT_CEMENT_ZHM' -> 'Cement' etc. (explicit map first, then pattern)
+    function ntSegmentOf(k) {
+        if (NT_ROLE_SEGMENT[k]) return NT_ROLE_SEGMENT[k];
+        var m = /^NT_(CEMENT|RMC|BPD)_(ZHM|ZCH|ZH|ZH_BPD)$/.exec(k);
+        if (!m) return null;
+        return m[1] === 'CEMENT' ? 'Cement' : m[1];
+    }
+
+    // ---------- Access from the role mapping + approval matrix ----------
+    function loadRoleAccess() {
+        var acc = {
+            business: { trade: false, nonTrade: false, key: false },
+            segZoneMap: {},
+            ntRoles: [],          // NT roles found for the user
+            ntNoZone: [],         // NT roles found but without a zone
+            anyZones: []          // zones on any of the user's rows (only used when FALLBACK_TO_ANY_MAPPED_ZONE)
+        };
+        var uid = gs.getUserID();
+        var pending = [];         // NT rows without a zone: [{ role, seg }]
+
+        ROLE_SOURCES.forEach(function(src) {
+            var gr = new GlideRecord(src.table);
+            if (!gr.isValid()) return;
+            if (!gr.isValidField(src.userField) || !gr.isValidField(src.roleField)) return;
+            var q = gr.addQuery(src.userField, uid);
+            q.addOrCondition(src.userField, 'CONTAINS', uid);        // also works when the user column is a List
+            gr.query();
+            while (gr.next()) {
+                var zones = readZones(gr);
+                zones.forEach(function(z) { if (acc.anyZones.indexOf(z) === -1) acc.anyZones.push(z); });
+
+                var keys = [normRole(gr.getValue(src.roleField)), normRole(gr.getDisplayValue(src.roleField))];
+                var ntSeg = null, ntKey = '', isTrade = false, isKey = false;
+                keys.forEach(function(k) {
+                    if (!k) return;
+                    var s = ntSegmentOf(k);
+                    if (s && !ntSeg) { ntSeg = s; ntKey = k; }
+                    if (TRADE_ROLES.indexOf(k) > -1) isTrade = true;
+                    if (KEY_ROLES.indexOf(k) > -1) isKey = true;
+                });
+
+                if (zones.length && isTrade) acc.business.trade = true;
+                if (zones.length && isKey) acc.business.key = true;
+
+                if (ntSeg) {
+                    acc.business.nonTrade = true;
+                    acc.ntRoles.push(ntKey + ' [' + src.name + ']');
+                    if (!zones.length) {
+                        acc.ntNoZone.push(ntKey + ' [' + src.name + ']');
+                        pending.push({ role: ntKey, seg: ntSeg });
+                        continue;
+                    }
+                    if (!acc.segZoneMap[ntSeg]) acc.segZoneMap[ntSeg] = {};
+                    zones.forEach(function(z) { acc.segZoneMap[ntSeg][z] = true; });
+                }
+            }
+        });
+
+        if (FALLBACK_TO_ANY_MAPPED_ZONE && acc.anyZones.length) {
+            pending.forEach(function(p) {
+                if (!acc.segZoneMap[p.seg]) acc.segZoneMap[p.seg] = {};
+                acc.anyZones.forEach(function(z) { acc.segZoneMap[p.seg][z] = true; });
+            });
+        }
+        return acc;
+    }
+
+    var ROLE = loadRoleAccess();
+    var BIZ_ACCESS = { trade: ROLE.business.trade, nonTrade: ROLE.business.nonTrade, key: ROLE.business.key };
+    if (USE_SCRIPT_INCLUDE) {
+        try {
+            var si = new CLMBusinessAccess().getAccess('ZHM') || {};
+            ['trade', 'nonTrade', 'key'].forEach(function(k) { if (si[k]) BIZ_ACCESS[k] = true; });
+        } catch (e) { gs.error('CLM ZHM NT portfolio: CLMBusinessAccess failed - ' + e); }
+    }
+
+    function getBusinessOptions() {
+        var arr = [];
+        for (var k in BUSINESS_CONFIG) {
+            if (!BUSINESS_CONFIG.hasOwnProperty(k)) continue;
+            var b = BUSINESS_CONFIG[k];
+            if (!BIZ_ACCESS[b.key]) continue;      // no access: not listed
+            if (!b.built) continue;                // not built: not listed
+            arr.push({ value: b.key, label: b.label, cg1: b.cg1, layout: b.layout, enabled: true, order: b.order });
+        }
+        arr.sort(function(a, b) { return a.order - b.order; });
+        return arr;
+    }
+
+    data.businessOptions = getBusinessOptions();
+    data.defaultBusiness = OWN_BUSINESS;
+
+    if (typeof input === 'undefined' || !input) {
+        data.filterOpts = { segments: [], zones: [], regions: [], depots: [] };
+        return;
+    }
+
+    // ================= Aggregator (GlideAggregate based) =================
+    function aggSums(table, fields, opts) {
+        opts = opts || {};
+        var out = {};
+        var probe = new GlideRecord(table);
+        var numeric = [], textual = [];
+
+        fields.forEach(function(base) {
+            var actual = probe.isValidField(base) ? base : (probe.isValidField('u_' + base) ? 'u_' + base : null);
+            if (!actual) return;
+            var type = '';
+            try { type = String(probe.getElement(actual).getED().getInternalType()).toLowerCase(); } catch (e) {}
+            var item = { base: base, actual: actual };
+            if (NUMERIC_TYPES.indexOf(type) > -1) numeric.push(item); else textual.push(item);
+        });
+
+        function keyOf(ga) { return opts.groupBy ? String(ga.getValue(opts.groupBy) || '').substring(0, 7) : '_all'; }
+        function slot(key) {
+            if (!out[key]) { out[key] = {}; fields.forEach(function(b) { out[key][b] = 0; }); }
+            return out[key];
+        }
+        function baseQuery() {
+            var ga = new GlideAggregate(table);
+            if (opts.scope) opts.scope(ga);
+            if (opts.extra) opts.extra(ga);
+            return ga;
+        }
+
+        if (numeric.length) {
+            var ga = baseQuery();
+            if (opts.groupBy) ga.groupBy(opts.groupBy);
+            numeric.forEach(function(it) { ga.addAggregate('SUM', it.actual); });
+            ga.query();
+            while (ga.next()) {
+                var s = slot(keyOf(ga));
+                numeric.forEach(function(it) { s[it.base] += fastNum(ga.getAggregate('SUM', it.actual)); });
+            }
+        }
+        textual.forEach(function(it) {
+            var g = baseQuery();
+            if (opts.groupBy) g.groupBy(opts.groupBy);
+            g.groupBy(it.actual);
+            g.addAggregate('COUNT');
+            g.query();
+            while (g.next()) {
+                var cnt = parseInt(g.getAggregate('COUNT'), 10) || 0;
+                slot(keyOf(g))[it.base] += fastNum(g.getValue(it.actual)) * cnt;
+            }
+        });
+        return out;
+    }
+
+    data.error = '';
+    data.accessDenied = false;
+    data.layoutUnavailable = false;
+
+    try { run(); }
+    catch (e) {
+        gs.error('CLM ZHM Non-Trade Portfolio widget error: ' + e + ' | ' + (e && e.stack));
+        data.error = 'Server error: ' + (e && e.message ? e.message : e);
+    }
+
+    function run() {
+        var f = (input && input.filters) ? input.filters : {};
+        function normalizeArray(val) {
+            if (typeof val === 'string') { try { val = JSON.parse(val); } catch (e) { val = val ? [val] : []; } }
+            if (!Array.isArray(val)) val = val ? [val] : [];
+            return val.map(function(x) { return String(x).trim(); }).filter(function(x) { return x !== ''; });
+        }
+        f.segments = normalizeArray(f.segments);
+        f.zones    = normalizeArray(f.zones);
+        f.regions  = normalizeArray(f.regions);
+        f.depots   = normalizeArray(f.depots);
+
+        var action = (input && input.action) || 'kpis';
+
+        // ---------- Authorization + scope ----------
+        var segZoneMap = ROLE.segZoneMap;
+        function zonesForSegments(segList) {
+            var out = {};
+            segList.forEach(function(s) { Object.keys(segZoneMap[s] || {}).forEach(function(z) { out[z] = true; }); });
+            return Object.keys(out);
+        }
+        var allowedSegments = Object.keys(segZoneMap);
+        var allowedZones = zonesForSegments(allowedSegments);
+
+        if (action === 'kpis' && input.fetchFilters) {
+            gs.info('CLM ZHM NonTrade access user=' + gs.getUserName() + ' ntRoles=[' + ROLE.ntRoles.join(', ') + '] noZone=[' + ROLE.ntNoZone.join(', ') + '] map=' + JSON.stringify(segZoneMap));
+        }
+
+        if (!ROLE.business.nonTrade || !allowedSegments.length || !allowedZones.length) {
+            if (!ROLE.ntRoles.length) {
+                data.error = 'Access denied: no Non-Trade ZHM / ZCH role (NT CEMENT / NT RMC / NT BPD) was found for your user in the role mapping or approval matrix.';
+            } else {
+                data.error = 'Access denied: your Non-Trade role (' + ROLE.ntRoles.join(', ') + ') has no zone assigned.';
+            }
+            data.accessDenied = true;
+            var alt = data.businessOptions.filter(function(o) { return o.value !== OWN_BUSINESS; })[0];
+            if (alt) data.redirectBusiness = alt.value;
+            return;
+        }
+
+        if (f.business && f.business !== OWN_BUSINESS) {
+            data.error = 'This widget only serves the Non-Trade business';
+            data.layoutUnavailable = true;
+            return;
+        }
+        data.business = OWN_BUSINESS;
+
+        var pm = /^(\d{4})-(\d{2})$/.exec(f.period || '');
+        var pYear, pMonth;
+        if (pm) { pYear = parseInt(pm[1], 10); pMonth = parseInt(pm[2], 10) - 1; }
+        else { var nowF = new Date(); var lm = new Date(nowF.getFullYear(), nowF.getMonth() - 1, 1); pYear = lm.getFullYear(); pMonth = lm.getMonth(); }
+        var periodStart = firstOfMonth(pYear, pMonth);
+        var periodNext  = firstOfMonth(pYear, pMonth + 1);
+        var monthSalesFieldName = monthFieldName(pYear, pMonth);
+
+        // Selected values are always intersected with what the user is mapped to
+        var activeSegments = f.segments.length ? f.segments.filter(function(s) { return allowedSegments.indexOf(s) > -1; }) : allowedSegments;
+        if (!activeSegments.length) activeSegments = allowedSegments;
+
+        var segZones = zonesForSegments(activeSegments);
+        var activeZones = f.zones.length ? f.zones.filter(function(zv) { return segZones.indexOf(zv) > -1; }) : segZones;
+        if (!activeZones.length) activeZones = segZones;
+
+        var activeRegions = f.regions;
+        var activeDepots  = f.depots;
+
+        // Every query: segment + zone (+ region / depot) + CG1 = N01
+        function applyScope(gr, prefix) {
+            prefix = prefix || '';
+            gr.addQuery(prefix + 'segment', 'IN', activeSegments.join(','));
+            gr.addQuery(prefix + ZONE_FIELD, 'IN', activeZones.join(','));
+            if (activeRegions.length) gr.addQuery(prefix + REGION_FIELD, 'IN', activeRegions.join(','));
+            if (activeDepots.length)  gr.addQuery(prefix + 'depot', 'IN', activeDepots.join(','));
+            gr.addQuery(prefix + 'cg1', CG1);
+        }
+
+        function populateFilterOptions() {
+            var opts = { segments: [], zones: [], regions: [], depots: [] };
+
+            function baseAgg(segmentList, zoneList) {
+                var ga = new GlideAggregate(TABLES.master);
+                ga.addQuery('cg1', CG1);
+                ga.addQuery('segment', 'IN', segmentList.join(','));
+                ga.addQuery(ZONE_FIELD, 'IN', zoneList.join(','));
+                return ga;
+            }
+
+            (function() {   // Segments: the user's role segments
+                var ga = baseAgg(allowedSegments, allowedZones);
+                ga.groupBy('segment'); ga.query();
+                var seen = {};
+                while (ga.next()) {
+                    var val = ga.getValue('segment');
+                    if (val && !seen[val]) { seen[val] = true; opts.segments.push({ label: ga.getDisplayValue('segment') || val, value: val }); }
+                }
+                allowedSegments.forEach(function(s) {
+                    if (!seen[s]) { seen[s] = true; opts.segments.push({ label: s, value: s }); }
+                });
+                opts.segments.sort(function(a, b) { return String(a.label).localeCompare(String(b.label)); });
+            })();
+
+            (function() {   // Zones: all the user's mapped zones (for the active segments)
+                var ga = baseAgg(activeSegments, segZones);
+                ga.groupBy(ZONE_FIELD); ga.groupBy(ZONE_NAME_FIELD); ga.query();
+                var seen = {};
+                while (ga.next()) {
+                    var zv = safeVal(ga, ZONE_FIELD);
+                    if (zv && !seen[zv]) { seen[zv] = true; opts.zones.push({ label: ga.getValue(ZONE_NAME_FIELD) || zv, value: zv }); }
+                }
+                segZones.forEach(function(z) {
+                    if (!seen[z]) { seen[z] = true; opts.zones.push({ label: z, value: z }); }
+                });
+                opts.zones.sort(function(a, b) { return String(a.label).localeCompare(String(b.label)); });
+            })();
+
+            (function() {   // Regions found in the customer master inside the selected zone(s)
+                var ga = baseAgg(activeSegments, activeZones);
+                ga.groupBy(REGION_FIELD); ga.groupBy(REGION_NAME_FIELD); ga.query();
+                var seen = {};
+                while (ga.next()) {
+                    var rv = safeVal(ga, REGION_FIELD);
+                    if (rv && !seen[rv]) { seen[rv] = true; opts.regions.push({ label: ga.getValue(REGION_NAME_FIELD) || rv, value: rv }); }
+                }
+                opts.regions.sort(function(a, b) { return String(a.label).localeCompare(String(b.label)); });
+            })();
+
+            (function() {   // Depots in the selected zone(s), tagged with their region
+                var ga = baseAgg(activeSegments, activeZones);
+                ga.groupBy('depot'); ga.groupBy('depot_name'); ga.groupBy(REGION_FIELD); ga.groupBy(REGION_NAME_FIELD); ga.query();
+                var seen = {};
+                while (ga.next()) {
+                    var dv = safeVal(ga, 'depot');
+                    if (!dv || seen[dv]) continue;
+                    seen[dv] = true;
+                    opts.depots.push({ label: ga.getValue('depot_name') || dv, value: dv, regionValue: safeVal(ga, REGION_FIELD), regionName: ga.getValue(REGION_NAME_FIELD) || '' });
+                }
+                opts.depots.sort(function(a, b) { return String(a.label).localeCompare(String(b.label)); });
+            })();
+
+            return opts;
+        }
+
+        if (action === 'kpis' && input.fetchFilters) data.filterOpts = populateFilterOptions();
+
+        var HANDLERS = { kpis: ntKpis, charts: ntCharts, table: ntTable, 'export': ntTable };
+        var handler = HANDLERS[action];
+        if (!handler) { data.error = 'Action "' + action + '" is not supported'; return; }
+        handler(action);
+
+        // =================================================================
+        // ACTION 1: KPIs
+        // =================================================================
+        function ntKpis() {
+            // pending / sendBack / rejected stay 0: not shown on this page and the credit request table is not used in Non-Trade
+            var counts = { total: 0, overdue: 0, review15: 0, review30: 0, highRisk: 0, highGrowth: 0, pending: 0, sendBack: 0, rejected: 0, expiring: 0, osGreaterThanZero: 0 };
+            var currentYm = pYear + '-' + pad2(pMonth + 1);
+
+            var gaCnt = new GlideAggregate(TABLES.master); applyScope(gaCnt, ''); gaCnt.addAggregate('COUNT'); gaCnt.query();
+            counts.total = gaCnt.next() ? (parseInt(gaCnt.getAggregate('COUNT'), 10) || 0) : 0;
+
+            var osCount = 0;
+            var gaOsCount = new GlideAggregate(TABLES.snapshot);
+            applyScope(gaOsCount, 'customer.');
+            gaOsCount.addQuery('snapshot_month', '>=', periodStart);
+            gaOsCount.addQuery('snapshot_month', '<', periodNext);
+            gaOsCount.addQuery('total_outstanding', '>', 0);
+            gaOsCount.groupBy('customer');
+            gaOsCount.query();
+            while (gaOsCount.next()) { osCount++; }
+            counts.osGreaterThanZero = osCount;
+
+            var masterSums = aggSums(TABLES.master, ['cr_limit', 'bank_guarantee'], { scope: function(gr) { applyScope(gr, ''); } })['_all'] || { cr_limit: 0, bank_guarantee: 0 };
+            var totalLimit = masterSums.cr_limit || 0;
+            var totalActiveBg = Math.abs(masterSums.bank_guarantee || 0);
+
+            var snapSums = aggSums(TABLES.snapshot, ['total_outstanding'].concat(BUCKETS), {
+                scope: function(gr) { applyScope(gr, 'customer.'); },
+                extra: function(gr) { gr.addQuery('snapshot_month', '>=', periodStart); gr.addQuery('snapshot_month', '<', periodNext); },
+                groupBy: 'snapshot_month'
+            });
+
+            function countCustomersWith(buckets) {
+                var ga = new GlideAggregate(TABLES.snapshot); applyScope(ga, 'customer.');
+                ga.addQuery('snapshot_month', '>=', periodStart); ga.addQuery('snapshot_month', '<', periodNext);
+                var q = ga.addQuery(buckets[0], '>', 0);
+                for (var b = 1; b < buckets.length; b++) q.addOrCondition(buckets[b], '>', 0);
+                ga.addAggregate('COUNT'); ga.query();
+                return ga.next() ? (parseInt(ga.getAggregate('COUNT'), 10) || 0) : 0;
+            }
+            counts.highRisk = countCustomersWith(['bucket_91_120_days', 'bucket_gt120_days']);
+            counts.overdue  = countCustomersWith(BUCKETS);
+
+            var cmap = snapSums[currentYm] || { total_outstanding: 0, bucket_0_30_days: 0, bucket_31_45_days: 0, bucket_46_60_days: 0, bucket_61_75_days: 0, bucket_76_90_days: 0, bucket_91_120_days: 0, bucket_gt120_days: 0 };
+            var totalOutstanding = cmap.total_outstanding;
+            var totalOd90 = cmap.bucket_91_120_days + cmap.bucket_gt120_days;
+            var totalOverdue = cmap.bucket_0_30_days + cmap.bucket_31_45_days + cmap.bucket_46_60_days + cmap.bucket_61_75_days + cmap.bucket_76_90_days + totalOd90;
+
+            // CL validity: customer master next_review_date (expired dates included)
+            var gaRev15 = new GlideAggregate(TABLES.master);
+            applyScope(gaRev15, '');
+            gaRev15.addEncodedQuery('next_review_dateISNOTEMPTY^next_review_date<=javascript:gs.daysAgoEnd(-15)');
+            gaRev15.addAggregate('COUNT'); gaRev15.query();
+            if (gaRev15.next()) { counts.review15 = parseInt(gaRev15.getAggregate('COUNT'), 10) || 0; counts.expiring = counts.review15; }
+
+            var gaRev30 = new GlideAggregate(TABLES.master);
+            applyScope(gaRev30, '');
+            gaRev30.addEncodedQuery('next_review_dateISNOTEMPTY^next_review_date<=javascript:gs.daysAgoEnd(-30)');
+            gaRev30.addAggregate('COUNT'); gaRev30.query();
+            if (gaRev30.next()) counts.review30 = parseInt(gaRev30.getAggregate('COUNT'), 10) || 0;
+
+            var valSums = aggSums(TABLES.salesData, [monthSalesFieldName], { scope: function(gr) { applyScope(gr, 'u_customer.'); } })['_all'] || {};
+            var sumTotalMonthSales = valSums[monthSalesFieldName] || 0;
+
+            var hhiScore = 0, hhiLabel = 'Less';
+            if (totalOutstanding > 0) {
+                var sumOfSquares = 0;
+                var gaHHI = new GlideAggregate(TABLES.snapshot);
+                applyScope(gaHHI, 'customer.');
+                gaHHI.addQuery('snapshot_month', '>=', periodStart); gaHHI.addQuery('snapshot_month', '<', periodNext);
+                gaHHI.addQuery('total_outstanding', '>', 0);
+                gaHHI.groupBy('customer'); gaHHI.addAggregate('SUM', 'total_outstanding'); gaHHI.query();
+                while (gaHHI.next()) {
+                    var custOs = fastNum(gaHHI.getAggregate('SUM', 'total_outstanding'));
+                    var share = (custOs / totalOutstanding) * 100;
+                    sumOfSquares += (share * share);
+                }
+                hhiScore = Math.round(sumOfSquares);
+                if (hhiScore < 1500) hhiLabel = 'Less';
+                else if (hhiScore <= 2500) hhiLabel = 'Moderate';
+                else hhiLabel = 'High';
+            }
+
+            data.counts = counts;
+
+            var nowLatest = new Date();
+            var dLatest = new Date(nowLatest.getFullYear(), nowLatest.getMonth() - 1, 1);
+            var latestPeriodStart = firstOfMonth(dLatest.getFullYear(), dLatest.getMonth());
+            var latestPeriodNext = firstOfMonth(dLatest.getFullYear(), dLatest.getMonth() + 1);
+            var latestOutstanding = totalOutstanding;
+            if (periodStart !== latestPeriodStart) {
+                var latestSums = aggSums(TABLES.snapshot, ['total_outstanding'], {
+                    scope: function(gr) { applyScope(gr, 'customer.'); },
+                    extra: function(gr) { gr.addQuery('snapshot_month', '>=', latestPeriodStart); gr.addQuery('snapshot_month', '<', latestPeriodNext); }
+                });
+                latestOutstanding = (latestSums['_all'] && latestSums['_all'].total_outstanding) || 0;
+            }
+
+            data.kpis = {
+                customerCount: counts.total, limit: totalLimit, outstanding: totalOutstanding, available: totalLimit - totalOutstanding,
+                utilPct: totalLimit > 0 ? Math.round((totalOutstanding / totalLimit) * 100) : 0, overdueExposure: totalOverdue, od90: totalOd90,
+                concentrationRisk: hhiScore, concentrationLabel: hhiLabel, netExposure: latestOutstanding - totalActiveBg,
+                activeBg: totalActiveBg,
+                osSalesRatioSum: sumTotalMonthSales > 0 ? totalOutstanding / sumTotalMonthSales : 0
+            };
+        }
+
+        // =================================================================
+        // ACTION 2: Charts (6 months)
+        // =================================================================
+        function ntCharts() {
+            var nowC = new Date(); var anchor = new Date(nowC.getFullYear(), nowC.getMonth() - 1, 1); var months = [];
+            for (var i = 5; i >= 0; i--) { var d = new Date(anchor.getFullYear(), anchor.getMonth() - i, 1); months.push({ year: d.getFullYear(), month: d.getMonth() }); }
+            var tStart6 = firstOfMonth(months[0].year, months[0].month); var tEndEx6 = firstOfMonth(months[5].year, months[5].month + 1);
+
+            var snapSums6 = aggSums(TABLES.snapshot, ['total_outstanding'].concat(BUCKETS), {
+                scope: function(gr) { applyScope(gr, 'customer.'); },
+                extra: function(gr) { gr.addQuery('snapshot_month', '>=', tStart6); gr.addQuery('snapshot_month', '<', tEndEx6); },
+                groupBy: 'snapshot_month'
+            });
+            var isAnySnapshotDataFound = Object.keys(snapSums6).length > 0;
+            var av = function(ym, fl) { return (snapSums6[ym] && snapSums6[ym][fl]) || 0; };
+
+            data.trend = { metric: 'outstanding', period: 'static-6m', points: !isAnySnapshotDataFound ? [] : months.map(function(mo) {
+                var ym = mo.year + '-' + pad2(mo.month + 1);
+                return { label: MONTH_NAMES[mo.month] + ' ' + String(mo.year).slice(-2), value: av(ym, 'total_outstanding') };
+            })};
+
+            data.ageingTrend = { months: !isAnySnapshotDataFound ? [] : months.map(function(mo) {
+                var ym = mo.year + '-' + pad2(mo.month + 1);
+                return { label: MONTH_NAMES[mo.month] + ' ' + String(mo.year).slice(-2), buckets: [
+                        { label: '0-30 Days',  value: av(ym, 'bucket_0_30_days') },
+                        { label: '31-60 Days', value: av(ym, 'bucket_31_45_days') + av(ym, 'bucket_46_60_days') },
+                        { label: '61-90 Days', value: av(ym, 'bucket_61_75_days') + av(ym, 'bucket_76_90_days') },
+                        { label: '>90 Days',   value: av(ym, 'bucket_91_120_days') + av(ym, 'bucket_gt120_days') }
+                ] };
+            })};
+
+            var comboFields = months.map(function(mo) { return MONTH_ABBR[mo.month]; });
+            var valSums6 = aggSums(TABLES.salesData, comboFields, { scope: function(gr) { applyScope(gr, 'u_customer.'); } })['_all'] || {};
+            var volSums6 = aggSums(TABLES.salesVolume, comboFields, { scope: function(gr) { applyScope(gr, 'u_customer.'); } })['_all'] || {};
+
+            data.salesTrend = { metric: 'combo', points: comboFields.map(function(fl, idx) {
+                var mo = months[idx];
+                return { label: MONTH_NAMES[mo.month] + '-' + String(mo.year).slice(-2), value: valSums6[fl] || 0, volume: volSums6[fl] || 0 };
+            })};
+        }
+
+        // =================================================================
+        // ACTION 3: Table / Export
+        // =================================================================
+        function ntTable(tableAction) {
+            var t = (input && input.table) || {};
+            var tp = {
+                page: Math.max(0, parseInt(t.page, 10) || 0),
+                limit: Math.max(1, Math.min(tableAction === 'export' ? MAX_EXPORT_ROWS : MAX_PAGE_ROWS, parseInt(t.limit, 10) || 10)),
+                search: String(t.search || '').trim(),
+                quick: t.quick || 'all', risk: t.risk || '', kpi: t.kpi || '', largeSort: t.largeSort === 'asc' ? 'asc' : 'desc'
+            };
+            var special = tp.quick !== 'all' || !!tp.risk;
+            var start = tp.page * tp.limit;
+
+            function applyMasterFilters(gr) {
+                applyScope(gr, '');
+                if (tp.search) {
+                    var qc = gr.addQuery('customer_code_sap', 'CONTAINS', tp.search);
+                    qc.addOrCondition('customer_name', 'CONTAINS', tp.search);
+                    qc.addOrCondition('pan', 'CONTAINS', tp.search);
+                    qc.addOrCondition('depot_name', 'CONTAINS', tp.search);
+                    qc.addOrCondition(REGION_NAME_FIELD, 'CONTAINS', tp.search);
+                    qc.addOrCondition(ZONE_NAME_FIELD, 'CONTAINS', tp.search);
+                }
+            }
+
+            function masterInfo(gr, segCache) {
+                var segRaw = gr.getValue('segment') || '';
+                if (segCache[segRaw] === undefined) segCache[segRaw] = gr.getDisplayValue('segment') || segRaw;
+                var dCode = safeVal(gr, 'depot'), rCode = safeVal(gr, REGION_FIELD), zCode = safeVal(gr, ZONE_FIELD);
+                return {
+                    sysId: gr.getUniqueValue(), code: gr.getValue('customer_code_sap'), name: gr.getValue('customer_name'),
+                    pan: gr.getValue('pan'), segment: segCache[segRaw],
+                    zoneCode: zCode, zoneName: gr.getValue(ZONE_NAME_FIELD) || zCode,
+                    regionCode: rCode, regionName: gr.getValue(REGION_NAME_FIELD) || rCode,
+                    depotCode: dCode, depotName: gr.getValue('depot_name') || dCode,
+                    crLimit: fastNum(gr.getValue('cr_limit')), activeBg: Math.abs(fastNum(gr.getValue('bank_guarantee'))),
+                    nextReviewDate: gr.getValue('next_review_date')
+                };
+            }
+
+            function loadActivity(ids) {
+                var A = { info: {}, reqMap: {}, snapMap: {}, salesMap: {}, monthSales: {} };
+                if (!ids || ids.length === 0) return A;
+                var segCache = {};
+
+                var grMaster = new GlideRecord(TABLES.master);
+                grMaster.addQuery('sys_id', 'IN', ids.join(','));
+                grMaster.query();
+                while (grMaster.next()) {
+                    var mid = grMaster.getUniqueValue();
+                    if (!A.info[mid]) A.info[mid] = masterInfo(grMaster, segCache);
+                }
+
+                // Non-Trade site request: customer_site_code = master customer_code_sap (or master sys_id if it is a reference).
+                // Status = pan request state (via pan_request) of the newest row; expected potential = newest row with expected_sob > 0.
+                var reqCodeToIds = {}, reqCodes = [];
+                for (var ri = 0; ri < ids.length; ri++) {
+                    var rc = A.info[ids[ri]] && A.info[ids[ri]].code ? String(A.info[ids[ri]].code).trim() : '';
+                    if (!rc) continue;
+                    if (!reqCodeToIds[rc]) { reqCodeToIds[rc] = []; reqCodes.push(rc); }
+                    reqCodeToIds[rc].push(ids[ri]);
+                }
+                if (reqCodes.length) {
+                    var grSite = new GlideRecord(TABLES.siteRequest);
+                    var qcSite = grSite.addQuery('customer_site_code', 'IN', reqCodes.join(','));
+                    qcSite.addOrCondition('customer_site_code', 'IN', ids.join(','));
+                    grSite.orderByDesc('sys_created_on');
+                    grSite.query();
+                    while (grSite.next()) {
+                        var rawSite = String(grSite.getValue('customer_site_code') || '').trim();
+                        var tIds = A.info[rawSite] ? [rawSite] : (reqCodeToIds[rawSite] || []);
+                        if (!tIds.length) continue;
+                        var potSite = fastNum(grSite.getValue('expected_sob'));
+                        var stSite = null;
+                        for (var qi = 0; qi < tIds.length; qi++) {
+                            var rid = tIds[qi];
+                            var curReq = A.reqMap[rid];
+                            if (!curReq) {
+                                if (stSite === null) {
+                                    stSite = '';
+                                    try { stSite = grSite.getElement('pan_request.state').getDisplayValue() || ''; } catch (eSt) {}
+                                    if (!stSite) stSite = 'Active';
+                                }
+                                A.reqMap[rid] = { status: stSite, expectedPotential: potSite };
+                            } else if (curReq.expectedPotential <= 0 && potSite > 0) {
+                                curReq.expectedPotential = potSite;   // status stays from the newest row
+                            }
+                        }
+                    }
+                }
+
+                var grSnap = new GlideRecord(TABLES.snapshot);
+                grSnap.addQuery('customer', 'IN', ids.join(','));
+                grSnap.addQuery('snapshot_month', '>=', periodStart);
+                grSnap.addQuery('snapshot_month', '<', periodNext);
+                grSnap.orderByDesc('sys_created_on');
+                grSnap.query();
+                while (grSnap.next()) {
+                    var cId2 = grSnap.getValue('customer'); if (!cId2 || A.snapMap[cId2]) continue;
+                    A.snapMap[cId2] = {
+                        outst: fastNum(grSnap.getValue('total_outstanding')),
+                        lt60: fastNum(grSnap.getValue('bucket_0_30_days')) + fastNum(grSnap.getValue('bucket_31_45_days')) + fastNum(grSnap.getValue('bucket_46_60_days')),
+                        d60_90: fastNum(grSnap.getValue('bucket_61_75_days')) + fastNum(grSnap.getValue('bucket_76_90_days')),
+                        gt90: fastNum(grSnap.getValue('bucket_91_120_days')) + fastNum(grSnap.getValue('bucket_gt120_days'))
+                    };
+                }
+
+                // Sales data (matches by Sys ID, SAP code string, or dot-walked SAP code)
+                var sapCodes = [], reverseMap = {};
+                for (var i = 0; i < ids.length; i++) {
+                    var ccode = A.info[ids[i]] && A.info[ids[i]].code ? String(A.info[ids[i]].code).trim() : '';
+                    if (ccode) { sapCodes.push(ccode); reverseMap[ccode] = ids[i]; }
+                }
+
+                var grSales = new GlideRecord(TABLES.salesData);
+                var qcSales = grSales.addQuery('u_customer', 'IN', ids.join(','));
+                if (sapCodes.length > 0) {
+                    qcSales.addOrCondition('u_customer', 'IN', sapCodes.join(','));
+                    qcSales.addOrCondition('u_customer.customer_code_sap', 'IN', sapCodes.join(','));
+                }
+                grSales.query();
+
+                var aggSales = {};
+                while (grSales.next()) {
+                    var rawCust = String(grSales.getValue('u_customer') || '').trim();
+                    var trueSysId = null;
+                    if (A.info[rawCust]) trueSysId = rawCust;
+                    else if (reverseMap[rawCust]) trueSysId = reverseMap[rawCust];
+                    else {
+                        var dotCode = '';
+                        try {
+                            var refGr = grSales.u_customer.getRefRecord();
+                            if (refGr && refGr.isValidRecord()) dotCode = String(refGr.getValue('customer_code_sap') || '').trim();
+                        } catch (e1) {}
+                        if (!dotCode) {
+                            try { dotCode = String(grSales.getElement('u_customer.customer_code_sap').toString() || '').trim(); } catch (e2) {}
+                        }
+                        if (dotCode && reverseMap[dotCode]) trueSysId = reverseMap[dotCode];
+                    }
+                    if (!trueSysId) continue;
+
+                    if (!aggSales[trueSysId]) aggSales[trueSysId] = { sum: 0, cnt: 0, monthRaw: 0 };
+                    for (var m = 0; m < SALES_FIELDS.length; m++) {
+                        var raw = grSales.getValue(SALES_FIELDS[m]) || grSales.getValue('u_' + SALES_FIELDS[m]);
+                        if (raw !== null && raw !== '') { aggSales[trueSysId].sum += fastNum(raw); aggSales[trueSysId].cnt++; }
+                    }
+                    var msRaw = grSales.getValue(monthSalesFieldName) || grSales.getValue('u_' + monthSalesFieldName);
+                    if (msRaw !== null && msRaw !== '') aggSales[trueSysId].monthRaw = fastNum(msRaw);
+                }
+                for (var sid in aggSales) {
+                    var sData = aggSales[sid];
+                    A.salesMap[sid] = { avgMonthlySales: sData.cnt > 0 ? (sData.sum / sData.cnt) : 0 };
+                    A.monthSales[sid] = sData.monthRaw;
+                }
+                return A;
+            }
+
+            var gdtToday = new GlideDateTime();
+            function buildRow(info, req, snap, sales, mSales) {
+                sales = sales || { avgMonthlySales: 0 }; mSales = mSales || 0;
+                var limit = info.crLimit || 0; var activeBg = info.activeBg || 0;
+                var outst = snap ? snap.outst : 0; var od90 = snap ? snap.gt90 : 0;
+                var od60_90 = snap ? snap.d60_90 : 0; var odLt60 = snap ? snap.lt60 : 0;
+
+                var risk = 'No Overdue', riskClass = '';
+                if (od90 > 0) { risk = 'High'; riskClass = 'clm-text-red'; }
+                else if (od60_90 > 0) { risk = 'Medium'; riskClass = 'clm-text-orange'; }
+                else if (odLt60 > 0) { risk = 'Low'; riskClass = 'clm-text-green'; }
+
+                var statusRaw = req ? (req.status || '') : 'Active';
+                var statLower = statusRaw.toLowerCase();
+                var displayStatus = statusRaw, cssClass = 'status-' + statLower.replace(/\s+/g, '-');
+                var isPending = statLower.indexOf('submit') > -1 || statLower.indexOf('pend') > -1;
+                if (isPending) { displayStatus = 'Pending'; cssClass = 'status-submitted'; }
+
+                // Review In: customer master next_review_date (negative = already expired)
+                var reviewDays = '--', reviewColor = '', reviewNum = null;
+                if (info.nextReviewDate) {
+                    try {
+                        var dateStr = info.nextReviewDate.toString();
+                        if (dateStr.length === 10) dateStr += ' 00:00:00';
+                        var revGdt = new GlideDateTime(dateStr);
+                        reviewNum = GlideDateTime.subtract(gdtToday, revGdt).getRoundedDayPart();
+                        reviewDays = reviewNum + 'd';
+                        if (reviewNum <= 15) reviewColor = 'clm-text-red';
+                        else if (reviewNum <= 30) reviewColor = 'clm-text-orange';
+                        else reviewColor = 'clm-text-green';
+                    } catch (e) {}
+                }
+
+                var available = limit - outst;
+                var util = limit > 0 ? Math.round((outst / limit) * 100) : 0;
+                var potential = req ? req.expectedPotential : 0;
+                var growthPct = potential > 0 ? (sales.avgMonthlySales / potential) * 100 : 0;
+
+                return {
+                    sysId: info.sysId, code: info.code, name: info.name, pan: info.pan, segment: info.segment,
+                    segmentClass: 'seg-' + (info.segment || 'default').toLowerCase().replace(/\s+/g, '-'),
+                    zoneCode: info.zoneCode, zoneName: info.zoneName, regionCode: info.regionCode, regionName: info.regionName,
+                    depotCode: info.depotCode, depotName: info.depotName, status: displayStatus, statusClass: cssClass,
+                    outstanding: outst, limit: limit, available: available, util: util, utilClass: util > 90 ? 'clm-text-red' : (util > 75 ? 'clm-text-orange' : 'clm-text-green'),
+                    od90: od90, odAll: od90 + od60_90 + odLt60, risk: risk, riskClass: riskClass, reviewIn: reviewDays, reviewColor: reviewColor, reviewNum: reviewNum,
+                    avgMonthlySales: sales.avgMonthlySales, highGrowthPct: growthPct, highGrowth20: (growthPct > HIGH_GROWTH_THRESHOLD_PCT ? 'Yes' : 'No'),
+                    osSalesRatio: mSales > 0 ? outst / mSales : 0, activeBg: activeBg, isPending: isPending
+                };
+            }
+
+            var pagedIds = [], matchingIds = [];
+            data.tableData = [];
+            data.tableTotal = 0;
+
+            if (special) {
+
+                // ===================== HIGH GROWTH =====================
+                if (tp.quick === 'highGrowth20') {
+                    var seenHG = {};
+                    // 1) site codes that have an expected_sob value
+                    var hgCodes = [], seenCode = {};
+                    var gaSite = new GlideAggregate(TABLES.siteRequest);
+                    gaSite.addQuery('expected_sob', '>', 0);
+                    gaSite.groupBy('customer_site_code');
+                    gaSite.query();
+                    while (gaSite.next()) {
+                        var hgRaw = String(gaSite.getValue('customer_site_code') || '').trim();
+                        if (hgRaw && !seenCode[hgRaw]) { seenCode[hgRaw] = true; hgCodes.push(hgRaw); }
+                    }
+                    // 2) in-scope master customers with those codes (segment / zone / region / depot / CG1 applied here)
+                    if (hgCodes.length) {
+                        var grHm = new GlideRecord(TABLES.master);
+                        applyScope(grHm, '');
+                        var qcHm = grHm.addQuery('customer_code_sap', 'IN', hgCodes.join(','));
+                        qcHm.addOrCondition('sys_id', 'IN', hgCodes.join(','));   // in case customer_site_code is a reference
+                        grHm.query();
+                        while (grHm.next()) {
+                            var hgMid = grHm.getUniqueValue();
+                            if (!seenHG[hgMid]) { seenHG[hgMid] = true; matchingIds.push(hgMid); }
+                        }
+                    }
+
+                    var hgRows = [];
+                    if (matchingIds.length) {
+                        var PA_hg = loadActivity(matchingIds);
+                        for (var h = 0; h < matchingIds.length; h++) {
+                            var infoH = PA_hg.info[matchingIds[h]]; if (!infoH) continue;
+                            var rowH = buildRow(infoH, PA_hg.reqMap[matchingIds[h]], PA_hg.snapMap[matchingIds[h]], PA_hg.salesMap[matchingIds[h]], PA_hg.monthSales[matchingIds[h]]);
+                            if (rowH.highGrowth20 === 'Yes') hgRows.push(rowH);
+                        }
+                        hgRows.sort(function(a, b) { return b.avgMonthlySales - a.avgMonthlySales; });
+                        hgRows = hgRows.slice(0, 20);
+                    }
+                    data.tableTotal = hgRows.length;
+                    data.tableData = hgRows.slice(start, start + tp.limit);
+                }
+                // ===================== LARGE EXPOSURE (OVERDUE >90D) =====================
+                else if (tp.quick === 'largeExposure') {
+                    var grLE = new GlideRecord(TABLES.snapshot);
+                    applyScope(grLE, 'customer.');
+                    grLE.addQuery('snapshot_month', '>=', periodStart);
+                    grLE.addQuery('snapshot_month', '<', periodNext);
+                    var leQc = grLE.addQuery('bucket_91_120_days', '>', 0);
+                    leQc.addOrCondition('bucket_gt120_days', '>', 0);
+                    if (tp.search) {
+                        var sqLE = grLE.addQuery('customer.customer_code_sap', 'CONTAINS', tp.search);
+                        sqLE.addOrCondition('customer.customer_name', 'CONTAINS', tp.search);
+                        sqLE.addOrCondition('customer.pan', 'CONTAINS', tp.search);
+                    }
+                    grLE.query();
+
+                    var leMap = {}, leCustIds = [];
+                    while (grLE.next()) {
+                        var leCid = grLE.getValue('customer');
+                        if (leCid && !leMap[leCid]) {
+                            var totalOverdue90 = fastNum(grLE.getValue('bucket_91_120_days')) + fastNum(grLE.getValue('bucket_gt120_days'));
+                            if (totalOverdue90 > 0) { leMap[leCid] = totalOverdue90; leCustIds.push(leCid); }
+                        }
+                    }
+                    leCustIds.sort(function(a, b) { return tp.largeSort === 'asc' ? (leMap[a] - leMap[b]) : (leMap[b] - leMap[a]); });
+
+                    data.tableTotal = leCustIds.length;
+                    var pagedLeIds = leCustIds.slice(start, start + tp.limit);
+                    if (pagedLeIds.length > 0) {
+                        var PA_le = loadActivity(pagedLeIds);
+                        var leRows = [];
+                        for (var k = 0; k < pagedLeIds.length; k++) {
+                            var infoLE = PA_le.info[pagedLeIds[k]];
+                            if (infoLE) leRows.push(buildRow(infoLE, PA_le.reqMap[pagedLeIds[k]], PA_le.snapMap[pagedLeIds[k]], PA_le.salesMap[pagedLeIds[k]], PA_le.monthSales[pagedLeIds[k]]));
+                        }
+                        leRows.sort(function(a, b) { return tp.largeSort === 'asc' ? (a.od90 - b.od90) : (b.od90 - a.od90); });
+                        data.tableData = leRows;
+                    }
+                }
+                // ===================== OTHER SPECIAL FILTERS =====================
+                else {
+                    var srcTable = TABLES.snapshot;
+                    var grBase = new GlideRecord(srcTable); applyScope(grBase, 'customer.');
+
+                    if (tp.quick === 'overdue' || tp.risk) {
+                        grBase.addQuery('snapshot_month', '>=', periodStart); grBase.addQuery('snapshot_month', '<', periodNext);
+                        if (tp.risk === 'High') grBase.addEncodedQuery('bucket_91_120_days>0^ORbucket_gt120_days>0');
+                        else if (tp.risk === 'Medium') grBase.addEncodedQuery('bucket_61_75_days>0^ORbucket_76_90_days>0^bucket_91_120_days=0^bucket_gt120_days=0');
+                        else if (tp.risk === 'Low') grBase.addEncodedQuery('bucket_0_30_days>0^ORbucket_31_45_days>0^ORbucket_46_60_days>0^bucket_61_75_days=0^bucket_76_90_days=0^bucket_91_120_days=0^bucket_gt120_days=0');
+                        else if (tp.risk === 'No Overdue') grBase.addEncodedQuery('bucket_0_30_days=0^bucket_31_45_days=0^bucket_46_60_days=0^bucket_61_75_days=0^bucket_76_90_days=0^bucket_91_120_days=0^bucket_gt120_days=0');
+                        else if (tp.quick === 'overdue') grBase.addEncodedQuery('bucket_0_30_days>0^ORbucket_31_45_days>0^ORbucket_46_60_days>0^ORbucket_61_75_days>0^ORbucket_76_90_days>0^ORbucket_91_120_days>0^ORbucket_gt120_days>0');
+                    }
+                    else if (tp.quick === 'review15' || tp.quick === 'review30') {
+                        srcTable = TABLES.master;
+                        grBase = new GlideRecord(srcTable);
+                        applyScope(grBase, '');
+                        if (tp.quick === 'review15') grBase.addEncodedQuery('next_review_dateISNOTEMPTY^next_review_date<=javascript:gs.daysAgoEnd(-15)');
+                        else grBase.addEncodedQuery('next_review_dateISNOTEMPTY^next_review_date<=javascript:gs.daysAgoEnd(-30)');
+                    }
+
+                    if (tp.search) {
+                        var pfx = (srcTable === TABLES.master) ? '' : 'customer.';
+                        var sq = grBase.addQuery(pfx + 'customer_code_sap', 'CONTAINS', tp.search);
+                        sq.addOrCondition(pfx + 'customer_name', 'CONTAINS', tp.search);
+                        sq.addOrCondition(pfx + 'pan', 'CONTAINS', tp.search);
+                    }
+
+                    var gaCount = new GlideAggregate(srcTable); gaCount.addEncodedQuery(grBase.getEncodedQuery()); gaCount.addAggregate('COUNT'); gaCount.query();
+                    data.tableTotal = gaCount.next() ? parseInt(gaCount.getAggregate('COUNT'), 10) : 0;
+
+                    grBase.chooseWindow(start, start + tp.limit);
+                    grBase.query();
+
+                    var uniquePageIds = {};
+                    while (grBase.next()) {
+                        var cid = (srcTable === TABLES.master) ? grBase.getUniqueValue() : grBase.getValue('customer');
+                        if (cid && !uniquePageIds[cid]) { uniquePageIds[cid] = true; pagedIds.push(cid); }
+                    }
+
+                    if (pagedIds.length > 0) {
+                        var PA_sp = loadActivity(pagedIds); var rawRows = [];
+                        for (var j = 0; j < pagedIds.length; j++) {
+                            var info = PA_sp.info[pagedIds[j]];
+                            if (info) rawRows.push(buildRow(info, PA_sp.reqMap[pagedIds[j]], PA_sp.snapMap[pagedIds[j]], PA_sp.salesMap[pagedIds[j]], PA_sp.monthSales[pagedIds[j]]));
+                        }
+                        data.tableData = rawRows;
+                    }
+                }
+            }
+            // ===================== ALL CUSTOMERS (default) =====================
+            else {
+                var gc = new GlideAggregate(TABLES.master); applyMasterFilters(gc); gc.addAggregate('COUNT'); gc.query();
+                data.tableTotal = gc.next() ? (parseInt(gc.getAggregate('COUNT'), 10) || 0) : 0;
+
+                var gm = new GlideRecord(TABLES.master); applyMasterFilters(gm); gm.orderBy('customer_name'); gm.chooseWindow(start, start + tp.limit); gm.query();
+                var pageInfos = [], pageIds = [], pSegCache = {};
+                while (gm.next()) {
+                    pageIds.push(gm.getUniqueValue());
+                    pageInfos.push(masterInfo(gm, pSegCache));
+                }
+                var PA = pageIds.length ? loadActivity(pageIds) : { reqMap: {}, snapMap: {}, salesMap: {}, monthSales: {} };
+                data.tableData = pageInfos.map(function(info) { return buildRow(info, PA.reqMap[info.sysId], PA.snapMap[info.sysId], PA.salesMap[info.sysId], PA.monthSales[info.sysId]); });
+            }
+        }
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gayatri.bhandge@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-29 10:02:51</sys_created_on>
+        <sys_id>294f88683b94d39087401044c3e45a83</sys_id>
+        <sys_mod_count>9</sys_mod_count>
+        <sys_name>clm_nt_zhm_portfolio</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_294f88683b94d39087401044c3e45a83</sys_update_name>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-14 14:20:20</sys_updated_on>
+        <template><![CDATA[<!--
+  CLM ZHM Non-Trade Portfolio Overview - HTML Template
+  v1.0
+  - Access from role mapping: NT CEMENT ZHM/ZCH -> Cement, NT RMC ZH/ZCH -> RMC, NT BPD ZH BPD/ZCH -> BPD
+  - Zones = the user's mapped zone(s); Region / Depot = whatever exists in the customer master (CG1 = N01) for those zones
+  - Business filter lists only the businesses the user has access to; picking another business
+    broadcasts 'clm.business.changed' to the dashboard widget
+-->
+<div ng-cloak class="clm-widget clm-pf">
+
+  <!-- ===================== INITIAL LOADING SCREEN ===================== -->
+  <div class="clm-initial-loader" ng-if="!c.initialLoadComplete && !c.data.accessDenied">
+    <i class="fa fa-spinner fa-spin fa-4x"></i>
+    <h3>Analyzing Non-Trade Portfolio Data</h3>
+    <p>Please wait while we aggregate the latest records...</p>
+  </div>
+
+  <!-- ===================== FULLSCREEN LOADING OVERLAY (PDF Export) ===================== -->
+  <div class="pdf-loading-overlay" ng-if="c.isExporting">
+    <div class="pdf-spinner-box">
+      <i class="fa fa-spinner fa-spin fa-4x"></i>
+      <div class="pdf-loading-text">Generating PDF Report...</div>
+      <div class="pdf-loading-sub">Please do not close this window, formatting in progress.</div>
+    </div>
+  </div>
+
+  <div class="clm-portfolio-overview" id="ntz-dashboard-capture" ng-show="c.initialLoadComplete || c.data.accessDenied">
+
+    <!-- ===================== ACCESS DENIED ===================== -->
+    <div class="clm-access-denied" ng-if="c.data.accessDenied">
+      <div class="clm-ad-icon"><i class="fa fa-lock"></i></div>
+      <div class="clm-ad-title">Access Restricted</div>
+      <div class="clm-ad-text">{{c.data.error}}</div>
+    </div>
+
+    <div ng-if="!c.data.accessDenied">
+
+    <!-- ===================== FILTERS ===================== -->
+    <div class="clm-filter-card" ng-class="{'is-busy': c.loading}">
+      <div class="clm-filter-head">
+        <div class="clm-block-title">Portfolio Filters</div>
+        <div class="clm-block-meta">
+          <span class="clm-chip"><span class="clm-chip-k">Business</span> {{c.getBusinessLabel()}}</span>
+          <span class="clm-chip"><span class="clm-chip-k">Period</span> {{c.getPeriodDisplayText()}}</span>
+          <button type="button" class="clm-btn clm-btn-export" ng-click="c.exportToPDF()" ng-disabled="c.isExporting" title="Exports the KPI and chart sections as a PDF">
+            <i class="fa" ng-class="c.isExporting ? 'fa-spinner fa-spin' : 'fa-file-pdf-o'"></i>
+            {{c.isExporting ? 'Generating PDF...' : 'Export PDF'}}
+          </button>
+        </div>
+      </div>
+      <div class="clm-filter-row">
+
+        <!-- BUSINESS (SINGLE SELECT) - only businesses the user has access to -->
+        <label class="clm-filter-field clm-filter-business">
+          <span class="clm-filter-label">Business</span>
+          <select class="form-control" ng-model="c.filters.business" ng-change="c.onBusinessChange()">
+            <option ng-repeat="b in c.businessOptions" value="{{::b.value}}" ng-disabled="!b.enabled">{{::c.getBusinessOptionText(b)}}</option>
+          </select>
+        </label>
+
+        <!-- SEGMENT (MULTISELECT, only the user's role segments) -->
+        <label class="clm-filter-field clm-multiselect-field">
+          <span class="clm-filter-label">Segment</span>
+          <div class="clm-multiselect-container" ng-class="{open: c.segmentDropdownOpen}" ng-click="$event.stopPropagation()">
+            <div class="clm-multiselect-trigger" ng-click="c.segmentDropdownOpen ? c.closeSegmentDropdown() : c.openSegmentDropdown()">
+              <span class="clm-multiselect-text">{{c.getSegmentDisplayText()}}</span>
+              <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+            </div>
+            <div class="clm-multiselect-dropdown" ng-if="c.segmentDropdownOpen">
+              <div class="clm-multiselect-actions" ng-if="c.data.filterOpts.segments.length > 1">
+                <a ng-click="c.selectAllSegments()">Select All</a>
+                <a ng-click="c.clearAllSegments()">Clear</a>
+              </div>
+              <input type="text" class="clm-multiselect-search" ng-model="c.segmentSearch" ng-change="c.updateSegmentList()" placeholder="Search segments...">
+              <ul class="clm-multiselect-list">
+                <li ng-repeat="s in c.displaySegments"
+                    ng-click="c.toggleSegment(s)"
+                    ng-class="{selected: c.isSegmentSelected(s)}">
+                  <span class="clm-checkbox" ng-class="{checked: c.isSegmentSelected(s)}"></span>
+                  {{::s.label}}
+                </li>
+                <li class="clm-dropdown-empty" ng-if="c.displaySegments.length === 0">No matches</li>
+              </ul>
+            </div>
+          </div>
+        </label>
+
+        <!-- ZONE (MULTISELECT, the user's mapped zones) -->
+        <label class="clm-filter-field clm-multiselect-field">
+          <span class="clm-filter-label">Zone</span>
+          <div class="clm-multiselect-container" ng-class="{open: c.zoneDropdownOpen}" ng-click="$event.stopPropagation()">
+            <div class="clm-multiselect-trigger" ng-click="c.zoneDropdownOpen ? c.closeZoneDropdown() : c.openZoneDropdown()">
+              <span class="clm-multiselect-text" title="{{c.getZoneTooltip()}}">{{c.getZoneDisplayText()}}</span>
+              <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+            </div>
+            <div class="clm-multiselect-dropdown" ng-if="c.zoneDropdownOpen">
+              <div class="clm-multiselect-actions" ng-if="c.data.filterOpts.zones.length > 1">
+                <a ng-click="c.selectAllZones()">Select All</a>
+                <a ng-click="c.clearAllZones()">Clear</a>
+              </div>
+              <input type="text" class="clm-multiselect-search" ng-model="c.zoneSearch" ng-change="c.updateZoneList()" placeholder="Search zones...">
+              <ul class="clm-multiselect-list">
+                <li ng-repeat="z in c.displayZones"
+                    ng-click="c.toggleZone(z)"
+                    ng-class="{selected: c.isZoneSelected(z)}">
+                  <span class="clm-checkbox" ng-class="{checked: c.isZoneSelected(z)}"></span>
+                  <span class="clm-multiselect-item-text">{{::c.msItemDisplay(z)}}</span>
+                </li>
+                <li class="clm-dropdown-empty" ng-if="c.displayZones.length === 0">No matches</li>
+              </ul>
+            </div>
+          </div>
+        </label>
+
+        <!-- REGION (MULTISELECT, cascades to Depot) -->
+        <label class="clm-filter-field clm-multiselect-field">
+          <span class="clm-filter-label">Region</span>
+          <div class="clm-multiselect-container" ng-class="{open: c.regionDropdownOpen}" ng-click="$event.stopPropagation()">
+            <div class="clm-multiselect-trigger" ng-click="c.regionDropdownOpen ? c.closeRegionDropdown() : c.openRegionDropdown()">
+              <span class="clm-multiselect-text">{{c.getRegionDisplayText()}}</span>
+              <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+            </div>
+            <div class="clm-multiselect-dropdown" ng-if="c.regionDropdownOpen">
+              <div class="clm-multiselect-actions">
+                <a ng-click="c.selectAllRegions()">Select All</a>
+                <a ng-click="c.clearAllRegions()">Clear</a>
+              </div>
+              <input type="text" class="clm-multiselect-search" ng-model="c.regionSearch" ng-change="c.updateRegionList()" placeholder="Search regions...">
+              <ul class="clm-multiselect-list">
+                <li ng-repeat="r in c.displayRegions"
+                    ng-click="c.toggleRegion(r)"
+                    ng-class="{selected: c.isRegionSelected(r)}">
+                  <span class="clm-checkbox" ng-class="{checked: c.isRegionSelected(r)}"></span>
+                  <span class="clm-multiselect-item-text">{{::c.msItemDisplay(r)}}</span>
+                </li>
+                <li class="clm-dropdown-empty" ng-if="c.displayRegions.length === 0">No matches</li>
+              </ul>
+            </div>
+          </div>
+        </label>
+
+        <!-- DEPOT (MULTISELECT, limited to the selected Regions) -->
+        <label class="clm-filter-field clm-multiselect-field">
+          <span class="clm-filter-label">Depot</span>
+          <div class="clm-multiselect-container" ng-class="{open: c.depotDropdownOpen}" ng-click="$event.stopPropagation()">
+            <div class="clm-multiselect-trigger" ng-click="c.depotDropdownOpen ? c.closeDepotDropdown() : c.openDepotDropdown()">
+              <span class="clm-multiselect-text">{{c.getDepotDisplayText()}}</span>
+              <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+            </div>
+            <div class="clm-multiselect-dropdown" ng-if="c.depotDropdownOpen">
+              <div class="clm-multiselect-actions">
+                <a ng-click="c.selectAllDepots()">Select All</a>
+                <a ng-click="c.clearAllDepots()">Clear</a>
+              </div>
+              <input type="text" class="clm-multiselect-search" ng-model="c.depotSearch" ng-change="c.updateDepotList()" placeholder="Search depots...">
+              <ul class="clm-multiselect-list">
+                <li ng-repeat="d in c.displayDepots"
+                    ng-click="c.toggleDepot(d)"
+                    ng-class="{selected: c.isDepotSelected(d)}">
+                  <span class="clm-checkbox" ng-class="{checked: c.isDepotSelected(d)}"></span>
+                  <span class="clm-multiselect-item-text">{{::c.msItemDisplay(d)}}</span>
+                </li>
+                <li class="clm-dropdown-empty" ng-if="c.displayDepots.length === 0">No matches</li>
+              </ul>
+            </div>
+          </div>
+        </label>
+
+        <!-- PERIOD -->
+        <label class="clm-filter-field clm-filter-period">
+          <span class="clm-filter-label">Period</span>
+          <select class="form-control" ng-model="c.filters.period" ng-change="c.onPeriodChange()">
+            <option ng-repeat="p in c.last6Months" value="{{::p.value}}">{{::p.label}}</option>
+          </select>
+        </label>
+
+      </div>
+    </div>
+
+    <div class="clm-pf-body" ng-class="{'is-busy': c.loading}">
+
+      <!-- ===================== SECTION 1: CREDIT LIMITS ===================== -->
+      <div class="clm-pf-section">
+        <div class="clm-section-title">
+          <span class="clm-section-num">1</span>
+          <span>Credit Limits</span>
+          <span class="clm-section-sub">Approved CL, available CL, bank guarantee and upcoming reviews</span>
+        </div>
+
+        <div class="clm-pf-tiles clm-pf-tiles-6">
+          <div class="clm-pf-tile edge-green">
+            <div class="clm-pf-tile-k">Total Customers</div>
+            <div class="clm-pf-tile-v v-green">{{c.counts.total}}</div>
+            <div class="clm-tile-subtitle"><span class="clm-live-dot"></span>Live Data</div>
+          </div>
+          <div class="clm-pf-tile edge-green">
+            <div class="clm-pf-tile-k">Total Approved Limit</div>
+            <div class="clm-pf-tile-v v-green">{{c.data.kpis.fmtLimit}}</div>
+            <div class="clm-tile-subtitle"><span class="clm-live-dot"></span>Live Data</div>
+          </div>
+          <div class="clm-pf-tile edge-green">
+            <div class="clm-pf-tile-k">Available Limit</div>
+            <div class="clm-pf-tile-v v-green">{{c.data.kpis.fmtAvailable}}</div>
+            <div class="clm-tile-subtitle"><span class="clm-live-dot"></span>Live Data</div>
+          </div>
+          <div class="clm-pf-tile edge-green">
+            <div class="clm-pf-tile-k">Utilisation %</div>
+            <div class="clm-pf-tile-v v-green">{{c.data.kpis.utilPct || 0}}%</div>
+            <div class="clm-pf-util-bar"><div class="clm-pf-util-fill" ng-style="{width: c.capPct(c.data.kpis.utilPct) + '%'}"></div></div>
+            <div class="clm-tile-subtitle"><span class="clm-live-dot"></span>Live Data</div>
+          </div>
+          <div class="clm-pf-tile edge-green">
+            <div class="clm-pf-tile-k">Active BG</div>
+            <div class="clm-pf-tile-v v-green">{{c.data.kpis.fmtActiveBg}}</div>
+            <div class="clm-pf-tile-hint">Bank guarantee held</div>
+            <div class="clm-tile-subtitle"><span class="clm-live-dot"></span>Live Data</div>
+          </div>
+          <div class="clm-pf-tile edge-green is-click"
+               ng-click="c.setExpiringKpiFilter()" ng-class="{'is-active': c.quickFilter === 'review15'}">
+            <i class="fa fa-info-circle clm-kpi-info" title="Click to drill down into CL Validity ≤15 Days"></i>
+            <div class="clm-pf-tile-k">CL Validity &le; 15 Days</div>
+            <div class="clm-pf-tile-v v-green">{{c.counts.expiring}}</div>
+            <div class="clm-pf-tile-hint">Click to view customers</div>
+            <div class="clm-tile-subtitle"><span class="clm-live-dot"></span>Live Data</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===================== SECTION 2: EXPOSURE & RISK ===================== -->
+      <div class="clm-pf-section">
+        <div class="clm-section-title">
+          <span class="clm-section-num">2</span>
+          <span>Exposure &amp; Risk</span>
+          <span class="clm-section-sub">Outstanding position for {{c.getPeriodDisplayText()}}</span>
+        </div>
+
+        <div class="clm-pf-split">
+          <div class="clm-block">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Outstanding &amp; Overdue</div>
+                <div class="clm-block-sub">Receivables and overdue amounts across the selected portfolio</div>
+              </div>
+            </div>
+            <div class="clm-tw-body">
+              <div class="clm-pf-tiles clm-pf-tiles-5">
+                <div class="clm-pf-tile edge-orange">
+                  <div class="clm-pf-tile-k">Total Customer OS&gt;0</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.counts.osGreaterThanZero}}</div>
+                </div>
+                <div class="clm-pf-tile edge-orange">
+                  <div class="clm-pf-tile-k">Total Outstanding</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.data.kpis.fmtOutstanding}}</div>
+                </div>
+                <div class="clm-pf-tile edge-orange">
+                  <div class="clm-pf-tile-k">Overdue Exposure</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.data.kpis.fmtOverdue}}</div>
+                </div>
+                <div class="clm-pf-tile edge-orange">
+                  <div class="clm-pf-tile-k">Overdue &gt;90D</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.data.kpis.fmtOd90}}</div>
+                </div>
+                <div class="clm-pf-tile edge-orange">
+                  <div class="clm-pf-tile-k">OS / Sales Ratio</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.data.kpis.fmtRatio}}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="clm-block">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Risk Indicators</div>
+                <div class="clm-block-sub">High-risk customers and concentration</div>
+              </div>
+            </div>
+            <div class="clm-tw-body">
+              <div class="clm-pf-tiles clm-pf-tiles-2">
+                <div class="clm-pf-tile edge-orange is-click"
+                     ng-click="c.setRiskKpiFilter()" ng-class="{'is-active': c.riskFilter === 'High'}">
+                  <i class="fa fa-info-circle clm-kpi-info" title="Click to drill down into High Risk Count"></i>
+                  <div class="clm-pf-tile-k">Risk Classification</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.counts.highRisk}}</div>
+                  <div class="clm-pf-tile-hint">High risk customers</div>
+                </div>
+                <div class="clm-pf-tile edge-orange">
+                  <div class="clm-pf-tile-k">Concentration Risk (HHI)</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.data.kpis.concentrationRisk || 0}} &ndash; {{c.data.kpis.concentrationLabel || 'Less'}}</div>
+                  <div class="clm-pf-tile-hint">&lt;1500 Less &middot; &le;2500 Moderate</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===================== SECTION 3: TRENDS ===================== -->
+      <div class="clm-pf-section">
+        <div class="clm-section-title">
+          <span class="clm-section-num">3</span>
+          <span>Portfolio Trends</span>
+          <span class="clm-section-sub">Last 6 months</span>
+        </div>
+
+        <!-- Chart 1: Total Outstanding MoM Trend -->
+        <div class="clm-block clm-chart-card">
+          <div class="clm-block-head">
+            <div class="clm-block-heading">
+              <div class="clm-block-title">Total Outstanding &middot; MoM Trend</div>
+              <div class="clm-block-sub">Month-end outstanding amount</div>
+            </div>
+            <div class="clm-block-meta">
+              <span class="clm-chip"><span class="clm-legend-color" style="background:#E87722;"></span>Outstanding (&#8377;)</span>
+            </div>
+          </div>
+
+          <div class="clm-chart-loader" ng-if="c.chartLoading">
+            <i class="fa fa-spinner fa-spin fa-2x"></i>
+          </div>
+
+          <div class="clm-trend-body" ng-show="!c.chartLoading && c.trendChart.points.length > 0">
+            <svg class="clm-trend-svg" viewBox="0 0 1550 300" preserveAspectRatio="xMidYMid meet">
+              <g class="clm-trend-grid">
+                <line ng-repeat="t in c.trendChart.yTicks"
+                      ng-attr-x1="{{c.trendChart.padLeft}}" ng-attr-y1="{{t.y}}"
+                      ng-attr-x2="{{c.trendChart.width - c.trendChart.padRight}}" ng-attr-y2="{{t.y}}"></line>
+              </g>
+              <text class="clm-trend-axis-title" ng-attr-x="-{{(c.trendChart.padY + c.trendChart.baselineY) / 2}}"
+                    y="18" transform="rotate(-90)" text-anchor="middle">Outstanding Amount (&#8377;)</text>
+              <g class="clm-trend-yaxis">
+                <text ng-repeat="t in c.trendChart.yTicks" ng-attr-x="{{c.trendChart.padLeft - 12}}" ng-attr-y="{{t.y + 4}}" text-anchor="end">{{t.label}}</text>
+              </g>
+              <line class="clm-axis-line"
+                    ng-attr-x1="{{c.trendChart.padLeft}}" ng-attr-y1="{{c.trendChart.baselineY}}"
+                    ng-attr-x2="{{c.trendChart.width - c.trendChart.padRight}}" ng-attr-y2="{{c.trendChart.baselineY}}"></line>
+              <path class="clm-trend-area" ng-attr-d="{{c.trendChart.areaPath}}"></path>
+              <polyline class="clm-trend-line" ng-attr-points="{{c.trendChart.linePoints}}"></polyline>
+              <circle class="clm-trend-dot" ng-class="{last: $last}"
+                      ng-repeat="p in c.trendChart.points"
+                      ng-attr-cx="{{p.x}}" ng-attr-cy="{{p.y}}" ng-attr-r="{{$last ? 6 : 4.5}}">
+                <title>{{p.label}}: {{p.formattedValue}}</title>
+              </circle>
+              <g class="clm-trend-vals">
+                <text ng-repeat="p in c.trendChart.points" ng-class="{last: $last}"
+                      ng-attr-x="{{p.x}}" ng-attr-y="{{p.y - 14}}" text-anchor="middle">{{p.formattedValue}}</text>
+              </g>
+              <g class="clm-trend-xaxis">
+                <text ng-repeat="p in c.trendChart.points"
+                      ng-attr-x="{{p.x}}" ng-attr-y="{{c.trendChart.baselineY + 22}}"
+                      text-anchor="middle">{{p.label}}</text>
+              </g>
+            </svg>
+          </div>
+        </div>
+
+        <!-- Chart Row: Sales Trend & Ageing -->
+        <div class="clm-charts-row">
+
+          <div class="clm-block clm-chart-card clm-chart-half">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Sales Trend (6M)</div>
+                <div class="clm-block-sub">Credit sales volume vs value</div>
+              </div>
+            </div>
+            <div class="clm-chart-loader" ng-if="c.chartLoading">
+              <i class="fa fa-spinner fa-spin fa-2x"></i>
+            </div>
+            <div class="clm-chart-wrapper" ng-show="!c.chartLoading">
+              <canvas id="ntzSalesChart"></canvas>
+            </div>
+            <div class="clm-ageing-legend" ng-show="!c.chartLoading && c.data.salesTrend.points.length > 0">
+              <span class="clm-legend-item"><span class="clm-legend-color" style="background:#0b5394;"></span>Credit Sales Volume (MT)</span>
+              <span class="clm-legend-item"><span class="clm-legend-line" style="background:#E87722;"></span>Credit Sales Value (&#8377;)</span>
+            </div>
+          </div>
+
+          <div class="clm-block clm-chart-card clm-chart-half">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Ageing Breakdown (6M)</div>
+                <div class="clm-block-sub">Outstanding split by days overdue</div>
+              </div>
+            </div>
+            <div class="clm-chart-loader" ng-if="c.chartLoading">
+              <i class="fa fa-spinner fa-spin fa-2x"></i>
+            </div>
+            <div class="clm-chart-wrapper" ng-show="!c.chartLoading">
+              <canvas id="ntzAgeingChart"></canvas>
+            </div>
+            <div class="clm-ageing-legend" ng-show="!c.chartLoading && c.data.ageingTrend.months.length > 0">
+              <span ng-repeat="leg in c.ageingLegend" class="clm-legend-item">
+                <span class="clm-legend-color" ng-style="::{'background-color': leg.color}"></span>
+                {{::leg.label}}
+              </span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ===================== SECTION 4: CUSTOMER PORTFOLIO (TABLE) ===================== -->
+      <div class="clm-pf-section clm-table-section" id="ntzTableContainer">
+        <div class="clm-section-title">
+          <span class="clm-section-num">4</span>
+          <span>Customer Portfolio</span>
+          <span class="clm-section-sub">Click a customer name to open Customer 360</span>
+        </div>
+
+        <div class="clm-block clm-table-container">
+          <div class="clm-block-head">
+            <div class="clm-block-heading">
+              <div class="clm-block-title">Customer List</div>
+              <div class="clm-block-sub">Use the quick filters to focus on overdue, review and exposure groups</div>
+            </div>
+            <div class="clm-block-meta">
+              <span class="clm-chip"><span class="clm-chip-k">Records</span> {{c.tableTotal}}</span>
+            </div>
+          </div>
+
+          <!-- Quick filters -->
+          <div class="clm-chip-row">
+            <button type="button" class="clm-qf" ng-class="{active: c.quickFilter === 'all'}" ng-click="c.setQuickFilter('all')">
+              All Customers <span class="clm-qf-count">{{c.counts.total}}</span>
+            </button>
+            <button type="button" class="clm-qf qf-red" ng-class="{active: c.quickFilter === 'overdue'}" ng-click="c.setQuickFilter('overdue')">
+              <i class="fa fa-exclamation-triangle"></i> Overdue Balance <span class="clm-qf-count">{{c.counts.overdue}}</span>
+            </button>
+            <button type="button" class="clm-qf qf-orange" ng-class="{active: c.quickFilter === 'review15'}" ng-click="c.setQuickFilter('review15')">
+              <i class="fa fa-clock-o"></i> CL Validity &le;15D <span class="clm-qf-count">{{c.counts.review15}}</span>
+            </button>
+            <button type="button" class="clm-qf qf-blue" ng-class="{active: c.quickFilter === 'review30'}" ng-click="c.setQuickFilter('review30')">
+              <i class="fa fa-calendar"></i> CL Validity &le;30D <span class="clm-qf-count">{{c.counts.review30}}</span>
+            </button>
+            <button type="button" class="clm-qf qf-purple"
+                    ng-class="{active: c.quickFilter === 'largeExposure'}"
+                    ng-click="c.setQuickFilter('largeExposure')">
+              <i class="fa fa-exclamation-circle"></i> Large Exposure
+              <i class="fa clm-qf-sort" ng-class="c.getLargeExposureIcon()" ng-click="c.toggleLargeExposureSort(); $event.stopPropagation();" title="Toggle sort order (OD>90)"></i>
+            </button>
+            <button type="button" class="clm-qf qf-green"
+                    ng-class="{active: c.quickFilter === 'highGrowth20'}"
+                    ng-click="c.setQuickFilter('highGrowth20')">
+              <i class="fa fa-line-chart"></i> High Growth
+            </button>
+            <select class="clm-qf-select" ng-model="c.riskFilter" ng-change="c.applyLocalFilters()">
+              <option value="">All Risk Levels</option>
+              <option value="High">High Risk</option>
+              <option value="Medium">Medium Risk</option>
+              <option value="Low">Low Risk</option>
+              <option value="No Overdue">No Overdue</option>
+            </select>
+          </div>
+
+          <!-- Active filters -->
+          <div class="clm-filters-transition-wrapper" ng-class="c.filterWrapperClass" ng-if="c.getActiveFilterCount() > 0">
+            <div class="clm-active-filters-inline">
+              <span class="clm-af-label">Active filters:</span>
+              <span class="clm-filter-chip" ng-if="c.filters.segments.length > 0">
+                Segment: {{c.selectedSegmentLabels.join(', ')}}
+                <i class="fa fa-times" ng-click="c.clearAllSegments()"></i>
+              </span>
+              <span class="clm-filter-chip" ng-if="c.filters.zones.length > 0">
+                Zone: {{c.selectedZoneLabels.join(', ')}}
+                <i class="fa fa-times" ng-click="c.clearAllZones()"></i>
+              </span>
+              <span class="clm-filter-chip" ng-if="c.filters.regions.length > 0">
+                Region: {{c.selectedRegionLabels.join(', ')}}
+                <i class="fa fa-times" ng-click="c.clearAllRegions()"></i>
+              </span>
+              <span class="clm-filter-chip" ng-if="c.filters.depots.length > 0">
+                Depot: {{c.selectedDepotLabels.join(', ')}}
+                <i class="fa fa-times" ng-click="c.clearAllDepots()"></i>
+              </span>
+              <span class="clm-filter-chip" ng-if="c.filters.period && c.filters.period !== c.defaultPeriod">
+                Period: {{c.getPeriodDisplayText()}}
+                <i class="fa fa-times" ng-click="c.filters.period = c.defaultPeriod; c.debouncedRefresh()"></i>
+              </span>
+              <span class="clm-filter-chip" ng-if="c.riskFilter">
+                Risk: {{c.riskFilter}}
+                <i class="fa fa-times" ng-click="c.riskFilter=''; c.applyLocalFilters()"></i>
+              </span>
+              <span class="clm-filter-chip" ng-if="c.quickFilter !== 'all'">
+                Quick: {{ {review15:'CL Validity ≤15D', review30:'CL Validity ≤30D', overdue:'Overdue Balance', largeExposure:'Large Exposure', highGrowth20:'High Growth'}[c.quickFilter] || c.quickFilter }}
+                <i class="fa fa-times" ng-click="c.setQuickFilter('all')"></i>
+              </span>
+              <button class="clm-clear-all-inline" ng-click="c.clearAllFilters()">
+                <i class="fa fa-times-circle"></i> Clear All
+              </button>
+            </div>
+          </div>
+
+          <!-- Toolbar -->
+          <div class="clm-table-toolbar-top">
+            <div class="clm-search-box">
+              <i class="fa fa-search"></i>
+              <input type="text" ng-model="c.tableSearch" ng-change="c.onSearchChange()" placeholder="Search by code, name, PAN, zone, region, depot...">
+            </div>
+            <div class="clm-table-controls-right">
+              <button type="button" class="clm-btn clm-btn-csv" ng-click="c.exportToCSV()" title="Exports up to 5000 rows of the current filter">
+                <i class="fa fa-file-excel-o"></i> Export (CSV)
+              </button>
+              <span class="clm-rows-label">Rows</span>
+              <select ng-model="c.limit" ng-options="n for n in [10, 15, 20, 50, 100]" ng-change="c.updatePagination()"></select>
+            </div>
+          </div>
+
+          <!-- Table -->
+          <div class="clm-table-wrapper" ng-class="{'is-busy': c.tableLoading}">
+            <table class="clm-table clm-pf-table">
+              <thead>
+                <tr class="super">
+                  <th colspan="4" class="bg-pan">Customer</th>
+                  <th colspan="3" class="bg-seg grp">Location</th>
+                  <th colspan="7" class="bg-code grp">Exposure</th>
+                  <th colspan="3" class="bg-assess grp">Risk &amp; Review</th>
+                </tr>
+                <tr class="cols">
+                  <th>Customer</th>
+                  <th>PAN</th>
+                  <th>Seg</th>
+                  <th>Status</th>
+                  <th class="grp">Zone</th>
+                  <th>Region</th>
+                  <th>Depot</th>
+                  <th class="grp">Outstanding</th>
+                  <th>Current CL</th>
+                  <th>Available</th>
+                  <th>Active BG</th>
+                  <th>Utilisation</th>
+                  <th>OS / Sales</th>
+                  <th>OD &gt;90D</th>
+                  <th class="grp">Risk</th>
+                  <th>Review In</th>
+                  <th>High Growth</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr ng-repeat="row in c.filteredList track by row.sysId">
+                  <td class="clm-cust-cell">
+                    <a class="clm-cust-link" href="javascript:void(0)" ng-click="c.selectCustomer(row)" title="Open Customer 360">
+                      <span class="clm-cust-name">{{::row.name}}</span>
+                      <span class="clm-cust-code">({{::row.code}})</span>
+                      <span class="clm-cust-go">View 360 <i class="fa fa-arrow-right"></i></span>
+                    </a>
+                  </td>
+                  <td class="clm-code">{{::row.pan}}</td>
+                  <td><span class="clm-pill-status" ng-class="::row.segmentClass">{{::row.segment}}</span></td>
+                  <td><span class="clm-pill-status" ng-class="::row.statusClass">{{::row.status}}</span></td>
+                  <td class="grp clm-loc">{{::row.zoneName}}<span class="clm-sub-code">{{::row.zoneCode}}</span></td>
+                  <td class="clm-loc">{{::row.regionName}}<span class="clm-sub-code">{{::row.regionCode}}</span></td>
+                  <td class="clm-loc">{{::row.depotName}}<span class="clm-sub-code">{{::row.depotCode}}</span></td>
+                  <td class="grp num clm-strong">{{::row.fmtOutstanding}}</td>
+                  <td class="num">{{::row.fmtLimit}}</td>
+                  <td class="num">{{::row.fmtAvailable}}</td>
+                  <td class="num">{{::row.fmtActiveBg}}</td>
+                  <td class="num">
+                    <div class="clm-util">
+                      <div class="clm-mini-progress"><div class="clm-mini-fill" ng-class="::row.utilClass" style="width: {{::row.cappedUtil}}%"></div></div>
+                      <span ng-class="::row.utilClass">{{::row.util}}%</span>
+                    </div>
+                  </td>
+                  <td class="num">{{::row.fmtOsSalesRatio}}</td>
+                  <td class="num clm-od90">{{::row.fmtOd90}}</td>
+                  <td class="grp"><span class="clm-risk-pill" ng-class="::row.riskClass">{{::row.risk}}</span></td>
+                  <td ng-class="::row.reviewColor">{{::row.reviewIn}}</td>
+                  <td><span class="clm-pill-status" ng-class="row.highGrowth20 === 'Yes' ? 'clm-hg-yes' : 'clm-hg-no'">{{::row.highGrowth20}}</span></td>
+                </tr>
+                <tr ng-if="c.tableLoading && c.filteredList.length === 0">
+                  <td colspan="17" class="clm-empty-row">Loading customers...</td>
+                </tr>
+                <tr ng-if="!c.tableLoading && c.filteredList.length === 0">
+                  <td colspan="17" class="clm-empty-row">No customers match your criteria.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Footer / pagination -->
+          <div class="clm-table-footer">
+            <div class="clm-showing" ng-if="c.tableTotal > 0">
+              Showing <b>{{c.page * c.limit + 1}}&ndash;{{c.getShowingTo()}}</b> of <b>{{c.tableTotal}}</b>
+            </div>
+            <div class="clm-page-numbers">
+              <button class="clm-page-btn" ng-disabled="c.page == 0" ng-click="c.goToPage(0)">&laquo;&laquo;</button>
+              <button class="clm-page-btn" ng-disabled="c.page == 0" ng-click="c.goToPage(c.page - 1)">&laquo;</button>
+              <button class="clm-page-btn"
+                      ng-repeat="p in c.getPageArray()"
+                      ng-class="{'active': c.page == p}"
+                      ng-click="c.goToPage(p)">{{p + 1}}</button>
+              <button class="clm-page-btn" ng-disabled="c.page >= c.getTotalPages() - 1" ng-click="c.goToPage(c.page + 1)">&raquo;</button>
+              <button class="clm-page-btn" ng-disabled="c.page >= c.getTotalPages() - 1" ng-click="c.goToPage(c.getTotalPages() - 1)">&raquo;&raquo;</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    </div><!-- /access granted -->
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>294f88683b94d39087401044c3e45a83</id>
+        <sys_created_by>gayatri.bhandge@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-29 10:02:51</sys_created_on>
+        <sys_id>314f88683b94d39087401044c3e45a9c</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-29 10:02:51</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

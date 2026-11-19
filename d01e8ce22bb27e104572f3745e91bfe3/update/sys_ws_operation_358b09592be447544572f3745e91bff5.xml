@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_ws_operation">
+    <sys_ws_operation action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <consumes>application/json,application/xml,text/xml</consumes>
+        <consumes_customized>false</consumes_customized>
+        <default_operation_uri/>
+        <enforce_acl/>
+        <http_method>GET</http_method>
+        <name>clmapprover</name>
+        <operation_script><![CDATA[(function process(/*RESTAPIRequest*/ request, /*RESTAPIResponse*/ response) {
+
+    var sysId   = request.queryParams.sys_id;
+    var action  = request.queryParams.action;
+    var userId  = gs.getUserID(); // email user
+
+    if (!sysId || !action) {
+        response.setBody({ success: false, error: "Missing parameters" });
+        return;
+    }
+
+    var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+    if (!gr.get(sysId)) {
+        response.setBody({ success: false, error: "Record not found" });
+        return;
+    }
+
+    var comments = "Action via Email";
+
+    // ]]>🔥<![CDATA[ SAME LOGIC AS YOUR WIDGET
+    function syncFlowApproval(requestSysId, decision, comments) {
+        var apGr = new GlideRecord('sysapproval_approver');
+        apGr.addQuery('document_id', requestSysId);
+        apGr.addQuery('state', 'requested');
+        apGr.query();
+
+        while (apGr.next()) {
+            if (decision === 'approve') {
+                apGr.state = 'approved';
+            } else {
+                apGr.state = 'rejected';
+            }
+            apGr.comments = comments;
+            apGr.update();
+        }
+    }
+
+    if (action === 'approve') {
+        syncFlowApproval(sysId, 'approve', comments);
+    } 
+    else if (action === 'reject') {
+        syncFlowApproval(sysId, 'reject', comments);
+    } 
+    else if (action === 'return') {
+        syncFlowApproval(sysId, 'reject', "Returned via email");
+    }
+
+    response.setBody({
+        success: true,
+        message: "Action completed"
+    });
+
+})(request, response);]]></operation_script>
+        <operation_uri>/api/x_birl3_clm/clm_approval/decision</operation_uri>
+        <produces>application/json,application/xml,text/xml</produces>
+        <produces_customized>false</produces_customized>
+        <relative_path>/decision</relative_path>
+        <request_example/>
+        <requires_acl_authorization>true</requires_acl_authorization>
+        <requires_authentication>true</requires_authentication>
+        <requires_snc_internal_role>true</requires_snc_internal_role>
+        <short_description/>
+        <support_trailing_slash>false</support_trailing_slash>
+        <sys_class_name>sys_ws_operation</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-04-28 12:26:43</sys_created_on>
+        <sys_id>358b09592be447544572f3745e91bff5</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clmapprover</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_ws_operation_358b09592be447544572f3745e91bff5</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-04-28 12:26:43</sys_updated_on>
+        <web_service_definition display_value="CLM Approval API">225b41592be447544572f3745e91bfd5</web_service_definition>
+        <web_service_version/>
+    </sys_ws_operation>
+</record_update>

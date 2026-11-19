@@ -1,0 +1,2733 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function ($scope, spUtil, $window, $timeout) {
+	var c = this;
+
+	// --- DATA REPOSITORIES ---
+	c.pans              = c.data.pans || [];
+	c.statusCounts      = c.data.statusCounts || {};
+	c.searchTerm        = '';
+	c.statusFilter      = 'ALL';
+
+	// Pagination
+	c.currentPage       = 1;
+	c.itemsPerPage      = 10;
+	c.pageSizes         = [10, 25, 50];
+	c.loadingData       = false;
+
+	// Modal: Mapped Sites Viewer
+	c.showSitesModal    = false;
+	c.viewingSitesPan   = null;
+
+	// Modal: Direct Email
+	c.showModal         = false;
+	c.selectedPan       = null;
+	c.emailInput        = '';
+	c.emailError        = '';
+	c.sending           = false;
+	c.sendSuccess       = false;
+
+	// Modal: Submitted Application Data Viewer (Latest Only)
+	c.showDataModal      = false;
+	c.loadingDataView   = false;
+	c.viewingPan        = null;
+	c.activeApplication = null;
+
+	// Status Filter Tiles
+	c.statusTiles = [
+		{ key: 'ALL',       label: 'All PANs',   cls: 'all' },
+		{ key: 'Not Sent',  label: 'Not Sent',   cls: 'none' },
+		{ key: 'Sent',      label: 'Sent',       cls: 'sent' },
+		{ key: 'Expired',   label: 'Expired',    cls: 'expired' },
+		{ key: 'Submitted', label: 'Submitted',  cls: 'submitted' }
+	];
+
+	function getPanStatus(item) {
+		var s = item.link_status;
+		if (s === 'Sent' || s === 'Expired' || s === 'Submitted') return s;
+		return 'Not Sent';
+	}
+
+	c.statusKey = function (item) {
+		var s = getPanStatus(item);
+		if (s === 'Sent') return 'sent';
+		if (s === 'Expired') return 'expired';
+		if (s === 'Submitted') return 'submitted';
+		return 'none';
+	};
+
+	c.countByStatus = function (key) {
+		if (c.statusCounts && c.statusCounts[key] !== undefined) {
+			return c.statusCounts[key];
+		}
+		return 0;
+	};
+
+	// --- SERVER SEARCH (DEBOUNCED) ---
+	var searchTimer = null;
+	c.onSearchChange = function () {
+		c.currentPage = 1;
+		if (searchTimer) $timeout.cancel(searchTimer);
+		searchTimer = $timeout(function () {
+			c.fetchPansFromServer();
+		}, 300);
+	};
+
+	c.onFilterChange = function () {
+		c.currentPage = 1;
+		c.fetchPansFromServer();
+	};
+
+	c.setStatusFilter = function (key) {
+		c.statusFilter = key;
+		c.currentPage = 1;
+		c.fetchPansFromServer();
+	};
+
+	c.fetchPansFromServer = function () {
+		c.loadingData = true;
+		c.server.get({
+			action: 'searchPans',
+			searchTerm: (c.searchTerm || '').trim(),
+			statusFilter: c.statusFilter
+		}).then(function (resp) {
+			c.loadingData = false;
+			if (resp.data.pans) {
+				c.pans = resp.data.pans;
+			}
+			if (resp.data.statusCounts) {
+				c.statusCounts = resp.data.statusCounts;
+			}
+		});
+	};
+
+	c.clearSearch = function () {
+		c.searchTerm = '';
+		c.currentPage = 1;
+		c.fetchPansFromServer();
+	};
+
+	c.hasFilters = function () {
+		return !!(c.searchTerm || (c.statusFilter && c.statusFilter !== 'ALL'));
+	};
+
+	c.clearFilters = function () {
+		c.searchTerm = '';
+		c.statusFilter = 'ALL';
+		c.currentPage = 1;
+		c.fetchPansFromServer();
+	};
+
+	// --- CLIENT PAGINATION ---
+	c.totalPages = function () {
+		var count = c.pans.length;
+		var pages = Math.ceil(count / c.itemsPerPage);
+		return pages > 0 ? pages : 1;
+	};
+
+	c.getPaginatedPans = function () {
+		var start = (c.currentPage - 1) * c.itemsPerPage;
+		return c.pans.slice(start, start + c.itemsPerPage);
+	};
+
+	c.pageStart = function () {
+		if (c.pans.length === 0) return 0;
+		return (c.currentPage - 1) * c.itemsPerPage + 1;
+	};
+
+	c.pageEnd = function () {
+		return Math.min(c.currentPage * c.itemsPerPage, c.pans.length);
+	};
+
+	c.setPage = function (page) {
+		if (page >= 1 && page <= c.totalPages()) c.currentPage = page;
+	};
+
+	// --- SITES MODAL VIEWER ---
+	c.openSitesModal = function (item) {
+		c.viewingSitesPan = item;
+		c.showSitesModal = true;
+	};
+
+	c.closeSitesModal = function () {
+		c.showSitesModal = false;
+		c.viewingSitesPan = null;
+	};
+
+	c.handleSitesOverlayClick = function ($event) {
+		if (angular.element($event.target).hasClass('clm-tds-overlay')) c.closeSitesModal();
+	};
+
+	// --- FORMATTERS & HELPERS ---
+	c.fmtNum = function (v) {
+		if (v === null || v === undefined || v === '' || v === '—') return '—';
+		var n = parseFloat(String(v).replace(/,/g, ''));
+		if (isNaN(n)) return v;
+		return n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+	};
+
+	c.fmtPct = function (v) {
+		if (v === null || v === undefined || v === '' || v === '—') return '0.00%';
+		var n = parseFloat(String(v).replace(/,/g, ''));
+		if (isNaN(n)) return v + '%';
+		return n.toFixed(2) + '%';
+	};
+
+	c.formatSize = function (bytes) {
+		if (!bytes) return '0 B';
+		var b = parseInt(bytes, 10);
+		if (isNaN(b) || b <= 0) return '0 B';
+		if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+		return (b / 1048576).toFixed(1) + ' MB';
+	};
+
+	c.getFileIconClass = function (name) {
+		var ext = (name || '').split('.').pop().toLowerCase();
+		if (ext === 'pdf') return 'clm-doc-pdf';
+		if (['jpg', 'jpeg', 'png'].indexOf(ext) > -1) return 'clm-doc-img';
+		if (['xls', 'xlsx'].indexOf(ext) > -1) return 'clm-doc-xls';
+		return 'clm-doc-file';
+	};
+
+	c.appStatusKey = function (s) {
+		s = (s || '').toLowerCase();
+		if (s === 'submitted' || s === 'approved' || s === 'completed') return 'ok';
+		if (s === 'rejected' || s === 'cancelled') return 'bad';
+		if (s) return 'pending';
+		return '';
+	};
+
+	// --- DATA VIEWER (CLICK PAN -> LATEST SUBMISSION ONLY) ---
+	c.viewPanData = function (item) {
+		c.viewingPan = item;
+		c.showDataModal = true;
+		c.loadingDataView = true;
+		c.activeApplication = null;
+
+		c.server.get({
+			action: 'getPanSubmittedData',
+			pan: item.pan,
+			site_sys_ids: item.site_sys_ids,
+			site_codes: item.site_codes
+		}).then(function (resp) {
+			c.loadingDataView = false;
+			if (resp.data.latestApplication) {
+				c.activeApplication = resp.data.latestApplication;
+			}
+		});
+	};
+
+	c.closeDataModal = function () {
+		c.showDataModal = false;
+		c.viewingPan = null;
+		c.activeApplication = null;
+	};
+
+	c.handleDataOverlayClick = function ($event) {
+		if (angular.element($event.target).hasClass('clm-tds-overlay')) c.closeDataModal();
+	};
+
+	// --- LINK COPY ---
+	c.copyLink = function (item) {
+		if (!item.request_link) return;
+		if (navigator.clipboard && $window.isSecureContext) {
+			navigator.clipboard.writeText(item.request_link).then(function () {
+				c.flashCopy(item);
+			}).catch(function () {
+				c.fallbackCopy(item.request_link, item);
+			});
+		} else {
+			c.fallbackCopy(item.request_link, item);
+		}
+	};
+
+	c.fallbackCopy = function (text, item) {
+		var el = document.createElement('textarea');
+		el.value = text;
+		el.style.position = 'fixed';
+		el.style.top = '-9999px';
+		document.body.appendChild(el);
+		el.focus();
+		el.select();
+		try {
+			document.execCommand('copy');
+			c.flashCopy(item);
+		} catch (e) {
+			spUtil.addErrorMessage('Could not copy link manually.');
+		}
+		document.body.removeChild(el);
+	};
+
+	c.flashCopy = function (item) {
+		$timeout(function () { item._copied = true; });
+		$timeout(function () { item._copied = false; }, 2000);
+	};
+
+	// --- SEND DIRECT EMAIL ---
+	c.openModal = function (item) {
+		c.selectedPan    = item;
+		c.emailInput     = item.last_sent_email || '';
+		c.emailError     = '';
+		c.sending        = false;
+		c.sendSuccess    = false;
+		c.showModal      = true;
+	};
+
+	c.closeModal = function () {
+		if (c.sending) return;
+		c.showModal = false;
+		c.selectedPan = null;
+	};
+
+	c.handleOverlayClick = function ($event) {
+		if (angular.element($event.target).hasClass('clm-tds-overlay')) c.closeModal();
+	};
+
+	c.confirmSend = function () {
+		c.emailError = '';
+		var email = (c.emailInput || '').trim();
+		var emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+
+		if (!email) { c.emailError = 'Recipient corporate email address is required.'; return; }
+		if (!emailRegex.test(email)) { c.emailError = 'Please enter a valid corporate email address.'; return; }
+
+		c.sending = true;
+		c.selectedPan._sending = true;
+		var target = c.selectedPan;
+
+		c.server.get({
+			action: 'sendDirectEmail',
+			pan: target.pan,
+			email: email,
+			custName: target.customer_name
+		}).then(function (resp) {
+			c.sending = false;
+			target._sending = false;
+
+			if (resp.data.success) {
+				c.sendSuccess = true;
+				$timeout(function () {
+					c.closeModal();
+					c.fetchPansFromServer();
+				}, 1200);
+			} else {
+				c.emailError = resp.data.message || 'Failed to dispatch upload link.';
+			}
+		});
+	};
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+/* ── Root Page Container ── */
+.clm-tds {
+  background: white;
+  min-height: 100vh;
+  padding: 24px 32px 40px;
+  color: #1a1a1a;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  width: 100%;
+}
+.clm-tds *, .clm-tds *::before, .clm-tds *::after {
+  box-sizing: border-box;
+}
+
+/* ============================================================
+   PAGE HEADER BANNER (Crimson / Red theme with arcs)
+   ============================================================ */
+.clm-tds-hero { 
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px 32px;
+  flex-wrap: wrap;
+  padding: 28px 32px;
+  margin-bottom: 20px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #9b1111 0%, #b81e1e 45%, #e0301e 100%);
+  color: #ffffff;
+  box-shadow: 0 10px 28px rgba(120, 20, 15, 0.28);
+}
+.clm-tds-hero::before,
+.clm-tds-hero::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.clm-tds-hero::before {
+  width: 360px;
+  height: 360px;
+  right: -110px;
+  top: -190px;
+  background: rgba(244, 123, 48, 0.55);
+}
+.clm-tds-hero::after {
+  width: 260px;
+  height: 260px;
+  right: 160px;
+  bottom: -200px;
+  background: rgba(120, 15, 15, 0.45);
+}
+
+.clm-tds-hero-main, .clm-tds-hero-stat {
+  position: relative;
+  z-index: 1;
+}
+.clm-tds-hero-main {
+  flex: 1 1 380px;
+  min-width: 0;
+}
+.clm-hero-bar {
+  width: 44px;
+  height: 6px;
+  margin-bottom: 12px;
+  border-radius: 3px;
+  background: #fff200;
+}
+.clm-tds-hero-title {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.25;
+  color: #ffffff;
+}
+.clm-tds-hero-accent {
+  color: #fff200;
+}
+.clm-tds-hero-sub {
+  max-width: 720px;
+  margin-top: 6px;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: #ffeae4;
+}
+
+.clm-tds-hero-stat { 
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  min-width: 140px;
+  padding-left: 24px;
+  border-left: 1px solid rgba(255, 255, 255, 0.3);
+  text-align: right; 
+}
+.clm-tds-hero-stat-v {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: 1px;
+  color: #fff200;
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(80, 10, 10, 0.35);
+}
+.clm-tds-hero-stat-k {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #ffd9cf;
+  white-space: nowrap;
+}
+
+/* ── Section Container ── */
+.clm-section {
+  background: #fff;
+  border: 1px solid #e0e6ed;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+  padding: 28px 32px;
+}
+.clm-section-title { 
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #1a1a1a;
+  text-transform: uppercase;
+  letter-spacing: 1px; 
+}
+.clm-section-num { 
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #F3D54E;
+  color: #1a1a1a;
+  font-size: 13px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0; 
+}
+.clm-tds-gap {
+  margin-top: 34px;
+}
+
+/* ── Card (Block) ── */
+.clm-block {
+  margin-top: 16px;
+  background: #fff;
+  border: 1px solid #dde3ea;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.clm-block.clm-tds-first {
+  margin-top: 0;
+}
+.clm-block-head { 
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  flex-wrap: wrap;
+  padding: 14px 20px;
+  background: #fafbfc;
+  border-bottom: 1px solid #dde3ea; 
+}
+.clm-block-title { 
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a1a1a;
+  text-transform: uppercase;
+  letter-spacing: .8px; 
+}
+.clm-block-title::before {
+  content: "";
+  width: 4px;
+  height: 16px;
+  border-radius: 2px;
+  background: #F3D54E;
+  flex-shrink: 0;
+}
+.clm-block-sub {
+  margin: 4px 0 0 14px;
+  font-size: 12px;
+  color: #5a6a7a;
+}
+.clm-block-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.clm-chip { 
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #fff;
+  border: 1px solid #dde3ea;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1a1a1a;
+  white-space: nowrap; 
+}
+.clm-chip-k {
+  font-weight: 400;
+  color: #5a6a7a;
+}
+.clm-tw-body {
+  padding: 18px 20px;
+}
+
+/* ── Status Tiles ── */
+.clm-mr-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.clm-tds-stats {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+.clm-mr-stat { 
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  background: #fff;
+  font: inherit;
+  border: 1px solid #dde3ea;
+  border-top: 4px solid #cdd4dc;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: box-shadow .15s, border-color .15s;
+  appearance: none; 
+}
+.clm-mr-stat:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .06);
+}
+.clm-mr-stat:focus {
+  outline: none;
+}
+.clm-mr-stat-k {
+  font-size: 12px;
+  font-weight: 700;
+  color: #3a4451;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+}
+.clm-mr-stat-v {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: #1a1a1a;
+}
+.clm-mr-stat.is-active {
+  background: #fffcf0;
+  border-color: #E87722;
+  box-shadow: 0 0 0 2px rgba(232, 119, 34, .25);
+}
+.clm-mr-stat.st-all {
+  border-top-color: #b81e1e;
+}
+.clm-mr-stat.st-none {
+  border-top-color: #8a96a3;
+}
+.clm-mr-stat.st-none .clm-mr-stat-v {
+  color: #5a6a7a;
+}
+.clm-mr-stat.st-sent {
+  border-top-color: #2e86c1;
+}
+.clm-mr-stat.st-sent .clm-mr-stat-v {
+  color: #2e86c1;
+}
+.clm-mr-stat.st-expired {
+  border-top-color: #E87722;
+}
+.clm-mr-stat.st-expired .clm-mr-stat-v {
+  color: #E87722;
+}
+.clm-mr-stat.st-submitted {
+  border-top-color: #27ae60;
+}
+.clm-mr-stat.st-submitted .clm-mr-stat-v {
+  color: #27ae60;
+}
+
+/* ── Search &amp; Filter ── */
+.clm-tds-filters {
+  display: grid;
+  grid-template-columns: 3fr 1fr;
+  gap: 16px;
+}
+.clm-tds-field-wide {
+  grid-column: span 1;
+}
+.clm-tds-lbl {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #3a4451;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+}
+.clm-tds-input { 
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  background: #fff;
+  color: #1a1a1a;
+  border: 1px solid #cdd4dc;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color .2s, box-shadow .2s; 
+}
+.clm-tds-input:focus {
+  border-color: #E87722;
+  box-shadow: 0 0 0 3px rgba(232, 119, 34, .12);
+}
+.clm-tds-input.is-err {
+  border-color: #E23D28;
+  box-shadow: 0 0 0 3px rgba(226, 61, 40, .12);
+}
+.clm-tds-input-sm {
+  width: auto;
+  height: 30px;
+  padding: 0 8px;
+  font-size: 12.5px;
+}
+.clm-tds-search {
+  position: relative;
+}
+.clm-tds-search-icon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #7f8c9a;
+  font-size: 13px;
+}
+.clm-tds-input-search {
+  padding: 0 34px;
+}
+.clm-tds-search-clear { 
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: #eef1f5;
+  color: #5a6a7a;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all .15s; 
+}
+.clm-tds-search-clear:hover {
+  background: #AF272F;
+  color: #fff;
+}
+.clm-tds-clear {
+  padding: 5px 12px;
+  background: #fff;
+  border: 1px solid #cdd4dc;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #AF272F;
+  cursor: pointer;
+  transition: all .15s;
+}
+.clm-tds-clear:hover {
+  background: #fef5f4;
+  border-color: #f5c2bc;
+  color: #b3261e;
+}
+.clm-tds-clear-inline {
+  margin-top: 12px;
+}
+
+/* ── Tables &amp; Sticky Column Configuration ── */
+.clm-tds-table-wrap {
+  overflow-x: auto;
+  background: #fff;
+  -webkit-overflow-scrolling: touch;
+}
+.clm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.clm-table th { 
+  background: #eef1f5;
+  color: #2b3440;
+  padding: 12px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  text-align: center;
+  white-space: nowrap;
+  border: 1px solid #dde3ea; 
+}
+.clm-table td {
+  padding: 14px;
+  color: #1a1a1a;
+  text-align: center;
+  white-space: nowrap;
+  border: 1px solid #e6eaef;
+  vertical-align: middle;
+}
+.clm-table tr &gt; :first-child {
+  border-left: 0;
+  text-align: left;
+}
+.clm-table tr &gt; :last-child {
+  border-right: 0;
+}
+.clm-table thead tr:first-child th {
+  border-top: 0;
+}
+.clm-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.clm-table .grp {
+  border-left: 2px solid #c9d1db !important;
+}
+.clm-table .tl {
+  text-align: left;
+}
+.clm-table tr.super th {
+  letter-spacing: 1px;
+  padding: 11px 14px;
+  text-align: center;
+}
+.clm-table th.bg-blank {
+  background: #f7f8fa;
+}
+.clm-table th.bg-code {
+  background: #e3eefa;
+  color: #0b5394;
+}
+.clm-table th.bg-seg {
+  background: #f1f3f7;
+  color: #3a4451;
+}
+.clm-table th.bg-req {
+  background: #e6f4ea;
+  color: #2e7d32;
+}
+
+/* Sticky first column in PAN Master Queue Table */
+.clm-tds-table .clm-sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  box-shadow: 2px 0 5px rgba(0, 0, 0, .04);
+}
+.clm-tds-table th.clm-sticky-col {
+  background: #f7f8fa !important;
+  z-index: 3;
+}
+.clm-tds-table td.clm-sticky-col {
+  background: #fff !important;
+}
+.clm-tds-table tr:hover td.clm-sticky-col {
+  background: #fafbfc !important;
+}
+
+.clm-tds-table {
+  min-width: 820px;
+  width: 100%;
+}
+.clm-tds-table tbody tr:hover td {
+  background: #fafbfc;
+}
+
+/* Sticky first column in Modal Child Sites Table */
+.clm-tds-sob .clm-sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  box-shadow: 2px 0 5px rgba(0, 0, 0, .04);
+}
+.clm-tds-sob th.clm-sticky-col {
+  background: #f7f8fa !important;
+  z-index: 3;
+}
+.clm-tds-sob td.clm-sticky-col {
+  background: #fff !important;
+}
+.clm-tds-sob tr:hover td.clm-sticky-col {
+  background: #fafbfc !important;
+}
+
+.clm-tds-sob {
+  min-width: 780px;
+  width: 100%;
+}
+.clm-subth {
+  font-size: 11px !important;
+  font-weight: 400 !important;
+  color: #5a6a7a !important;
+  padding: 6px 10px !important;
+}
+
+/* Entity Cell formatting */
+.clm-tds-entity-cell {
+  white-space: normal !important;
+  max-width: 340px;
+}
+.clm-pan-meta-row {
+  margin-bottom: 5px;
+}
+
+/* Site Details inside Modal Card 3 */
+.clm-td-siteinfo {
+  white-space: normal !important;
+  max-width: 320px;
+}
+.clm-site-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 5px;
+}
+
+.clm-cust-name {
+  font-weight: 700;
+  color: #1a1a1a;
+  line-height: 1.35;
+  font-size: 13px;
+}
+
+/* PAN Link: Red accent style */
+.clm-tds-pan-link { 
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #AF272F;
+  text-decoration: none;
+  border-bottom: 1px dashed #f5c2bc;
+  cursor: pointer;
+  letter-spacing: .5px;
+  transition: all .15s;
+}
+.clm-tds-pan-link:hover {
+  color: #9b1111;
+  border-bottom-color: #9b1111;
+  text-decoration: none;
+}
+
+/* Mapped Site Button */
+.clm-tds-site-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 12px;
+  background: #fdf5f3;
+  border-radius: 14px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #b81e1e;
+  border: 1px solid #f5cfca;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.clm-tds-site-btn:hover {
+  background: #b81e1e;
+  color: #ffffff;
+  border-color: #b81e1e;
+}
+.clm-site-code-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  background: #f1f3f7;
+  border: 1px solid #dde3ea;
+  border-radius: 4px;
+  font-weight: 700;
+  color: #1a1a1a;
+  letter-spacing: .5px;
+  font-size: 12px;
+}
+
+/* Inline metric row for SOB in modal */
+.clm-inline-cell {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 8px !important;
+  white-space: nowrap !important;
+}
+.clm-du-pct {
+  display: inline-block;
+  min-width: 50px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: #f4f6f9;
+  border: 1px solid #e6eaef;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #3a4451;
+}
+.clm-du-pct.is-exp {
+  color: #1e8449;
+  background: #eaf7ee;
+  border-color: #b9e3c6;
+}
+
+/* Segment Pill */
+.clm-segment-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.clm-segment-pill.seg-rmc {
+  background: #f3e8ff;
+  color: #6b21a8;
+  border: 1px solid #e9d5ff;
+}
+.clm-segment-pill.seg-cement {
+  background: #e0f2fe;
+  color: #0369a1;
+  border: 1px solid #bae6fd;
+}
+
+/* Link Status Pills */
+.clm-tds-ls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  border: 1px solid;
+  font-size: 11.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.clm-tds-ls::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.clm-tds-ls.ls-none {
+  background: #f5f6f8;
+  color: #5a6a7a;
+  border-color: #dde3ea;
+}
+.clm-tds-ls.ls-sent {
+  background: #eaf3fb;
+  color: #1f6fa5;
+  border-color: #b6d4ee;
+}
+.clm-tds-ls.ls-expired {
+  background: #fff4e0;
+  color: #a15a00;
+  border-color: #f6d39a;
+}
+.clm-tds-ls.ls-submitted {
+  background: #eaf7ee;
+  color: #1e8449;
+  border-color: #b9e3c6;
+}
+
+/* ── Buttons (Orange CTA / Ghost) ── */
+.clm-tds-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.clm-tds-btn { 
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  text-decoration: none !important;
+  transition: all .2s; 
+}
+.clm-tds-btn .fa {
+  font-size: 11px;
+}
+.clm-tds-btn-lg {
+  height: 38px;
+  padding: 0 18px;
+  font-size: 12.5px;
+}
+.clm-tds-btn-sm {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 11.5px;
+}
+.clm-tds-btn-ghost {
+  background: #fff;
+  border-color: #cdd4dc;
+  color: #1a1a1a;
+}
+.clm-tds-btn-ghost:hover:not([disabled]) {
+  background: #1a1a1a;
+  border-color: #1a1a1a;
+  color: #F3D54E;
+}
+.clm-tds-btn-ghost.is-copied {
+  background: #f4fbf6;
+  border-color: #b9e3c6;
+  color: #1e8449;
+}
+.clm-tds-btn-primary {
+  background: #E87722;
+  border-color: #E87722;
+  color: #ffffff;
+}
+.clm-tds-btn-primary:hover:not([disabled]) {
+  background: #d35400;
+  border-color: #d35400;
+  color: #ffffff;
+}
+.clm-tds-btn[disabled] {
+  opacity: .5;
+  background: #eef1f5;
+  border-color: #e0e6ed;
+  color: #9aa5b1;
+  cursor: not-allowed;
+}
+.clm-tds-lock {
+  margin-top: 5px;
+  font-size: 11px;
+  color: #7f8c9a;
+}
+
+/* ── Supporting Documents Card &amp; Grid ── */
+.clm-doc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+.clm-doc-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #fafbfc;
+  border: 1px solid #dde3ea;
+  border-radius: 8px;
+  transition: all .15s ease;
+}
+.clm-doc-card:hover {
+  background: #ffffff;
+  border-color: #c5d0dc;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+.clm-doc-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 6px;
+  background: #fdeeed;
+  color: #c0392b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+.clm-doc-info {
+  flex: 1;
+  min-width: 0;
+}
+.clm-doc-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #1a1a1a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.clm-doc-size {
+  font-size: 11px;
+  color: #7f8c9a;
+  margin-top: 2px;
+}
+.clm-doc-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.clm-tds-no-docs {
+  padding: 24px;
+  text-align: center;
+  color: #7f8c9a;
+  font-size: 12.5px;
+  background: #fafbfc;
+  border-radius: 6px;
+  border: 1px dashed #dde3ea;
+}
+
+/* ── Pager ── */
+.clm-tds-pager { 
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  padding: 12px 20px;
+  background: #fafbfc;
+  border-top: 1px solid #dde3ea;
+  font-size: 12.5px;
+  color: #3a4451; 
+}
+.clm-tds-pager-left, .clm-tds-pager-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.clm-tds-pager-range {
+  margin-left: 8px;
+  font-weight: 700;
+  color: #1a1a1a;
+}
+.clm-tds-page-btn { 
+  height: 30px;
+  min-width: 32px;
+  padding: 0 10px;
+  background: #fff;
+  border: 1px solid #cdd4dc;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1a1a1a;
+  cursor: pointer;
+  transition: all .15s; 
+}
+.clm-tds-page-btn:hover:not([disabled]) {
+  background: #1a1a1a;
+  border-color: #1a1a1a;
+  color: #F3D54E;
+}
+.clm-tds-page-btn[disabled] {
+  opacity: .4;
+  cursor: not-allowed;
+}
+.clm-tds-page-ind {
+  margin: 0 6px;
+  font-weight: 700;
+  color: #1a1a1a;
+}
+
+/* ── Modals &amp; Factors (Orange Top Border Accent) ── */
+.clm-tds-overlay { 
+  position: fixed;
+  inset: 0;
+  z-index: 9990;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(26, 26, 26, .55); 
+}
+.clm-tds-modal { 
+  display: flex;
+  flex-direction: column;
+  width: 560px;
+  max-width: 100%;
+  max-height: 90vh;
+  background: #fff;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, .25);
+  border-top: 4px solid #E87722; 
+}
+.clm-tds-modal-lg {
+  width: 1040px;
+}
+.clm-tds-modal-head {
+  flex-shrink: 0;
+}
+.clm-tds-x {
+  width: 32px;
+  height: 32px;
+  background: #fff;
+  border: 1px solid #dde3ea;
+  border-radius: 6px;
+  color: #5a6a7a;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all .15s;
+}
+.clm-tds-x:hover:not([disabled]) {
+  border-color: #AF272F;
+  color: #AF272F;
+}
+.clm-tds-modal-body {
+  overflow-y: auto;
+}
+.clm-tds-modal-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 20px 22px;
+  background: #f4f5f7;
+}
+.clm-tds-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 14px 20px;
+  background: #fafbfc;
+  border-top: 1px solid #dde3ea;
+}
+
+.clm-tw-factors {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.clm-tw-factors.clm-tds-f4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.clm-tw-factor {
+  padding: 12px 14px;
+  border: 1px solid #e0e6ed;
+  border-radius: 6px;
+  background: #fafbfc;
+  min-width: 0;
+}
+.clm-tw-factor.clm-tds-span2 {
+  grid-column: span 2;
+}
+.clm-tw-factor-k {
+  font-size: 12px;
+  color: #5a6a7a;
+  margin-bottom: 4px;
+}
+.clm-tw-factor-v {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1a1a1a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.clm-tw-factor-v.clm-tds-wrap {
+  white-space: normal;
+  overflow: visible;
+  word-break: break-word;
+  line-height: 1.35;
+  font-size: 13.5px;
+}
+.clm-tw-factor-s {
+  font-size: 11px;
+  color: #7f8c9a;
+  margin-top: 4px;
+}
+
+.clm-tds-form {
+  margin-top: 18px;
+}
+.clm-tds-field-lbl {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a1a1a;
+}
+.clm-tds-req {
+  color: #E23D28;
+}
+.clm-tds-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #7f8c9a;
+}
+.clm-tds-err {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #c0392b;
+}
+.clm-tds-success {
+  margin-top: 16px;
+  padding: 10px 12px;
+  background: #f4fbf6;
+  border: 1px solid #cfead8;
+  border-radius: 6px;
+  color: #1e8449;
+  font-size: 12.5px;
+}
+
+.clm-tds-app-st {
+  text-transform: capitalize;
+}
+.clm-tds-app-st.as-ok {
+  color: #1e8449;
+}
+.clm-tds-app-st.as-pending {
+  color: #2e86c1;
+}
+.clm-tds-app-st.as-bad {
+  color: #c0392b;
+}
+
+/* ── Spinners &amp; Empty States ── */
+.clm-tds-spinner { 
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #dde3ea;
+  border-top-color: #1a1a1a;
+  border-radius: 50%;
+  animation: clm-tds-spin .7s linear infinite;
+  vertical-align: middle; 
+}
+.clm-tds-spinner-sm {
+  width: 12px;
+  height: 12px;
+}
+.clm-tds-spinner-lg {
+  width: 30px;
+  height: 30px;
+  border-width: 3px;
+  border-top-color: #E87722;
+}
+@keyframes clm-tds-spin {
+  to { transform: rotate(360deg); }
+}
+
+.clm-tds-empty-cell {
+  padding: 44px 16px;
+  text-align: center;
+  color: #5a6a7a;
+  font-size: 13px;
+}
+.clm-tds-empty {
+  padding: 40px 16px;
+  text-align: center;
+  color: #5a6a7a;
+  font-size: 13px;
+  background: #fff;
+  border: 1px dashed #cdd4dc;
+  border-radius: 8px;
+}
+.clm-tds-empty-icon {
+  font-size: 28px;
+  margin-bottom: 8px;
+}
+.clm-tds-empty-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #7f8c9a;
+}
+.clm-tds-loading {
+  padding: 48px 16px;
+  text-align: center;
+  color: #5a6a7a;
+  font-size: 13px;
+}
+.clm-tds-loading .clm-tds-spinner {
+  margin-bottom: 12px;
+}
+
+/* ── Typography &amp; Global Rules ── */
+.clm-tds, .clm-tds *, .clm-tds input, .clm-tds select, .clm-tds textarea, .clm-tds button, .clm-tds table {
+  font-family: "Oxygen", Arial, sans-serif !important;
+}
+
+/* ── Responsive Adaptations ── */
+@media (max-width: 768px) {
+  html, body {
+    overflow-x: hidden !important;
+    width: 100% !important;
+  }
+  .clm-tds {
+    padding: 12px 10px 24px;
+  }
+  .clm-section {
+    padding: 14px 10px;
+  }
+  .clm-tds-hero {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 22px 16px;
+  }
+  .clm-tds-hero-stat {
+    border-left: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.22);
+    padding: 12px 0 0;
+    width: 100%;
+    align-items: center;
+  }
+  .clm-tds-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .clm-tds-stats .clm-mr-stat:first-child {
+    grid-column: span 2;
+  }
+  .clm-tds-filters {
+    grid-template-columns: 1fr;
+  }
+  .clm-tw-factors, .clm-tw-factors.clm-tds-f4 {
+    grid-template-columns: 1fr;
+  }
+  .clm-tw-factor.clm-tds-span2 {
+    grid-column: span 1;
+  }
+  .clm-doc-grid {
+    grid-template-columns: 1fr;
+  }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>uclm_non-trade_document_submission</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Non-Trade Document Submission</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function () {
+
+	// =========================================================================
+	// 1. CONFIGURATION & SCHEMA CONSTANTS
+	// =========================================================================
+	var CONFIG = {
+		TABLE_CUSTOMER: 'x_birl3_clm_clm_customer_master1',
+		TABLE_MATRIX: 'x_birl3_clm_approval_matrix',
+		TABLE_CUSTOMER_FORM: 'x_birl3_clm_customer_form',
+		TABLE_ATTACHMENT: 'sys_attachment',
+		BASE_URL: gs.getProperty('glide.servlet.uri') || 'https://abgdev.service-now.com/',
+		LINK_EXPIRY_DAYS: 3,
+		INITIAL_PAN_LIMIT: 150,
+		FIELD_LINK_SENDER: 'link_sent_by'
+	};
+
+	var currentUserId = gs.getUserID();
+	var isAdmin = gs.hasRole('admin') || gs.hasRole('x_birl3_clm.admin');
+
+	function buildLink(token) {
+		var cleanBase = CONFIG.BASE_URL.replace(/\/$/, "");
+		return cleanBase + '/uclm?id=uclm_nt_document_submission_form&token=' + token;
+	}
+
+	function formatGeo(nameVal, codeVal) {
+		var n = (nameVal || '').trim();
+		var c = (codeVal || '').trim();
+		if (n && c) return n + ' (' + c + ')';
+		if (n) return n;
+		if (c) return c;
+		return '—';
+	}
+
+	function getUnit(seg) {
+		if (!seg) return 'MT';
+		return (String(seg).trim().toUpperCase() === 'RMC' ? 'CuM' : 'MT');
+	}
+
+	function getStatusRank(st) {
+		if (st === 'Submitted') return 4;
+		if (st === 'Sent') return 3;
+		if (st === 'Expired') return 2;
+		return 1; // 'Not Sent'
+	}
+
+	// =========================================================================
+	// 2. CHECK APPROVAL MATRIX FOR TSH JURISDICTION (NON-ADMIN)
+	// =========================================================================
+	var userDepots = [];
+	var isTshUser = false;
+
+	if (!isAdmin) {
+		var matGr = new GlideRecord(CONFIG.TABLE_MATRIX);
+		if (matGr.isValid()) {
+			var uq = matGr.addQuery('approver_user', currentUserId);
+			uq.addOrCondition('user', currentUserId);
+			uq.addOrCondition('approver', currentUserId);
+
+			var typeQ = matGr.addQuery('customer_type', 'non_trade');
+			typeQ.addOrCondition('customer_type', 'Non-Trade');
+			typeQ.addOrCondition('customer_type', 'NON_TRADE');
+
+			matGr.query();
+
+			while (matGr.next()) {
+				var rName = (matGr.getValue('role_name') || matGr.getValue('role') || '').toLowerCase();
+				if (rName.indexOf('tsh') !== -1 || rName.indexOf('tsm') !== -1) {
+					isTshUser = true;
+					var d = matGr.getValue('depot') || matGr.getValue('depot_code') || matGr.getValue('depot_name');
+					if (d && userDepots.indexOf(d) === -1) {
+						userDepots.push(d);
+					}
+				}
+			}
+		}
+	} else {
+		isTshUser = true;
+	}
+
+	// =========================================================================
+	// 3. FAST AUTO-EXPIRE SENT LINKS OLDER THAN 3 DAYS (< 10 ms)
+	// =========================================================================
+	function checkAndExpireSentLinks(adminFlag, depots) {
+		var nowNumeric = new GlideDateTime().getNumericValue();
+		var expiryThresholdMs = CONFIG.LINK_EXPIRY_DAYS * 86400000;
+
+		var expGr = new GlideRecord(CONFIG.TABLE_CUSTOMER);
+		expGr.addQuery('cg1', 'N01');
+		expGr.addQuery('link_status', 'Sent');
+		expGr.addNotNullQuery('link_sent_on');
+
+		if (!adminFlag && depots && depots.length > 0) {
+			var dq = expGr.addQuery('depot', 'IN', depots.join(','));
+			dq.addOrCondition('depot_name', 'IN', depots.join(','));
+		}
+		expGr.query();
+
+		while (expGr.next()) {
+			var sentOn = expGr.getValue('link_sent_on');
+			if (sentOn) {
+				var sentTime = new GlideDateTime(sentOn).getNumericValue();
+				if ((nowNumeric - sentTime) >= expiryThresholdMs) {
+					expGr.setValue('link_status', 'Expired');
+					expGr.setValue('update_allowed', false);
+					expGr.update();
+				}
+			}
+		}
+	}
+
+	// =========================================================================
+	// 4. FAST DATABASE-LEVEL STATUS COUNTER VIA GLIDEAGGREGATE (~40 ms)
+	// =========================================================================
+	function calculateStatusCounts(adminFlag, depots) {
+		var counts = { 'ALL': 0, 'Not Sent': 0, 'Sent': 0, 'Expired': 0, 'Submitted': 0 };
+
+		var agg = new GlideAggregate(CONFIG.TABLE_CUSTOMER);
+		agg.addQuery('cg1', 'N01');
+		agg.addNotNullQuery('pan');
+		agg.addQuery('pan', '!=', '');
+
+		if (!adminFlag && depots && depots.length > 0) {
+			var dq = agg.addQuery('depot', 'IN', depots.join(','));
+			dq.addOrCondition('depot_name', 'IN', depots.join(','));
+		}
+
+		agg.addAggregate('COUNT');
+		agg.groupBy('link_status');
+		agg.query();
+
+		var total = 0;
+		while (agg.next()) {
+			var st = agg.getValue('link_status') || 'Not Sent';
+			var cnt = parseInt(agg.getAggregate('COUNT'), 10) || 0;
+			if (counts[st] !== undefined) {
+				counts[st] = cnt;
+			} else {
+				counts['Not Sent'] += cnt;
+			}
+			total += cnt;
+		}
+		counts['ALL'] = total;
+		return counts;
+	}
+
+	// Helper: Get all distinct PANs where TSH has at least one site in their depot
+	function getEligiblePansForDepots(depots) {
+		var pans = [];
+		if (!depots || depots.length === 0) return pans;
+
+		var agg = new GlideAggregate(CONFIG.TABLE_CUSTOMER);
+		agg.addQuery('cg1', 'N01');
+		agg.addNotNullQuery('pan');
+		agg.addQuery('pan', '!=', '');
+		var dq = agg.addQuery('depot', 'IN', depots.join(','));
+		dq.addOrCondition('depot_name', 'IN', depots.join(','));
+		agg.groupBy('pan');
+		agg.query();
+
+		while (agg.next()) {
+			var p = agg.getValue('pan');
+			if (p) pans.push(String(p).trim().toUpperCase());
+		}
+		return pans;
+	}
+
+
+	// Helper: Aggregate Records into Distinct PAN Portfolios
+	function groupRowsByPan(custGr, userIsTsh, maxDistinctPans, existingMap, existingOrder) {
+		var pansMap = existingMap || {};
+		var panOrder = existingOrder || [];
+		var nowNumeric = new GlideDateTime().getNumericValue();
+		var expiryThresholdMs = CONFIG.LINK_EXPIRY_DAYS * 86400000;
+
+		while (custGr.next()) {
+			var pan = custGr.getValue('pan');
+			if (!pan) continue;
+			pan = String(pan).trim().toUpperCase();
+
+			var linkStatus = custGr.getValue('link_status') || 'Not Sent';
+			var sentOn = custGr.getValue('link_sent_on');
+
+			if (linkStatus === 'Sent' && sentOn) {
+				var sentTime = new GlideDateTime(sentOn).getNumericValue();
+				if ((nowNumeric - sentTime) >= expiryThresholdMs) {
+					linkStatus = 'Expired';
+				}
+			}
+
+			if (!pansMap[pan]) {
+				if (maxDistinctPans && panOrder.length >= maxDistinctPans) {
+					continue;
+				}
+				pansMap[pan] = {
+					pan: pan,
+					customer_name: custGr.getValue('customer_name') || 'Non-Trade Customer',
+					site_count: 0,
+					site_sys_ids: [],
+					site_codes: [],
+					sites: [],
+					link_status: linkStatus,
+					request_link: custGr.getValue('request_link') || '',
+					last_sent_email: custGr.isValidField('last_sent_email') ? (custGr.getValue('last_sent_email') || '') : '',
+					is_tsh: userIsTsh
+				};
+				panOrder.push(pan);
+			}
+
+			var sCode = custGr.getValue('customer_code_sap') || '—';
+			var sName = custGr.getValue('customer_name') || '—';
+			var sZone = formatGeo(custGr.getValue('zone_name'), custGr.getValue('zone'));
+			var sRegion = formatGeo(custGr.getValue('region_name'), custGr.getValue('region'));
+			var sDepot = formatGeo(custGr.getValue('depot_name'), custGr.getValue('depot'));
+
+			pansMap[pan].site_count += 1;
+			pansMap[pan].site_sys_ids.push(custGr.getUniqueValue());
+			if (sCode !== '—') pansMap[pan].site_codes.push(sCode);
+
+			pansMap[pan].sites.push({
+				customer_code_sap: sCode,
+				customer_name: sName,
+				zone: sZone,
+				region: sRegion,
+				depot: sDepot
+			});
+
+			if (getStatusRank(linkStatus) > getStatusRank(pansMap[pan].link_status)) {
+				pansMap[pan].link_status = linkStatus;
+			}
+			if (custGr.getValue('request_link')) {
+				pansMap[pan].request_link = custGr.getValue('request_link');
+			}
+		}
+
+		var result = [];
+		for (var i = 0; i < panOrder.length; i++) {
+			result.push(pansMap[panOrder[i]]);
+		}
+
+		result.sort(function (a, b) {
+			var rankA = getStatusRank(a.link_status);
+			var rankB = getStatusRank(b.link_status);
+			if (rankA !== rankB) {
+				return rankB - rankA;
+			}
+			return (a.customer_name || '').localeCompare(b.customer_name || '');
+		});
+
+		return result;
+	}
+
+	// =========================================================================
+	// 5. INITIAL LOAD: TWO-PHASE FAST QUERY (< 200 ms TOTAL)
+	// =========================================================================
+	if (!input) {
+		if (!isAdmin && (!isTshUser || userDepots.length === 0)) {
+			data.pans = [];
+			data.statusCounts = { 'ALL': 0, 'Not Sent': 0, 'Sent': 0, 'Expired': 0, 'Submitted': 0 };
+			return;
+		}
+
+		// 1. Get eligible PANs where TSH has at least one mapped site
+		var eligiblePans = [];
+		if (!isAdmin) {
+			eligiblePans = getEligiblePansForDepots(userDepots);
+			if (eligiblePans.length === 0) {
+				data.pans = [];
+				data.statusCounts = { 'ALL': 0, 'Not Sent': 0, 'Sent': 0, 'Expired': 0, 'Submitted': 0 };
+				return;
+			}
+		}
+
+		// 2. Check and expire links
+		checkAndExpireSentLinks(isAdmin, userDepots);
+
+		// 3. Status counts
+		data.statusCounts = calculateStatusCounts(isAdmin, userDepots);
+
+		// 4. PHASE 1: Fetch active PANs with ALL child sites (NO depot filter)
+		var activeGr = new GlideRecord(CONFIG.TABLE_CUSTOMER);
+		activeGr.addQuery('cg1', 'N01');
+		activeGr.addNotNullQuery('pan');
+		activeGr.addQuery('pan', '!=', '');
+		activeGr.addQuery('link_status', 'IN', 'Submitted,Sent,Expired');
+
+		if (!isAdmin) {
+			activeGr.addQuery('pan', 'IN', eligiblePans.join(',')); // Filter by eligible PANs, NOT depot
+		}
+		activeGr.orderByDesc('link_sent_on');
+		activeGr.orderByDesc('sys_updated_on');
+		activeGr.query();
+
+		var pansMap = {};
+		var panOrder = [];
+		groupRowsByPan(activeGr, isTshUser, CONFIG.INITIAL_PAN_LIMIT, pansMap, panOrder);
+
+		// 5. PHASE 2: Fill remaining slots with recent "Not Sent" PANs (NO depot filter)
+		var remainingSlots = CONFIG.INITIAL_PAN_LIMIT - panOrder.length;
+		if (remainingSlots > 0) {
+			var restGr = new GlideRecord(CONFIG.TABLE_CUSTOMER);
+			restGr.addQuery('cg1', 'N01');
+			restGr.addNotNullQuery('pan');
+			restGr.addQuery('pan', '!=', '');
+
+			var nsQ = restGr.addQuery('link_status', 'Not Sent');
+			nsQ.addOrCondition('link_status', '');
+			nsQ.addOrCondition('link_status', 'NULL');
+
+			if (!isAdmin) {
+				restGr.addQuery('pan', 'IN', eligiblePans.join(',')); // Filter by eligible PANs, NOT depot
+			}
+
+			restGr.orderByDesc('sys_updated_on');
+			restGr.setLimit(remainingSlots * 3);
+			restGr.query();
+
+			data.pans = groupRowsByPan(restGr, isTshUser, CONFIG.INITIAL_PAN_LIMIT, pansMap, panOrder);
+		} else {
+			var activeResult = [];
+			for (var a = 0; a < panOrder.length; a++) {
+				activeResult.push(pansMap[panOrder[a]]);
+			}
+			activeResult.sort(function (x, y) {
+				var rX = getStatusRank(x.link_status);
+				var rY = getStatusRank(y.link_status);
+				if (rX !== rY) return rY - rX;
+				return (x.customer_name || '').localeCompare(y.customer_name || '');
+			});
+			data.pans = activeResult;
+		}
+
+		return;
+	}
+
+	// =========================================================================
+	// 6. ACTION: SEARCH PANS (FAST INDEX-DIRECTED SEARCH)
+	// =========================================================================
+	if (input && input.action === 'searchPans') {
+		checkAndExpireSentLinks(isAdmin, userDepots);
+
+		var searchTerm = (input.searchTerm || '').trim();
+		var statusFilter = input.statusFilter || 'ALL';
+		var matchedPans = [];
+
+		var eligiblePans = [];
+		if (!isAdmin) {
+			eligiblePans = getEligiblePansForDepots(userDepots);
+			if (eligiblePans.length === 0) {
+				data.pans = [];
+				data.statusCounts = calculateStatusCounts(isAdmin, userDepots);
+				return;
+			}
+		}
+
+		if (searchTerm) {
+			var findPansGr = new GlideRecord(CONFIG.TABLE_CUSTOMER);
+			findPansGr.addQuery('cg1', 'N01');
+			findPansGr.addNotNullQuery('pan');
+			findPansGr.addQuery('pan', '!=', '');
+
+			if (!isAdmin) {
+				findPansGr.addQuery('pan', 'IN', eligiblePans.join(','));
+			}
+
+			var termQ = findPansGr.addQuery('pan', 'CONTAINS', searchTerm);
+			termQ.addOrCondition('customer_code_sap', 'CONTAINS', searchTerm);
+			termQ.addOrCondition('customer_name', 'CONTAINS', searchTerm);
+
+			findPansGr.orderByDesc('link_sent_on');
+			findPansGr.orderByDesc('sys_updated_on');
+			findPansGr.setLimit(120);
+			findPansGr.query();
+
+			while (findPansGr.next()) {
+				var pNum = String(findPansGr.getValue('pan') || '').trim().toUpperCase();
+				if (pNum && matchedPans.indexOf(pNum) === -1) {
+					matchedPans.push(pNum);
+				}
+			}
+
+			if (matchedPans.length === 0) {
+				data.pans = [];
+				data.statusCounts = calculateStatusCounts(isAdmin, userDepots);
+				return;
+			}
+		}
+
+		// Query records to build rows
+		var searchGr = new GlideRecord(CONFIG.TABLE_CUSTOMER);
+		searchGr.addQuery('cg1', 'N01');
+		searchGr.addNotNullQuery('pan');
+		searchGr.addQuery('pan', '!=', '');
+
+		if (searchTerm && matchedPans.length > 0) {
+			searchGr.addQuery('pan', 'IN', matchedPans.join(','));
+		} else if (!isAdmin) {
+			searchGr.addQuery('pan', 'IN', eligiblePans.join(',')); // Filter by PAN, NOT depot
+		}
+
+		if (statusFilter && statusFilter !== 'ALL') {
+			if (statusFilter === 'Not Sent') {
+				var nsCondition = searchGr.addQuery('link_status', 'Not Sent');
+				nsCondition.addOrCondition('link_status', '');
+				nsCondition.addOrCondition('link_status', 'NULL');
+			} else {
+				searchGr.addQuery('link_status', statusFilter);
+			}
+			searchGr.orderByDesc('link_sent_on');
+			searchGr.orderByDesc('sys_updated_on');
+			searchGr.setLimit(450);
+			searchGr.query();
+			data.pans = groupRowsByPan(searchGr, isTshUser, 150);
+		} else {
+			var sPansMap = {};
+			var sPanOrder = [];
+
+			var sActGr = new GlideRecord(CONFIG.TABLE_CUSTOMER);
+			sActGr.addQuery('cg1', 'N01');
+			sActGr.addNotNullQuery('pan');
+			sActGr.addQuery('pan', '!=', '');
+			sActGr.addQuery('link_status', 'IN', 'Submitted,Sent,Expired');
+
+			if (searchTerm && matchedPans.length > 0) {
+				sActGr.addQuery('pan', 'IN', matchedPans.join(','));
+			} else if (!isAdmin) {
+				sActGr.addQuery('pan', 'IN', eligiblePans.join(','));
+			}
+			sActGr.orderByDesc('link_sent_on');
+			sActGr.orderByDesc('sys_updated_on');
+			sActGr.query();
+
+			groupRowsByPan(sActGr, isTshUser, 150, sPansMap, sPanOrder);
+
+			var sRemSlots = 150 - sPanOrder.length;
+			if (sRemSlots > 0) {
+				var sRestGr = new GlideRecord(CONFIG.TABLE_CUSTOMER);
+				sRestGr.addQuery('cg1', 'N01');
+				sRestGr.addNotNullQuery('pan');
+				sRestGr.addQuery('pan', '!=', '');
+
+				var sNsQ = sRestGr.addQuery('link_status', 'Not Sent');
+				sNsQ.addOrCondition('link_status', '');
+				sNsQ.addOrCondition('link_status', 'NULL');
+
+				if (searchTerm && matchedPans.length > 0) {
+					sRestGr.addQuery('pan', 'IN', matchedPans.join(','));
+				} else if (!isAdmin) {
+					sRestGr.addQuery('pan', 'IN', eligiblePans.join(','));
+				}
+				sRestGr.orderByDesc('sys_updated_on');
+				sRestGr.setLimit(sRemSlots * 3);
+				sRestGr.query();
+
+				data.pans = groupRowsByPan(sRestGr, isTshUser, 150, sPansMap, sPanOrder);
+			} else {
+				var sRes = [];
+				for (var z = 0; z < sPanOrder.length; z++) sRes.push(sPansMap[sPanOrder[z]]);
+				data.pans = sRes;
+			}
+		}
+
+		data.statusCounts = calculateStatusCounts(isAdmin, userDepots);
+		return;
+	}
+
+	// =========================================================================
+	// 7. ACTION: FETCH SUBMITTED DATA (NO COMMERCIAL TERMS)
+	// =========================================================================
+	if (input && input.action === 'getPanSubmittedData') {
+		var targetPan = String(input.pan || '').trim().toUpperCase();
+		var siteSysIds = input.site_sys_ids || [];
+		var siteCodes = input.site_codes || [];
+
+		var formGr = new GlideRecord(CONFIG.TABLE_CUSTOMER_FORM);
+		if (!formGr.isValid()) {
+			data.latestApplication = null;
+			return;
+		}
+
+		var rowsGr = new GlideRecord(CONFIG.TABLE_CUSTOMER_FORM);
+		var queryOr = rowsGr.addQuery('application_number', targetPan);
+		if (rowsGr.isValidField('pan')) {
+			queryOr.addOrCondition('pan', targetPan);
+		}
+		if (siteSysIds.length > 0) {
+			queryOr.addOrCondition('customer', 'IN', siteSysIds.join(','));
+		}
+		if (siteCodes.length > 0) {
+			queryOr.addOrCondition('customer', 'IN', siteCodes.join(','));
+			queryOr.addOrCondition('customer.customer_code_sap', 'IN', siteCodes.join(','));
+		}
+
+		rowsGr.addQuery('application_status', '!=', 'otp_pending');
+		rowsGr.orderByDesc('sys_created_on');
+		rowsGr.query();
+
+		var applicationObj = null;
+		var panSegmentsMap = {};
+		var sitesList = [];
+		var formRowSysIds = [];
+		var seenSites = {};
+
+		while (rowsGr.next()) {
+			var rowSysId = rowsGr.getUniqueValue();
+
+			var siteKey = '';
+			if (rowsGr.customer && rowsGr.customer.customer_code_sap) {
+				siteKey = rowsGr.customer.customer_code_sap.toString();
+			}
+			if (!siteKey) {
+				siteKey = rowsGr.getValue('customer') || rowsGr.getDisplayValue('customer') || rowSysId;
+			}
+
+			if (seenSites[siteKey]) {
+				continue;
+			}
+			seenSites[siteKey] = true;
+
+			formRowSysIds.push(rowSysId);
+
+			var commentText = '';
+			if (rowsGr.isValidField('comments')) {
+				commentText = rowsGr.getValue('comments') || '';
+			} else if (rowsGr.isValidField('comment')) {
+				commentText = rowsGr.getValue('comment') || '';
+			} else if (rowsGr.isValidField('u_comments')) {
+				commentText = rowsGr.getValue('u_comments') || '';
+			}
+			commentText = (commentText || '').trim();
+
+			var segName = 'Cement';
+			if (rowsGr.isValidField('segment') && rowsGr.getValue('segment')) {
+				segName = rowsGr.getValue('segment');
+			} else if (rowsGr.customer && rowsGr.customer.segment) {
+				segName = rowsGr.customer.segment.toString();
+			}
+			segName = (segName || 'Cement').trim();
+			var segUnit = getUnit(segName);
+
+			var siteCode = '';
+			var siteName = '';
+			if (rowsGr.customer && rowsGr.customer.customer_code_sap) {
+				siteCode = rowsGr.customer.customer_code_sap.toString();
+				siteName = rowsGr.customer.customer_name ? rowsGr.customer.customer_name.toString() : '';
+			} else {
+				var custLookup = new GlideRecord(CONFIG.TABLE_CUSTOMER);
+				if (custLookup.get(rowsGr.getValue('customer'))) {
+					siteCode = custLookup.getValue('customer_code_sap') || '';
+					siteName = custLookup.getValue('customer_name') || '';
+				}
+			}
+
+			if (!applicationObj) {
+				var declVal = rowsGr.getValue('declaration');
+				var isDecl = (declVal === 'true' || declVal === true || declVal === 1 || declVal === '1');
+
+				applicationObj = {
+					application_number: rowsGr.getValue('application_number') || targetPan,
+					number: rowsGr.getValue('number') || targetPan,
+					application_status: rowsGr.getValue('application_status') || 'submitted',
+					proprietor_name: rowsGr.getValue('proprietor_name') || '—',
+					declaration: isDecl,
+					comments: commentText || '—',
+					sys_created_by: rowsGr.getValue('sys_created_by') || '—',
+					sys_created_on: rowsGr.getDisplayValue('sys_created_on') || rowsGr.getValue('sys_created_on') || '—',
+					pan_segments: [],
+					sites: [],
+					attachments: []
+				};
+			}
+
+			if (!panSegmentsMap[segName]) {
+				panSegmentsMap[segName] = {
+					name: segName,
+					unit: segUnit,
+					pan_total_potential: rowsGr.getValue('pan_total_potential') || '—',
+					pan_ut_sob: rowsGr.getValue('pan_ut_sob') || '—',
+					pan_ut_sob_per: rowsGr.getValue('pan_ut_sob_per') || '0.00',
+					pan_expected_sob: rowsGr.getValue('pan_expected_sob') || '—',
+					pan_expected_sob_per: rowsGr.getValue('pan_expected_sob_per') || '0.00'
+				};
+			}
+
+			sitesList.push({
+				customer: rowsGr.getValue('customer') || '—',
+				customer_code_sap: siteCode || rowsGr.getDisplayValue('customer') || '—',
+				customer_name: siteName || rowsGr.getDisplayValue('customer') || '—',
+				customer_display: rowsGr.getDisplayValue('customer') || rowsGr.getValue('customer') || '—',
+				segment: segName,
+				unit: segUnit,
+				site_total_potential: rowsGr.getValue('site_total_potential') || '—',
+				site_ut_sob: rowsGr.getValue('site_ut_sob') || '—',
+				site_ut_sob_per: rowsGr.getValue('site_ut_sob_per') || '0.00',
+				site_expected_sob: rowsGr.getValue('site_expected_sob') || '—',
+				site_expected_sob_per: rowsGr.getValue('site_expected_sob_per') || '0.00'
+			});
+		}
+
+		if (applicationObj) {
+			for (var sKey in panSegmentsMap) {
+				applicationObj.pan_segments.push(panSegmentsMap[sKey]);
+			}
+			applicationObj.sites = sitesList;
+
+			if (formRowSysIds.length > 0) {
+				var attGr = new GlideRecord(CONFIG.TABLE_ATTACHMENT);
+				attGr.addQuery('table_name', CONFIG.TABLE_CUSTOMER_FORM);
+				attGr.addQuery('table_sys_id', 'IN', formRowSysIds.join(','));
+				attGr.orderBy('file_name');
+				attGr.query();
+
+				while (attGr.next()) {
+					var attSysId = attGr.getUniqueValue();
+					applicationObj.attachments.push({
+						sys_id: attSysId,
+						file_name: attGr.getValue('file_name') || 'Document',
+						size_bytes: attGr.getValue('size_bytes') || 0,
+						content_type: attGr.getValue('content_type') || 'application/octet-stream',
+						view_url: '/sys_attachment.do?sys_id=' + attSysId + '&view=true',
+						download_url: '/sys_attachment.do?sys_id=' + attSysId
+					});
+				}
+			}
+		}
+
+		data.latestApplication = applicationObj;
+		return;
+	}
+
+	// =========================================================================
+	// 8. ACTION: SEND EMAIL & BATCH UPDATE ALL SITES UNDER THE PAN
+	// =========================================================================
+	if (input && input.action === 'sendDirectEmail') {
+		var reqPan = input.pan;
+		var toEmail = input.email;
+
+		if (!isTshUser && !isAdmin) {
+			data.success = false;
+			data.message = 'Unauthorized. Only an assigned TSH can generate upload links.';
+			return;
+		}
+
+		var token = gs.generateGUID();
+		var requestLink = buildLink(token);
+		var nowGdt = new GlideDateTime().getValue();
+
+		var updateGr = new GlideRecord(CONFIG.TABLE_CUSTOMER);
+		updateGr.addQuery('cg1', 'N01');
+		updateGr.addQuery('pan', reqPan);
+		updateGr.query();
+
+		var primaryRecord = null;
+		while (updateGr.next()) {
+			if (!primaryRecord) primaryRecord = updateGr;
+			updateGr.setValue('token', token);
+			updateGr.setValue('request_link', requestLink);
+			updateGr.setValue('link_sent_on', nowGdt);
+			updateGr.setValue('link_status', 'Sent');
+			updateGr.setValue('update_allowed', true);
+			if (updateGr.isValidField('last_sent_email')) updateGr.setValue('last_sent_email', toEmail);
+			if (updateGr.isValidField(CONFIG.FIELD_LINK_SENDER)) updateGr.setValue(CONFIG.FIELD_LINK_SENDER, currentUserId);
+			updateGr.update();
+		}
+
+		if (!primaryRecord) {
+			data.success = false;
+			data.message = 'No sites found under PAN to update.';
+			return;
+		}
+
+		try {
+			gs.eventQueue('x_birl3_clm.nt_doc_link', primaryRecord, toEmail, requestLink);
+			data.success = true;
+			data.request_link = requestLink;
+		} catch (eEmail) {
+			data.success = false;
+			data.message = 'Records updated, but email event dispatch failed.';
+		}
+		return;
+	}
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-15 12:07:19</sys_created_on>
+        <sys_id>1085600497809b10be31fa17f053af1b</sys_id>
+        <sys_mod_count>53</sys_mod_count>
+        <sys_name>UCLM Non-Trade Document Submission</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_1085600497809b10be31fa17f053af1b</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-31 10:52:47</sys_updated_on>
+        <template><![CDATA[<div class="clm-tds">
+
+  <!-- ================= PAGE HEADER (Crimson / Red Theme) ================= -->
+  <div class="clm-tds-hero">
+    <div class="clm-tds-hero-main">
+      <div class="clm-hero-bar"></div>
+      <h2 class="clm-tds-hero-title">Non-Trade Customer <span class="clm-tds-hero-accent">Document Submission</span></h2>
+      <p class="clm-tds-hero-sub">Corporate PAN portfolios mapped to your depot jurisdiction — dispatch upload links and review consolidated submissions</p>
+    </div>
+    <div class="clm-tds-hero-stat">
+      <div class="clm-tds-hero-stat-v">{{c.countByStatus('ALL')}}</div>
+      <div class="clm-tds-hero-stat-k">Total PANs</div>
+    </div>
+  </div>
+
+  <div class="clm-section">
+
+    <!-- ================= SECTION 1: LINK OVERVIEW ================= -->
+    <div class="clm-section-title"><span class="clm-section-num">1</span> Upload Link Overview</div>
+
+    <div class="clm-mr-stats clm-tds-stats">
+      <button type="button"
+              class="clm-mr-stat"
+              ng-repeat="t in c.statusTiles track by t.key"
+              ng-class="['st-' + t.cls, {'is-active': c.statusFilter === t.key}]"
+              ng-click="c.setStatusFilter(t.key)">
+        <span class="clm-mr-stat-k">{{t.label}}</span>
+        <span class="clm-mr-stat-v">{{c.countByStatus(t.key)}}</span>
+      </button>
+    </div>
+
+    <!-- ================= SECTION 2: PAN PORTFOLIOS ================= -->
+    <div class="clm-section-title clm-tds-gap"><span class="clm-section-num">2</span> Non-Trade PAN Portfolios</div>
+
+    <!-- Search & Filter Card -->
+    <div class="clm-block clm-tds-first">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Search &amp; Filter</div>
+          <div class="clm-block-sub">Search by Corporate PAN, Customer Site Code, or Company Name</div>
+        </div>
+        <div class="clm-block-meta">
+          <span class="clm-chip" ng-if="!c.loadingData">
+            <span class="clm-chip-k">Showing</span> {{c.pans.length}} loaded
+          </span>
+          <span class="clm-chip" ng-if="c.loadingData">
+            <span class="clm-tds-spinner clm-tds-spinner-sm"></span> Searching...
+          </span>
+          <button type="button" class="clm-tds-clear" ng-if="c.hasFilters()" ng-click="c.clearFilters()">&#x2715; Clear filters</button>
+        </div>
+      </div>
+
+      <div class="clm-tw-body">
+        <div class="clm-tds-filters">
+          <div class="clm-tds-field clm-tds-field-wide">
+            <label class="clm-tds-lbl">Search PAN, Site Code, or Company</label>
+            <div class="clm-tds-search">
+              <i class="fa fa-search clm-tds-search-icon"></i>
+              <input type="text"
+                     class="clm-tds-input clm-tds-input-search"
+                     ng-model="c.searchTerm"
+                     ng-change="c.onSearchChange()"
+                     placeholder="Enter PAN Number, Site Code (e.g. 630316O001), or Company Name..."
+                     autocomplete="off">
+              <button type="button" class="clm-tds-search-clear" ng-if="c.searchTerm" ng-click="c.clearSearch()">&#x2715;</button>
+            </div>
+          </div>
+
+          <div class="clm-tds-field">
+            <label class="clm-tds-lbl">Link Status</label>
+            <select class="clm-tds-input"
+                    ng-model="c.statusFilter"
+                    ng-change="c.onFilterChange()"
+                    ng-options="t.key as t.label for t in c.statusTiles"></select>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PAN Portfolio Table Card -->
+    <div class="clm-block">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">PAN Master Queue</div>
+          <div class="clm-block-sub">Click a PAN Number to view submitted application data and attachments. Click Mapped Sites to inspect child sites.</div>
+        </div>
+        <div class="clm-block-meta">
+          <span class="clm-chip"><span class="clm-chip-k">Page</span> {{c.currentPage}} of {{c.totalPages()}}</span>
+        </div>
+      </div>
+
+      <div class="clm-tds-table-wrap">
+        <table class="clm-table clm-tds-table">
+          <thead>
+            <tr class="super">
+              <th class="bg-code tl clm-sticky-col">PAN &amp; Entity Identity</th>
+              <th>Portfolio</th>
+              <th colspan="2" class="bg-req grp">Upload Link</th>
+            </tr>
+            <tr>
+              <th class="tl clm-sticky-col" style="width: 44%; min-width: 240px;">Corporate PAN &bull; Company Name</th>
+              <th style="width: 18%; min-width: 130px;">Mapped Sites</th>
+              <th class="grp" style="width: 16%; min-width: 110px;">Status</th>
+              <th style="width: 22%; min-width: 170px;">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- Loading -->
+            <tr class="clm-tds-empty-row" ng-if="c.loadingData">
+              <td colspan="4" class="clm-tds-empty-cell">
+                <span class="clm-tds-spinner clm-tds-spinner-lg"></span>
+                <div style="margin-top: 10px;">Querying customer master records...</div>
+              </td>
+            </tr>
+
+            <!-- Empty Queue -->
+            <tr class="clm-tds-empty-row" ng-if="!c.loadingData && c.pans.length === 0">
+              <td colspan="4" class="clm-tds-empty-cell">
+                <div class="clm-tds-empty-icon">&#128269;</div>
+                No PAN records found matching the criteria.
+                <div ng-if="c.hasFilters()">
+                  <button type="button" class="clm-tds-clear clm-tds-clear-inline" ng-click="c.clearFilters()">&#x2715; Clear filters</button>
+                </div>
+              </td>
+            </tr>
+
+            <!-- Grouped PAN Rows -->
+            <tr ng-repeat="item in c.getPaginatedPans() track by item.pan" ng-if="!c.loadingData">
+              <td data-label="PAN &amp; Entity" class="tl clm-sticky-col clm-tds-entity-cell">
+                <div class="clm-pan-meta-row">
+                  <a href="javascript:void(0)" class="clm-tds-pan-link" ng-click="c.viewPanData(item)" title="Click to view submitted application data">
+                    {{item.pan}} <i class="fa fa-external-link"></i>
+                  </a>
+                </div>
+                <div class="clm-cust-name">{{item.customer_name || '—'}}</div>
+              </td>
+
+              <!-- Mapped Sites -->
+              <td data-label="Mapped Sites">
+                <button type="button" 
+                        class="clm-tds-site-btn" 
+                        ng-click="c.openSitesModal(item)" 
+                        title="Click to view all mapped site codes and location details under this PAN">
+                  <i class="fa fa-building-o"></i> 
+                  <span>{{item.site_count}} Site{{item.site_count > 1 ? 's' : ''}}</span>
+                  <i class="fa fa-external-link-square m-l-xs"></i>
+                </button>
+              </td>
+
+              <!-- Link Status -->
+              <td data-label="Status" class="grp">
+                <span class="clm-tds-ls" ng-class="'ls-' + c.statusKey(item)">{{item.link_status || 'Not Sent'}}</span>
+              </td>
+
+              <!-- Actions -->
+              <td data-label="Action" class="clm-tds-act-cell">
+                <div class="clm-tds-actions">
+                  <button type="button"
+                          class="clm-tds-btn clm-tds-btn-ghost"
+                          ng-if="item.request_link && item.link_status !== 'Expired' && item.link_status !== 'Submitted'"
+                          ng-class="{'is-copied': item._copied}"
+                          ng-click="c.copyLink(item)">
+                    <span ng-if="!item._copied"><i class="fa fa-clone"></i> Copy Link</span>
+                    <span ng-if="item._copied"><i class="fa fa-check"></i> Copied!</span>
+                  </button>
+                  <button type="button"
+                          class="clm-tds-btn clm-tds-btn-primary"
+                          ng-click="c.openModal(item)"
+                          ng-disabled="item._sending || !item.is_tsh"
+                          title="{{!item.is_tsh ? 'Only an authorized TSH can send this link' : ''}}">
+                    <span ng-if="!item._sending">
+                      <span ng-if="item.link_status !== 'Sent' && item.link_status !== 'Expired' && item.link_status !== 'Submitted'"><i class="fa fa-paper-plane"></i> Send Email</span>
+                      <span ng-if="item.link_status === 'Sent' || item.link_status === 'Expired' || item.link_status === 'Submitted'"><i class="fa fa-repeat"></i> Resend</span>
+                    </span>
+                    <span ng-if="item._sending"><span class="clm-tds-spinner clm-tds-spinner-sm"></span></span>
+                  </button>
+                </div>
+                <div ng-if="!item.is_tsh" class="clm-tds-lock">
+                  <i class="fa fa-lock"></i> Unauthorized (TSH only)
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Pagination Footer -->
+      <div class="clm-tds-pager" ng-if="c.pans.length > 0 && !c.loadingData">
+        <div class="clm-tds-pager-left">
+          <span>Rows per page</span>
+          <select class="clm-tds-input clm-tds-input-sm"
+                  ng-model="c.itemsPerPage"
+                  ng-change="c.currentPage = 1"
+                  ng-options="n for n in c.pageSizes"></select>
+          <span class="clm-tds-pager-range">{{c.pageStart()}}&ndash;{{c.pageEnd()}} of {{c.pans.length}}</span>
+        </div>
+        <div class="clm-tds-pager-ctrl">
+          <button type="button" class="clm-tds-page-btn" ng-click="c.setPage(1)" ng-disabled="c.currentPage === 1" title="First Page">&laquo;</button>
+          <button type="button" class="clm-tds-page-btn" ng-click="c.setPage(c.currentPage - 1)" ng-disabled="c.currentPage === 1" title="Previous Page">&lsaquo; Prev</button>
+          <span class="clm-tds-page-ind">Page {{c.currentPage}} of {{c.totalPages()}}</span>
+          <button type="button" class="clm-tds-page-btn" ng-click="c.setPage(c.currentPage + 1)" ng-disabled="c.currentPage >= c.totalPages()" title="Next Page">Next &rsaquo;</button>
+          <button type="button" class="clm-tds-page-btn" ng-click="c.setPage(c.totalPages())" ng-disabled="c.currentPage >= c.totalPages()" title="Last Page">&raquo;</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ================= MODAL: MAPPED SITE CODES & GEOGRAPHY ================= -->
+  <div class="clm-tds-overlay" ng-if="c.showSitesModal" ng-click="c.handleSitesOverlayClick($event)">
+    <div class="clm-tds-modal clm-tds-modal-lg">
+      <div class="clm-block-head clm-tds-modal-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Mapped Site Portfolio ({{c.viewingSitesPan.site_count}} Sites)</div>
+          <div class="clm-block-sub">PAN: <strong>{{c.viewingSitesPan.pan}}</strong> &mdash; {{c.viewingSitesPan.customer_name}}</div>
+        </div>
+        <button type="button" class="clm-tds-x" ng-click="c.closeSitesModal()">&#x2715;</button>
+      </div>
+
+      <div class="clm-tds-modal-scroll">
+        <div class="clm-tds-table-wrap">
+          <table class="clm-table clm-sites-table">
+            <thead>
+              <tr class="super">
+                <th colspan="2" class="bg-code">Site Entity Information</th>
+                <th colspan="3" class="bg-seg grp">Operating Geography [Name (Code)]</th>
+              </tr>
+              <tr>
+                <th class="tl" style="width: 20%;">Site Code</th>
+                <th class="tl" style="width: 32%;">Site Name</th>
+                <th class="tl grp" style="width: 16%;">Zone</th>
+                <th class="tl" style="width: 16%;">Region</th>
+                <th class="tl" style="width: 16%;">Depot</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr ng-repeat="site in c.viewingSitesPan.sites track by $index">
+                <td data-label="Site Code" class="tl">
+                  <span class="clm-site-code-badge">{{site.customer_code_sap}}</span>
+                </td>
+                <td data-label="Site Name" class="tl">
+                  <div class="clm-cust-name">{{site.customer_name}}</div>
+                </td>
+                <td data-label="Zone" class="tl grp clm-tds-geo">{{site.zone}}</td>
+                <td data-label="Region" class="tl clm-tds-geo">{{site.region}}</td>
+                <td data-label="Depot" class="tl clm-tds-geo">{{site.depot}}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="clm-tds-modal-foot">
+        <button type="button" class="clm-tds-btn clm-tds-btn-primary" ng-click="c.closeSitesModal()">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= MODAL: SEND SECURE UPLOAD LINK ================= -->
+  <div class="clm-tds-overlay" ng-if="c.showModal" ng-click="c.handleOverlayClick($event)">
+    <div class="clm-tds-modal" ng-if="c.selectedPan">
+      <div class="clm-block-head clm-tds-modal-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Send Secure Upload Link (Non-Trade)</div>
+          <div class="clm-block-sub">Applies across all {{c.selectedPan.site_count}} mapped sites under this PAN (Valid for 3 days)</div>
+        </div>
+        <button type="button" class="clm-tds-x" ng-click="c.closeModal()" ng-disabled="c.sending">&#x2715;</button>
+      </div>
+
+      <div class="clm-tw-body clm-tds-modal-body">
+        <div class="clm-tw-factors">
+          <div class="clm-tw-factor clm-tds-span2">
+            <div class="clm-tw-factor-k">Company Name</div>
+            <div class="clm-tw-factor-v clm-tds-wrap">{{c.selectedPan.customer_name}}</div>
+            <div class="clm-tw-factor-s">Covers {{c.selectedPan.site_count}} Site{{c.selectedPan.site_count > 1 ? 's' : ''}}</div>
+          </div>
+          <div class="clm-tw-factor">
+            <div class="clm-tw-factor-k">PAN Number</div>
+            <div class="clm-tw-factor-v">{{c.selectedPan.pan}}</div>
+          </div>
+        </div>
+
+        <div class="clm-tds-form">
+          <label class="clm-tds-field-lbl">Recipient Corporate Email Address <span class="clm-tds-req">*</span></label>
+          <input type="email"
+                 class="clm-tds-input"
+                 ng-class="{'is-err': c.emailError}"
+                 ng-model="c.emailInput"
+                 ng-keyup="c.emailError = ''"
+                 placeholder="e.g. accounts@customerdomain.com"
+                 autocomplete="off">
+          <div class="clm-tds-hint" ng-show="!c.emailError">The secure Non-Trade document upload link will be emailed to this address.</div>
+          <div class="clm-tds-err" ng-show="c.emailError"><i class="fa fa-exclamation-circle"></i> {{c.emailError}}</div>
+        </div>
+
+        <div class="clm-tds-success" ng-show="c.sendSuccess">
+          <i class="fa fa-check-circle"></i> Upload link email queued successfully. Refreshing list...
+        </div>
+      </div>
+
+      <div class="clm-tds-modal-foot">
+        <button type="button" class="clm-tds-btn clm-tds-btn-ghost clm-tds-btn-lg" ng-click="c.closeModal()" ng-disabled="c.sending">Cancel</button>
+        <button type="button" class="clm-tds-btn clm-tds-btn-primary clm-tds-btn-lg" ng-click="c.confirmSend()" ng-disabled="c.sending || c.sendSuccess">
+          <span ng-if="!c.sending"><i class="fa fa-paper-plane"></i> Send Direct Email</span>
+          <span ng-if="c.sending"><span class="clm-tds-spinner clm-tds-spinner-sm"></span> Sending...</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= MODAL: SUBMITTED DATA (LATEST SUBMISSION ONLY) ================= -->
+  <div class="clm-tds-overlay" ng-if="c.showDataModal" ng-click="c.handleDataOverlayClick($event)">
+    <div class="clm-tds-modal clm-tds-modal-lg">
+
+      <div class="clm-block-head clm-tds-modal-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Submitted Application Data (Latest Submission)</div>
+          <div class="clm-block-sub">PAN: <strong>{{c.viewingPan.pan}}</strong> &mdash; {{c.viewingPan.customer_name}}</div>
+        </div>
+        <div class="clm-block-meta">
+          <span class="clm-chip" ng-if="!c.loadingDataView && c.activeApplication">
+            <span class="clm-chip-k">Status</span>
+            <span class="clm-tds-app-st" ng-class="'as-' + c.appStatusKey(c.activeApplication.application_status)">{{c.activeApplication.application_status || '—'}}</span>
+          </span>
+          <button type="button" class="clm-tds-x" ng-click="c.closeDataModal()">&#x2715;</button>
+        </div>
+      </div>
+
+      <div class="clm-tds-modal-scroll">
+        <!-- Loading -->
+        <div ng-if="c.loadingDataView" class="clm-tds-loading">
+          <span class="clm-tds-spinner clm-tds-spinner-lg"></span>
+          <div>Loading latest application data and documents...</div>
+        </div>
+
+        <!-- Not found -->
+        <div ng-if="!c.loadingDataView && !c.activeApplication" class="clm-tds-empty">
+          <div class="clm-tds-empty-icon">&#128196;</div>
+          No submitted form data found for PAN <strong>{{c.viewingPan.pan}}</strong>.
+          <div class="clm-tds-empty-sub">No submission record exists in the customer form table for this PAN yet.</div>
+        </div>
+
+        <!-- Content Found -->
+        <div ng-if="!c.loadingDataView && c.activeApplication">
+          <!-- Card 1: Common Application Details -->
+          <div class="clm-block clm-tds-first">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Application &amp; Authorization Details</div>
+                <div class="clm-block-sub">Submission reference and proprietor details</div>
+              </div>
+            </div>
+            <div class="clm-tw-body">
+              <div class="clm-tw-factors clm-tds-f4">
+                <div class="clm-tw-factor">
+                  <div class="clm-tw-factor-k">Application (PAN)</div>
+                  <div class="clm-tw-factor-v">{{c.activeApplication.application_number || '—'}}</div>
+                </div>
+                <div class="clm-tw-factor">
+                  <div class="clm-tw-factor-k">Form Record Number</div>
+                  <div class="clm-tw-factor-v">{{c.activeApplication.number || '—'}}</div>
+                </div>
+                <div class="clm-tw-factor">
+                  <div class="clm-tw-factor-k">Proprietor Name</div>
+                  <div class="clm-tw-factor-v clm-tds-wrap">{{c.activeApplication.proprietor_name || '—'}}</div>
+                </div>
+                <div class="clm-tw-factor">
+                  <div class="clm-tw-factor-k">Submitted On</div>
+                  <div class="clm-tw-factor-v clm-tds-wrap">{{c.activeApplication.sys_created_on || '—'}}</div>
+                </div>
+                <div class="clm-tw-factor">
+                  <div class="clm-tw-factor-k">Submitted By</div>
+                  <div class="clm-tw-factor-v clm-tds-wrap">{{c.activeApplication.sys_created_by || '—'}}</div>
+                </div>
+                <div class="clm-tw-factor">
+                  <div class="clm-tw-factor-k">Declaration Accepted</div>
+                  <div class="clm-tw-factor-v">
+                    <span ng-if="c.activeApplication.declaration" class="text-success"><i class="fa fa-check-circle"></i> True</span>
+                    <span ng-if="!c.activeApplication.declaration" class="text-muted"><i class="fa fa-times-circle"></i> False</span>
+                  </div>
+                </div>
+                <div class="clm-tw-factor clm-tds-span2">
+                  <div class="clm-tw-factor-k">Financials &amp; Operational Comments</div>
+                  <div class="clm-tw-factor-v clm-tds-wrap" 
+                       style="white-space: pre-line; max-height: 120px; overflow-y: auto;" 
+                       title="{{c.activeApplication.comments}}">
+                    {{c.activeApplication.comments || '—'}}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 2: Consolidated PAN Level Share of Business by Segment -->
+          <div class="clm-block">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">PAN Level — Share of Business by Segment</div>
+                <div class="clm-block-sub">Overall PAN potential and UltraTech SOB targets grouped by operating segment</div>
+              </div>
+            </div>
+            <div class="clm-tds-table-wrap">
+              <table class="clm-table clm-tds-sob">
+                <thead>
+                  <tr class="super">
+                    <th class="bg-blank" style="width: 24%;">Segment Scope</th>
+                    <th class="bg-seg grp" style="width: 20%;">Volume Potential</th>
+                    <th colspan="2" class="bg-code grp" style="width: 28%;">Current UltraTech SOB</th>
+                    <th colspan="2" class="bg-req grp" style="width: 28%;">Expected UltraTech SOB</th>
+                  </tr>
+                  <tr>
+                    <th class="tl">Operating Segment</th>
+                    <th class="grp">Total Potential</th>
+                    <th class="grp">SOB Vol</th>
+                    <th>SOB %</th>
+                    <th class="grp">SOB Vol</th>
+                    <th>SOB %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr ng-repeat="seg in c.activeApplication.pan_segments track by seg.name">
+                    <td data-label="Segment Scope" class="tl">
+                      <span class="clm-segment-pill" ng-class="seg.name === 'RMC' ? 'seg-rmc' : 'seg-cement'">
+                        {{seg.name}}
+                      </span>
+                    </td>
+                    <td data-label="Total Potential" class="grp">
+                      <strong>{{c.fmtNum(seg.pan_total_potential)}}</strong> <small class="text-muted">{{seg.unit}}</small>
+                    </td>
+                    <td data-label="UT SOB Vol" class="grp">
+                      {{c.fmtNum(seg.pan_ut_sob)}} <small class="text-muted">{{seg.unit}}</small>
+                    </td>
+                    <td data-label="UT SOB %">{{c.fmtPct(seg.pan_ut_sob_per)}}</td>
+                    <td data-label="Expected SOB Vol" class="grp">
+                      {{c.fmtNum(seg.pan_expected_sob)}} <small class="text-muted">{{seg.unit}}</small>
+                    </td>
+                    <td data-label="Expected SOB %">
+                      <strong>{{c.fmtPct(seg.pan_expected_sob_per)}}</strong>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Card 3: Multi-Site Child Rows -->
+          <div class="clm-block">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Site Level Operational Breakdown ({{c.activeApplication.sites.length}} Sites)</div>
+                <div class="clm-block-sub">Individual site records combined under PAN #{{c.activeApplication.application_number}}</div>
+              </div>
+            </div>
+            <div class="clm-tds-table-wrap">
+              <table class="clm-table clm-tds-sob">
+                <thead>
+                  <tr class="super">
+                    <th class="bg-code tl clm-sticky-col" style="width: 40%; min-width: 240px;">Customer Site Information</th>
+                    <th class="bg-seg grp" style="width: 20%; min-width: 130px;">Site Potential</th>
+                    <th class="bg-code grp" style="width: 20%; min-width: 140px;">Current UltraTech SOB</th>
+                    <th class="bg-req grp" style="width: 20%; min-width: 140px;">Expected UltraTech SOB</th>
+                  </tr>
+                  <tr>
+                    <th class="tl clm-sticky-col clm-subth">Site Code &bull; Segment &bull; Name</th>
+                    <th class="grp clm-subth">Total Potential</th>
+                    <th class="grp clm-subth">Quantity &amp; SOB %</th>
+                    <th class="grp clm-subth">Quantity &amp; SOB %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr ng-repeat="site in c.activeApplication.sites track by $index">
+                    <td data-label="Site Info" class="tl clm-sticky-col clm-td-siteinfo">
+                      <div class="clm-site-meta-row">
+                        <span class="clm-site-code-badge">{{site.customer_code_sap || site.customer_display || site.customer}}</span>
+                        <span class="clm-segment-pill" ng-class="site.segment === 'RMC' ? 'seg-rmc' : 'seg-cement'">
+                          {{site.segment}}
+                        </span>
+                      </div>
+                      <div class="clm-cust-name">{{site.customer_name || site.customer_display}}</div>
+                    </td>
+
+                    <td data-label="Site Potential" class="grp text-center">
+                      <strong>{{c.fmtNum(site.site_total_potential)}}</strong> <small class="text-muted">{{site.unit}}</small>
+                    </td>
+
+                    <td data-label="Current SOB" class="grp text-center">
+                      <div class="clm-inline-cell">
+                        <span>{{c.fmtNum(site.site_ut_sob)}} <small class="text-muted">{{site.unit}}</small></span>
+                        <span class="clm-du-pct">{{c.fmtPct(site.site_ut_sob_per)}}</span>
+                      </div>
+                    </td>
+
+                    <td data-label="Expected SOB" class="grp text-center">
+                      <div class="clm-inline-cell">
+                        <span>{{c.fmtNum(site.site_expected_sob)}} <small class="text-muted">{{site.unit}}</small></span>
+                        <span class="clm-du-pct is-exp">{{c.fmtPct(site.site_expected_sob_per)}}</span>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Card 4: Supporting Documents -->
+          <div class="clm-block">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Submitted Supporting Documents ({{c.activeApplication.attachments.length}} Files)</div>
+                <div class="clm-block-sub">Uploaded financial statements, tax filings, and legal records</div>
+              </div>
+            </div>
+            <div class="clm-tw-body">
+              <div ng-if="c.activeApplication.attachments.length === 0" class="clm-tds-no-docs">
+                <i class="fa fa-folder-open-o"></i> No supporting documents were uploaded for this submission.
+              </div>
+              <div class="clm-doc-grid" ng-if="c.activeApplication.attachments.length > 0">
+                <div class="clm-doc-card" ng-repeat="att in c.activeApplication.attachments track by att.sys_id">
+                  <div class="clm-doc-icon" ng-class="c.getFileIconClass(att.file_name)">
+                    <i class="fa fa-file-text-o"></i>
+                  </div>
+                  <div class="clm-doc-info">
+                    <div class="clm-doc-name" title="{{att.file_name}}">{{att.file_name}}</div>
+                    <div class="clm-doc-size">{{c.formatSize(att.size_bytes)}}</div>
+                  </div>
+                  <div class="clm-doc-actions">
+                    <a ng-href="{{att.view_url}}" target="_blank" class="clm-tds-btn clm-tds-btn-ghost clm-tds-btn-sm" title="Click to view file in browser">
+                      <i class="fa fa-eye"></i> View
+                    </a>
+                    <a ng-href="{{att.download_url}}" download="{{att.file_name}}" target="_blank" class="clm-tds-btn clm-tds-btn-primary clm-tds-btn-sm" title="Click to download file">
+                      <i class="fa fa-download"></i> Download
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>1085600497809b10be31fa17f053af1b</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-15 12:07:19</sys_created_on>
+        <sys_id>9885a04497809b10be31fa17f053af20</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-15 12:07:19</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

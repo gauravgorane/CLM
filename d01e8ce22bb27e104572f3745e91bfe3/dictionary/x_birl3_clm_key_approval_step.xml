@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?><database>
+    <element attributes="enforce_dot_walk_cross_scope_access=true" audit="true" db_object_id="04eeaee42b841f104572f3745e91bf32" label="Key Approval Step" max_length="40" name="x_birl3_clm_key_approval_step" type="collection">
+        <element label="Request" max_length="32" name="request" reference="x_birl3_clm_key_group_code_request" type="reference"/>
+        <element label="Approved Limit" max_length="20" name="approved_limit" type="decimal"/>
+        <element label="Group Approvers" max_length="4000" name="group_approvers" reference="sys_user" type="glide_list"/>
+        <element default="true" label="Parallel Leader" max_length="40" name="parallel_leader" type="boolean"/>
+        <element label="Comments" max_length="255" name="comments" type="string"/>
+        <element choice="1" label="Level" max_length="40" name="level" type="choice">
+            <choice>
+                <element inactive_on_update="false" label="Segment" sequence="0" value="segment"/>
+                <element inactive_on_update="false" label="Grandparent" sequence="1" value="grandparent"/>
+            </choice>
+        </element>
+        <element label="Role Name" max_length="40" name="role_name" type="string"/>
+        <element label="Domain Path" max_length="255" name="sys_domain_path" type="domain_path"/>
+        <element attributes="edge_encryption_enabled=true" default="javascript:global.getNextObjNumberPadded();" label="Number" max_length="40" name="number" type="string"/>
+        <element label="Sequence" max_length="40" name="sequence" type="integer"/>
+        <element label="Level Final Limit" max_length="20" name="level_final_limit" type="currency"/>
+        <element label="Actioned On" max_length="40" name="actioned_on" type="string"/>
+        <element choice="1" label="Trigger Reason" max_length="40" name="trigger_reason" type="choice">
+            <choice>
+                <element inactive_on_update="false" label="Deviation" sequence="1" value="deviation"/>
+                <element inactive_on_update="false" label="Matrix" sequence="0" value="matrix"/>
+            </choice>
+        </element>
+        <element label="Approver" max_length="32" name="approver" reference="sys_user" type="reference"/>
+        <element default="cacbc7742bb676104572f3745e91bf5a" label="Domain" max_length="32" name="sys_domain" type="domain_id"/>
+        <element choice="3" label="State" max_length="255" name="state" type="choice">
+            <choice>
+                <element inactive_on_update="false" label="On Hold" value="on_hold"/>
+                <element inactive_on_update="false" label="Approved" sequence="1" value="approved"/>
+                <element inactive_on_update="false" label="Pending" sequence="0" value="pending"/>
+                <element inactive_on_update="false" label="Cancelled" value="cancelled"/>
+                <element inactive_on_update="false" label="Awaiting" value="awaiting"/>
+                <element inactive_on_update="false" label="Rejected" sequence="2" value="rejected"/>
+            </choice>
+        </element>
+        <index name="index">
+            <element name="sys_domain_path"/>
+        </index>
+        <index name="index2">
+            <element name="request"/>
+        </index>
+        <index name="index3">
+            <element name="approver"/>
+        </index>
+        <index name="index4">
+            <element name="sys_domain"/>
+        </index>
+    </element>
+</database>

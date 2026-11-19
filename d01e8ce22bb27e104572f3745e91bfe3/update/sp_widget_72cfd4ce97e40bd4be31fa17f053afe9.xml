@@ -1,0 +1,569 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope) {
+    var c = this;
+    /* * Default page size */
+    c.pageSize = 20;
+    /* * Refresh */
+    c.refresh = function() {
+        c.server.get({
+            action: "load",
+            page: 1,
+            pageSize: c.pageSize
+        }).then(function(response) {
+            c.data = response.data;
+        });
+    };
+    /* * Next page */
+    c.nextPage = function() {
+        if (c.data.page >= c.data.totalPages) {
+            return;
+        }
+        c.server.get({
+            action: "load",
+            page: c.data.page + 1,
+            pageSize: c.pageSize
+        }).then(function(response) {
+            c.data = response.data;
+        });
+    };
+    /* * Previous page */
+    c.previousPage = function() {
+        if (c.data.page <= 1) {
+            return;
+        }
+        c.server.get({
+            action: "load",
+            page: c.data.page - 1,
+            pageSize: c.pageSize
+        }).then(function(response) {
+            c.data = response.data;
+        });
+    };
+    /* * Change page size * * 20 → 40 → 50 → 100 */
+    c.changePageSize = function() {
+        c.server.get({
+            action: "load",
+            page: 1,
+            pageSize: c.pageSize
+        }).then(function(response) {
+            c.data = response.data;
+        });
+    };
+    /* * Action CSS */
+    c.getActionClass = function(action) {
+        action = (action || "").toUpperCase();
+        if (action === "INSERT" || action === "CREATE") {
+            return "action-created";
+        }
+        if (action === "UPDATE" || action === "INSERT_OR_UPDATE") {
+            return "action-updated";
+        }
+        if (action === "DELETE") {
+            return "action-deleted";
+        }
+        return "";
+    };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.app-change-monitor  {
+ background: #fff;
+     border: 1px solid #ddd;
+     border-radius: 4px;
+     }
+
+ /* Header */ .monitor-header  {
+ display: flex;
+     justify-content: space-between;
+     align-items: center;
+     padding: 15px 20px;
+     border-bottom: 1px solid #ddd;
+     }
+
+ .monitor-header h3  {
+ margin: 0;
+     font-size: 18px;
+     font-weight: 600;
+     }
+
+ .monitor-header h3 small  {
+ display: block;
+     margin-top: 4px;
+     font-size: 12px;
+     font-weight: normal;
+     color: #666;
+     }
+
+ /* Summary */ .list-summary  {
+ display: flex;
+     justify-content: space-between;
+     padding: 10px 20px;
+     background: #f7f7f7;
+     border-bottom: 1px solid #ddd;
+     font-size: 13px;
+     color: #666;
+     }
+
+ /* Table */ .table  {
+ margin-bottom: 0;
+     }
+
+ .table thead th  {
+ background: #f7f7f7;
+     font-size: 12px;
+     font-weight: 600;
+     color: #444;
+     border-bottom: 1px solid #ccc;
+     white-space: nowrap;
+     }
+
+ .table tbody td  {
+ font-size: 13px;
+     vertical-align: middle;
+     padding: 10px 8px;
+     }
+
+ /* Technical name */ .technical-name  {
+ margin-top: 3px;
+     font-family: monospace;
+     font-size: 11px;
+     color: #777;
+     }
+
+ /* Actions */ .action  {
+ display: inline-block;
+     padding: 3px 7px;
+     border-radius: 3px;
+     font-size: 11px;
+     font-weight: 600;
+     }
+
+ .action-created  {
+ background: #e8f5e9;
+     color: #2e7d32;
+     }
+
+ .action-updated  {
+ background: #fff8e1;
+     color: #f57f17;
+     }
+
+ .action-deleted  {
+ background: #ffebee;
+     color: #c62828;
+     }
+
+ /* Pagination */ .pagination-bar  {
+ display: flex;
+     justify-content: space-between;
+     align-items: center;
+     padding: 12px 20px;
+     border-top: 1px solid #ddd;
+     background: #fafafa;
+     }
+
+ .page-size  {
+ display: flex;
+     align-items: center;
+     gap: 8px;
+     }
+
+ .page-size label  {
+ margin: 0;
+     font-size: 12px;
+     font-weight: normal;
+     }
+
+ .page-size select  {
+ width: 75px;
+     margin: 0;
+     }
+
+ .page-navigation  {
+ display: flex;
+     align-items: center;
+     gap: 15px;
+     }
+
+ .page-number  {
+ font-size: 12px;
+     color: #666;
+     }
+
+ /* Empty */ .empty  {
+ text-align: center;
+     padding: 40px !important;
+     color: #777;
+     }
+
+ /* Mobile */ @media (max-width: 700px)  {
+ .pagination-bar  {
+ flex-direction: column;
+         gap: 12px;
+         align-items: flex-start;
+             }
+
+ }</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>demo</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {
+
+}]]></link>
+        <name>demo</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+	
+	var pan = 'AAACB8316K';
+
+	// Embed the Gen AI Summary Widget with the Request's PAN
+	var panValue = pan || targetPan.getValue('pan') || data.panNumber || pan;
+	data.aiWidget = $sp.getWidget('uclm_genai_news', {
+		pan: panValue,
+		//customer_name: targetPan.getValue('company_name') || '',
+		embedded: true
+	});
+
+	/* * Configuration */
+	var DEFAULT_PAGE_SIZE = 20;
+	var MAX_PAGE_SIZE = 100;
+	/* * Application sys_id */
+	var appSysId = "d01e8ce22bb27e104572f3745e91bfe3";
+	/* * Default response */
+	data.application_name = "";
+	data.changes = [];
+	data.total = 0;
+	data.page = 1;
+	data.pageSize = DEFAULT_PAGE_SIZE;
+	data.totalPages = 0;
+	data.pageStart = 0;
+	data.pageEnd = 0;
+	/* * Validate application */
+	if (!appSysId) {
+		data.error = "Application sys_id is not configured.";
+		return;
+	} /* * Get page */
+	if (input && input.page) {
+		data.page = parseInt(input.page,
+												 10);
+	}
+	if (data.page < 1) {
+		data.page = 1;
+	} /* * Get page size */
+	if (input && input.pageSize) {
+		data.pageSize = parseInt(input.pageSize,
+														 10);
+	} /* * Only allow our supported * page sizes */
+	var allowedPageSizes = {
+		20: true,
+		40: true,
+		50: true,
+		100: true
+	};
+	if (!allowedPageSizes[data.pageSize]) {
+		data.pageSize = DEFAULT_PAGE_SIZE;
+	} /* * Application */
+	var app = new GlideRecord("sys_app");
+	if (app.get(appSysId)) {
+		data.application_name = app.getDisplayValue();
+	} else {
+		data.error = "Application not found: " + appSysId;
+		return;
+	} /* * Count */
+	var countGR = new GlideAggregate("sys_update_xml");
+	countGR.addQuery("application",
+									 appSysId);
+	countGR.addAggregate("COUNT");
+	countGR.query();
+	if (countGR.next()) {
+		data.total = parseInt(countGR.getAggregate("COUNT"),
+													10);
+	} /* * Calculate pages */
+	data.totalPages = Math.ceil(data.total / data.pageSize);
+	if (data.totalPages < 1) {
+		data.totalPages = 1;
+	} /* * Prevent invalid page */
+	if (data.page > data.totalPages) {
+		data.page = data.totalPages;
+	} /* * Offset */
+	var offset = (data.page - 1) * data.pageSize;
+	/* * Get records */
+	var gr = new GlideRecord("sys_update_xml");
+	gr.addQuery("application",
+							appSysId);
+	/* * Newest first */
+	gr.orderByDesc("sys_created_on");
+	/* * Server-side pagination */
+	gr.chooseWindow(offset,
+									offset + data.pageSize);
+	gr.query();
+	/* * Process records */
+	while (gr.next()) {
+		var action = gr.getValue("action");
+		var targetName = gr.getValue("target_name");
+		var name = gr.getValue("name");
+		var type = gr.getValue("type");
+		/* * Map component */
+		var componentType = getComponentType(type,
+																				 targetName,
+																				 name);
+		/* * Name */
+		var componentName = getComponentName(gr,
+																				 targetName,
+																				 name);
+		data.changes.push({
+			sys_id: gr.getUniqueValue(),
+			action: action || "",
+			component_type: componentType,
+			component_name: componentName,
+			target_name: targetName || "",
+			changed_by: gr.getDisplayValue("sys_created_by"),
+			changed_on: gr.getDisplayValue("sys_created_on"),
+			update_set: gr.getDisplayValue("update_set")
+		});
+	} /* * Page information */
+	if (data.total > 0) {
+		data.pageStart = offset + 1;
+		data.pageEnd = Math.min(offset + data.pageSize,
+														data.total);
+	} /* * Component mapping */
+	function getComponentType(type,
+														targetName,
+														name) {
+		var value = (type || targetName || name || "").toLowerCase();
+		if (value.indexOf("sys_db_object") !== -1) {
+			return "Table";
+		}
+		if (value.indexOf("sys_dictionary") !== -1) {
+			return "Field";
+		}
+		if (value.indexOf("sys_script_client") !== -1) {
+			return "Client Script";
+		}
+		if (value.indexOf("sys_script_include") !== -1) {
+			return "Script Include";
+		}
+		if (value.indexOf("sys_script") !== -1) {
+			return "Business Rule";
+		}
+		if (value.indexOf("sys_security_acl") !== -1) {
+			return "ACL";
+		}
+		if (value.indexOf("sys_ui_policy") !== -1) {
+			return "UI Policy";
+		}
+		if (value.indexOf("sys_ui_action") !== -1) {
+			return "UI Action";
+		}
+		if (value.indexOf("sys_ui_page") !== -1) {
+			return "UI Page";
+		}
+		if (value.indexOf("flow") !== -1) {
+			return "Flow";
+		}
+		if (value.indexOf("workflow") !== -1) {
+			return "Workflow";
+		}
+		return type || "Application Component";
+	} /* * Component name */
+	function getComponentName(record,
+														targetName,
+														name) {
+		var value = targetName || name || record.getDisplayValue();
+		return value || "Unnamed component";
+	}
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-04-30 17:10:26</sys_created_on>
+        <sys_id>72cfd4ce97e40bd4be31fa17f053afe9</sys_id>
+        <sys_mod_count>81</sys_mod_count>
+        <sys_name>demo</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_72cfd4ce97e40bd4be31fa17f053afe9</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-31 15:12:35</sys_updated_on>
+        <template><![CDATA[<sp-widget widget="c.data.aiWidget" ng-if="c.data.aiWidget"></sp-widget>
+
+<div class="app-change-monitor">
+    <!-- Header -->
+    <div class="monitor-header">
+        <div>
+            <h3>
+                Application Changes
+                <small>
+                    {{c.data.application_name}}
+                </small>
+            </h3>
+        </div>
+        <button class="btn btn-default btn-sm"
+            ng-click="c.refresh()">
+            <i class="fa fa-refresh">
+            </i>
+            Refresh
+        </button>
+    </div>
+    <!-- Error -->
+    <div class="alert alert-danger"
+       ng-if="c.data.error">
+        {{c.data.error}}
+    </div>
+    <!-- Summary -->
+    <div class="list-summary">
+        <span>
+            <strong>
+                {{c.data.total}}
+            </strong>
+            changes
+        </span>
+        <span ng-if="c.data.total >
+            0">
+      Showing {{c.data.pageStart}} - {{c.data.pageEnd}}
+        </span>
+    </div>
+    <!-- Table -->
+    <div class="table-responsive">
+        <table class="table table-hover">
+            <thead>
+                <tr>
+                    <th style="width:100px;">
+                        Action
+                    </th>
+                    <th style="width:160px;">
+                        Component
+                    </th>
+                    <th>
+                        Name
+                    </th>
+                    <th>
+                        Changed By
+                    </th>
+                    <th>
+                        Changed On
+                    </th>
+                    <th>
+                        Update Set
+                    </th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr ng-repeat="item in c.data.changes track by item.sys_id">
+                    <td>
+                        <span class="action"
+                  ng-class="c.getActionClass(item.action)">
+                            {{item.action}}
+                        </span>
+                    </td>
+                    <td>
+                        {{item.component_type}}
+                    </td>
+                    <td>
+                        <strong>
+                            {{item.component_name}}
+                        </strong>
+                        <div class="technical-name"
+                 ng-if="item.target_name">
+                            {{item.target_name}}
+                        </div>
+                    </td>
+                    <td>
+                        {{item.changed_by}}
+                    </td>
+                    <td>
+                        {{item.changed_on}}
+                    </td>
+                    <td>
+                        {{item.update_set || '-'}}
+                    </td>
+                </tr>
+                <!-- Empty -->
+                <tr ng-if="!c.data.changes.length">
+                    <td colspan="6"
+              class="empty">
+                        No application changes found.
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    <!-- Pagination -->
+    <div class="pagination-bar"
+       ng-if="c.data.total >
+        0">
+        <!-- Page size -->
+        <div class="page-size">
+            <label>
+                Rows:
+            </label>
+            <select class="form-control input-sm"
+              ng-model="c.pageSize"
+              ng-change="c.changePageSize()">
+                <option value="20">
+                    20
+                </option>
+                <option value="40">
+                    40
+                </option>
+                <option value="50">
+                    50
+                </option>
+                <option value="100">
+                    100
+                </option>
+            </select>
+        </div>
+        <!-- Page navigation -->
+        <div class="page-navigation">
+            <button class="btn btn-default btn-sm"
+              ng-click="c.previousPage()"
+              ng-disabled="c.data.page <= 1">
+                <i class="fa fa-chevron-left">
+                </i>
+                Previous
+            </button>
+            <span class="page-number">
+                Page
+                <strong>
+                    {{c.data.page}}
+                </strong>
+                of
+                <strong>
+                    {{c.data.totalPages}}
+                </strong>
+            </span>
+            <button class="btn btn-default btn-sm"
+              ng-click="c.nextPage()"
+              ng-disabled="c.data.page >
+                = c.data.totalPages">
+
+        Next
+                <i class="fa fa-chevron-right">
+                </i>
+            </button>
+        </div>
+    </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>72cfd4ce97e40bd4be31fa17f053afe9</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-04-30 17:10:26</sys_created_on>
+        <sys_id>7acfd4ce97e40bd4be31fa17f053afef</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-04-30 17:10:26</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

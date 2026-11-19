@@ -1,0 +1,439 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="global" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>false</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_key_group_code_request</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition table="x_birl3_clm_key_group_code_request">approval_chain=BUILDING^EQ<item endquery="false" field="approval_chain" goto="false" newquery="false" operator="=" or="false" value="BUILDING"/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>CLM: Key Matrix Mapping</name>
+        <order>200</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[/*
+ * Business Rule : CLM: Key Matrix Mapping
+ * Table         : CLM Key Group Code Request   (x_birl3_clm_key_group_code_request)
+ * When          : AFTER  |  UPDATE  |  Order 200      (Insert NOT ticked)
+ * Condition     : Approval Chain is BUILDING
+ * Advanced      : checked
+ *
+ * Why it is kicked by the FLOW and not by the insert: the Central SPOC widget inserts the request first
+ * and only AFTERWARDS links the site drafts (target_request) to it. A rule running at insert time would
+ * find no sites. The flow starts after the widget has finished, and its first action writes BUILDING into
+ * Approval Chain. That update fires this rule, which finishes before the flow's next action, so the
+ * approver list is always ready. The rule replaces BUILDING with the chain text (or an ERROR message).
+ *
+ * What it does  : reads the approval matrix, works out WHO must approve this request and in WHAT ORDER,
+ *                 and writes one row per approver into the Key Approval Step table.
+ *
+ * Logic (FRS Key sections):
+ *   Stage 1  - Group Code Net Exposure looked up in the Key matrix for the segment
+ *              (cumulative: every row whose min_amount is below the exposure is an approver,
+ *              in sequence_order).
+ *   Stage 2  - If Grandparent Net Exposure > threshold, ALSO run the Grandparent rows
+ *              (matrix rows with pan_india = true) and set gp_override.
+ *   Deviation- If the deviation flag is true: segment chain moves one tier up, AND the Grandparent
+ *              chain moves one tier up (only when Grandparent override applies).
+ *   Dedupe   - an approver already in the chain is never added again (segment first, then Grandparent).
+ *              Give the same user to roles that are the same person (e.g. BH and CMO).
+ *   Coverage - if a required role has NO approver for a site's zone/region, the chain is NOT built
+ *              (a mandatory approval level is never skipped silently). The gap is logged and written
+ *              to the chain field; the flow's "no steps found" branch then returns the request.
+ *
+ * Zone / region / depot used here are the GEOGRAPHIC ones from the Customer Master (zone 60, region 107),
+ * which are text fields on both the Customer Master and the matrix. NOT the "Zonal Parent Code".
+ *
+ * Lines marked CONFIRM: check the real field name on your table before using.
+ */
+(function executeRule(current, previous /*null when async*/ ) {
+	gs.addInfoMessage('Key rule fired | approval_chain=' + current.getValue('approval_chain'));
+	gs.info("BR WOKE UP - RUNNING ON: " + current.getUniqueValue());
+
+    // ============================== CONFIG ==============================
+    var CFG = {
+        // matrix (same table the Non-Trade rule uses; Gayatri already added Key rows)
+        matrixTable: 'x_birl3_clm_approval_matrix',
+        customerType: 'Key',                          // Gayatri's widgets query customer_type = 'Key' - same here. CONFIRM (right-click the matrix filter breadcrumb > Copy query)
+
+        // new table you create
+        stepTable: 'x_birl3_clm_key_approval_step',
+
+        // fields on the Key Group Code Request
+        fieldSegment: 'segment',                      // exists (Choice). CONFIRM its choice values are lowercase
+        fieldGroupCode: 'group_code',                 // exists
+        fieldGroupNE: 'group_net_exposure',           // exists
+        fieldGpNE: 'grandparent_net_exposure',        // seen in the list view
+        fieldGpOverride: 'gp_override',               // seen in the list view; this rule writes it
+        fieldDeviation: 'is_deviation',               // exists (the SPOC widget sets it: requested ask > safe allowable limit)
+        fieldGpCode: 'grandparent_code',              // exists
+        fieldChain: 'approval_chain',                 // NEW text field (255): the flow writes BUILDING, this rule writes e.g. "ZH Key > ZCH > Head KA"
+        kickValue: 'BUILDING',
+
+        // where the zone/region/depot of the request's sites come from
+        siteMode: 'drafts',                           // 'drafts' = only the sites the SPOC selected (CRM Site Drafts linked by target_request)
+                                                      // 'group'  = every Customer Master row with this group code
+        fallbackToGroup: true,                        // if no drafts are linked (e.g. a hand-made test request) use the group code. Set false before go-live
+        customerMasterTable: 'x_birl3_clm_clm_customer_master1',
+        masterGroupField: 'groupcode',
+        masterCodeField: 'customer_code_sap',
+        masterZone: 'zone',
+        masterRegion: 'region',
+        masterDepot: 'depot',
+        masterSegment: 'segment',
+
+        // only for siteMode = 'drafts'
+        draftTable: 'x_birl3_clm_p1_crm_site_draft',
+        draftRequestField: 'target_request',          // confirmed from the SPOC widget code
+        draftCustomerField: 'site_code',              // confirmed: holds the SAP customer code (customer_code_sap)
+
+        gpThreshold: 15000000,                        // Rs 1.5 Cr. FRS also says Rs 1 Cr in places - CONFIRM with Jayant
+        validationRoles: ['ZCH', 'HO'],               // commercial-validation roles: ignored when finding the "next tier"
+        skipRoles: ['CRM', 'Central Spoc']            // persona rows on the same matrix table - never approvers
+    };
+
+    var LOG = 'CLM Key Matrix Mapping: ';
+
+    function toNum(v) {
+        var n = parseFloat((v || '0').toString().replace(/[^0-9.-]+/g, ''));
+        return isNaN(n) ? 0 : n;
+    }
+    function isTrue(v) {
+        return (v == '1' || v == 'true' || v === true);
+    }
+
+    var reqId = current.getUniqueValue();
+    var groupCode = current.getValue(CFG.fieldGroupCode) || '';
+    var gpCode = (current.getValue(CFG.fieldGpCode) || '').toString().trim();
+
+    // Only run when the flow has kicked us (Approval Chain = BUILDING)
+    if ((current.getValue(CFG.fieldChain) || '') !== CFG.kickValue) return;
+    var groupNE = toNum(current.getValue(CFG.fieldGroupNE));
+    var gpNE = toNum(current.getValue(CFG.fieldGpNE));
+    var isDeviation = isTrue(current.getValue(CFG.fieldDeviation));
+    var isGpOverride = (gpNE > CFG.gpThreshold);
+
+    // This is an AFTER rule, so changes to "current" are not saved automatically.
+    // We collect what we want to save and write it with ONE separate update (workflow off = no loops).
+    var out = {};
+    out[CFG.fieldGpOverride] = isGpOverride;
+    function saveToRequest(chainText) {
+        out[CFG.fieldChain] = chainText;
+        var up = new GlideRecord(current.getTableName());
+        if (up.get(reqId)) {
+            for (var key in out) {
+                if (up.isValidField(key)) up.setValue(key, out[key]);
+            }
+            up.setWorkflow(false);
+            up.update();
+        }
+    }
+    function fail(msg) {
+        gs.error(LOG + msg + ' [' + current.getDisplayValue() + ']');
+        saveToRequest('ERROR: ' + msg);
+    }
+
+    // ---- Safety 1: never rebuild a chain that has already started
+    var started = new GlideRecord(CFG.stepTable);
+    started.addQuery('request', reqId);
+    started.addQuery('state', '!=', 'pending');
+    started.setLimit(1);
+    started.query();
+    if (started.hasNext()) {
+        fail('approvals already started - chain not rebuilt');
+        return;
+    }
+    // clear any old pending chain (re-run safe)
+    var old = new GlideRecord(CFG.stepTable);
+    old.addQuery('request', reqId);
+    old.deleteMultiple();
+
+    // ---- 1. Geography of the request's sites (zone / region / depot, de-duplicated)
+    var sites = [];
+    var seenGeo = {};
+    function addGeo(z, r, d) {
+        z = (z || '').toString(); r = (r || '').toString(); d = (d || '').toString();
+        var key = z + '|' + r + '|' + d;
+        if (seenGeo[key]) return;
+        seenGeo[key] = true;
+        sites.push({ zone: z, region: r, depot: d });
+    }
+
+    var segment = (current.getValue(CFG.fieldSegment) || '').toLowerCase();
+
+    if (CFG.siteMode === 'drafts') {
+        var dg = new GlideRecord(CFG.draftTable);
+        dg.addQuery(CFG.draftRequestField, reqId);
+        dg.query();
+        var seenDraftSite = {};
+        while (dg.next()) {
+            var draftSite = dg.getValue(CFG.draftCustomerField);
+            if (!draftSite || seenDraftSite[draftSite]) continue; // each site has 2 draft rows (CRM original + SPOC copy)
+            seenDraftSite[draftSite] = true;
+            var cm = new GlideRecord(CFG.customerMasterTable);
+            cm.addQuery(CFG.masterCodeField, draftSite);
+            cm.setLimit(1);
+            cm.query();
+            if (cm.next()) {
+                addGeo(cm.getValue(CFG.masterZone), cm.getValue(CFG.masterRegion), cm.getValue(CFG.masterDepot));
+                if (!segment) segment = (cm.getValue(CFG.masterSegment) || '').toLowerCase();
+            }
+        }
+    } else {
+        if (!groupCode) {
+            fail('Group Code is empty - cannot find sites');
+            return;
+        }
+        var ga = new GlideAggregate(CFG.customerMasterTable);
+        ga.addQuery(CFG.masterGroupField, groupCode);
+        ga.groupBy(CFG.masterZone);
+        ga.groupBy(CFG.masterRegion);
+        ga.groupBy(CFG.masterDepot);
+        ga.query();
+        while (ga.next()) {
+            addGeo(ga.getValue(CFG.masterZone), ga.getValue(CFG.masterRegion), ga.getValue(CFG.masterDepot));
+        }
+        if (!segment) {
+            var sm = new GlideRecord(CFG.customerMasterTable);
+            sm.addQuery(CFG.masterGroupField, groupCode);
+            sm.setLimit(1);
+            sm.query();
+            if (sm.next()) segment = (sm.getValue(CFG.masterSegment) || '').toLowerCase();
+        }
+    }
+
+    if (sites.length === 0 && CFG.siteMode === 'drafts' && CFG.fallbackToGroup && groupCode) {
+        gs.warn(LOG + 'no site drafts linked to ' + current.getDisplayValue() + ' - using Customer Master rows of group ' + groupCode);
+        var ga2 = new GlideAggregate(CFG.customerMasterTable);
+        ga2.addQuery(CFG.masterGroupField, groupCode);
+        ga2.groupBy(CFG.masterZone);
+        ga2.groupBy(CFG.masterRegion);
+        ga2.groupBy(CFG.masterDepot);
+        ga2.query();
+        while (ga2.next()) {
+            addGeo(ga2.getValue(CFG.masterZone), ga2.getValue(CFG.masterRegion), ga2.getValue(CFG.masterDepot));
+        }
+        if (!segment) {
+            var sm2 = new GlideRecord(CFG.customerMasterTable);
+            sm2.addQuery(CFG.masterGroupField, groupCode);
+            sm2.setLimit(1);
+            sm2.query();
+            if (sm2.next()) segment = (sm2.getValue(CFG.masterSegment) || '').toLowerCase();
+        }
+    }
+
+    if (!segment || groupNE <= 0) {
+        fail('segment is missing or Group Net Exposure is 0 (segment=' + segment + ', groupNE=' + groupNE +
+            '). The SPOC widget currently sets NE from the last APPROVED limit, so a first request shows 0 - fix the NE source or enter NE by hand to test');
+        return;
+    }
+    if (sites.length === 0) {
+        fail('no sites found for this request (drafts linked: none; group code ' + groupCode + ') - chain not built');
+        return;
+    }
+
+    function wild(rowVal, siteVal) {
+        return !rowVal || rowVal === siteVal; // empty matrix value = applies to all
+    }
+
+    // ---- 2. Load ALL matrix rows for this segment (+ blank segment = Grandparent rows).
+    //         Each row remembers which sites it fits. Rows with no approver are kept (fit nothing)
+    //         so that a role with no user shows up as a coverage gap instead of disappearing.
+    var segAll = [];
+    var gpAll = [];
+    var mx = new GlideRecord(CFG.matrixTable);
+    mx.addQuery('customer_type', CFG.customerType);
+    mx.addEncodedQuery('segment=' + segment + '^ORsegmentISEMPTY');
+    mx.orderBy('sequence_order');
+    mx.query();
+    var ignoredRows = [];
+    var skipLower = CFG.skipRoles.map(function(x) { return x.toLowerCase(); });
+    while (mx.next()) {
+        var approver = mx.getValue('approver_user') || '';
+        var roleName = (mx.getValue('role_name') || '').toString();
+
+        // (a) persona rows (CRM / Central Spoc) are not approvers
+        if (skipLower.indexOf(roleName.toLowerCase()) > -1) {
+            ignoredRows.push(roleName + '(persona)');
+            continue;
+        }
+        // (b) a row tied to a different Grandparent / Group Code does not apply to this request (blank = applies to all)
+        var rowGp = (mx.getValue('grandparent_code') || '').toString().trim().toUpperCase();
+        var rowGrp = (mx.getValue('group_code') || '').toString().trim().toUpperCase();
+        if (rowGp && rowGp !== gpCode.toUpperCase()) continue;
+        if (rowGrp && rowGrp !== (groupCode || '').toString().trim().toUpperCase()) continue;
+        // (c) a row with no amount band at all (min 0 AND max 0, not Grandparent) is a mapping row (e.g. the HO contact), not a ladder row
+        var bandMin = parseFloat(mx.getValue('min_amount')) || 0;
+        var bandMax = parseFloat(mx.getValue('max_amount')) || 0;
+        if (bandMin <= 0 && bandMax <= 0 && !isTrue(mx.getValue('pan_india'))) {
+            ignoredRows.push(roleName + '(no amount band)');
+            continue;
+        }
+
+        var row = {
+            role: mx.getValue('role_name'),
+            approver: approver,
+            min: parseFloat(mx.getValue('min_amount')) || 0,
+            seq: parseInt(mx.getValue('sequence_order'), 10),
+            isGp: isTrue(mx.getValue('pan_india')), // pan_india = Grandparent-level row
+            fitSites: []
+        };
+        if (isNaN(row.seq)) {
+            fail('matrix row "' + row.role + '" has no Sequence Order - fill it on every Key matrix row');
+            return;
+        }
+        if (approver) {
+            var rz = mx.getValue('zone') || '';
+            var rr = mx.getValue('region') || '';
+            var rd = mx.getValue('depot') || '';
+            for (var i = 0; i < sites.length; i++) {
+                if (wild(rz, sites[i].zone) && wild(rr, sites[i].region) && wild(rd, sites[i].depot)) {
+                    row.fitSites.push(i);
+                }
+            }
+        }
+        if (row.isGp) gpAll.push(row);
+        else segAll.push(row);
+    }
+    if (ignoredRows.length > 0) {
+        gs.info(LOG + 'ignored matrix rows: ' + ignoredRows.join(', '));
+    }
+
+    // ---- 3. Deviation = treat exposure as sitting just inside the NEXT tier
+    //         (tier detection uses ALL rows, so it never depends on who has a user assigned)
+    function effectiveExposure(rows, actual, escalate) {
+        if (!escalate) return actual;
+        var nextMin = null;
+        for (var k = 0; k < rows.length; k++) {
+            var r = rows[k];
+            if (CFG.validationRoles.indexOf(r.role) > -1) continue; // ZCH/HO do not define a tier
+            if (r.min >= actual && (nextMin === null || r.min < nextMin)) nextMin = r.min; // not yet met
+        }
+        return (nextMin === null) ? actual : nextMin + 1;
+    }
+
+    // ---- 4. Which rows are "met" at each level
+    var effSeg = effectiveExposure(segAll, groupNE, isDeviation);
+    var segMet = segAll.filter(function(r) {
+        return (r.min <= 0 || effSeg > r.min);
+    });
+
+    var gpMet = [];
+    if (isGpOverride) {
+        var effGp = effectiveExposure(gpAll, gpNE, isDeviation);
+        gpMet = gpAll.filter(function(r) {
+            return (effGp > r.min);
+        });
+    }
+
+    // ---- 5. Coverage check: every met role must have an approver for EVERY site's zone/region
+    var missing = [];
+    function checkCoverage(metRows, label) {
+        var byRole = {};
+        metRows.forEach(function(r) {
+            if (!byRole[r.role]) byRole[r.role] = {};
+            r.fitSites.forEach(function(idx) {
+                byRole[r.role][idx] = true;
+            });
+        });
+        Object.keys(byRole).forEach(function(role) {
+            sites.forEach(function(s, idx) {
+                if (!byRole[role][idx]) {
+                    missing.push(label + ' ' + role + ' (zone ' + s.zone + ', region ' + s.region + ')');
+                }
+            });
+        });
+    }
+    checkCoverage(segMet, 'segment');
+    checkCoverage(gpMet, 'grandparent');
+
+    if (missing.length > 0) {
+        gs.error(LOG + 'NO APPROVER mapped for: ' + missing.join('; ') + ' on ' + current.getDisplayValue() +
+            '. Chain NOT built - fix the matrix rows (approver_user / zone / region) and retry.');
+        saveToRequest('MISSING APPROVER: ' + missing.join('; '));
+        return;
+    }
+
+    // ---- 6. Build the chain (segment first, then Grandparent) with global de-duplication
+    var chain = [];
+    var seen = {};
+    function addStep(r, level, reason) {
+        if (!r.approver || r.fitSites.length === 0) return;
+        if (seen[r.approver]) return;
+        seen[r.approver] = true;
+        chain.push({ role: r.role, approver: r.approver, level: level, reason: reason });
+    }
+
+    segMet.forEach(function(r) {
+        addStep(r, 'segment', (r.min <= 0 || groupNE > r.min) ? 'matrix' : 'deviation');
+    });
+    gpMet.forEach(function(r) {
+        addStep(r, 'grandparent', (gpNE > r.min) ? 'matrix' : 'deviation');
+    });
+
+    if (chain.length === 0) {
+        fail('matrix returned NO approvers (segment=' + segment + ', groupNE=' + groupNE + '). Check customer_type value, matrix rows and approver_user');
+        return;
+    }
+
+    // ---- 7. Write the steps
+    var names = [];
+    chain.forEach(function(s, idx) {
+        var st = new GlideRecord(CFG.stepTable);
+        st.initialize();
+        st.setValue('request', reqId);
+        st.setValue('sequence', (idx + 1) * 10);
+        st.setValue('role_name', s.role);
+        st.setValue('approver', s.approver);
+        st.setValue('level', s.level);           // segment | grandparent
+        st.setValue('trigger_reason', s.reason); // matrix | deviation
+        st.setValue('state', 'pending');
+        st.insert();
+        names.push(s.role);
+    });
+
+    saveToRequest(names.join(' > '));
+
+    gs.info(LOG + current.getDisplayValue() + ' | segment=' + segment + ' | groupNE=' + groupNE +
+        ' | gpNE=' + gpNE + ' | gpOverride=' + isGpOverride + ' | deviation=' + isDeviation +
+        ' | geo-combinations=' + sites.length + ' | chain=' + names.join(' > '));
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-17 12:28:55</sys_created_on>
+        <sys_domain>global</sys_domain>
+        <sys_domain_path>/</sys_domain_path>
+        <sys_id>bf1676682bc41f104572f3745e91bf02</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>CLM: Key Matrix Mapping</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_bf1676682bc41f104572f3745e91bf02</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-18 22:13:40</sys_updated_on>
+        <template/>
+        <when>after</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=bf1676682bc41f104572f3745e91bf02"/>
+</record_update>

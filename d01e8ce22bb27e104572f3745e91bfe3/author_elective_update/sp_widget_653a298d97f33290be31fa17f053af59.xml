@@ -1,0 +1,6014 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[/**
+ * CLM ADAPTIVE WIDGET — Client Script V5 (TCL + Multi-Segment)
+ * Replaces WIDGET_client_v4.js entirely
+ */
+
+api.controller = function($scope) {
+    var c = this;
+
+    // Core state
+    c.data.calc          = {};
+    c.data.submitted     = false;
+    c.data.submitting    = false;
+    c.data.saving        = false;
+    c.data.customerError = '';
+    c.data.submitError   = '';
+
+    // Multi-segment state
+    c.data.isMultiSegment    = false;
+    c.data.msMethod          = 'manual';
+    c.data.msSegments        = [];
+    c.data.msValidationError = '';
+    c.data.msTotalSD         = 0;
+    c.data.msTotalMACL       = 0;
+    c.data.msTotalRequested  = 0;
+
+    // TCL state
+    c.data.isTCL          = false;
+    c.data.tclAmount      = 0;
+    c.data.tclValidTill   = '';
+    c.data.tclMinDate     = '';
+    c.data.tclDaysLeft    = 0;
+    c.data.tclError       = '';
+    c.data.tclIncreasePct = 0;
+    c.data.permanentLimit = 0;
+    c.data.activeTCLs     = [];
+
+    // Set min date for TCL to tomorrow
+    var tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    c.data.tclMinDate = tomorrow.toISOString().split('T')[0];
+
+    // ── Load customer ──────────────────────────────────────────
+    c.loadCustomer = function() {
+        var code = (c.data.customerCode || '').trim().toUpperCase();
+        if (!code) return;
+
+        c.data.customerError  = '';
+        c.data.customerName   = 'Loading...';
+        c.data.calc           = {};
+        c.data.isMultiSegment = false;
+        c.data.isTCL          = false;
+        c.data.tclError       = '';
+        c.data.activeTCLs     = [];
+
+        c.server.get({ action: 'loadCustomer', customerCode: code })
+        .then(function(r) {
+            if (r.data.customer) {
+                var cust = r.data.customer;
+                c.data.customerSysId   = cust.sys_id;
+                c.data.customerName    = cust.name;
+                c.data.customerType    = cust.customer_type;
+                c.data.segment         = cust.segment;
+                c.data.zone            = cust.zone;
+                c.data.region          = cust.region;
+              c.data.pan          = cust.pan;  
+							c.data.cg2Code         = cust.cg2_code;
+                c.data.constitution    = cust.constitution;
+                c.data.isListed        = cust.is_listed;
+                c.data.vintageDays     = cust.vintage_days;
+                c.data.currentLimit    = cust.current_limit / 100000;
+                c.data.hierarchyLevel  = cust.hierarchy_level;
+                c.data.hierarchyData   = cust.hierarchy_data;
+                c.data.avgMonthlySales = cust.avg_monthly_sales;
+                c.data.orderRate       = cust.order_rate || 7000;
+                c.data.permanentLimit  = cust.permanent_limit || 0;
+                c.data.activeTCLs      = cust.active_tcls    || [];
+
+                if (cust.outstanding > 0 && !c.data.outstanding)
+                    c.data.outstanding = cust.outstanding;
+                if (cust.customer_type === 'Trade' && cust.current_sd > 0 && !c.data.activeSD)
+                    c.data.activeSD = cust.current_sd;
+                if (cust.customer_type !== 'Trade')
+                    c.data.activeSD = 0;
+
+                c.initMultiSegment(cust);
+                if (c.data.requestedLimit > 0) c.recalculate();
+            } else {
+                c.data.customerName  = '';
+                c.data.customerSysId = '';
+                c.data.customerError = 'Customer "' + code + '" not found.';
+            }
+        });
+    };
+
+    c.clearCustomer = function() {
+        c.data.customerSysId  = '';
+        c.data.customerName   = '';
+        c.data.customerType   = '';
+        c.data.customerError  = '';
+        c.data.segment        = '';
+        c.data.calc           = {};
+        c.data.activeSD       = 0;
+        c.data.outstanding    = 0;
+        c.data.isMultiSegment = false;
+        c.data.isTCL          = false;
+        c.data.tclError       = '';
+        c.data.activeTCLs     = [];
+        c.data.permanentLimit = 0;
+    };
+
+    // ── TCL FUNCTIONS ──────────────────────────────────────────
+
+    c.onTCLToggle = function() {
+        c.data.tclError = '';
+        if (c.data.isTCL) {
+            // Pre-fill TCL amount with current requested limit
+            if (c.data.requestedLimit > 0)
+                c.data.tclAmount = c.data.requestedLimit;
+            c.validateTCL();
+        } else {
+            c.data.tclAmount    = 0;
+            c.data.tclValidTill = '';
+            c.data.tclDaysLeft  = 0;
+            c.data.tclError     = '';
+            c.data.tclIncreasePct = 0;
+        }
+    };
+
+    c.onTCLAmountChange = function() {
+        var perm = parseFloat(c.data.permanentLimit) || 0;
+        var tcl  = parseFloat(c.data.tclAmount)      || 0;
+        c.data.tclIncreasePct = perm > 0 ? ((tcl - perm) / perm) * 100 : 0;
+
+        // Sync to main requested limit
+        if (tcl > 0) c.data.requestedLimit = tcl;
+        c.validateTCL();
+        c.recalculate();
+    };
+
+    c.onTCLDateChange = function() {
+        if (!c.data.tclValidTill) { c.data.tclDaysLeft = 0; return; }
+        var today  = new Date();
+        var target = new Date(c.data.tclValidTill);
+        var diff   = Math.ceil((target - today) / (1000 * 60 * 60 * 24));
+        c.data.tclDaysLeft = diff > 0 ? diff : 0;
+        c.validateTCL();
+    };
+
+    c.validateTCL = function() {
+        c.data.tclError = '';
+        if (!c.data.isTCL) return true;
+
+        var tcl  = parseFloat(c.data.tclAmount)      || 0;
+        var perm = parseFloat(c.data.permanentLimit)  || 0;
+
+        if (tcl <= 0) {
+            c.data.tclError = 'Please enter the TCL amount.';
+            return false;
+        }
+        if (perm > 0 && tcl <= perm) {
+            c.data.tclError = 'TCL amount (₹' + (tcl/100000).toFixed(1) + 'L) must exceed the permanent limit (₹' + (perm/100000).toFixed(1) + 'L).';
+            return false;
+        }
+        if (!c.data.tclValidTill) {
+            c.data.tclError = 'Please select a Valid Till date.';
+            return false;
+        }
+        if (c.data.tclDaysLeft <= 0) {
+            c.data.tclError = 'Valid Till date must be in the future.';
+            return false;
+        }
+        return true;
+    };
+
+    c.buildTCLPayload = function() {
+        if (!c.data.isTCL) return null;
+        return {
+            is_tcl:           true,
+            tcl_amount:       parseFloat(c.data.tclAmount)     || 0,
+            tcl_valid_till:   c.data.tclValidTill,
+            permanent_limit:  parseFloat(c.data.permanentLimit) || 0
+        };
+    };
+
+    // ── MULTI-SEGMENT FUNCTIONS ────────────────────────────────
+
+    c.initMultiSegment = function(cust) {
+        var rate = (cust && cust.order_rate)       ? cust.order_rate       : 7000;
+        var mpq  = (cust && cust.avg_monthly_sales) ? cust.avg_monthly_sales : 0;
+        c.data.msMethod          = 'manual';
+        c.data.msValidationError = '';
+        c.data.msTotalSD = c.data.msTotalMACL = c.data.msTotalRequested = 0;
+        c.data.msSegments = [
+            { name: 'Cement', active: true,  sd: parseFloat((cust && cust.current_sd) || 0), mpq: mpq, orderRate: rate, creditTenor: 45, p1: 0, requestedLimit: 0, pct: 0 },
+            { name: 'RMC',    active: false, sd: 0, mpq: 0, orderRate: 5500, creditTenor: 30, p1: 0, requestedLimit: 0, pct: 0 },
+            { name: 'BPD',    active: false, sd: 0, mpq: 0, orderRate: 4500, creditTenor: 45, p1: 0, requestedLimit: 0, pct: 0 }
+        ];
+    };
+
+    c.onMultiSegmentToggle = function() {
+        c.data.msValidationError = '';
+        if (c.data.isMultiSegment) c.recalculateMS();
+    };
+
+    c.onMethodChange = function() {
+        c.data.msValidationError = '';
+        if (c.data.msMethod === 'prorata') c.applyProRata();
+    };
+
+    c.recalculateMS = function() {
+        if (!c.data.isMultiSegment || !c.data.msSegments) return;
+        var totalSD = 0, totalRequested = 0, totalMACL = 0;
+        c.data.msSegments.forEach(function(seg) {
+            if (!seg.active) { seg.p1 = 0; seg.pct = 0; return; }
+            var mpq = parseFloat(seg.mpq) || 0, rate = parseFloat(seg.orderRate) || 7000, tenor = parseFloat(seg.creditTenor) || 45;
+            seg.p1 = mpq > 0 ? (mpq * rate * tenor) / 30 : 0;
+            totalSD        += parseFloat(seg.sd)             || 0;
+            totalRequested += parseFloat(seg.requestedLimit) || 0;
+            totalMACL      += seg.p1;
+        });
+        c.data.msTotalSD = totalSD; c.data.msTotalRequested = totalRequested; c.data.msTotalMACL = totalMACL;
+        c.data.msSegments.forEach(function(seg) {
+            if (!seg.active || totalRequested === 0) { seg.pct = 0; return; }
+            seg.pct = (parseFloat(seg.requestedLimit) || 0) / totalRequested;
+        });
+        if (c.data.msMethod === 'prorata') c.applyProRata();
+        c.validateMS();
+        if (totalRequested > 0) { c.data.requestedLimit = totalRequested; c.recalculate(); }
+    };
+
+    c.applyProRata = function() {
+        if (!c.data.msSegments) return;
+        var active = c.data.msSegments.filter(function(s) { return s.active; });
+        var totalSD = active.reduce(function(a, s) { return a + (parseFloat(s.sd) || 0); }, 0);
+        var totalReq = parseFloat(c.data.requestedLimit) || 0;
+        if (totalReq === 0 || active.length === 0) return;
+        var allocSum = 0;
+        active.forEach(function(seg) {
+            var sd = parseFloat(seg.sd) || 0;
+            var pct = totalSD > 0 ? sd / totalSD : 1 / active.length;
+            seg.requestedLimit = Math.round(totalReq * pct); seg.pct = pct; allocSum += seg.requestedLimit;
+        });
+        var diff = totalReq - allocSum;
+        if (diff !== 0) active[0].requestedLimit += diff;
+        c.data.msTotalRequested = totalReq;
+    };
+
+    c.onManualLimitChange = function() { c.recalculateMS(); };
+
+    c.validateMS = function() {
+        if (!c.data.isMultiSegment || c.data.msMethod === 'hold') { c.data.msValidationError = ''; return true; }
+        var active = c.data.msSegments.filter(function(s) { return s.active; });
+        if (active.length === 0) { c.data.msValidationError = 'Select at least one segment.'; return false; }
+        var sum = active.reduce(function(a, s) { return a + (parseFloat(s.requestedLimit) || 0); }, 0);
+        var total = parseFloat(c.data.requestedLimit) || 0;
+        if (total > 0 && Math.abs(sum - total) > 100) {
+            c.data.msValidationError = 'Segment limits (₹' + (sum/100000).toFixed(1) + 'L) must equal total (₹' + (total/100000).toFixed(1) + 'L)';
+            return false;
+        }
+        c.data.msValidationError = ''; return true;
+    };
+
+    c.buildMSPayload = function() {
+        if (!c.data.isMultiSegment || !c.data.msSegments) return null;
+        return {
+            is_multi_segment: true, method: c.data.msMethod,
+            segments: c.data.msSegments.filter(function(s) { return s.active; }).map(function(s) {
+                return { segment: s.name, sd: parseFloat(s.sd)||0, mpq: parseFloat(s.mpq)||0,
+                         order_rate: parseFloat(s.orderRate)||7000, credit_tenor: parseFloat(s.creditTenor)||45,
+                         requested_limit: parseFloat(s.requestedLimit)||0, pct: parseFloat(s.pct)||0 };
+            })
+        };
+    };
+
+    // ── Live recalculate ───────────────────────────────────────
+    c.recalculate = function() {
+        var req = parseFloat(c.data.requestedLimit) || 0;
+        if (req <= 0 || !c.data.customerSysId) { c.data.calc = {}; return; }
+        c.server.get({
+            action: 'calculate', customerType: c.data.customerType || 'Trade',
+            customerSysId: c.data.customerSysId, requestedLimit: req,
+            activeSD: parseFloat(c.data.activeSD)||0, outstanding: parseFloat(c.data.outstanding)||0,
+            avgMonthlySales: parseFloat(c.data.avgMonthlySales)||0,
+            salesLastMonth: parseFloat(c.data.salesLastMonth)||0, salesPrevMonth: parseFloat(c.data.salesPrevMonth)||0,
+            segment: c.data.segment||'Cement', cg2Code: c.data.cg2Code||'', vintageDays: parseInt(c.data.vintageDays)||0
+        }).then(function(r) { if (r.data.calc) c.data.calc = r.data.calc; });
+    };
+
+    // ── Save Draft ─────────────────────────────────────────────
+    c.saveDraft = function() {
+        c.data.saving = true;
+        c.server.get({ action: 'saveDraft', form: c.buildPayload() })
+        .then(function(r) { c.data.saving = false; c.data.draftSysId = r.data.sysId; c.data.requestNumber = r.data.number; });
+    };
+
+    // ── Submit ─────────────────────────────────────────────────
+    c.submit = function() {
+        c.data.submitError = '';
+        if (!c.data.customerSysId)  { c.data.submitError = 'Please select a valid customer.'; return; }
+        if (!c.data.segment)         { c.data.submitError = 'Please select a segment.'; return; }
+        if (!c.data.justification || c.data.justification.trim().length < 20) {
+            c.data.submitError = 'Business justification must be at least 20 characters.'; return; }
+        if (c.data.calc.isDeviation && (!c.data.deviationJustification || c.data.deviationJustification.trim().length < 20)) {
+            c.data.submitError = 'Deviation justification is required.'; return; }
+        if (c.data.isMultiSegment && !c.validateMS()) {
+            c.data.submitError = c.data.msValidationError || 'Fix multi-segment errors.'; return; }
+        if (c.data.isTCL && !c.validateTCL()) {
+            c.data.submitError = c.data.tclError || 'Fix TCL errors.'; return; }
+
+        c.data.submitting = true;
+        c.server.get({ action: 'submit', form: c.buildPayload() })
+        .then(function(r) {
+            c.data.submitting = false;
+            if (r.data.success) {
+                c.data.submitted = true; c.data.requestNumber = r.data.requestNumber;
+                c.data.approverRole = r.data.approverRole; c.data.isDeviation = r.data.isDeviation;
+            } else { c.data.submitError = r.data.error || 'Submission failed.'; }
+        }).catch(function() { c.data.submitting = false; c.data.submitError = 'Server error.'; });
+    };
+
+    c.resetForm = function() {
+        c.data = { calc: {}, submitted: false, submitting: false, saving: false,
+                   isMultiSegment: false, msMethod: 'manual', msSegments: [],
+                   isTCL: false, activeTCLs: [] };
+    };
+
+    c.buildPayload = function() {
+        var payload = {
+            customerSysId: c.data.customerSysId, customerType: c.data.customerType,
+            segment: c.data.segment, requestedLimit: c.data.requestedLimit,
+            activeSD: c.data.activeSD||0, outstanding: c.data.outstanding||0,
+            avgMonthlySales: c.data.avgMonthlySales||0, salesLastMonth: c.data.salesLastMonth||0,
+            salesPrevMonth: c.data.salesPrevMonth||0, chequeBounces: c.data.chequeBounces||0,
+            marketPerception: c.data.marketPerception||'', justification: c.data.justification,
+            deviationJustification: c.data.deviationJustification||'',
+            vintageDays: c.data.vintageDays||0, draftSysId: c.data.draftSysId||''
+        };
+        var msPayload  = c.buildMSPayload();
+        var tclPayload = c.buildTCLPayload();
+        if (msPayload)  payload.multiSegment = msPayload;
+        if (tclPayload) payload.tcl          = tclPayload;
+        return payload;
+    };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* ============================================================
+   CLM WIDGET — COMPLETE CSS (UltraTech Theme)
+   FULLY RESPONSIVE + MOBILE OPTIMIZED
+   Brand Colors: Black #000000 | Neon Yellow #FFF21A | White #FFFFFF
+   ============================================================ */
+
+/* ── Base ── */
+.clm-widget {
+  font-family: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  color: #1a1a1a;
+  box-sizing: border-box;
+}
+
+/* ── Header ── */
+.clm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #000000;
+  color: #fff;
+  padding: 20px 28px;
+  border-radius: 8px 8px 0 0;
+  margin-bottom: 0;
+  border-bottom: 3px solid #FFF21A;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.clm-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: #ffffff;
+}
+.clm-subtitle {
+  font-size: 13px;
+  color: rgba(255, 242, 26, 0.75);
+  margin-top: 2px;
+  width: 100%;
+}
+.clm-request-badge {
+  background: #FFF21A;
+  border: 1px solid #FFF21A;
+  color: #000000;
+  padding: 4px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin-left: auto;
+}
+
+/* ── Section ── */
+.clm-section {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-top: none;
+  padding: 24px 28px;
+}
+.clm-section:last-of-type {
+  border-radius: 0 0 8px 8px;
+}
+.clm-section-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #000000;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.clm-section-num {
+  width: 24px;
+  height: 24px;
+  background: #FFF21A;
+  color: #000000;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* ── Form Layout ── */
+.clm-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.clm-row:last-child {
+  margin-bottom: 0;
+}
+.clm-field {
+  flex: 1;
+  min-width: 200px;
+}
+.clm-field label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: #4a4a4a;
+  margin-bottom: 6px;
+}
+.req {
+  color: #e74c3c;
+  margin-left: 2px;
+}
+
+.clm-input,
+.clm-textarea {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid #cccccc;
+  border-radius: 5px;
+  font-size: 14px;
+  color: #1a1a1a;
+  background: #fff;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  box-sizing: border-box;
+}
+.clm-input:focus,
+.clm-textarea:focus {
+  outline: none;
+  border-color: #000000;
+  box-shadow: 0 0 0 3px rgba(255, 242, 26, 0.4);
+}
+.clm-input[readonly] {
+  background: #f5f5f5;
+  color: #888888;
+  cursor: default;
+}
+.clm-textarea {
+  resize: vertical;
+  min-height: 90px;
+  line-height: 1.5;
+}
+.clm-textarea-danger {
+  border-color: #e74c3c;
+}
+.clm-textarea-danger:focus {
+  border-color: #c0392b;
+  box-shadow: 0 0 0 3px rgba(231, 76, 60, 0.12);
+}
+
+/* Input with button */
+.clm-input-group {
+  display: flex;
+  gap: 8px;
+}
+.clm-input-group .clm-input {
+  flex: 1;
+}
+.clm-input-btn {
+  padding: 9px 16px;
+  background: #FFF21A;
+  color: #000000;
+  border: none;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+.clm-input-btn:hover {
+  background: #e6d900;
+}
+.clm-input-btn:disabled {
+  background: #e0e0e0;
+  color: #999999;
+  cursor: not-allowed;
+}
+
+.clm-field-hint {
+  font-size: 12px;
+  color: #888888;
+  margin-top: 4px;
+}
+.clm-field-msg {
+  font-size: 12px;
+  margin-top: 4px;
+}
+.clm-error {
+  color: #e74c3c;
+}
+
+/* ── Customer Strip ── */
+.clm-customer-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: #f5f5f5;
+  border-radius: 6px;
+  border: 1px solid #e0e0e0;
+}
+.clm-strip-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 100px;
+}
+.clm-strip-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #888888;
+}
+.clm-strip-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+/* Customer type colors */
+.clm-type-trade {
+  color: #000000;
+}
+.clm-type-nontrade {
+  color: #8e44ad;
+}
+.clm-type-key {
+  color: #c8860a;
+}
+
+/* ── Calc Panel ── */
+.clm-calc-panel {
+  background: #f9f9f9;
+  border: 1px solid #e0e0e0;
+  border-top: 3px solid #FFF21A;
+  border-bottom: none;
+  padding: 20px 28px;
+}
+.clm-calc-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #000000;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.clm-calc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.clm-calc-card {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+.clm-calc-card-safe {
+  border-color: #a9dfbf;
+  background: #f0faf4;
+}
+.clm-calc-card-danger {
+  border-color: #f5b7b1;
+  background: #fdf3f2;
+}
+.clm-calc-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #888888;
+  margin-bottom: 6px;
+}
+.clm-calc-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #000000;
+  line-height: 1.2;
+}
+.clm-calc-sub {
+  font-size: 11px;
+  color: #aaaaaa;
+  margin-top: 4px;
+}
+.clm-val-ok {
+  color: #27ae60;
+}
+.clm-val-warn {
+  color: #c8860a;
+}
+.clm-val-danger {
+  color: #e74c3c;
+}
+.clm-val-approver {
+  font-size: 14px;
+  color: #000000;
+}
+
+/* Path badge */
+.clm-path-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.clm-badge-tool {
+  background: #000000;
+  color: #FFF21A;
+}
+.clm-badge-nontool {
+  background: #27ae60;
+  color: #fff;
+}
+
+/* ── Alerts ── */
+.clm-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  margin-top: 12px;
+}
+.clm-alert-icon {
+  font-size: 18px;
+  font-weight: 700;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+.clm-alert-danger {
+  background: #fdf3f2;
+  border: 1px solid #f5b7b1;
+  color: #922b21;
+}
+.clm-alert-success {
+  background: #eafaf1;
+  border: 1px solid #a9dfbf;
+  color: #1e8449;
+}
+
+/* Hierarchy strip */
+.clm-hierarchy-strip {
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: #fffde7;
+  border: 1px solid #FFF21A;
+  border-radius: 6px;
+}
+.clm-hierarchy-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #888888;
+  margin-bottom: 8px;
+}
+.clm-hierarchy-node {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid #fff0a0;
+  font-size: 13px;
+}
+.clm-hierarchy-node:last-child {
+  border-bottom: none;
+}
+.clm-hierarchy-level {
+  font-size: 10px;
+  font-weight: 700;
+  color: #888888;
+  min-width: 50px;
+}
+.clm-hierarchy-name {
+  flex: 1;
+  color: #000000;
+  font-weight: 600;
+}
+.clm-hierarchy-limit {
+  color: #c8860a;
+  font-weight: 600;
+}
+
+/* ── Actions ── */
+.clm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 20px 28px;
+  background: #f9f9f9;
+  border: 1px solid #e0e0e0;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  flex-wrap: wrap;
+}
+.clm-btn {
+  padding: 10px 24px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s;
+}
+.clm-btn-primary {
+  background: #000000;
+  color: #FFF21A;
+}
+.clm-btn-primary:hover:not(:disabled) {
+  background: #1a1a1a;
+}
+.clm-btn-primary:disabled {
+  background: #aaaaaa;
+  color: #ffffff;
+  cursor: not-allowed;
+}
+.clm-btn-outline {
+  background: transparent;
+  color: #000000;
+  border: 2px solid #000000;
+}
+.clm-btn-outline:hover:not(:disabled) {
+  background: #fffde7;
+  border-color: #000000;
+}
+.clm-btn-outline:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Success Panel ── */
+.clm-success-panel {
+  text-align: center;
+  padding: 48px 28px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+}
+.clm-success-icon {
+  width: 60px;
+  height: 60px;
+  background: #FFF21A;
+  color: #000000;
+  border-radius: 50%;
+  font-size: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 20px;
+}
+.clm-success-panel h3 {
+  color: #000000;
+  font-size: 20px;
+  margin-bottom: 12px;
+}
+.clm-success-panel p {
+  color: #4a4a4a;
+  margin-bottom: 20px;
+}
+.clm-deviation-note {
+  background: #fdf3f2;
+  border: 1px solid #f5b7b1;
+  color: #922b21;
+  padding: 10px 16px;
+  border-radius: 6px;
+  margin-bottom: 20px;
+  font-size: 13px;
+}
+
+/* ============================================================
+   MULTI-SEGMENT CSS (UltraTech Theme)
+   ============================================================ */
+
+.clm-ms-badge {
+  display: inline-block;
+  background: #FFF21A;
+  color: #000000;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-left: 8px;
+  vertical-align: middle;
+  letter-spacing: 0.5px;
+}
+.clm-ms-toggle-row {
+  padding: 12px 0 8px 0;
+}
+.clm-ms-toggle-label {
+  font-size: 14px;
+  color: #1a1a1a;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.clm-ms-panel {
+  margin-top: 16px;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.clm-ms-method-row {
+  padding: 14px 16px;
+  background: #f9f9f9;
+  border-bottom: 1px solid #e0e0e0;
+}
+.clm-ms-method-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #888888;
+  margin-bottom: 10px;
+  display: block;
+}
+.clm-ms-method-options {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.clm-ms-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  padding: 10px 14px;
+  border: 1px solid #dddddd;
+  border-radius: 5px;
+  background: #fff;
+  min-width: 160px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.clm-ms-radio:hover {
+  border-color: #FFF21A;
+  background: #fffde7;
+}
+.clm-ms-radio input[type="radio"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+  accent-color: #000000;
+}
+.clm-ms-radio-label strong {
+  display: block;
+  font-size: 13px;
+  color: #000000;
+}
+.clm-ms-radio-label small {
+  display: block;
+  font-size: 11px;
+  color: #888888;
+  margin-top: 2px;
+}
+
+.clm-ms-table-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 14px;
+  background: #f0f0f0;
+  border-bottom: 1px solid #e0e0e0;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #888888;
+}
+.clm-ms-table-row {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid #f5f5f5;
+  background: #fff;
+  gap: 4px;
+}
+.clm-ms-table-row:last-child {
+  border-bottom: none;
+}
+.clm-ms-col-seg {
+  flex: 1.8;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.clm-ms-col-num {
+  flex: 1;
+  text-align: right;
+}
+.clm-ms-seg-name {
+  font-size: 14px;
+  color: #000000;
+}
+.clm-ms-calc {
+  font-weight: 600;
+  font-size: 13px;
+}
+.clm-ms-input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #cccccc;
+  border-radius: 4px;
+  font-size: 12px;
+  text-align: right;
+  box-sizing: border-box;
+}
+.clm-ms-input:focus {
+  outline: none;
+  border-color: #000000;
+  box-shadow: 0 0 0 2px rgba(255, 242, 26, 0.4);
+}
+.clm-ms-input:disabled {
+  background: #f5f5f5;
+  color: #aaaaaa;
+}
+.clm-ms-input[readonly] {
+  background: #f5f5f5;
+  color: #888888;
+}
+
+.clm-ms-totals-row {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  background: #f0f0f0;
+  border-top: 2px solid #dddddd;
+  font-size: 13px;
+  gap: 4px;
+}
+.clm-ms-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.clm-ms-alert-danger {
+  background: #fdf3f2;
+  color: #c0392b;
+  border-top: 1px solid #f5b7b1;
+}
+.clm-ms-alert-success {
+  background: #eafaf1;
+  color: #1e8449;
+  border-top: 1px solid #a9dfbf;
+}
+.clm-ms-hold-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 20px;
+  background: #fffde7;
+  border-top: 2px solid #FFF21A;
+}
+.clm-ms-hold-icon {
+  font-size: 28px;
+  flex-shrink: 0;
+}
+.clm-ms-hold-info strong {
+  display: block;
+  font-size: 15px;
+  color: #000000;
+  margin-bottom: 6px;
+}
+.clm-ms-hold-info p {
+  font-size: 13px;
+  color: #4a4a4a;
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* ============================================================
+   TCL CSS (UltraTech Theme)
+   ============================================================ */
+
+.clm-tcl-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 8px;
+  vertical-align: middle;
+  letter-spacing: 0.5px;
+}
+.clm-tcl-badge-active {
+  background: #FFF21A;
+  color: #000000;
+}
+.clm-tcl-badge-info {
+  background: #000000;
+  color: #FFF21A;
+}
+
+.clm-tcl-existing {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  background: #fffde7;
+  border: 1px solid #FFF21A;
+  border-radius: 5px;
+}
+.clm-tcl-existing-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #888888;
+  margin-bottom: 8px;
+}
+.clm-tcl-existing-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  padding: 4px 0;
+  border-bottom: 1px solid #fff0a0;
+}
+.clm-tcl-existing-row:last-child {
+  border-bottom: none;
+}
+.clm-tcl-existing-seg {
+  font-weight: 700;
+  color: #000000;
+  min-width: 60px;
+}
+.clm-tcl-existing-amt {
+  font-weight: 700;
+  color: #c8860a;
+}
+.clm-tcl-existing-perm {
+  color: #888888;
+  font-size: 12px;
+}
+.clm-tcl-existing-date {
+  color: #4a4a4a;
+  margin-left: auto;
+}
+.clm-tcl-expiring {
+  color: #e74c3c;
+  font-weight: 700;
+  font-size: 12px;
+}
+.clm-tcl-safe {
+  color: #27ae60;
+  font-size: 12px;
+}
+
+.clm-tcl-toggle-row {
+  padding: 4px 0 8px 0;
+}
+.clm-tcl-toggle-label {
+  font-size: 14px;
+  color: #1a1a1a;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.clm-tcl-panel {
+  margin-top: 16px;
+  padding: 0;
+  border: 1px solid #FFF21A;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fffde7;
+}
+.clm-tcl-info-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: #fffde7;
+  border-bottom: 1px solid #FFF21A;
+}
+.clm-tcl-info-icon {
+  font-size: 18px;
+  color: #c8860a;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.clm-tcl-info-text {
+  font-size: 13px;
+  color: #4a4a4a;
+  line-height: 1.5;
+}
+.clm-tcl-info-text strong {
+  color: #000000;
+}
+
+.clm-tcl-panel .clm-row {
+  padding: 14px 16px;
+}
+
+.clm-tcl-calc-strip {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 12px 16px;
+  background: #fffde7;
+  border-top: 1px solid #FFF21A;
+  flex-wrap: wrap;
+}
+.clm-tcl-calc-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 16px;
+  text-align: center;
+}
+.clm-tcl-calc-item:first-child {
+  padding-left: 0;
+}
+.clm-tcl-calc-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #888888;
+}
+.clm-tcl-calc-val {
+  font-size: 16px;
+  font-weight: 700;
+  color: #000000;
+}
+.clm-tcl-calc-arrow {
+  color: #bbbbbb;
+  font-size: 18px;
+  padding: 0 8px;
+}
+.clm-tcl-warning {
+  padding: 10px 16px;
+  background: #fffde7;
+  border-top: 1px solid #FFF21A;
+  font-size: 12px;
+  color: #9a7d0a;
+  font-weight: 600;
+}
+
+/* ============================================================
+   FORCE FULL-WIDTH CLM WIDGET (ServiceNow Override)
+   ============================================================ */
+
+.sn-widget-content,
+.sn-widget-content &gt; div,
+.container,
+.container-fluid {
+  width: 100% !important;
+  max-width: 100% !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+
+html,
+body {
+  width: 100%;
+}
+
+/* Inner padding for full-width layout */
+.clm-header,
+.clm-section,
+.clm-calc-panel,
+.clm-actions,
+.clm-success-panel {
+  padding-left: 24px;
+  padding-right: 24px;
+}
+
+/* ============================================================
+   TABLET BREAKPOINT — 768px
+   ============================================================ */
+
+@media (max-width: 768px) {
+  .clm-header {
+    padding: 16px 20px;
+  }
+
+  .clm-title {
+    font-size: 18px;
+  }
+
+  .clm-subtitle {
+    font-size: 12px;
+  }
+
+  .clm-request-badge {
+    padding: 3px 12px;
+    font-size: 12px;
+  }
+
+  .clm-section {
+    padding: 20px 20px;
+  }
+
+  .clm-section-title {
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+
+  .clm-section-num {
+    width: 22px;
+    height: 22px;
+    font-size: 11px;
+  }
+
+  .clm-row {
+    gap: 16px;
+    margin-bottom: 14px;
+  }
+
+  .clm-field {
+    flex: 1;
+    min-width: 150px;
+  }
+
+  .clm-field label {
+    font-size: 12px;
+  }
+
+  .clm-input,
+  .clm-textarea {
+    font-size: 13px;
+    padding: 8px 10px;
+  }
+
+  .clm-textarea {
+    min-height: 80px;
+  }
+
+  .clm-input-btn {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .clm-customer-strip {
+    gap: 6px;
+    padding: 10px 12px;
+  }
+
+  .clm-strip-item {
+    min-width: 90px;
+  }
+
+  .clm-strip-label {
+    font-size: 10px;
+  }
+
+  .clm-strip-value {
+    font-size: 12px;
+  }
+
+  .clm-calc-panel {
+    padding: 16px 20px;
+  }
+
+  .clm-calc-title {
+    font-size: 11px;
+    margin-bottom: 12px;
+  }
+
+  .clm-calc-grid {
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 10px;
+  }
+
+  .clm-calc-card {
+    padding: 10px 12px;
+  }
+
+  .clm-calc-label {
+    font-size: 10px;
+  }
+
+  .clm-calc-value {
+    font-size: 18px;
+  }
+
+  .clm-alert {
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+
+  .clm-hierarchy-strip {
+    padding: 10px 12px;
+    margin-top: 14px;
+  }
+
+  .clm-hierarchy-title {
+    font-size: 10px;
+    margin-bottom: 6px;
+  }
+
+  .clm-hierarchy-node {
+    padding: 4px 0;
+    font-size: 12px;
+  }
+
+  .clm-hierarchy-level {
+    font-size: 9px;
+    min-width: 45px;
+  }
+
+  .clm-hierarchy-name {
+    font-size: 12px;
+  }
+
+  .clm-hierarchy-limit {
+    font-size: 12px;
+  }
+
+  .clm-actions {
+    padding: 16px 20px;
+    gap: 10px;
+  }
+
+  .clm-btn {
+    padding: 8px 16px;
+    font-size: 13px;
+    flex: 1;
+    min-width: 100px;
+  }
+
+  .clm-success-panel {
+    padding: 40px 20px;
+  }
+
+  .clm-success-icon {
+    width: 50px;
+    height: 50px;
+    font-size: 24px;
+    margin-bottom: 16px;
+  }
+
+  .clm-success-panel h3 {
+    font-size: 18px;
+    margin-bottom: 10px;
+  }
+
+  .clm-success-panel p {
+    font-size: 12px;
+    margin-bottom: 16px;
+  }
+
+  .clm-deviation-note {
+    font-size: 12px;
+    padding: 8px 12px;
+    margin-bottom: 16px;
+  }
+
+  /* Multi-segment adjustments */
+  .clm-ms-badge {
+    font-size: 9px;
+    padding: 2px 6px;
+  }
+
+  .clm-ms-toggle-label {
+    font-size: 13px;
+  }
+
+  .clm-ms-method-row {
+    padding: 12px 14px;
+  }
+
+  .clm-ms-method-label {
+    font-size: 10px;
+    margin-bottom: 8px;
+  }
+
+  .clm-ms-method-options {
+    gap: 12px;
+  }
+
+  .clm-ms-radio {
+    padding: 8px 12px;
+    min-width: 140px;
+    font-size: 12px;
+  }
+
+  .clm-ms-radio-label strong {
+    font-size: 12px;
+  }
+
+  .clm-ms-radio-label small {
+    font-size: 10px;
+  }
+
+  .clm-ms-table-header {
+    padding: 6px 12px;
+    font-size: 10px;
+  }
+
+  .clm-ms-table-row {
+    padding: 8px 12px;
+    gap: 3px;
+  }
+
+  .clm-ms-col-seg {
+    flex: 1.5;
+  }
+
+  .clm-ms-seg-name {
+    font-size: 13px;
+  }
+
+  .clm-ms-calc {
+    font-size: 12px;
+  }
+
+  .clm-ms-input {
+    padding: 5px 6px;
+    font-size: 11px;
+  }
+
+  .clm-ms-totals-row {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .clm-ms-alert {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .clm-ms-hold-info {
+    padding: 16px;
+    gap: 12px;
+  }
+
+  .clm-ms-hold-icon {
+    font-size: 24px;
+  }
+
+  .clm-ms-hold-info strong {
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+
+  .clm-ms-hold-info p {
+    font-size: 12px;
+  }
+
+  /* TCL adjustments */
+  .clm-tcl-existing {
+    padding: 8px 12px;
+    margin-bottom: 10px;
+  }
+
+  .clm-tcl-existing-title {
+    font-size: 10px;
+    margin-bottom: 6px;
+  }
+
+  .clm-tcl-existing-row {
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 12px;
+  }
+
+  .clm-tcl-existing-seg {
+    min-width: 50px;
+  }
+
+  .clm-tcl-existing-date {
+    margin-left: auto;
+    font-size: 11px;
+  }
+
+  .clm-tcl-toggle-label {
+    font-size: 13px;
+  }
+
+  .clm-tcl-panel {
+    margin-top: 12px;
+  }
+
+  .clm-tcl-info-box {
+    padding: 12px 14px;
+    gap: 10px;
+  }
+
+  .clm-tcl-info-icon {
+    font-size: 16px;
+  }
+
+  .clm-tcl-info-text {
+    font-size: 12px;
+  }
+
+  .clm-tcl-panel .clm-row {
+    padding: 12px 14px;
+  }
+
+  .clm-tcl-calc-strip {
+    padding: 10px 12px;
+    gap: 0;
+  }
+
+  .clm-tcl-calc-item {
+    padding: 0 12px;
+    gap: 2px;
+  }
+
+  .clm-tcl-calc-label {
+    font-size: 9px;
+  }
+
+  .clm-tcl-calc-val {
+    font-size: 14px;
+  }
+
+  .clm-tcl-calc-arrow {
+    font-size: 16px;
+    padding: 0 4px;
+  }
+
+  .clm-tcl-warning {
+    padding: 8px 12px;
+    font-size: 11px;
+  }
+
+  /* Inner padding for tablet */
+  .clm-header,
+  .clm-section,
+  .clm-calc-panel,
+  .clm-actions,
+  .clm-success-panel {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}
+
+/* ============================================================
+   MOBILE BREAKPOINT — 480px
+   ============================================================ */
+
+@media (max-width: 480px) {
+  .clm-header {
+    padding: 14px 16px;
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .clm-title {
+    font-size: 16px;
+    flex: 1;
+  }
+
+  .clm-subtitle {
+    font-size: 11px;
+    width: 100%;
+    margin-top: 4px;
+  }
+
+  .clm-request-badge {
+    padding: 2px 10px;
+    font-size: 11px;
+    margin-left: auto;
+  }
+
+  .clm-section {
+    padding: 16px 14px;
+  }
+
+  .clm-section-title {
+    font-size: 12px;
+    margin-bottom: 14px;
+    gap: 8px;
+  }
+
+  .clm-section-num {
+    width: 20px;
+    height: 20px;
+    font-size: 10px;
+  }
+
+  .clm-row {
+    flex-direction: column;
+    gap: 0;
+    margin-bottom: 12px;
+  }
+
+  .clm-field {
+    flex: 1;
+    min-width: unset;
+    margin-bottom: 12px;
+  }
+
+  .clm-field label {
+    font-size: 12px;
+    margin-bottom: 5px;
+  }
+
+  .clm-input,
+  .clm-textarea {
+    font-size: 13px;
+    padding: 8px 10px;
+  }
+
+  .clm-textarea {
+    min-height: 70px;
+  }
+
+  .clm-input-group {
+    flex-direction: column;
+  }
+
+  .clm-input-group .clm-input {
+    margin-bottom: 8px;
+  }
+
+  .clm-input-btn {
+    width: 100%;
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .clm-field-hint {
+    font-size: 11px;
+  }
+
+  .clm-customer-strip {
+    gap: 6px;
+    padding: 10px 12px;
+    margin-top: 12px;
+  }
+
+  .clm-strip-item {
+    flex: 0 0 calc(50% - 3px);
+    min-width: unset;
+  }
+
+  .clm-strip-label {
+    font-size: 9px;
+  }
+
+  .clm-strip-value {
+    font-size: 11px;
+  }
+
+  .clm-calc-panel {
+    padding: 14px 14px;
+    margin: 12px 0 0 0;
+  }
+
+  .clm-calc-title {
+    font-size: 10px;
+    margin-bottom: 10px;
+    gap: 8px;
+  }
+
+  .clm-calc-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .clm-calc-card {
+    padding: 8px 10px;
+  }
+
+  .clm-calc-label {
+    font-size: 9px;
+    margin-bottom: 4px;
+  }
+
+  .clm-calc-value {
+    font-size: 16px;
+  }
+
+  .clm-calc-sub {
+    font-size: 10px;
+    margin-top: 2px;
+  }
+
+  .clm-alert {
+    padding: 10px 12px;
+    gap: 10px;
+    font-size: 12px;
+  }
+
+  .clm-alert-icon {
+    font-size: 16px;
+  }
+
+  .clm-hierarchy-strip {
+    padding: 10px 12px;
+    margin-top: 12px;
+    border-radius: 5px;
+  }
+
+  .clm-hierarchy-title {
+    font-size: 9px;
+    margin-bottom: 6px;
+  }
+
+  .clm-hierarchy-node {
+    padding: 3px 0;
+    font-size: 11px;
+    gap: 6px;
+  }
+
+  .clm-hierarchy-level {
+    font-size: 8px;
+    min-width: 40px;
+  }
+
+  .clm-hierarchy-name {
+    font-size: 11px;
+  }
+
+  .clm-hierarchy-limit {
+    font-size: 11px;
+  }
+
+  .clm-actions {
+    padding: 12px 14px;
+    gap: 8px;
+    flex-direction: column;
+  }
+
+  .clm-btn {
+    width: 100%;
+    padding: 10px 16px;
+    font-size: 13px;
+    min-width: unset;
+  }
+
+  .clm-success-panel {
+    padding: 40px 16px;
+  }
+
+  .clm-success-icon {
+    width: 48px;
+    height: 48px;
+    font-size: 22px;
+    margin-bottom: 16px;
+  }
+
+  .clm-success-panel h3 {
+    font-size: 16px;
+    margin-bottom: 10px;
+  }
+
+  .clm-success-panel p {
+    font-size: 12px;
+    margin-bottom: 16px;
+    line-height: 1.5;
+  }
+
+  .clm-deviation-note {
+    font-size: 11px;
+    padding: 10px 12px;
+  }
+
+  /* Multi-segment mobile */
+  .clm-ms-toggle-label {
+    font-size: 12px;
+  }
+
+  .clm-ms-method-row {
+    padding: 12px 12px;
+  }
+
+  .clm-ms-method-label {
+    font-size: 10px;
+    margin-bottom: 8px;
+  }
+
+  .clm-ms-method-options {
+    gap: 8px;
+    flex-direction: column;
+  }
+
+  .clm-ms-radio {
+    width: 100%;
+    padding: 10px 12px;
+    min-width: unset;
+    font-size: 12px;
+  }
+
+  .clm-ms-radio-label strong {
+    font-size: 12px;
+  }
+
+  .clm-ms-radio-label small {
+    font-size: 10px;
+  }
+
+  .clm-ms-table-header {
+    padding: 8px 10px;
+    font-size: 9px;
+  }
+
+  .clm-ms-table-row {
+    padding: 8px 10px;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .clm-ms-col-seg {
+    flex: 1;
+  }
+
+  .clm-ms-col-num {
+    text-align: left;
+  }
+
+  .clm-ms-seg-name {
+    font-size: 12px;
+  }
+
+  .clm-ms-calc {
+    font-size: 11px;
+  }
+
+  .clm-ms-input {
+    padding: 6px 8px;
+    font-size: 11px;
+    text-align: left;
+  }
+
+  .clm-ms-totals-row {
+    padding: 10px 10px;
+    font-size: 11px;
+    flex-direction: column;
+  }
+
+  .clm-ms-alert {
+    padding: 10px 10px;
+    font-size: 11px;
+  }
+
+  .clm-ms-hold-info {
+    padding: 14px 12px;
+    gap: 10px;
+    flex-direction: column;
+  }
+
+  .clm-ms-hold-icon {
+    font-size: 24px;
+  }
+
+  .clm-ms-hold-info strong {
+    font-size: 13px;
+    margin-bottom: 6px;
+  }
+
+  .clm-ms-hold-info p {
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  /* TCL mobile */
+  .clm-tcl-existing {
+    padding: 8px 10px;
+    margin-bottom: 10px;
+    border-radius: 4px;
+  }
+
+  .clm-tcl-existing-title {
+    font-size: 9px;
+    margin-bottom: 6px;
+  }
+
+  .clm-tcl-existing-row {
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 11px;
+    flex-wrap: wrap;
+  }
+
+  .clm-tcl-existing-seg {
+    min-width: 45px;
+    font-size: 11px;
+  }
+
+  .clm-tcl-existing-amt {
+    font-size: 11px;
+  }
+
+  .clm-tcl-existing-perm {
+    font-size: 10px;
+  }
+
+  .clm-tcl-existing-date {
+    margin-left: auto;
+    font-size: 10px;
+  }
+
+  .clm-tcl-toggle-label {
+    font-size: 12px;
+  }
+
+  .clm-tcl-panel {
+    margin-top: 10px;
+    border-radius: 5px;
+  }
+
+  .clm-tcl-info-box {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+
+  .clm-tcl-info-icon {
+    font-size: 16px;
+  }
+
+  .clm-tcl-info-text {
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .clm-tcl-panel .clm-row {
+    padding: 12px 10px;
+    margin-bottom: 8px;
+  }
+
+  .clm-tcl-panel .clm-row:last-of-type {
+    margin-bottom: 0;
+  }
+
+  .clm-tcl-calc-strip {
+    padding: 10px 10px;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .clm-tcl-calc-item {
+    padding: 8px 0;
+    gap: 3px;
+  }
+
+  .clm-tcl-calc-item:first-child {
+    padding-left: 0;
+  }
+
+  .clm-tcl-calc-label {
+    font-size: 9px;
+  }
+
+  .clm-tcl-calc-val {
+    font-size: 14px;
+  }
+
+  .clm-tcl-calc-arrow {
+    display: none;
+  }
+
+  .clm-tcl-warning {
+    padding: 10px 10px;
+    font-size: 11px;
+  }
+
+  /* Inner padding for mobile */
+  .clm-header,
+  .clm-section,
+  .clm-calc-panel,
+  .clm-actions,
+  .clm-success-panel {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+}
+
+/* ============================================================
+   EXTRA SMALL DEVICES — 360px
+   ============================================================ */
+
+@media (max-width: 360px) {
+  .clm-header {
+    padding: 12px 12px;
+  }
+
+  .clm-title {
+    font-size: 15px;
+  }
+
+  .clm-subtitle {
+    font-size: 10px;
+  }
+
+  .clm-request-badge {
+    padding: 2px 8px;
+    font-size: 10px;
+  }
+
+  .clm-section {
+    padding: 14px 12px;
+  }
+
+  .clm-section-title {
+    font-size: 11px;
+    margin-bottom: 12px;
+  }
+
+  .clm-section-num {
+    width: 18px;
+    height: 18px;
+    font-size: 9px;
+  }
+
+  .clm-field label {
+    font-size: 11px;
+  }
+
+  .clm-input,
+  .clm-textarea {
+    font-size: 12px;
+    padding: 6px 8px;
+  }
+
+  .clm-textarea {
+    min-height: 60px;
+  }
+
+  .clm-input-btn {
+    padding: 6px 10px;
+    font-size: 11px;
+  }
+
+  .clm-customer-strip {
+    gap: 4px;
+    padding: 8px 10px;
+  }
+
+  .clm-strip-label {
+    font-size: 8px;
+  }
+
+  .clm-strip-value {
+    font-size: 10px;
+  }
+
+  .clm-calc-panel {
+    padding: 12px 12px;
+  }
+
+  .clm-calc-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+  }
+
+  .clm-calc-card {
+    padding: 6px 8px;
+  }
+
+  .clm-calc-label {
+    font-size: 8px;
+  }
+
+  .clm-calc-value {
+    font-size: 14px;
+  }
+
+  .clm-alert {
+    padding: 8px 10px;
+    font-size: 11px;
+  }
+
+  .clm-hierarchy-strip {
+    padding: 8px 10px;
+  }
+
+  .clm-hierarchy-title {
+    font-size: 8px;
+  }
+
+  .clm-hierarchy-node {
+    font-size: 10px;
+  }
+
+  .clm-hierarchy-level {
+    font-size: 7px;
+    min-width: 35px;
+  }
+
+  .clm-actions {
+    padding: 10px 12px;
+    gap: 6px;
+  }
+
+  .clm-btn {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .clm-success-panel {
+    padding: 32px 12px;
+  }
+
+  .clm-success-icon {
+    width: 40px;
+    height: 40px;
+    font-size: 18px;
+    margin-bottom: 12px;
+  }
+
+  .clm-success-panel h3 {
+    font-size: 14px;
+    margin-bottom: 8px;
+  }
+
+  .clm-success-panel p {
+    font-size: 11px;
+  }
+
+  /* Inner padding for extra small */
+  .clm-header,
+  .clm-section,
+  .clm-calc-panel,
+  .clm-actions,
+  .clm-success-panel {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+}
+
+/* ============================================================
+   DESKTOP BREAKPOINT — 1024px+
+   ============================================================ */
+
+@media (min-width: 1024px) {
+  .clm-header,
+  .clm-section,
+  .clm-calc-panel,
+  .clm-actions,
+  .clm-success-panel {
+    padding-left: 28px;
+    padding-right: 28px;
+  }
+
+  .clm-row {
+    gap: 24px;
+  }
+
+  .clm-field {
+    min-width: 220px;
+  }
+
+  .clm-actions {
+    justify-content: flex-end;
+  }
+
+  .clm-btn {
+    flex: 0 1 auto;
+  }
+
+  .clm-calc-grid {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  }
+}
+
+/* ============================================================
+   ULTRA WIDE — 1600px+
+   ============================================================ */
+
+@media (min-width: 1600px) {
+  .clm-header,
+  .clm-section,
+  .clm-calc-panel,
+  .clm-actions,
+  .clm-success-panel {
+    padding-left: 48px;
+    padding-right: 48px;
+  }
+
+  .clm-row {
+    gap: 32px;
+  }
+
+  .clm-field {
+    min-width: 250px;
+  }
+
+  .clm-calc-grid {
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 16px;
+  }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clm_trade_credit_limit_request</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>CLM Trade Credit Limit Request</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+    var action = input && input.action;
+
+    // ── loadCustomer ──────────────────────────────────────────
+    if (action === 'loadCustomer') {
+
+        var custGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        custGr.addQuery('customer_code_sap', (input.customerCode + '').trim().toUpperCase());
+        custGr.setLimit(1);
+        custGr.query();
+
+        if (!custGr.next()) { data.customer = null; return; }
+
+        var vintageDays = 0;
+        var fos = custGr.first_order_date + '';
+        if (fos && fos !== '' && fos !== 'null') {
+            var fd = new GlideDate(); fd.setValue(fos);
+            var td = new GlideDate();
+            var dd = Math.floor((td.getNumericValue() - fd.getNumericValue()) / (1000 * 60 * 60 * 24));
+            vintageDays = dd > 0 ? dd : 0;
+        }
+
+        var outstanding = 0;
+        var agGr = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+        agGr.addQuery('customer', custGr.sys_id + '');
+        agGr.orderByDesc('snapshot_month');
+        agGr.setLimit(1);
+        agGr.query();
+        if (agGr.next()) outstanding = parseFloat(agGr.total_outstanding) || 0;
+
+        var permanentLimit = 0;
+        var pGr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        pGr.addQuery('customer', custGr.sys_id + '');
+        pGr.addQuery('state',    'Approved');
+        pGr.addQuery('is_tcl',   false);
+        pGr.orderByDesc('sys_created_on');
+        pGr.setLimit(1);
+        pGr.query();
+        if (pGr.next()) permanentLimit = parseFloat(pGr.approved_limit) || 0;
+
+        data.customer = {
+            sys_id:            custGr.sys_id + '',
+            name:              custGr.customer_name + '',
+            customer_type:     custGr.customer_type + '',
+            segment:           custGr.segment + '',
+            zone:              custGr.zone + '',
+            region:            custGr.region + '',
+					pan:            custGr.pan + '',
+            cg2_code:          custGr.cg2_code + '',
+            vintage_days:      vintageDays,
+            current_sd:        parseFloat(custGr.current_sd_amount)    || 0,
+            current_limit:     parseFloat(custGr.current_credit_limit) || 0,
+            avg_monthly_sales: parseFloat(custGr.avg_monthly_sales_mt) || 0,
+            order_rate:        7000,
+            outstanding:       outstanding,
+            permanent_limit:   permanentLimit,
+            active_tcls:       []
+        };
+    }
+
+    // ── calculate ─────────────────────────────────────────────
+    else if (action === 'calculate') {
+
+        var custSysId = input.customerSysId || '';
+        var req       = parseFloat(input.requestedLimit)  || 0;
+        var sd        = parseFloat(input.activeSD)        || 0;
+        var os        = parseFloat(input.outstanding)     || 0;
+        var avg       = parseFloat(input.avgMonthlySales) || 0;
+        var segment   = input.segment    || 'Cement';
+        var cg2Code   = input.cg2Code    || '';
+        var vin       = parseInt(input.vintageDays) || 0;
+
+        // Aging
+        var total=0, safe=0, warning=0, critical=0, toxic=0, mCount=0;
+        var salesLast=0, salesPrev=0;
+
+        var agGr2 = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+        agGr2.addQuery('customer', custSysId);
+        agGr2.orderByDesc('snapshot_month');
+        agGr2.setLimit(6);
+        agGr2.query();
+
+        while (agGr2.next()) {
+            mCount++;
+            total    += parseFloat(agGr2.total_outstanding)   || 0;
+            safe     += (parseFloat(agGr2.bucket_0_30_days)   || 0)
+                      + (parseFloat(agGr2.bucket_31_45_days)  || 0)
+                      + (parseFloat(agGr2.bucket_46_60_days)  || 0);
+            warning  += parseFloat(agGr2.bucket_61_75_days)   || 0;
+            critical += parseFloat(agGr2.bucket_76_90_days)   || 0;
+            toxic    += (parseFloat(agGr2.bucket_91_120_days) || 0)
+                      + (parseFloat(agGr2.bucket_gt120_days)  || 0);
+            if (mCount === 1) {
+                salesLast = parseFloat(agGr2.sales_current_month) || 0;
+                salesPrev = parseFloat(agGr2.sales_prev_month)    || 0;
+            }
+        }
+
+        // Aging rating
+        var agRating = 'A';
+        if (total > 0) {
+            var sp = safe  / total;
+            var tp = (critical + toxic) / total;
+            if      (sp >= 0.80 && tp <= 0.10) agRating = 'A';
+            else if (sp >= 0.60 && tp <= 0.20) agRating = 'B';
+            else                                agRating = 'C';
+        }
+
+        // NOD
+        var nod = 0;
+        var avg2M = (salesLast + salesPrev) / 2;
+        if (vin <= 60) {
+            if (avg > 0) nod = Math.ceil((os / avg) * Math.min(vin, 60));
+        } else {
+            if (avg2M > 0) nod = Math.round((os / avg2M) * 30);
+        }
+
+        // Multiplier
+        var multiplier = 1;
+        if (vin < 90) {
+            multiplier = 1;
+        } else if (vin < 180) {
+            multiplier = (nod < 15 && avg > 1000) ? 2 : 1;
+        } else {
+            var mGr = new GlideRecord('x_birl3_clm_clm_multiplier');
+            mGr.addQuery('cg2_code',  cg2Code);
+            mGr.addQuery('segment',   segment);
+            mGr.addQuery('is_active', true);
+            mGr.setLimit(1);
+            mGr.query();
+            if (mGr.next()) multiplier = parseInt(mGr.multiplier) || 1;
+            else {
+                if      (cg2Code === 'CG2_A' || cg2Code === 'PMNT_GOOD') multiplier = 4;
+                else if (cg2Code === 'CG2_B')                              multiplier = 2;
+                else                                                        multiplier = 1;
+            }
+        }
+
+        var netExp   = Math.max(0, req - sd);
+        var maxAllw  = sd * multiplier;
+        var implMult = sd > 0 ? req / sd : 0;
+        var isDev    = req > maxAllw;
+
+        // Pass vintageDays to router for BPD logic
+        var router   = new CLMApprovalRouter();
+        var approver = router.getApprover(segment, 'Trade', netExp, nod, isDev, implMult, vin);
+
+        data.calc = {
+            multiplier:   multiplier,
+            maxAllowable: maxAllw  / 100000,
+            netExposure:  netExp   / 100000,
+            impliedMult:  implMult,
+            isDeviation:  isDev,
+            nod:          nod,
+            agingRating:  agRating,
+            approverRole: approver.role,
+            escalated:    approver.escalated || false,
+            reason:       approver.reason    || ''
+        };
+    }
+
+    // ── saveDraft ─────────────────────────────────────────────
+    else if (action === 'saveDraft') {
+        var f  = input.form;
+        var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        if (f.draftSysId) gr.get(f.draftSysId); else gr.initialize();
+        gr.customer_type           = f.customerType;
+        gr.segment                 = f.segment;
+        gr.customer                = f.customerSysId;
+        gr.requested_limit         = f.requestedLimit;
+        gr.active_sd               = f.activeSD;
+        gr.outstanding_amount      = f.outstanding;
+        gr.avg_monthly_sales       = f.avgMonthlySales;
+        gr.sales_last_month        = f.salesLastMonth;
+        gr.sales_prev_month        = f.salesPrevMonth;
+        gr.cheque_bounces_12m      = f.chequeBounces;
+        gr.market_perception       = f.marketPerception;
+        gr.business_justification  = f.justification;
+        gr.deviation_justification = f.deviationJustification;
+        gr.state                   = 'Draft';
+        gr.initiator               = gs.getUserID();
+        var sysId = f.draftSysId ? gr.update() : gr.insert();
+        var gr2 = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        gr2.get(sysId);
+        data.sysId  = sysId;
+        data.number = gr2.request_number + '';
+    }
+
+    // ── submit ────────────────────────────────────────────────
+    else if (action === 'submit') {
+        var f = input.form;
+        try {
+            var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+            gr.initialize();
+            gr.customer_type           = f.customerType;
+            gr.segment                 = f.segment;
+            gr.customer                = f.customerSysId;
+            gr.requested_limit         = f.requestedLimit;
+            gr.active_sd               = f.activeSD;
+            gr.outstanding_amount      = f.outstanding;
+            gr.avg_monthly_sales       = f.avgMonthlySales;
+            gr.sales_last_month        = f.salesLastMonth;
+            gr.sales_prev_month        = f.salesPrevMonth;
+            gr.cheque_bounces_12m      = f.chequeBounces;
+            gr.market_perception       = f.marketPerception;
+            gr.business_justification  = f.justification;
+            gr.deviation_justification = f.deviationJustification;
+            gr.initiator               = gs.getUserID();
+            gr.state                   = 'Submitted';
+
+            if (f.multiSegment && f.multiSegment.is_multi_segment) {
+                gr.is_multi_segment      = true;
+                gr.total_requested_limit = f.requestedLimit;
+            }
+
+            var sysId = gr.insert();
+            if (!sysId) { data.success = false; data.error = 'Failed to create request.'; return; }
+
+            var result = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+            result.get(sysId);
+            data.success       = true;
+            data.requestNumber = result.request_number + '';
+            data.approverRole  = result.required_approver_level + '';
+            data.isDeviation   = result.is_deviation + '' === 'true';
+            data.sysId         = sysId;
+
+        } catch(e) {
+            data.success = false;
+            data.error   = 'Error: ' + e.message;
+        }
+    }
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-21 13:14:34</sys_created_on>
+        <sys_id>653a298d97f33290be31fa17f053af59</sys_id>
+        <sys_mod_count>31</sys_mod_count>
+        <sys_name>CLM Trade Credit Limit Request</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_653a298d97f33290be31fa17f053af59</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-03-27 05:09:37</sys_updated_on>
+        <template><![CDATA[<!--
+  CLM ADAPTIVE REQUEST FORM — Widget HTML (UPDATED)
+  Widget ID: clm-trade-request
+  
+  Replaces existing HTML entirely.
+  Auto-detects customer type on search and shows correct sections.
+-->
+
+<div class="clm-widget">
+
+  <!-- ── HEADER ── -->
+  <div class="clm-header">
+    <div class="clm-header-left">
+      <div class="clm-title">
+        <span ng-if="!c.data.customerType || c.data.customerType == 'Trade'">Trade Customer</span>
+        <span ng-if="c.data.customerType == 'Non-Trade'">Non-Trade Customer</span>
+        <span ng-if="c.data.customerType == 'Key'">Key Customer</span>
+      </div>
+      <div class="clm-subtitle">Credit Limit Request</div>
+    </div>
+    <div class="clm-header-right" ng-if="c.data.requestNumber">
+      <div class="clm-request-badge">{{c.data.requestNumber}}</div>
+    </div>
+  </div>
+
+  <!-- ── SUCCESS STATE ── -->
+  <div class="clm-success-panel" ng-if="c.data.submitted">
+    <div class="clm-success-icon">✓</div>
+    <h3>Request Submitted Successfully</h3>
+    <p>Request <strong>{{c.data.requestNumber}}</strong> has been created and routed to <strong>{{c.data.approverRole}}</strong> for approval.</p>
+    <div ng-if="c.data.isDeviation" class="clm-deviation-note">
+      ⚠ This is a deviation request — approval requires justification review.
+    </div>
+    <button class="clm-btn clm-btn-outline" ng-click="c.resetForm()">Submit Another Request</button>
+  </div>
+
+  <!-- ── MAIN FORM ── -->
+  <form name="clmForm" ng-submit="c.submit()" ng-if="!c.data.submitted">
+
+    <!-- ══════════════════════════════════════════════════════
+         SECTION 1: CUSTOMER DETAILS (same for all types)
+    ══════════════════════════════════════════════════════ -->
+    <div class="clm-section">
+      <div class="clm-section-title">
+        <span class="clm-section-num">1</span> Customer Details
+      </div>
+
+      <div class="clm-row">
+        <div class="clm-field">
+          <label>Customer Code (SAP) <span class="req">*</span></label>
+          <div class="clm-input-group">
+            <input type="text"
+                   ng-model="c.data.customerCode"
+                   ng-blur="c.loadCustomer()"
+                   ng-change="c.clearCustomer()"
+                   placeholder="e.g. NT001 or KEY_C001"
+                   class="clm-input" required />
+            <button type="button" class="clm-input-btn"
+                    ng-click="c.loadCustomer()"
+                    ng-disabled="!c.data.customerCode">Search</button>
+          </div>
+          <div class="clm-field-msg clm-error" ng-if="c.data.customerError">
+            {{c.data.customerError}}
+          </div>
+        </div>
+
+        <div class="clm-field">
+          <label>Customer Name</label>
+          <input type="text" ng-model="c.data.customerName"
+                 class="clm-input" readonly placeholder="Auto-filled on search" />
+        </div>
+
+        <div class="clm-field">
+  <label>Segment <span class="req">*</span></label>
+  <input type="text" ng-model="c.data.segment"
+         class="clm-input"
+         readonly placeholder="Auto-filled from customer master" />
+
+  <div class="clm-field-hint" ng-if="c.data.segment">
+    Auto-filled from customer master.
+  </div>
+</div>
+
+      <!-- Customer info strip -->
+      <div class="clm-customer-strip" ng-if="c.data.customerName">
+        <div class="clm-strip-item">
+          <span class="clm-strip-label">Type</span>
+          <span class="clm-strip-value"
+                ng-class="{
+                  'clm-type-trade':    c.data.customerType == 'Trade',
+                  'clm-type-nontrade': c.data.customerType == 'Non-Trade',
+                  'clm-type-key':      c.data.customerType == 'Key'
+                }">
+            {{c.data.customerType || '—'}}
+          </span>
+        </div>
+        <div class="clm-strip-item">
+          <span class="clm-strip-label">Zone</span>
+          <span class="clm-strip-value">{{c.data.zone || '—'}}</span>
+        </div>
+        <div class="clm-strip-item">
+          <span class="clm-strip-label">Region</span>
+          <span class="clm-strip-value">{{c.data.region || '—'}}</span>
+        </div>
+        
+        <div class="clm-strip-item">
+          <span class="clm-strip-label">PAN</span>
+          <span class="clm-strip-value">{{c.data.pan || '—'}}</span>
+        </div>
+        
+        
+        <div class="clm-strip-item" ng-if="c.data.customerType == 'Trade'">
+          <span class="clm-strip-label">CG2 Code</span>
+          <span class="clm-strip-value">{{c.data.cg2Code || '—'}}</span>
+        </div>
+        <div class="clm-strip-item" ng-if="c.data.customerType != 'Trade'">
+          <span class="clm-strip-label">Constitution</span>
+          <span class="clm-strip-value">{{c.data.constitution || '—'}}</span>
+        </div>
+        <div class="clm-strip-item" ng-if="c.data.customerType != 'Trade'">
+          <span class="clm-strip-label">Listed</span>
+          <span class="clm-strip-value">{{c.data.isListed ? 'Yes' : 'No'}}</span>
+        </div>
+        <div class="clm-strip-item">
+          <span class="clm-strip-label">Customer Since</span>
+          <span class="clm-strip-value">{{c.data.vintageDays}} days</span>
+        </div>
+        <div class="clm-strip-item">
+          <span class="clm-strip-label">Current Limit</span>
+          <span class="clm-strip-value">₹{{c.data.currentLimit | number:2}}L</span>
+        </div>
+        <!-- Key customer hierarchy -->
+        <div class="clm-strip-item" ng-if="c.data.customerType == 'Key' && c.data.hierarchyLevel">
+          <span class="clm-strip-label">Hierarchy Level</span>
+          <span class="clm-strip-value">{{c.data.hierarchyLevel}}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════
+         SECTION 2A: TRADE — Credit Limit & SD
+    ══════════════════════════════════════════════════════ -->
+ <div class="clm-section" ng-if="c.data.customerType == 'Trade'">
+  <div class="clm-section-title">
+    <span class="clm-section-num">2</span> Credit Limit &amp; Security Deposit
+  </div>
+
+  <!-- Input Row -->
+  <div class="clm-row">
+    
+    <div class="clm-field">
+      <label>Active Security Deposit (₹) <span class="req">*</span></label>
+      <input type="number" ng-model="c.data.activeSD"
+             class="clm-input" min="0" readonly />
+    </div>
+
+    <div class="clm-field">
+      <label>Requested Credit Limit (₹) <span class="req">*</span></label>
+      <input type="number" ng-model="c.data.requestedLimit"
+             ng-change="c.recalculate()" class="clm-input" min="0" required />
+    </div>
+
+    <div class="clm-field">
+      <label>Current Outstanding (₹) <span class="req">*</span></label>
+      <input type="number" ng-model="c.data.outstanding"
+             class="clm-input" min="0" readonly />
+    </div>
+
+  </div>
+
+  <!-- Single Row for Live Calculations -->
+  <div class="clm-row clm-field-hint" 
+       ng-if="c.data.activeSD || c.data.requestedLimit || c.data.outstanding">
+       
+    <div class="clm-field" ng-if="c.data.activeSD">
+      Active SD: ₹{{c.data.activeSD / 100000 | number:2}} Lakhs
+    </div>
+
+    <div class="clm-field" ng-if="c.data.requestedLimit">
+      Requested Limit: ₹{{c.data.requestedLimit / 100000 | number:2}} Lakhs
+    </div>
+
+    <div class="clm-field" ng-if="c.data.outstanding">
+      Outstanding: ₹{{c.data.outstanding / 100000 | number:2}} Lakhs
+    </div>
+
+  </div>
+</div>
+    <!-- ══════════════════════════════════════════════════════
+         SECTION 2B: NON-TRADE / KEY — Credit Limit Request
+    ══════════════════════════════════════════════════════ -->
+    <div class="clm-section"
+         ng-if="c.data.customerType == 'Non-Trade' || c.data.customerType == 'Key'">
+      <div class="clm-section-title">
+        <span class="clm-section-num">2</span> Credit Limit Request
+      </div>
+
+      <div class="clm-row">
+        <div class="clm-field">
+          <label>Requested Credit Limit (₹) <span class="req">*</span></label>
+          <input type="number" ng-model="c.data.requestedLimit"
+                 ng-change="c.recalculate()" class="clm-input" min="0" required />
+          <div class="clm-field-hint" ng-if="c.data.requestedLimit">
+            ₹{{c.data.requestedLimit / 100000 | number:2}} Lakhs
+            <span class="clm-path-badge"
+                  ng-class="c.data.calc.workflowPath == 'Tool' ? 'clm-badge-tool' : 'clm-badge-nontool'"
+                  ng-if="c.data.calc.workflowPath">
+              {{c.data.calc.workflowPath}} Working
+            </span>
+          </div>
+        </div>
+        <div class="clm-field">
+          <label>Active BG/LC (₹) <small style="color:#aaa">if any</small></label>
+          <input type="number" ng-model="c.data.activeSD"
+                 ng-change="c.recalculate()" class="clm-input" min="0"
+                 placeholder="0 if no collateral" />
+          <div class="clm-field-hint" ng-if="c.data.activeSD > 0">
+            ₹{{c.data.activeSD / 100000 | number:2}} Lakhs
+          </div>
+        </div>
+        <div class="clm-field">
+          <label>Current Outstanding (₹)</label>
+          <input type="number" ng-model="c.data.outstanding"
+                 class="clm-input" min="0" placeholder="Auto-loaded from aging" />
+          <div class="clm-field-hint" ng-if="c.data.outstanding">
+            ₹{{c.data.outstanding / 100000 | number:2}} Lakhs
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════
+         LIVE CALCULATION PANEL — TRADE
+    ══════════════════════════════════════════════════════ -->
+    <div class="clm-calc-panel"
+         ng-if="c.data.customerType == 'Trade' && c.data.activeSD > 0 && c.data.requestedLimit > 0">
+      <div class="clm-calc-title">Live Calculation</div>
+      <div class="clm-calc-grid">
+        <div class="clm-calc-card">
+          <div class="clm-calc-label">System Multiplier</div>
+          <div class="clm-calc-value">{{c.data.calc.multiplier || '—'}}x</div>
+          <div class="clm-calc-sub">Based on {{c.data.vintageDays}} days vintage</div>
+        </div>
+        <div class="clm-calc-card">
+          <div class="clm-calc-label">Max Allowable</div>
+          <div class="clm-calc-value">₹{{c.data.calc.maxAllowable | number:2}}L</div>
+          <div class="clm-calc-sub">SD × Multiplier</div>
+        </div>
+        <div class="clm-calc-card">
+          <div class="clm-calc-label">Net Exposure</div>
+          <div class="clm-calc-value">₹{{c.data.calc.netExposure | number:2}}L</div>
+          <div class="clm-calc-sub">Requested − SD</div>
+        </div>
+        <div class="clm-calc-card">
+          <div class="clm-calc-label">Implied Multiplier</div>
+          <div class="clm-calc-value"
+               ng-class="c.data.calc.isDeviation ? 'clm-val-danger' : 'clm-val-ok'">
+            {{c.data.calc.impliedMult | number:2}}x
+          </div>
+          <div class="clm-calc-sub">Requested ÷ SD</div>
+        </div>
+        <div class="clm-calc-card">
+          <div class="clm-calc-label">Approver</div>
+          <div class="clm-calc-value clm-val-approver">{{c.data.calc.approverRole || '—'}}</div>
+          <div class="clm-calc-sub" ng-if="c.data.calc.escalated" style="color:#e74c3c">
+            ↑ Escalated
+          </div>
+        </div>
+        <div class="clm-calc-card">
+          <div class="clm-calc-label">Aging Rating</div>
+          <div class="clm-calc-value"
+               ng-class="{
+                 'clm-val-ok':     c.data.calc.agingRating == 'A',
+                 'clm-val-warn':   c.data.calc.agingRating == 'B',
+                 'clm-val-danger': c.data.calc.agingRating == 'C'
+               }">
+            {{c.data.calc.agingRating || '—'}}
+          </div>
+          <div class="clm-calc-sub">6-month history</div>
+        </div>
+      </div>
+      <!-- Deviation alert -->
+      <div class="clm-alert clm-alert-danger" ng-if="c.data.calc.isDeviation">
+        <div class="clm-alert-icon">⚠</div>
+        <div class="clm-alert-body">
+          <strong>Deviation</strong> — Implied {{c.data.calc.impliedMult | number:2}}x exceeds system {{c.data.calc.multiplier}}x. Higher approval required.
+        </div>
+      </div>
+      <div class="clm-alert clm-alert-success" ng-if="!c.data.calc.isDeviation">
+        <div class="clm-alert-icon">✓</div>
+        <div class="clm-alert-body"><strong>Within Limits</strong> — Routes to <strong>{{c.data.calc.approverRole}}</strong></div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════
+         LIVE CALCULATION PANEL — NON-TRADE / KEY
+    ══════════════════════════════════════════════════════ -->
+    <div class="clm-calc-panel"
+         ng-if="(c.data.customerType == 'Non-Trade' || c.data.customerType == 'Key') && c.data.requestedLimit > 0 && c.data.calc.p1">
+      <div class="clm-calc-title">
+        P1 × P2 × P3 Calculation
+        <span class="clm-path-badge"
+              ng-class="c.data.calc.workflowPath == 'Tool' ? 'clm-badge-tool' : 'clm-badge-nontool'">
+          {{c.data.calc.workflowPath}} Working
+        </span>
+      </div>
+      <div class="clm-calc-grid">
+        <div class="clm-calc-card">
+          <div class="clm-calc-label">P1 — MACL</div>
+          <div class="clm-calc-value">₹{{c.data.calc.p1 | number:1}}L</div>
+          <div class="clm-calc-sub">{{c.data.isListed ? 'Net Worth based' : 'MPQ based'}}</div>
+        </div>
+        <div class="clm-calc-card">
+          <div class="clm-calc-label">P2 — Composite</div>
+          <div class="clm-calc-value">{{(c.data.calc.p2 * 100) | number:1}}%</div>
+          <div class="clm-calc-sub">Operational score</div>
+        </div>
+        <div class="clm-calc-card">
+          <div class="clm-calc-label">P3 — Credit</div>
+          <div class="clm-calc-value"
+               ng-class="{
+                 'clm-val-ok':     c.data.calc.p3 >= 0.75,
+                 'clm-val-warn':   c.data.calc.p3 >= 0.5 && c.data.calc.p3 < 0.75,
+                 'clm-val-danger': c.data.calc.p3 < 0.5
+               }">
+            {{(c.data.calc.p3 * 100) | number:0}}%
+          </div>
+          <div class="clm-calc-sub">{{c.data.calc.creditKey || '—'}}</div>
+        </div>
+        <div class="clm-calc-card"
+             ng-class="c.data.calc.isDeviation ? 'clm-calc-card-danger' : 'clm-calc-card-safe'">
+          <div class="clm-calc-label">Safe Allowable</div>
+          <div class="clm-calc-value"
+               ng-class="c.data.calc.isDeviation ? 'clm-val-danger' : 'clm-val-ok'">
+            ₹{{c.data.calc.safeLimit | number:1}}L
+          </div>
+          <div class="clm-calc-sub">P1 × P2 × P3</div>
+        </div>
+        <div class="clm-calc-card">
+          <div class="clm-calc-label">Approver</div>
+          <div class="clm-calc-value clm-val-approver">{{c.data.calc.approverRole || '—'}}</div>
+          <div class="clm-calc-sub" ng-if="c.data.calc.escalated" style="color:#e74c3c">
+            ↑ Escalated
+          </div>
+        </div>
+        <div class="clm-calc-card">
+          <div class="clm-calc-label">Aging Rating</div>
+          <div class="clm-calc-value"
+               ng-class="{
+                 'clm-val-ok':     c.data.calc.agingRating == 'a' || c.data.calc.agingRating == 'A',
+                 'clm-val-warn':   c.data.calc.agingRating == 'b' || c.data.calc.agingRating == 'B',
+                 'clm-val-danger': c.data.calc.agingRating == 'c' || c.data.calc.agingRating == 'C'
+               }">
+            {{c.data.calc.agingRating || '—'}}
+          </div>
+          <div class="clm-calc-sub">6-month history</div>
+        </div>
+      </div>
+
+      <!-- NT Deviation alert -->
+      <div class="clm-alert clm-alert-danger" ng-if="c.data.calc.isDeviation">
+        <div class="clm-alert-icon">⚠</div>
+        <div class="clm-alert-body">
+          <strong>Deviation</strong> — Requested ₹{{c.data.requestedLimit / 100000 | number:1}}L exceeds
+          Safe Allowable Limit ₹{{c.data.calc.safeLimit | number:1}}L.
+          Mandatory deviation justification required below.
+        </div>
+      </div>
+      <div class="clm-alert clm-alert-success" ng-if="!c.data.calc.isDeviation">
+        <div class="clm-alert-icon">✓</div>
+        <div class="clm-alert-body">
+          <strong>Within Safe Limit</strong> — Routes to <strong>{{c.data.calc.approverRole}}</strong>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════
+         SECTION 3A: TRADE — Sales & Risk Data
+    ══════════════════════════════════════════════════════ -->
+    <div class="clm-section" ng-if="c.data.customerType == 'Trade'">
+      <div class="clm-section-title">
+        <span class="clm-section-num">3</span> Sales &amp; Risk Data
+      </div>
+      <div class="clm-row">
+        <div class="clm-field">
+          <label>Avg Monthly Sales — Last 12M (MT)</label>
+          <input type="number" ng-model="c.data.avgMonthlySales"
+                 ng-change="c.recalculate()" class="clm-input" min="0" />
+        </div>
+        <div class="clm-field">
+          <label>Sales Last Month (₹)</label>
+          <input type="number" ng-model="c.data.salesLastMonth" class="clm-input" min="0" />
+        </div>
+        <div class="clm-field">
+          <label>Sales Last 6 Months (₹)</label>
+          <input type="number" ng-model="c.data.salesPrevMonth" class="clm-input" min="0" />
+        </div>
+      </div>
+      <div class="clm-row">
+        <div class="clm-field">
+          <label>Cheque Bounces (Last 12 Months)</label>
+          <input type="number" ng-model="c.data.chequeBounces" class="clm-input" min="0" />
+        </div>
+        <div class="clm-field">
+          <label>Market Perception</label>
+          <select ng-model="c.data.marketPerception" class="clm-input">
+            <option value="">-- Select --</option>
+            <option value="A">A — Good</option>
+            <option value="B">B — Average</option>
+            <option value="C">C — Non-Consistent</option>
+            <option value="D">D — Defaulter</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════
+         SECTION 3B: NON-TRADE / KEY — Project & Risk Data
+    ══════════════════════════════════════════════════════ -->
+    <div class="clm-section"
+         ng-if="c.data.customerType == 'Non-Trade' || c.data.customerType == 'Key'">
+      <div class="clm-section-title">
+        <span class="clm-section-num">3</span> Project &amp; Risk Data
+      </div>
+      <div class="clm-row">
+        <div class="clm-field">
+          <label>Sales Last Month (₹)</label>
+          <input type="number" ng-model="c.data.salesLastMonth" class="clm-input" min="0" />
+        </div>
+        <div class="clm-field">
+          <label>Sales Previous Month (₹)</label>
+          <input type="number" ng-model="c.data.salesPrevMonth" class="clm-input" min="0" />
+        </div>
+        <div class="clm-field">
+          <label>Market Perception</label>
+          <select ng-model="c.data.marketPerception" class="clm-input">
+            <option value="">-- Select --</option>
+            <option value="A">A — Good</option>
+            <option value="B">B — Average</option>
+            <option value="C">C — Non-Consistent</option>
+            <option value="D">D — Defaulter</option>
+          </select>
+        </div>
+      </div>
+      <!-- Key customer: show current exposure across hierarchy -->
+      <div ng-if="c.data.customerType == 'Key' && c.data.hierarchyData" class="clm-hierarchy-strip">
+        <div class="clm-hierarchy-title">Group Exposure</div>
+        <div ng-repeat="node in c.data.hierarchyData" class="clm-hierarchy-node">
+          <span class="clm-hierarchy-level">{{node.level}}</span>
+          <span class="clm-hierarchy-name">{{node.name}}</span>
+          <span class="clm-hierarchy-limit">₹{{node.limit | number:1}}L active</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════
+         SECTION 4: BUSINESS JUSTIFICATION (all types)
+    ══════════════════════════════════════════════════════ -->
+     <div class="clm-section" ng-if="c.data.customerType == 'Trade'">
+      <div class="clm-section-title">
+        <span class="clm-section-num">4</span> Business Justification <span class="req">*</span>
+      </div>
+      <textarea ng-model="c.data.justification"
+                class="clm-textarea" rows="4"
+                placeholder="Explain the business reason for this credit limit request..."
+                required></textarea>
+
+      <!-- Deviation justification (all types) -->
+      <div ng-if="c.data.calc.isDeviation" style="margin-top:12px">
+        <label style="font-weight:600;color:#c0392b">
+          Deviation Justification <span class="req">*</span>
+          <small>(Required — request exceeds safe limit)</small>
+        </label>
+        <textarea ng-model="c.data.deviationJustification"
+                  class="clm-textarea clm-textarea-danger" rows="3"
+                  placeholder="Explain why the requested limit exceeds the calculated safe limit..."
+                  ng-required="c.data.calc.isDeviation"></textarea>
+      </div>
+    </div>
+
+    <!-- ERROR -->
+    <div class="clm-alert clm-alert-danger" ng-if="c.data.submitError">
+      <div class="clm-alert-icon">✗</div>
+      <div class="clm-alert-body">{{c.data.submitError}}</div>
+    </div>
+
+    <!-- ACTIONS -->
+    <div class="clm-actions">
+      <button type="button" class="clm-btn clm-btn-outline"
+              ng-click="c.saveDraft()" ng-disabled="c.data.saving">
+        {{c.data.saving ? 'Saving...' : 'Save Draft'}}
+      </button>
+      <button type="submit" class="clm-btn clm-btn-primary"
+              ng-disabled="clmForm.$invalid || c.data.submitting || !c.data.customerSysId">
+        {{c.data.submitting ? 'Submitting...' : 'Submit for Approval'}}
+      </button>
+    </div>
+
+  </form>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>653a298d97f33290be31fa17f053af59</id>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-21 13:14:34</sys_created_on>
+        <sys_id>293aa98d97f33290be31fa17f053af43</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-03-21 13:14:34</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_653a298d97f33290be31fa17f053af59</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[/**
+ * CLM ADAPTIVE WIDGET — Client Script V5 (TCL + Multi-Segment)
+ * Replaces WIDGET_client_v4.js entirely
+ */
+
+api.controller = function($scope) {
+    var c = this;
+
+    // Core state
+    c.data.calc          = {};
+    c.data.submitted     = false;
+    c.data.submitting    = false;
+    c.data.saving        = false;
+    c.data.customerError = '';
+    c.data.submitError   = '';
+
+    // Multi-segment state
+    c.data.isMultiSegment    = false;
+    c.data.msMethod          = 'manual';
+    c.data.msSegments        = [];
+    c.data.msValidationError = '';
+    c.data.msTotalSD         = 0;
+    c.data.msTotalMACL       = 0;
+    c.data.msTotalRequested  = 0;
+
+    // TCL state
+    c.data.isTCL          = false;
+    c.data.tclAmount      = 0;
+    c.data.tclValidTill   = '';
+    c.data.tclMinDate     = '';
+    c.data.tclDaysLeft    = 0;
+    c.data.tclError       = '';
+    c.data.tclIncreasePct = 0;
+    c.data.permanentLimit = 0;
+    c.data.activeTCLs     = [];
+
+    // Set min date for TCL to tomorrow
+    var tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    c.data.tclMinDate = tomorrow.toISOString().split('T')[0];
+
+    // ── Load customer ──────────────────────────────────────────
+    c.loadCustomer = function() {
+        var code = (c.data.customerCode || '').trim().toUpperCase();
+        if (!code) return;
+
+        c.data.customerError  = '';
+        c.data.customerName   = 'Loading...';
+        c.data.calc           = {};
+        c.data.isMultiSegment = false;
+        c.data.isTCL          = false;
+        c.data.tclError       = '';
+        c.data.activeTCLs     = [];
+
+        c.server.get({ action: 'loadCustomer', customerCode: code })
+        .then(function(r) {
+            if (r.data.customer) {
+                var cust = r.data.customer;
+                c.data.customerSysId   = cust.sys_id;
+                c.data.customerName    = cust.name;
+                c.data.customerType    = cust.customer_type;
+                c.data.segment         = cust.segment;
+                c.data.zone            = cust.zone;
+                c.data.region          = cust.region;
+              c.data.pan          = cust.pan;  
+							c.data.cg2Code         = cust.cg2_code;
+                c.data.constitution    = cust.constitution;
+                c.data.isListed        = cust.is_listed;
+                c.data.vintageDays     = cust.vintage_days;
+                c.data.currentLimit    = cust.current_limit / 100000;
+                c.data.hierarchyLevel  = cust.hierarchy_level;
+                c.data.hierarchyData   = cust.hierarchy_data;
+                c.data.avgMonthlySales = cust.avg_monthly_sales;
+                c.data.orderRate       = cust.order_rate || 7000;
+                c.data.permanentLimit  = cust.permanent_limit || 0;
+                c.data.activeTCLs      = cust.active_tcls    || [];
+
+                if (cust.outstanding &gt; 0 &amp;&amp; !c.data.outstanding)
+                    c.data.outstanding = cust.outstanding;
+                if (cust.customer_type === 'Trade' &amp;&amp; cust.current_sd &gt; 0 &amp;&amp; !c.data.activeSD)
+                    c.data.activeSD = cust.current_sd;
+                if (cust.customer_type !== 'Trade')
+                    c.data.activeSD = 0;
+
+                c.initMultiSegment(cust);
+                if (c.data.requestedLimit &gt; 0) c.recalculate();
+            } else {
+                c.data.customerName  = '';
+                c.data.customerSysId = '';
+                c.data.customerError = 'Customer "' + code + '" not found.';
+            }
+        });
+    };
+
+    c.clearCustomer = function() {
+        c.data.customerSysId  = '';
+        c.data.customerName   = '';
+        c.data.customerType   = '';
+        c.data.customerError  = '';
+        c.data.segment        = '';
+        c.data.calc           = {};
+        c.data.activeSD       = 0;
+        c.data.outstanding    = 0;
+        c.data.isMultiSegment = false;
+        c.data.isTCL          = false;
+        c.data.tclError       = '';
+        c.data.activeTCLs     = [];
+        c.data.permanentLimit = 0;
+    };
+
+    // ── TCL FUNCTIONS ──────────────────────────────────────────
+
+    c.onTCLToggle = function() {
+        c.data.tclError = '';
+        if (c.data.isTCL) {
+            // Pre-fill TCL amount with current requested limit
+            if (c.data.requestedLimit &gt; 0)
+                c.data.tclAmount = c.data.requestedLimit;
+            c.validateTCL();
+        } else {
+            c.data.tclAmount    = 0;
+            c.data.tclValidTill = '';
+            c.data.tclDaysLeft  = 0;
+            c.data.tclError     = '';
+            c.data.tclIncreasePct = 0;
+        }
+    };
+
+    c.onTCLAmountChange = function() {
+        var perm = parseFloat(c.data.permanentLimit) || 0;
+        var tcl  = parseFloat(c.data.tclAmount)      || 0;
+        c.data.tclIncreasePct = perm &gt; 0 ? ((tcl - perm) / perm) * 100 : 0;
+
+        // Sync to main requested limit
+        if (tcl &gt; 0) c.data.requestedLimit = tcl;
+        c.validateTCL();
+        c.recalculate();
+    };
+
+    c.onTCLDateChange = function() {
+        if (!c.data.tclValidTill) { c.data.tclDaysLeft = 0; return; }
+        var today  = new Date();
+        var target = new Date(c.data.tclValidTill);
+        var diff   = Math.ceil((target - today) / (1000 * 60 * 60 * 24));
+        c.data.tclDaysLeft = diff &gt; 0 ? diff : 0;
+        c.validateTCL();
+    };
+
+    c.validateTCL = function() {
+        c.data.tclError = '';
+        if (!c.data.isTCL) return true;
+
+        var tcl  = parseFloat(c.data.tclAmount)      || 0;
+        var perm = parseFloat(c.data.permanentLimit)  || 0;
+
+        if (tcl &lt;= 0) {
+            c.data.tclError = 'Please enter the TCL amount.';
+            return false;
+        }
+        if (perm &gt; 0 &amp;&amp; tcl &lt;= perm) {
+            c.data.tclError = 'TCL amount (₹' + (tcl/100000).toFixed(1) + 'L) must exceed the permanent limit (₹' + (perm/100000).toFixed(1) + 'L).';
+            return false;
+        }
+        if (!c.data.tclValidTill) {
+            c.data.tclError = 'Please select a Valid Till date.';
+            return false;
+        }
+        if (c.data.tclDaysLeft &lt;= 0) {
+            c.data.tclError = 'Valid Till date must be in the future.';
+            return false;
+        }
+        return true;
+    };
+
+    c.buildTCLPayload = function() {
+        if (!c.data.isTCL) return null;
+        return {
+            is_tcl:           true,
+            tcl_amount:       parseFloat(c.data.tclAmount)     || 0,
+            tcl_valid_till:   c.data.tclValidTill,
+            permanent_limit:  parseFloat(c.data.permanentLimit) || 0
+        };
+    };
+
+    // ── MULTI-SEGMENT FUNCTIONS ────────────────────────────────
+
+    c.initMultiSegment = function(cust) {
+        var rate = (cust &amp;&amp; cust.order_rate)       ? cust.order_rate       : 7000;
+        var mpq  = (cust &amp;&amp; cust.avg_monthly_sales) ? cust.avg_monthly_sales : 0;
+        c.data.msMethod          = 'manual';
+        c.data.msValidationError = '';
+        c.data.msTotalSD = c.data.msTotalMACL = c.data.msTotalRequested = 0;
+        c.data.msSegments = [
+            { name: 'Cement', active: true,  sd: parseFloat((cust &amp;&amp; cust.current_sd) || 0), mpq: mpq, orderRate: rate, creditTenor: 45, p1: 0, requestedLimit: 0, pct: 0 },
+            { name: 'RMC',    active: false, sd: 0, mpq: 0, orderRate: 5500, creditTenor: 30, p1: 0, requestedLimit: 0, pct: 0 },
+            { name: 'BPD',    active: false, sd: 0, mpq: 0, orderRate: 4500, creditTenor: 45, p1: 0, requestedLimit: 0, pct: 0 }
+        ];
+    };
+
+    c.onMultiSegmentToggle = function() {
+        c.data.msValidationError = '';
+        if (c.data.isMultiSegment) c.recalculateMS();
+    };
+
+    c.onMethodChange = function() {
+        c.data.msValidationError = '';
+        if (c.data.msMethod === 'prorata') c.applyProRata();
+    };
+
+    c.recalculateMS = function() {
+        if (!c.data.isMultiSegment || !c.data.msSegments) return;
+        var totalSD = 0, totalRequested = 0, totalMACL = 0;
+        c.data.msSegments.forEach(function(seg) {
+            if (!seg.active) { seg.p1 = 0; seg.pct = 0; return; }
+            var mpq = parseFloat(seg.mpq) || 0, rate = parseFloat(seg.orderRate) || 7000, tenor = parseFloat(seg.creditTenor) || 45;
+            seg.p1 = mpq &gt; 0 ? (mpq * rate * tenor) / 30 : 0;
+            totalSD        += parseFloat(seg.sd)             || 0;
+            totalRequested += parseFloat(seg.requestedLimit) || 0;
+            totalMACL      += seg.p1;
+        });
+        c.data.msTotalSD = totalSD; c.data.msTotalRequested = totalRequested; c.data.msTotalMACL = totalMACL;
+        c.data.msSegments.forEach(function(seg) {
+            if (!seg.active || totalRequested === 0) { seg.pct = 0; return; }
+            seg.pct = (parseFloat(seg.requestedLimit) || 0) / totalRequested;
+        });
+        if (c.data.msMethod === 'prorata') c.applyProRata();
+        c.validateMS();
+        if (totalRequested &gt; 0) { c.data.requestedLimit = totalRequested; c.recalculate(); }
+    };
+
+    c.applyProRata = function() {
+        if (!c.data.msSegments) return;
+        var active = c.data.msSegments.filter(function(s) { return s.active; });
+        var totalSD = active.reduce(function(a, s) { return a + (parseFloat(s.sd) || 0); }, 0);
+        var totalReq = parseFloat(c.data.requestedLimit) || 0;
+        if (totalReq === 0 || active.length === 0) return;
+        var allocSum = 0;
+        active.forEach(function(seg) {
+            var sd = parseFloat(seg.sd) || 0;
+            var pct = totalSD &gt; 0 ? sd / totalSD : 1 / active.length;
+            seg.requestedLimit = Math.round(totalReq * pct); seg.pct = pct; allocSum += seg.requestedLimit;
+        });
+        var diff = totalReq - allocSum;
+        if (diff !== 0) active[0].requestedLimit += diff;
+        c.data.msTotalRequested = totalReq;
+    };
+
+    c.onManualLimitChange = function() { c.recalculateMS(); };
+
+    c.validateMS = function() {
+        if (!c.data.isMultiSegment || c.data.msMethod === 'hold') { c.data.msValidationError = ''; return true; }
+        var active = c.data.msSegments.filter(function(s) { return s.active; });
+        if (active.length === 0) { c.data.msValidationError = 'Select at least one segment.'; return false; }
+        var sum = active.reduce(function(a, s) { return a + (parseFloat(s.requestedLimit) || 0); }, 0);
+        var total = parseFloat(c.data.requestedLimit) || 0;
+        if (total &gt; 0 &amp;&amp; Math.abs(sum - total) &gt; 100) {
+            c.data.msValidationError = 'Segment limits (₹' + (sum/100000).toFixed(1) + 'L) must equal total (₹' + (total/100000).toFixed(1) + 'L)';
+            return false;
+        }
+        c.data.msValidationError = ''; return true;
+    };
+
+    c.buildMSPayload = function() {
+        if (!c.data.isMultiSegment || !c.data.msSegments) return null;
+        return {
+            is_multi_segment: true, method: c.data.msMethod,
+            segments: c.data.msSegments.filter(function(s) { return s.active; }).map(function(s) {
+                return { segment: s.name, sd: parseFloat(s.sd)||0, mpq: parseFloat(s.mpq)||0,
+                         order_rate: parseFloat(s.orderRate)||7000, credit_tenor: parseFloat(s.creditTenor)||45,
+                         requested_limit: parseFloat(s.requestedLimit)||0, pct: parseFloat(s.pct)||0 };
+            })
+        };
+    };
+
+    // ── Live recalculate ───────────────────────────────────────
+    c.recalculate = function() {
+        var req = parseFloat(c.data.requestedLimit) || 0;
+        if (req &lt;= 0 || !c.data.customerSysId) { c.data.calc = {}; return; }
+        c.server.get({
+            action: 'calculate', customerType: c.data.customerType || 'Trade',
+            customerSysId: c.data.customerSysId, requestedLimit: req,
+            activeSD: parseFloat(c.data.activeSD)||0, outstanding: parseFloat(c.data.outstanding)||0,
+            avgMonthlySales: parseFloat(c.data.avgMonthlySales)||0,
+            salesLastMonth: parseFloat(c.data.salesLastMonth)||0, salesPrevMonth: parseFloat(c.data.salesPrevMonth)||0,
+            segment: c.data.segment||'Cement', cg2Code: c.data.cg2Code||'', vintageDays: parseInt(c.data.vintageDays)||0
+        }).then(function(r) { if (r.data.calc) c.data.calc = r.data.calc; });
+    };
+
+    // ── Save Draft ─────────────────────────────────────────────
+    c.saveDraft = function() {
+        c.data.saving = true;
+        c.server.get({ action: 'saveDraft', form: c.buildPayload() })
+        .then(function(r) { c.data.saving = false; c.data.draftSysId = r.data.sysId; c.data.requestNumber = r.data.number; });
+    };
+
+    // ── Submit ─────────────────────────────────────────────────
+    c.submit = function() {
+        c.data.submitError = '';
+        if (!c.data.customerSysId)  { c.data.submitError = 'Please select a valid customer.'; return; }
+        if (!c.data.segment)         { c.data.submitError = 'Please select a segment.'; return; }
+        if (!c.data.justification || c.data.justification.trim().length &lt; 20) {
+            c.data.submitError = 'Business justification must be at least 20 characters.'; return; }
+        if (c.data.calc.isDeviation &amp;&amp; (!c.data.deviationJustification || c.data.deviationJustification.trim().length &lt; 20)) {
+            c.data.submitError = 'Deviation justification is required.'; return; }
+        if (c.data.isMultiSegment &amp;&amp; !c.validateMS()) {
+            c.data.submitError = c.data.msValidationError || 'Fix multi-segment errors.'; return; }
+        if (c.data.isTCL &amp;&amp; !c.validateTCL()) {
+            c.data.submitError = c.data.tclError || 'Fix TCL errors.'; return; }
+
+        c.data.submitting = true;
+        c.server.get({ action: 'submit', form: c.buildPayload() })
+        .then(function(r) {
+            c.data.submitting = false;
+            if (r.data.success) {
+                c.data.submitted = true; c.data.requestNumber = r.data.requestNumber;
+                c.data.approverRole = r.data.approverRole; c.data.isDeviation = r.data.isDeviation;
+            } else { c.data.submitError = r.data.error || 'Submission failed.'; }
+        }).catch(function() { c.data.submitting = false; c.data.submitError = 'Server error.'; });
+    };
+
+    c.resetForm = function() {
+        c.data = { calc: {}, submitted: false, submitting: false, saving: false,
+                   isMultiSegment: false, msMethod: 'manual', msSegments: [],
+                   isTCL: false, activeTCLs: [] };
+    };
+
+    c.buildPayload = function() {
+        var payload = {
+            customerSysId: c.data.customerSysId, customerType: c.data.customerType,
+            segment: c.data.segment, requestedLimit: c.data.requestedLimit,
+            activeSD: c.data.activeSD||0, outstanding: c.data.outstanding||0,
+            avgMonthlySales: c.data.avgMonthlySales||0, salesLastMonth: c.data.salesLastMonth||0,
+            salesPrevMonth: c.data.salesPrevMonth||0, chequeBounces: c.data.chequeBounces||0,
+            marketPerception: c.data.marketPerception||'', justification: c.data.justification,
+            deviationJustification: c.data.deviationJustification||'',
+            vintageDays: c.data.vintageDays||0, draftSysId: c.data.draftSysId||''
+        };
+        var msPayload  = c.buildMSPayload();
+        var tclPayload = c.buildTCLPayload();
+        if (msPayload)  payload.multiSegment = msPayload;
+        if (tclPayload) payload.tcl          = tclPayload;
+        return payload;
+    };
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;/* ============================================================
+   CLM WIDGET — COMPLETE CSS (UltraTech Theme)
+   FULLY RESPONSIVE + MOBILE OPTIMIZED
+   Brand Colors: Black #000000 | Neon Yellow #FFF21A | White #FFFFFF
+   ============================================================ */
+
+/* ── Base ── */
+.clm-widget {
+  font-family: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  color: #1a1a1a;
+  box-sizing: border-box;
+}
+
+/* ── Header ── */
+.clm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #000000;
+  color: #fff;
+  padding: 20px 28px;
+  border-radius: 8px 8px 0 0;
+  margin-bottom: 0;
+  border-bottom: 3px solid #FFF21A;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.clm-title {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: #ffffff;
+}
+.clm-subtitle {
+  font-size: 13px;
+  color: rgba(255, 242, 26, 0.75);
+  margin-top: 2px;
+  width: 100%;
+}
+.clm-request-badge {
+  background: #FFF21A;
+  border: 1px solid #FFF21A;
+  color: #000000;
+  padding: 4px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin-left: auto;
+}
+
+/* ── Section ── */
+.clm-section {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-top: none;
+  padding: 24px 28px;
+}
+.clm-section:last-of-type {
+  border-radius: 0 0 8px 8px;
+}
+.clm-section-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #000000;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.clm-section-num {
+  width: 24px;
+  height: 24px;
+  background: #FFF21A;
+  color: #000000;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* ── Form Layout ── */
+.clm-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.clm-row:last-child {
+  margin-bottom: 0;
+}
+.clm-field {
+  flex: 1;
+  min-width: 200px;
+}
+.clm-field label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: #4a4a4a;
+  margin-bottom: 6px;
+}
+.req {
+  color: #e74c3c;
+  margin-left: 2px;
+}
+
+.clm-input,
+.clm-textarea {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid #cccccc;
+  border-radius: 5px;
+  font-size: 14px;
+  color: #1a1a1a;
+  background: #fff;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  box-sizing: border-box;
+}
+.clm-input:focus,
+.clm-textarea:focus {
+  outline: none;
+  border-color: #000000;
+  box-shadow: 0 0 0 3px rgba(255, 242, 26, 0.4);
+}
+.clm-input[readonly] {
+  background: #f5f5f5;
+  color: #888888;
+  cursor: default;
+}
+.clm-textarea {
+  resize: vertical;
+  min-height: 90px;
+  line-height: 1.5;
+}
+.clm-textarea-danger {
+  border-color: #e74c3c;
+}
+.clm-textarea-danger:focus {
+  border-color: #c0392b;
+  box-shadow: 0 0 0 3px rgba(231, 76, 60, 0.12);
+}
+
+/* Input with button */
+.clm-input-group {
+  display: flex;
+  gap: 8px;
+}
+.clm-input-group .clm-input {
+  flex: 1;
+}
+.clm-input-btn {
+  padding: 9px 16px;
+  background: #FFF21A;
+  color: #000000;
+  border: none;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+.clm-input-btn:hover {
+  background: #e6d900;
+}
+.clm-input-btn:disabled {
+  background: #e0e0e0;
+  color: #999999;
+  cursor: not-allowed;
+}
+
+.clm-field-hint {
+  font-size: 12px;
+  color: #888888;
+  margin-top: 4px;
+}
+.clm-field-msg {
+  font-size: 12px;
+  margin-top: 4px;
+}
+.clm-error {
+  color: #e74c3c;
+}
+
+/* ── Customer Strip ── */
+.clm-customer-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: #f5f5f5;
+  border-radius: 6px;
+  border: 1px solid #e0e0e0;
+}
+.clm-strip-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 100px;
+}
+.clm-strip-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #888888;
+}
+.clm-strip-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+/* Customer type colors */
+.clm-type-trade {
+  color: #000000;
+}
+.clm-type-nontrade {
+  color: #8e44ad;
+}
+.clm-type-key {
+  color: #c8860a;
+}
+
+/* ── Calc Panel ── */
+.clm-calc-panel {
+  background: #f9f9f9;
+  border: 1px solid #e0e0e0;
+  border-top: 3px solid #FFF21A;
+  border-bottom: none;
+  padding: 20px 28px;
+}
+.clm-calc-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #000000;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.clm-calc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.clm-calc-card {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+.clm-calc-card-safe {
+  border-color: #a9dfbf;
+  background: #f0faf4;
+}
+.clm-calc-card-danger {
+  border-color: #f5b7b1;
+  background: #fdf3f2;
+}
+.clm-calc-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #888888;
+  margin-bottom: 6px;
+}
+.clm-calc-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #000000;
+  line-height: 1.2;
+}
+.clm-calc-sub {
+  font-size: 11px;
+  color: #aaaaaa;
+  margin-top: 4px;
+}
+.clm-val-ok {
+  color: #27ae60;
+}
+.clm-val-warn {
+  color: #c8860a;
+}
+.clm-val-danger {
+  color: #e74c3c;
+}
+.clm-val-approver {
+  font-size: 14px;
+  color: #000000;
+}
+
+/* Path badge */
+.clm-path-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.clm-badge-tool {
+  background: #000000;
+  color: #FFF21A;
+}
+.clm-badge-nontool {
+  background: #27ae60;
+  color: #fff;
+}
+
+/* ── Alerts ── */
+.clm-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  margin-top: 12px;
+}
+.clm-alert-icon {
+  font-size: 18px;
+  font-weight: 700;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+.clm-alert-danger {
+  background: #fdf3f2;
+  border: 1px solid #f5b7b1;
+  color: #922b21;
+}
+.clm-alert-success {
+  background: #eafaf1;
+  border: 1px solid #a9dfbf;
+  color: #1e8449;
+}
+
+/* Hierarchy strip */
+.clm-hierarchy-strip {
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: #fffde7;
+  border: 1px solid #FFF21A;
+  border-radius: 6px;
+}
+.clm-hierarchy-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #888888;
+  margin-bottom: 8px;
+}
+.clm-hierarchy-node {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid #fff0a0;
+  font-size: 13px;
+}
+.clm-hierarchy-node:last-child {
+  border-bottom: none;
+}
+.clm-hierarchy-level {
+  font-size: 10px;
+  font-weight: 700;
+  color: #888888;
+  min-width: 50px;
+}
+.clm-hierarchy-name {
+  flex: 1;
+  color: #000000;
+  font-weight: 600;
+}
+.clm-hierarchy-limit {
+  color: #c8860a;
+  font-weight: 600;
+}
+
+/* ── Actions ── */
+.clm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 20px 28px;
+  background: #f9f9f9;
+  border: 1px solid #e0e0e0;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  flex-wrap: wrap;
+}
+.clm-btn {
+  padding: 10px 24px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s;
+}
+.clm-btn-primary {
+  background: #000000;
+  color: #FFF21A;
+}
+.clm-btn-primary:hover:not(:disabled) {
+  background: #1a1a1a;
+}
+.clm-btn-primary:disabled {
+  background: #aaaaaa;
+  color: #ffffff;
+  cursor: not-allowed;
+}
+.clm-btn-outline {
+  background: transparent;
+  color: #000000;
+  border: 2px solid #000000;
+}
+.clm-btn-outline:hover:not(:disabled) {
+  background: #fffde7;
+  border-color: #000000;
+}
+.clm-btn-outline:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Success Panel ── */
+.clm-success-panel {
+  text-align: center;
+  padding: 48px 28px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+}
+.clm-success-icon {
+  width: 60px;
+  height: 60px;
+  background: #FFF21A;
+  color: #000000;
+  border-radius: 50%;
+  font-size: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 20px;
+}
+.clm-success-panel h3 {
+  color: #000000;
+  font-size: 20px;
+  margin-bottom: 12px;
+}
+.clm-success-panel p {
+  color: #4a4a4a;
+  margin-bottom: 20px;
+}
+.clm-deviation-note {
+  background: #fdf3f2;
+  border: 1px solid #f5b7b1;
+  color: #922b21;
+  padding: 10px 16px;
+  border-radius: 6px;
+  margin-bottom: 20px;
+  font-size: 13px;
+}
+
+/* ============================================================
+   MULTI-SEGMENT CSS (UltraTech Theme)
+   ============================================================ */
+
+.clm-ms-badge {
+  display: inline-block;
+  background: #FFF21A;
+  color: #000000;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-left: 8px;
+  vertical-align: middle;
+  letter-spacing: 0.5px;
+}
+.clm-ms-toggle-row {
+  padding: 12px 0 8px 0;
+}
+.clm-ms-toggle-label {
+  font-size: 14px;
+  color: #1a1a1a;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.clm-ms-panel {
+  margin-top: 16px;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.clm-ms-method-row {
+  padding: 14px 16px;
+  background: #f9f9f9;
+  border-bottom: 1px solid #e0e0e0;
+}
+.clm-ms-method-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #888888;
+  margin-bottom: 10px;
+  display: block;
+}
+.clm-ms-method-options {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.clm-ms-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  padding: 10px 14px;
+  border: 1px solid #dddddd;
+  border-radius: 5px;
+  background: #fff;
+  min-width: 160px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.clm-ms-radio:hover {
+  border-color: #FFF21A;
+  background: #fffde7;
+}
+.clm-ms-radio input[type="radio"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+  accent-color: #000000;
+}
+.clm-ms-radio-label strong {
+  display: block;
+  font-size: 13px;
+  color: #000000;
+}
+.clm-ms-radio-label small {
+  display: block;
+  font-size: 11px;
+  color: #888888;
+  margin-top: 2px;
+}
+
+.clm-ms-table-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 14px;
+  background: #f0f0f0;
+  border-bottom: 1px solid #e0e0e0;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #888888;
+}
+.clm-ms-table-row {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid #f5f5f5;
+  background: #fff;
+  gap: 4px;
+}
+.clm-ms-table-row:last-child {
+  border-bottom: none;
+}
+.clm-ms-col-seg {
+  flex: 1.8;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.clm-ms-col-num {
+  flex: 1;
+  text-align: right;
+}
+.clm-ms-seg-name {
+  font-size: 14px;
+  color: #000000;
+}
+.clm-ms-calc {
+  font-weight: 600;
+  font-size: 13px;
+}
+.clm-ms-input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #cccccc;
+  border-radius: 4px;
+  font-size: 12px;
+  text-align: right;
+  box-sizing: border-box;
+}
+.clm-ms-input:focus {
+  outline: none;
+  border-color: #000000;
+  box-shadow: 0 0 0 2px rgba(255, 242, 26, 0.4);
+}
+.clm-ms-input:disabled {
+  background: #f5f5f5;
+  color: #aaaaaa;
+}
+.clm-ms-input[readonly] {
+  background: #f5f5f5;
+  color: #888888;
+}
+
+.clm-ms-totals-row {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  background: #f0f0f0;
+  border-top: 2px solid #dddddd;
+  font-size: 13px;
+  gap: 4px;
+}
+.clm-ms-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.clm-ms-alert-danger {
+  background: #fdf3f2;
+  color: #c0392b;
+  border-top: 1px solid #f5b7b1;
+}
+.clm-ms-alert-success {
+  background: #eafaf1;
+  color: #1e8449;
+  border-top: 1px solid #a9dfbf;
+}
+.clm-ms-hold-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 20px;
+  background: #fffde7;
+  border-top: 2px solid #FFF21A;
+}
+.clm-ms-hold-icon {
+  font-size: 28px;
+  flex-shrink: 0;
+}
+.clm-ms-hold-info strong {
+  display: block;
+  font-size: 15px;
+  color: #000000;
+  margin-bottom: 6px;
+}
+.clm-ms-hold-info p {
+  font-size: 13px;
+  color: #4a4a4a;
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* ============================================================
+   TCL CSS (UltraTech Theme)
+   ============================================================ */
+
+.clm-tcl-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 8px;
+  vertical-align: middle;
+  letter-spacing: 0.5px;
+}
+.clm-tcl-badge-active {
+  background: #FFF21A;
+  color: #000000;
+}
+.clm-tcl-badge-info {
+  background: #000000;
+  color: #FFF21A;
+}
+
+.clm-tcl-existing {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  background: #fffde7;
+  border: 1px solid #FFF21A;
+  border-radius: 5px;
+}
+.clm-tcl-existing-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #888888;
+  margin-bottom: 8px;
+}
+.clm-tcl-existing-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  padding: 4px 0;
+  border-bottom: 1px solid #fff0a0;
+}
+.clm-tcl-existing-row:last-child {
+  border-bottom: none;
+}
+.clm-tcl-existing-seg {
+  font-weight: 700;
+  color: #000000;
+  min-width: 60px;
+}
+.clm-tcl-existing-amt {
+  font-weight: 700;
+  color: #c8860a;
+}
+.clm-tcl-existing-perm {
+  color: #888888;
+  font-size: 12px;
+}
+.clm-tcl-existing-date {
+  color: #4a4a4a;
+  margin-left: auto;
+}
+.clm-tcl-expiring {
+  color: #e74c3c;
+  font-weight: 700;
+  font-size: 12px;
+}
+.clm-tcl-safe {
+  color: #27ae60;
+  font-size: 12px;
+}
+
+.clm-tcl-toggle-row {
+  padding: 4px 0 8px 0;
+}
+.clm-tcl-toggle-label {
+  font-size: 14px;
+  color: #1a1a1a;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.clm-tcl-panel {
+  margin-top: 16px;
+  padding: 0;
+  border: 1px solid #FFF21A;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fffde7;
+}
+.clm-tcl-info-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: #fffde7;
+  border-bottom: 1px solid #FFF21A;
+}
+.clm-tcl-info-icon {
+  font-size: 18px;
+  color: #c8860a;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.clm-tcl-info-text {
+  font-size: 13px;
+  color: #4a4a4a;
+  line-height: 1.5;
+}
+.clm-tcl-info-text strong {
+  color: #000000;
+}
+
+.clm-tcl-panel .clm-row {
+  padding: 14px 16px;
+}
+
+.clm-tcl-calc-strip {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 12px 16px;
+  background: #fffde7;
+  border-top: 1px solid #FFF21A;
+  flex-wrap: wrap;
+}
+.clm-tcl-calc-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 16px;
+  text-align: center;
+}
+.clm-tcl-calc-item:first-child {
+  padding-left: 0;
+}
+.clm-tcl-calc-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #888888;
+}
+.clm-tcl-calc-val {
+  font-size: 16px;
+  font-weight: 700;
+  color: #000000;
+}
+.clm-tcl-calc-arrow {
+  color: #bbbbbb;
+  font-size: 18px;
+  padding: 0 8px;
+}
+.clm-tcl-warning {
+  padding: 10px 16px;
+  background: #fffde7;
+  border-top: 1px solid #FFF21A;
+  font-size: 12px;
+  color: #9a7d0a;
+  font-weight: 600;
+}
+
+/* ============================================================
+   FORCE FULL-WIDTH CLM WIDGET (ServiceNow Override)
+   ============================================================ */
+
+.sn-widget-content,
+.sn-widget-content &amp;gt; div,
+.container,
+.container-fluid {
+  width: 100% !important;
+  max-width: 100% !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+
+html,
+body {
+  width: 100%;
+}
+
+/* Inner padding for full-width layout */
+.clm-header,
+.clm-section,
+.clm-calc-panel,
+.clm-actions,
+.clm-success-panel {
+  padding-left: 24px;
+  padding-right: 24px;
+}
+
+/* ============================================================
+   TABLET BREAKPOINT — 768px
+   ============================================================ */
+
+@media (max-width: 768px) {
+  .clm-header {
+    padding: 16px 20px;
+  }
+
+  .clm-title {
+    font-size: 18px;
+  }
+
+  .clm-subtitle {
+    font-size: 12px;
+  }
+
+  .clm-request-badge {
+    padding: 3px 12px;
+    font-size: 12px;
+  }
+
+  .clm-section {
+    padding: 20px 20px;
+  }
+
+  .clm-section-title {
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+
+  .clm-section-num {
+    width: 22px;
+    height: 22px;
+    font-size: 11px;
+  }
+
+  .clm-row {
+    gap: 16px;
+    margin-bottom: 14px;
+  }
+
+  .clm-field {
+    flex: 1;
+    min-width: 150px;
+  }
+
+  .clm-field label {
+    font-size: 12px;
+  }
+
+  .clm-input,
+  .clm-textarea {
+    font-size: 13px;
+    padding: 8px 10px;
+  }
+
+  .clm-textarea {
+    min-height: 80px;
+  }
+
+  .clm-input-btn {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .clm-customer-strip {
+    gap: 6px;
+    padding: 10px 12px;
+  }
+
+  .clm-strip-item {
+    min-width: 90px;
+  }
+
+  .clm-strip-label {
+    font-size: 10px;
+  }
+
+  .clm-strip-value {
+    font-size: 12px;
+  }
+
+  .clm-calc-panel {
+    padding: 16px 20px;
+  }
+
+  .clm-calc-title {
+    font-size: 11px;
+    margin-bottom: 12px;
+  }
+
+  .clm-calc-grid {
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 10px;
+  }
+
+  .clm-calc-card {
+    padding: 10px 12px;
+  }
+
+  .clm-calc-label {
+    font-size: 10px;
+  }
+
+  .clm-calc-value {
+    font-size: 18px;
+  }
+
+  .clm-alert {
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+
+  .clm-hierarchy-strip {
+    padding: 10px 12px;
+    margin-top: 14px;
+  }
+
+  .clm-hierarchy-title {
+    font-size: 10px;
+    margin-bottom: 6px;
+  }
+
+  .clm-hierarchy-node {
+    padding: 4px 0;
+    font-size: 12px;
+  }
+
+  .clm-hierarchy-level {
+    font-size: 9px;
+    min-width: 45px;
+  }
+
+  .clm-hierarchy-name {
+    font-size: 12px;
+  }
+
+  .clm-hierarchy-limit {
+    font-size: 12px;
+  }
+
+  .clm-actions {
+    padding: 16px 20px;
+    gap: 10px;
+  }
+
+  .clm-btn {
+    padding: 8px 16px;
+    font-size: 13px;
+    flex: 1;
+    min-width: 100px;
+  }
+
+  .clm-success-panel {
+    padding: 40px 20px;
+  }
+
+  .clm-success-icon {
+    width: 50px;
+    height: 50px;
+    font-size: 24px;
+    margin-bottom: 16px;
+  }
+
+  .clm-success-panel h3 {
+    font-size: 18px;
+    margin-bottom: 10px;
+  }
+
+  .clm-success-panel p {
+    font-size: 12px;
+    margin-bottom: 16px;
+  }
+
+  .clm-deviation-note {
+    font-size: 12px;
+    padding: 8px 12px;
+    margin-bottom: 16px;
+  }
+
+  /* Multi-segment adjustments */
+  .clm-ms-badge {
+    font-size: 9px;
+    padding: 2px 6px;
+  }
+
+  .clm-ms-toggle-label {
+    font-size: 13px;
+  }
+
+  .clm-ms-method-row {
+    padding: 12px 14px;
+  }
+
+  .clm-ms-method-label {
+    font-size: 10px;
+    margin-bottom: 8px;
+  }
+
+  .clm-ms-method-options {
+    gap: 12px;
+  }
+
+  .clm-ms-radio {
+    padding: 8px 12px;
+    min-width: 140px;
+    font-size: 12px;
+  }
+
+  .clm-ms-radio-label strong {
+    font-size: 12px;
+  }
+
+  .clm-ms-radio-label small {
+    font-size: 10px;
+  }
+
+  .clm-ms-table-header {
+    padding: 6px 12px;
+    font-size: 10px;
+  }
+
+  .clm-ms-table-row {
+    padding: 8px 12px;
+    gap: 3px;
+  }
+
+  .clm-ms-col-seg {
+    flex: 1.5;
+  }
+
+  .clm-ms-seg-name {
+    font-size: 13px;
+  }
+
+  .clm-ms-calc {
+    font-size: 12px;
+  }
+
+  .clm-ms-input {
+    padding: 5px 6px;
+    font-size: 11px;
+  }
+
+  .clm-ms-totals-row {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .clm-ms-alert {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .clm-ms-hold-info {
+    padding: 16px;
+    gap: 12px;
+  }
+
+  .clm-ms-hold-icon {
+    font-size: 24px;
+  }
+
+  .clm-ms-hold-info strong {
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+
+  .clm-ms-hold-info p {
+    font-size: 12px;
+  }
+
+  /* TCL adjustments */
+  .clm-tcl-existing {
+    padding: 8px 12px;
+    margin-bottom: 10px;
+  }
+
+  .clm-tcl-existing-title {
+    font-size: 10px;
+    margin-bottom: 6px;
+  }
+
+  .clm-tcl-existing-row {
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 12px;
+  }
+
+  .clm-tcl-existing-seg {
+    min-width: 50px;
+  }
+
+  .clm-tcl-existing-date {
+    margin-left: auto;
+    font-size: 11px;
+  }
+
+  .clm-tcl-toggle-label {
+    font-size: 13px;
+  }
+
+  .clm-tcl-panel {
+    margin-top: 12px;
+  }
+
+  .clm-tcl-info-box {
+    padding: 12px 14px;
+    gap: 10px;
+  }
+
+  .clm-tcl-info-icon {
+    font-size: 16px;
+  }
+
+  .clm-tcl-info-text {
+    font-size: 12px;
+  }
+
+  .clm-tcl-panel .clm-row {
+    padding: 12px 14px;
+  }
+
+  .clm-tcl-calc-strip {
+    padding: 10px 12px;
+    gap: 0;
+  }
+
+  .clm-tcl-calc-item {
+    padding: 0 12px;
+    gap: 2px;
+  }
+
+  .clm-tcl-calc-label {
+    font-size: 9px;
+  }
+
+  .clm-tcl-calc-val {
+    font-size: 14px;
+  }
+
+  .clm-tcl-calc-arrow {
+    font-size: 16px;
+    padding: 0 4px;
+  }
+
+  .clm-tcl-warning {
+    padding: 8px 12px;
+    font-size: 11px;
+  }
+
+  /* Inner padding for tablet */
+  .clm-header,
+  .clm-section,
+  .clm-calc-panel,
+  .clm-actions,
+  .clm-success-panel {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}
+
+/* ============================================================
+   MOBILE BREAKPOINT — 480px
+   ============================================================ */
+
+@media (max-width: 480px) {
+  .clm-header {
+    padding: 14px 16px;
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .clm-title {
+    font-size: 16px;
+    flex: 1;
+  }
+
+  .clm-subtitle {
+    font-size: 11px;
+    width: 100%;
+    margin-top: 4px;
+  }
+
+  .clm-request-badge {
+    padding: 2px 10px;
+    font-size: 11px;
+    margin-left: auto;
+  }
+
+  .clm-section {
+    padding: 16px 14px;
+  }
+
+  .clm-section-title {
+    font-size: 12px;
+    margin-bottom: 14px;
+    gap: 8px;
+  }
+
+  .clm-section-num {
+    width: 20px;
+    height: 20px;
+    font-size: 10px;
+  }
+
+  .clm-row {
+    flex-direction: column;
+    gap: 0;
+    margin-bottom: 12px;
+  }
+
+  .clm-field {
+    flex: 1;
+    min-width: unset;
+    margin-bottom: 12px;
+  }
+
+  .clm-field label {
+    font-size: 12px;
+    margin-bottom: 5px;
+  }
+
+  .clm-input,
+  .clm-textarea {
+    font-size: 13px;
+    padding: 8px 10px;
+  }
+
+  .clm-textarea {
+    min-height: 70px;
+  }
+
+  .clm-input-group {
+    flex-direction: column;
+  }
+
+  .clm-input-group .clm-input {
+    margin-bottom: 8px;
+  }
+
+  .clm-input-btn {
+    width: 100%;
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .clm-field-hint {
+    font-size: 11px;
+  }
+
+  .clm-customer-strip {
+    gap: 6px;
+    padding: 10px 12px;
+    margin-top: 12px;
+  }
+
+  .clm-strip-item {
+    flex: 0 0 calc(50% - 3px);
+    min-width: unset;
+  }
+
+  .clm-strip-label {
+    font-size: 9px;
+  }
+
+  .clm-strip-value {
+    font-size: 11px;
+  }
+
+  .clm-calc-panel {
+    padding: 14px 14px;
+    margin: 12px 0 0 0;
+  }
+
+  .clm-calc-title {
+    font-size: 10px;
+    margin-bottom: 10px;
+    gap: 8px;
+  }
+
+  .clm-calc-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .clm-calc-card {
+    padding: 8px 10px;
+  }
+
+  .clm-calc-label {
+    font-size: 9px;
+    margin-bottom: 4px;
+  }
+
+  .clm-calc-value {
+    font-size: 16px;
+  }
+
+  .clm-calc-sub {
+    font-size: 10px;
+    margin-top: 2px;
+  }
+
+  .clm-alert {
+    padding: 10px 12px;
+    gap: 10px;
+    font-size: 12px;
+  }
+
+  .clm-alert-icon {
+    font-size: 16px;
+  }
+
+  .clm-hierarchy-strip {
+    padding: 10px 12px;
+    margin-top: 12px;
+    border-radius: 5px;
+  }
+
+  .clm-hierarchy-title {
+    font-size: 9px;
+    margin-bottom: 6px;
+  }
+
+  .clm-hierarchy-node {
+    padding: 3px 0;
+    font-size: 11px;
+    gap: 6px;
+  }
+
+  .clm-hierarchy-level {
+    font-size: 8px;
+    min-width: 40px;
+  }
+
+  .clm-hierarchy-name {
+    font-size: 11px;
+  }
+
+  .clm-hierarchy-limit {
+    font-size: 11px;
+  }
+
+  .clm-actions {
+    padding: 12px 14px;
+    gap: 8px;
+    flex-direction: column;
+  }
+
+  .clm-btn {
+    width: 100%;
+    padding: 10px 16px;
+    font-size: 13px;
+    min-width: unset;
+  }
+
+  .clm-success-panel {
+    padding: 40px 16px;
+  }
+
+  .clm-success-icon {
+    width: 48px;
+    height: 48px;
+    font-size: 22px;
+    margin-bottom: 16px;
+  }
+
+  .clm-success-panel h3 {
+    font-size: 16px;
+    margin-bottom: 10px;
+  }
+
+  .clm-success-panel p {
+    font-size: 12px;
+    margin-bottom: 16px;
+    line-height: 1.5;
+  }
+
+  .clm-deviation-note {
+    font-size: 11px;
+    padding: 10px 12px;
+  }
+
+  /* Multi-segment mobile */
+  .clm-ms-toggle-label {
+    font-size: 12px;
+  }
+
+  .clm-ms-method-row {
+    padding: 12px 12px;
+  }
+
+  .clm-ms-method-label {
+    font-size: 10px;
+    margin-bottom: 8px;
+  }
+
+  .clm-ms-method-options {
+    gap: 8px;
+    flex-direction: column;
+  }
+
+  .clm-ms-radio {
+    width: 100%;
+    padding: 10px 12px;
+    min-width: unset;
+    font-size: 12px;
+  }
+
+  .clm-ms-radio-label strong {
+    font-size: 12px;
+  }
+
+  .clm-ms-radio-label small {
+    font-size: 10px;
+  }
+
+  .clm-ms-table-header {
+    padding: 8px 10px;
+    font-size: 9px;
+  }
+
+  .clm-ms-table-row {
+    padding: 8px 10px;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .clm-ms-col-seg {
+    flex: 1;
+  }
+
+  .clm-ms-col-num {
+    text-align: left;
+  }
+
+  .clm-ms-seg-name {
+    font-size: 12px;
+  }
+
+  .clm-ms-calc {
+    font-size: 11px;
+  }
+
+  .clm-ms-input {
+    padding: 6px 8px;
+    font-size: 11px;
+    text-align: left;
+  }
+
+  .clm-ms-totals-row {
+    padding: 10px 10px;
+    font-size: 11px;
+    flex-direction: column;
+  }
+
+  .clm-ms-alert {
+    padding: 10px 10px;
+    font-size: 11px;
+  }
+
+  .clm-ms-hold-info {
+    padding: 14px 12px;
+    gap: 10px;
+    flex-direction: column;
+  }
+
+  .clm-ms-hold-icon {
+    font-size: 24px;
+  }
+
+  .clm-ms-hold-info strong {
+    font-size: 13px;
+    margin-bottom: 6px;
+  }
+
+  .clm-ms-hold-info p {
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  /* TCL mobile */
+  .clm-tcl-existing {
+    padding: 8px 10px;
+    margin-bottom: 10px;
+    border-radius: 4px;
+  }
+
+  .clm-tcl-existing-title {
+    font-size: 9px;
+    margin-bottom: 6px;
+  }
+
+  .clm-tcl-existing-row {
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 11px;
+    flex-wrap: wrap;
+  }
+
+  .clm-tcl-existing-seg {
+    min-width: 45px;
+    font-size: 11px;
+  }
+
+  .clm-tcl-existing-amt {
+    font-size: 11px;
+  }
+
+  .clm-tcl-existing-perm {
+    font-size: 10px;
+  }
+
+  .clm-tcl-existing-date {
+    margin-left: auto;
+    font-size: 10px;
+  }
+
+  .clm-tcl-toggle-label {
+    font-size: 12px;
+  }
+
+  .clm-tcl-panel {
+    margin-top: 10px;
+    border-radius: 5px;
+  }
+
+  .clm-tcl-info-box {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+
+  .clm-tcl-info-icon {
+    font-size: 16px;
+  }
+
+  .clm-tcl-info-text {
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .clm-tcl-panel .clm-row {
+    padding: 12px 10px;
+    margin-bottom: 8px;
+  }
+
+  .clm-tcl-panel .clm-row:last-of-type {
+    margin-bottom: 0;
+  }
+
+  .clm-tcl-calc-strip {
+    padding: 10px 10px;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .clm-tcl-calc-item {
+    padding: 8px 0;
+    gap: 3px;
+  }
+
+  .clm-tcl-calc-item:first-child {
+    padding-left: 0;
+  }
+
+  .clm-tcl-calc-label {
+    font-size: 9px;
+  }
+
+  .clm-tcl-calc-val {
+    font-size: 14px;
+  }
+
+  .clm-tcl-calc-arrow {
+    display: none;
+  }
+
+  .clm-tcl-warning {
+    padding: 10px 10px;
+    font-size: 11px;
+  }
+
+  /* Inner padding for mobile */
+  .clm-header,
+  .clm-section,
+  .clm-calc-panel,
+  .clm-actions,
+  .clm-success-panel {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+}
+
+/* ============================================================
+   EXTRA SMALL DEVICES — 360px
+   ============================================================ */
+
+@media (max-width: 360px) {
+  .clm-header {
+    padding: 12px 12px;
+  }
+
+  .clm-title {
+    font-size: 15px;
+  }
+
+  .clm-subtitle {
+    font-size: 10px;
+  }
+
+  .clm-request-badge {
+    padding: 2px 8px;
+    font-size: 10px;
+  }
+
+  .clm-section {
+    padding: 14px 12px;
+  }
+
+  .clm-section-title {
+    font-size: 11px;
+    margin-bottom: 12px;
+  }
+
+  .clm-section-num {
+    width: 18px;
+    height: 18px;
+    font-size: 9px;
+  }
+
+  .clm-field label {
+    font-size: 11px;
+  }
+
+  .clm-input,
+  .clm-textarea {
+    font-size: 12px;
+    padding: 6px 8px;
+  }
+
+  .clm-textarea {
+    min-height: 60px;
+  }
+
+  .clm-input-btn {
+    padding: 6px 10px;
+    font-size: 11px;
+  }
+
+  .clm-customer-strip {
+    gap: 4px;
+    padding: 8px 10px;
+  }
+
+  .clm-strip-label {
+    font-size: 8px;
+  }
+
+  .clm-strip-value {
+    font-size: 10px;
+  }
+
+  .clm-calc-panel {
+    padding: 12px 12px;
+  }
+
+  .clm-calc-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+  }
+
+  .clm-calc-card {
+    padding: 6px 8px;
+  }
+
+  .clm-calc-label {
+    font-size: 8px;
+  }
+
+  .clm-calc-value {
+    font-size: 14px;
+  }
+
+  .clm-alert {
+    padding: 8px 10px;
+    font-size: 11px;
+  }
+
+  .clm-hierarchy-strip {
+    padding: 8px 10px;
+  }
+
+  .clm-hierarchy-title {
+    font-size: 8px;
+  }
+
+  .clm-hierarchy-node {
+    font-size: 10px;
+  }
+
+  .clm-hierarchy-level {
+    font-size: 7px;
+    min-width: 35px;
+  }
+
+  .clm-actions {
+    padding: 10px 12px;
+    gap: 6px;
+  }
+
+  .clm-btn {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .clm-success-panel {
+    padding: 32px 12px;
+  }
+
+  .clm-success-icon {
+    width: 40px;
+    height: 40px;
+    font-size: 18px;
+    margin-bottom: 12px;
+  }
+
+  .clm-success-panel h3 {
+    font-size: 14px;
+    margin-bottom: 8px;
+  }
+
+  .clm-success-panel p {
+    font-size: 11px;
+  }
+
+  /* Inner padding for extra small */
+  .clm-header,
+  .clm-section,
+  .clm-calc-panel,
+  .clm-actions,
+  .clm-success-panel {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+}
+
+/* ============================================================
+   DESKTOP BREAKPOINT — 1024px+
+   ============================================================ */
+
+@media (min-width: 1024px) {
+  .clm-header,
+  .clm-section,
+  .clm-calc-panel,
+  .clm-actions,
+  .clm-success-panel {
+    padding-left: 28px;
+    padding-right: 28px;
+  }
+
+  .clm-row {
+    gap: 24px;
+  }
+
+  .clm-field {
+    min-width: 220px;
+  }
+
+  .clm-actions {
+    justify-content: flex-end;
+  }
+
+  .clm-btn {
+    flex: 0 1 auto;
+  }
+
+  .clm-calc-grid {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  }
+}
+
+/* ============================================================
+   ULTRA WIDE — 1600px+
+   ============================================================ */
+
+@media (min-width: 1600px) {
+  .clm-header,
+  .clm-section,
+  .clm-calc-panel,
+  .clm-actions,
+  .clm-success-panel {
+    padding-left: 48px;
+    padding-right: 48px;
+  }
+
+  .clm-row {
+    gap: 32px;
+  }
+
+  .clm-field {
+    min-width: 250px;
+  }
+
+  .clm-calc-grid {
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 16px;
+  }
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id&gt;clm_trade_credit_limit_request&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;CLM Trade Credit Limit Request&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+
+    var action = input &amp;&amp; input.action;
+
+    // ── loadCustomer ──────────────────────────────────────────
+    if (action === 'loadCustomer') {
+
+        var custGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        custGr.addQuery('customer_code_sap', (input.customerCode + '').trim().toUpperCase());
+        custGr.setLimit(1);
+        custGr.query();
+
+        if (!custGr.next()) { data.customer = null; return; }
+
+        var vintageDays = 0;
+        var fos = custGr.first_order_date + '';
+        if (fos &amp;&amp; fos !== '' &amp;&amp; fos !== 'null') {
+            var fd = new GlideDate(); fd.setValue(fos);
+            var td = new GlideDate();
+            var dd = Math.floor((td.getNumericValue() - fd.getNumericValue()) / (1000 * 60 * 60 * 24));
+            vintageDays = dd &gt; 0 ? dd : 0;
+        }
+
+        var outstanding = 0;
+        var agGr = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+        agGr.addQuery('customer', custGr.sys_id + '');
+        agGr.orderByDesc('snapshot_month');
+        agGr.setLimit(1);
+        agGr.query();
+        if (agGr.next()) outstanding = parseFloat(agGr.total_outstanding) || 0;
+
+        var permanentLimit = 0;
+        var pGr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        pGr.addQuery('customer', custGr.sys_id + '');
+        pGr.addQuery('state',    'Approved');
+        pGr.addQuery('is_tcl',   false);
+        pGr.orderByDesc('sys_created_on');
+        pGr.setLimit(1);
+        pGr.query();
+        if (pGr.next()) permanentLimit = parseFloat(pGr.approved_limit) || 0;
+
+        data.customer = {
+            sys_id:            custGr.sys_id + '',
+            name:              custGr.customer_name + '',
+            customer_type:     custGr.customer_type + '',
+            segment:           custGr.segment + '',
+            zone:              custGr.zone + '',
+            region:            custGr.region + '',
+					pan:            custGr.pan + '',
+            cg2_code:          custGr.cg2_code + '',
+            vintage_days:      vintageDays,
+            current_sd:        parseFloat(custGr.current_sd_amount)    || 0,
+            current_limit:     parseFloat(custGr.current_credit_limit) || 0,
+            avg_monthly_sales: parseFloat(custGr.avg_monthly_sales_mt) || 0,
+            order_rate:        7000,
+            outstanding:       outstanding,
+            permanent_limit:   permanentLimit,
+            active_tcls:       []
+        };
+    }
+
+    // ── calculate ─────────────────────────────────────────────
+    else if (action === 'calculate') {
+
+        var custSysId = input.customerSysId || '';
+        var req       = parseFloat(input.requestedLimit)  || 0;
+        var sd        = parseFloat(input.activeSD)        || 0;
+        var os        = parseFloat(input.outstanding)     || 0;
+        var avg       = parseFloat(input.avgMonthlySales) || 0;
+        var segment   = input.segment    || 'Cement';
+        var cg2Code   = input.cg2Code    || '';
+        var vin       = parseInt(input.vintageDays) || 0;
+
+        // Aging
+        var total=0, safe=0, warning=0, critical=0, toxic=0, mCount=0;
+        var salesLast=0, salesPrev=0;
+
+        var agGr2 = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+        agGr2.addQuery('customer', custSysId);
+        agGr2.orderByDesc('snapshot_month');
+        agGr2.setLimit(6);
+        agGr2.query();
+
+        while (agGr2.next()) {
+            mCount++;
+            total    += parseFloat(agGr2.total_outstanding)   || 0;
+            safe     += (parseFloat(agGr2.bucket_0_30_days)   || 0)
+                      + (parseFloat(agGr2.bucket_31_45_days)  || 0)
+                      + (parseFloat(agGr2.bucket_46_60_days)  || 0);
+            warning  += parseFloat(agGr2.bucket_61_75_days)   || 0;
+            critical += parseFloat(agGr2.bucket_76_90_days)   || 0;
+            toxic    += (parseFloat(agGr2.bucket_91_120_days) || 0)
+                      + (parseFloat(agGr2.bucket_gt120_days)  || 0);
+            if (mCount === 1) {
+                salesLast = parseFloat(agGr2.sales_current_month) || 0;
+                salesPrev = parseFloat(agGr2.sales_prev_month)    || 0;
+            }
+        }
+
+        // Aging rating
+        var agRating = 'A';
+        if (total &gt; 0) {
+            var sp = safe  / total;
+            var tp = (critical + toxic) / total;
+            if      (sp &gt;= 0.80 &amp;&amp; tp &lt;= 0.10) agRating = 'A';
+            else if (sp &gt;= 0.60 &amp;&amp; tp &lt;= 0.20) agRating = 'B';
+            else                                agRating = 'C';
+        }
+
+        // NOD
+        var nod = 0;
+        var avg2M = (salesLast + salesPrev) / 2;
+        if (vin &lt;= 60) {
+            if (avg &gt; 0) nod = Math.ceil((os / avg) * Math.min(vin, 60));
+        } else {
+            if (avg2M &gt; 0) nod = Math.round((os / avg2M) * 30);
+        }
+
+        // Multiplier
+        var multiplier = 1;
+        if (vin &lt; 90) {
+            multiplier = 1;
+        } else if (vin &lt; 180) {
+            multiplier = (nod &lt; 15 &amp;&amp; avg &gt; 1000) ? 2 : 1;
+        } else {
+            var mGr = new GlideRecord('x_birl3_clm_clm_multiplier');
+            mGr.addQuery('cg2_code',  cg2Code);
+            mGr.addQuery('segment',   segment);
+            mGr.addQuery('is_active', true);
+            mGr.setLimit(1);
+            mGr.query();
+            if (mGr.next()) multiplier = parseInt(mGr.multiplier) || 1;
+            else {
+                if      (cg2Code === 'CG2_A' || cg2Code === 'PMNT_GOOD') multiplier = 4;
+                else if (cg2Code === 'CG2_B')                              multiplier = 2;
+                else                                                        multiplier = 1;
+            }
+        }
+
+        var netExp   = Math.max(0, req - sd);
+        var maxAllw  = sd * multiplier;
+        var implMult = sd &gt; 0 ? req / sd : 0;
+        var isDev    = req &gt; maxAllw;
+
+        // Pass vintageDays to router for BPD logic
+        var router   = new CLMApprovalRouter();
+        var approver = router.getApprover(segment, 'Trade', netExp, nod, isDev, implMult, vin);
+
+        data.calc = {
+            multiplier:   multiplier,
+            maxAllowable: maxAllw  / 100000,
+            netExposure:  netExp   / 100000,
+            impliedMult:  implMult,
+            isDeviation:  isDev,
+            nod:          nod,
+            agingRating:  agRating,
+            approverRole: approver.role,
+            escalated:    approver.escalated || false,
+            reason:       approver.reason    || ''
+        };
+    }
+
+    // ── saveDraft ─────────────────────────────────────────────
+    else if (action === 'saveDraft') {
+        var f  = input.form;
+        var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        if (f.draftSysId) gr.get(f.draftSysId); else gr.initialize();
+        gr.customer_type           = f.customerType;
+        gr.segment                 = f.segment;
+        gr.customer                = f.customerSysId;
+        gr.requested_limit         = f.requestedLimit;
+        gr.active_sd               = f.activeSD;
+        gr.outstanding_amount      = f.outstanding;
+        gr.avg_monthly_sales       = f.avgMonthlySales;
+        gr.sales_last_month        = f.salesLastMonth;
+        gr.sales_prev_month        = f.salesPrevMonth;
+        gr.cheque_bounces_12m      = f.chequeBounces;
+        gr.market_perception       = f.marketPerception;
+        gr.business_justification  = f.justification;
+        gr.deviation_justification = f.deviationJustification;
+        gr.state                   = 'Draft';
+        gr.initiator               = gs.getUserID();
+        var sysId = f.draftSysId ? gr.update() : gr.insert();
+        var gr2 = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        gr2.get(sysId);
+        data.sysId  = sysId;
+        data.number = gr2.request_number + '';
+    }
+
+    // ── submit ────────────────────────────────────────────────
+    else if (action === 'submit') {
+        var f = input.form;
+        try {
+            var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+            gr.initialize();
+            gr.customer_type           = f.customerType;
+            gr.segment                 = f.segment;
+            gr.customer                = f.customerSysId;
+            gr.requested_limit         = f.requestedLimit;
+            gr.active_sd               = f.activeSD;
+            gr.outstanding_amount      = f.outstanding;
+            gr.avg_monthly_sales       = f.avgMonthlySales;
+            gr.sales_last_month        = f.salesLastMonth;
+            gr.sales_prev_month        = f.salesPrevMonth;
+            gr.cheque_bounces_12m      = f.chequeBounces;
+            gr.market_perception       = f.marketPerception;
+            gr.business_justification  = f.justification;
+            gr.deviation_justification = f.deviationJustification;
+            gr.initiator               = gs.getUserID();
+            gr.state                   = 'Submitted';
+
+            if (f.multiSegment &amp;&amp; f.multiSegment.is_multi_segment) {
+                gr.is_multi_segment      = true;
+                gr.total_requested_limit = f.requestedLimit;
+            }
+
+            var sysId = gr.insert();
+            if (!sysId) { data.success = false; data.error = 'Failed to create request.'; return; }
+
+            var result = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+            result.get(sysId);
+            data.success       = true;
+            data.requestNumber = result.request_number + '';
+            data.approverRole  = result.required_approver_level + '';
+            data.isDeviation   = result.is_deviation + '' === 'true';
+            data.sysId         = sysId;
+
+        } catch(e) {
+            data.success = false;
+            data.error   = 'Error: ' + e.message;
+        }
+    }
+
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;vedant.salunke@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-03-21 13:14:34&lt;/sys_created_on&gt;&lt;sys_id&gt;653a298d97f33290be31fa17f053af59&lt;/sys_id&gt;&lt;sys_mod_count&gt;31&lt;/sys_mod_count&gt;&lt;sys_name&gt;CLM Trade Credit Limit Request&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_653a298d97f33290be31fa17f053af59&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;vedant.salunke@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-03-27 05:09:37&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;!--
+  CLM ADAPTIVE REQUEST FORM — Widget HTML (UPDATED)
+  Widget ID: clm-trade-request
+  
+  Replaces existing HTML entirely.
+  Auto-detects customer type on search and shows correct sections.
+--&gt;
+
+&lt;div class="clm-widget"&gt;
+
+  &lt;!-- ── HEADER ── --&gt;
+  &lt;div class="clm-header"&gt;
+    &lt;div class="clm-header-left"&gt;
+      &lt;div class="clm-title"&gt;
+        &lt;span ng-if="!c.data.customerType || c.data.customerType == 'Trade'"&gt;Trade Customer&lt;/span&gt;
+        &lt;span ng-if="c.data.customerType == 'Non-Trade'"&gt;Non-Trade Customer&lt;/span&gt;
+        &lt;span ng-if="c.data.customerType == 'Key'"&gt;Key Customer&lt;/span&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-subtitle"&gt;Credit Limit Request&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="clm-header-right" ng-if="c.data.requestNumber"&gt;
+      &lt;div class="clm-request-badge"&gt;{{c.data.requestNumber}}&lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;!-- ── SUCCESS STATE ── --&gt;
+  &lt;div class="clm-success-panel" ng-if="c.data.submitted"&gt;
+    &lt;div class="clm-success-icon"&gt;✓&lt;/div&gt;
+    &lt;h3&gt;Request Submitted Successfully&lt;/h3&gt;
+    &lt;p&gt;Request &lt;strong&gt;{{c.data.requestNumber}}&lt;/strong&gt; has been created and routed to &lt;strong&gt;{{c.data.approverRole}}&lt;/strong&gt; for approval.&lt;/p&gt;
+    &lt;div ng-if="c.data.isDeviation" class="clm-deviation-note"&gt;
+      ⚠ This is a deviation request — approval requires justification review.
+    &lt;/div&gt;
+    &lt;button class="clm-btn clm-btn-outline" ng-click="c.resetForm()"&gt;Submit Another Request&lt;/button&gt;
+  &lt;/div&gt;
+
+  &lt;!-- ── MAIN FORM ── --&gt;
+  &lt;form name="clmForm" ng-submit="c.submit()" ng-if="!c.data.submitted"&gt;
+
+    &lt;!-- ══════════════════════════════════════════════════════
+         SECTION 1: CUSTOMER DETAILS (same for all types)
+    ══════════════════════════════════════════════════════ --&gt;
+    &lt;div class="clm-section"&gt;
+      &lt;div class="clm-section-title"&gt;
+        &lt;span class="clm-section-num"&gt;1&lt;/span&gt; Customer Details
+      &lt;/div&gt;
+
+      &lt;div class="clm-row"&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Customer Code (SAP) &lt;span class="req"&gt;*&lt;/span&gt;&lt;/label&gt;
+          &lt;div class="clm-input-group"&gt;
+            &lt;input type="text"
+                   ng-model="c.data.customerCode"
+                   ng-blur="c.loadCustomer()"
+                   ng-change="c.clearCustomer()"
+                   placeholder="e.g. NT001 or KEY_C001"
+                   class="clm-input" required /&gt;
+            &lt;button type="button" class="clm-input-btn"
+                    ng-click="c.loadCustomer()"
+                    ng-disabled="!c.data.customerCode"&gt;Search&lt;/button&gt;
+          &lt;/div&gt;
+          &lt;div class="clm-field-msg clm-error" ng-if="c.data.customerError"&gt;
+            {{c.data.customerError}}
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Customer Name&lt;/label&gt;
+          &lt;input type="text" ng-model="c.data.customerName"
+                 class="clm-input" readonly placeholder="Auto-filled on search" /&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-field"&gt;
+  &lt;label&gt;Segment &lt;span class="req"&gt;*&lt;/span&gt;&lt;/label&gt;
+  &lt;input type="text" ng-model="c.data.segment"
+         class="clm-input"
+         readonly placeholder="Auto-filled from customer master" /&gt;
+
+  &lt;div class="clm-field-hint" ng-if="c.data.segment"&gt;
+    Auto-filled from customer master.
+  &lt;/div&gt;
+&lt;/div&gt;
+
+      &lt;!-- Customer info strip --&gt;
+      &lt;div class="clm-customer-strip" ng-if="c.data.customerName"&gt;
+        &lt;div class="clm-strip-item"&gt;
+          &lt;span class="clm-strip-label"&gt;Type&lt;/span&gt;
+          &lt;span class="clm-strip-value"
+                ng-class="{
+                  'clm-type-trade':    c.data.customerType == 'Trade',
+                  'clm-type-nontrade': c.data.customerType == 'Non-Trade',
+                  'clm-type-key':      c.data.customerType == 'Key'
+                }"&gt;
+            {{c.data.customerType || '—'}}
+          &lt;/span&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-strip-item"&gt;
+          &lt;span class="clm-strip-label"&gt;Zone&lt;/span&gt;
+          &lt;span class="clm-strip-value"&gt;{{c.data.zone || '—'}}&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-strip-item"&gt;
+          &lt;span class="clm-strip-label"&gt;Region&lt;/span&gt;
+          &lt;span class="clm-strip-value"&gt;{{c.data.region || '—'}}&lt;/span&gt;
+        &lt;/div&gt;
+        
+        &lt;div class="clm-strip-item"&gt;
+          &lt;span class="clm-strip-label"&gt;PAN&lt;/span&gt;
+          &lt;span class="clm-strip-value"&gt;{{c.data.pan || '—'}}&lt;/span&gt;
+        &lt;/div&gt;
+        
+        
+        &lt;div class="clm-strip-item" ng-if="c.data.customerType == 'Trade'"&gt;
+          &lt;span class="clm-strip-label"&gt;CG2 Code&lt;/span&gt;
+          &lt;span class="clm-strip-value"&gt;{{c.data.cg2Code || '—'}}&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-strip-item" ng-if="c.data.customerType != 'Trade'"&gt;
+          &lt;span class="clm-strip-label"&gt;Constitution&lt;/span&gt;
+          &lt;span class="clm-strip-value"&gt;{{c.data.constitution || '—'}}&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-strip-item" ng-if="c.data.customerType != 'Trade'"&gt;
+          &lt;span class="clm-strip-label"&gt;Listed&lt;/span&gt;
+          &lt;span class="clm-strip-value"&gt;{{c.data.isListed ? 'Yes' : 'No'}}&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-strip-item"&gt;
+          &lt;span class="clm-strip-label"&gt;Customer Since&lt;/span&gt;
+          &lt;span class="clm-strip-value"&gt;{{c.data.vintageDays}} days&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-strip-item"&gt;
+          &lt;span class="clm-strip-label"&gt;Current Limit&lt;/span&gt;
+          &lt;span class="clm-strip-value"&gt;₹{{c.data.currentLimit | number:2}}L&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;!-- Key customer hierarchy --&gt;
+        &lt;div class="clm-strip-item" ng-if="c.data.customerType == 'Key' &amp;&amp; c.data.hierarchyLevel"&gt;
+          &lt;span class="clm-strip-label"&gt;Hierarchy Level&lt;/span&gt;
+          &lt;span class="clm-strip-value"&gt;{{c.data.hierarchyLevel}}&lt;/span&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- ══════════════════════════════════════════════════════
+         SECTION 2A: TRADE — Credit Limit &amp; SD
+    ══════════════════════════════════════════════════════ --&gt;
+ &lt;div class="clm-section" ng-if="c.data.customerType == 'Trade'"&gt;
+  &lt;div class="clm-section-title"&gt;
+    &lt;span class="clm-section-num"&gt;2&lt;/span&gt; Credit Limit &amp;amp; Security Deposit
+  &lt;/div&gt;
+
+  &lt;!-- Input Row --&gt;
+  &lt;div class="clm-row"&gt;
+    
+    &lt;div class="clm-field"&gt;
+      &lt;label&gt;Active Security Deposit (₹) &lt;span class="req"&gt;*&lt;/span&gt;&lt;/label&gt;
+      &lt;input type="number" ng-model="c.data.activeSD"
+             class="clm-input" min="0" readonly /&gt;
+    &lt;/div&gt;
+
+    &lt;div class="clm-field"&gt;
+      &lt;label&gt;Requested Credit Limit (₹) &lt;span class="req"&gt;*&lt;/span&gt;&lt;/label&gt;
+      &lt;input type="number" ng-model="c.data.requestedLimit"
+             ng-change="c.recalculate()" class="clm-input" min="0" required /&gt;
+    &lt;/div&gt;
+
+    &lt;div class="clm-field"&gt;
+      &lt;label&gt;Current Outstanding (₹) &lt;span class="req"&gt;*&lt;/span&gt;&lt;/label&gt;
+      &lt;input type="number" ng-model="c.data.outstanding"
+             class="clm-input" min="0" readonly /&gt;
+    &lt;/div&gt;
+
+  &lt;/div&gt;
+
+  &lt;!-- Single Row for Live Calculations --&gt;
+  &lt;div class="clm-row clm-field-hint" 
+       ng-if="c.data.activeSD || c.data.requestedLimit || c.data.outstanding"&gt;
+       
+    &lt;div class="clm-field" ng-if="c.data.activeSD"&gt;
+      Active SD: ₹{{c.data.activeSD / 100000 | number:2}} Lakhs
+    &lt;/div&gt;
+
+    &lt;div class="clm-field" ng-if="c.data.requestedLimit"&gt;
+      Requested Limit: ₹{{c.data.requestedLimit / 100000 | number:2}} Lakhs
+    &lt;/div&gt;
+
+    &lt;div class="clm-field" ng-if="c.data.outstanding"&gt;
+      Outstanding: ₹{{c.data.outstanding / 100000 | number:2}} Lakhs
+    &lt;/div&gt;
+
+  &lt;/div&gt;
+&lt;/div&gt;
+    &lt;!-- ══════════════════════════════════════════════════════
+         SECTION 2B: NON-TRADE / KEY — Credit Limit Request
+    ══════════════════════════════════════════════════════ --&gt;
+    &lt;div class="clm-section"
+         ng-if="c.data.customerType == 'Non-Trade' || c.data.customerType == 'Key'"&gt;
+      &lt;div class="clm-section-title"&gt;
+        &lt;span class="clm-section-num"&gt;2&lt;/span&gt; Credit Limit Request
+      &lt;/div&gt;
+
+      &lt;div class="clm-row"&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Requested Credit Limit (₹) &lt;span class="req"&gt;*&lt;/span&gt;&lt;/label&gt;
+          &lt;input type="number" ng-model="c.data.requestedLimit"
+                 ng-change="c.recalculate()" class="clm-input" min="0" required /&gt;
+          &lt;div class="clm-field-hint" ng-if="c.data.requestedLimit"&gt;
+            ₹{{c.data.requestedLimit / 100000 | number:2}} Lakhs
+            &lt;span class="clm-path-badge"
+                  ng-class="c.data.calc.workflowPath == 'Tool' ? 'clm-badge-tool' : 'clm-badge-nontool'"
+                  ng-if="c.data.calc.workflowPath"&gt;
+              {{c.data.calc.workflowPath}} Working
+            &lt;/span&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Active BG/LC (₹) &lt;small style="color:#aaa"&gt;if any&lt;/small&gt;&lt;/label&gt;
+          &lt;input type="number" ng-model="c.data.activeSD"
+                 ng-change="c.recalculate()" class="clm-input" min="0"
+                 placeholder="0 if no collateral" /&gt;
+          &lt;div class="clm-field-hint" ng-if="c.data.activeSD &gt; 0"&gt;
+            ₹{{c.data.activeSD / 100000 | number:2}} Lakhs
+          &lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Current Outstanding (₹)&lt;/label&gt;
+          &lt;input type="number" ng-model="c.data.outstanding"
+                 class="clm-input" min="0" placeholder="Auto-loaded from aging" /&gt;
+          &lt;div class="clm-field-hint" ng-if="c.data.outstanding"&gt;
+            ₹{{c.data.outstanding / 100000 | number:2}} Lakhs
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- ══════════════════════════════════════════════════════
+         LIVE CALCULATION PANEL — TRADE
+    ══════════════════════════════════════════════════════ --&gt;
+    &lt;div class="clm-calc-panel"
+         ng-if="c.data.customerType == 'Trade' &amp;&amp; c.data.activeSD &gt; 0 &amp;&amp; c.data.requestedLimit &gt; 0"&gt;
+      &lt;div class="clm-calc-title"&gt;Live Calculation&lt;/div&gt;
+      &lt;div class="clm-calc-grid"&gt;
+        &lt;div class="clm-calc-card"&gt;
+          &lt;div class="clm-calc-label"&gt;System Multiplier&lt;/div&gt;
+          &lt;div class="clm-calc-value"&gt;{{c.data.calc.multiplier || '—'}}x&lt;/div&gt;
+          &lt;div class="clm-calc-sub"&gt;Based on {{c.data.vintageDays}} days vintage&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-calc-card"&gt;
+          &lt;div class="clm-calc-label"&gt;Max Allowable&lt;/div&gt;
+          &lt;div class="clm-calc-value"&gt;₹{{c.data.calc.maxAllowable | number:2}}L&lt;/div&gt;
+          &lt;div class="clm-calc-sub"&gt;SD × Multiplier&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-calc-card"&gt;
+          &lt;div class="clm-calc-label"&gt;Net Exposure&lt;/div&gt;
+          &lt;div class="clm-calc-value"&gt;₹{{c.data.calc.netExposure | number:2}}L&lt;/div&gt;
+          &lt;div class="clm-calc-sub"&gt;Requested − SD&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-calc-card"&gt;
+          &lt;div class="clm-calc-label"&gt;Implied Multiplier&lt;/div&gt;
+          &lt;div class="clm-calc-value"
+               ng-class="c.data.calc.isDeviation ? 'clm-val-danger' : 'clm-val-ok'"&gt;
+            {{c.data.calc.impliedMult | number:2}}x
+          &lt;/div&gt;
+          &lt;div class="clm-calc-sub"&gt;Requested ÷ SD&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-calc-card"&gt;
+          &lt;div class="clm-calc-label"&gt;Approver&lt;/div&gt;
+          &lt;div class="clm-calc-value clm-val-approver"&gt;{{c.data.calc.approverRole || '—'}}&lt;/div&gt;
+          &lt;div class="clm-calc-sub" ng-if="c.data.calc.escalated" style="color:#e74c3c"&gt;
+            ↑ Escalated
+          &lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-calc-card"&gt;
+          &lt;div class="clm-calc-label"&gt;Aging Rating&lt;/div&gt;
+          &lt;div class="clm-calc-value"
+               ng-class="{
+                 'clm-val-ok':     c.data.calc.agingRating == 'A',
+                 'clm-val-warn':   c.data.calc.agingRating == 'B',
+                 'clm-val-danger': c.data.calc.agingRating == 'C'
+               }"&gt;
+            {{c.data.calc.agingRating || '—'}}
+          &lt;/div&gt;
+          &lt;div class="clm-calc-sub"&gt;6-month history&lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;!-- Deviation alert --&gt;
+      &lt;div class="clm-alert clm-alert-danger" ng-if="c.data.calc.isDeviation"&gt;
+        &lt;div class="clm-alert-icon"&gt;⚠&lt;/div&gt;
+        &lt;div class="clm-alert-body"&gt;
+          &lt;strong&gt;Deviation&lt;/strong&gt; — Implied {{c.data.calc.impliedMult | number:2}}x exceeds system {{c.data.calc.multiplier}}x. Higher approval required.
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-alert clm-alert-success" ng-if="!c.data.calc.isDeviation"&gt;
+        &lt;div class="clm-alert-icon"&gt;✓&lt;/div&gt;
+        &lt;div class="clm-alert-body"&gt;&lt;strong&gt;Within Limits&lt;/strong&gt; — Routes to &lt;strong&gt;{{c.data.calc.approverRole}}&lt;/strong&gt;&lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- ══════════════════════════════════════════════════════
+         LIVE CALCULATION PANEL — NON-TRADE / KEY
+    ══════════════════════════════════════════════════════ --&gt;
+    &lt;div class="clm-calc-panel"
+         ng-if="(c.data.customerType == 'Non-Trade' || c.data.customerType == 'Key') &amp;&amp; c.data.requestedLimit &gt; 0 &amp;&amp; c.data.calc.p1"&gt;
+      &lt;div class="clm-calc-title"&gt;
+        P1 × P2 × P3 Calculation
+        &lt;span class="clm-path-badge"
+              ng-class="c.data.calc.workflowPath == 'Tool' ? 'clm-badge-tool' : 'clm-badge-nontool'"&gt;
+          {{c.data.calc.workflowPath}} Working
+        &lt;/span&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-calc-grid"&gt;
+        &lt;div class="clm-calc-card"&gt;
+          &lt;div class="clm-calc-label"&gt;P1 — MACL&lt;/div&gt;
+          &lt;div class="clm-calc-value"&gt;₹{{c.data.calc.p1 | number:1}}L&lt;/div&gt;
+          &lt;div class="clm-calc-sub"&gt;{{c.data.isListed ? 'Net Worth based' : 'MPQ based'}}&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-calc-card"&gt;
+          &lt;div class="clm-calc-label"&gt;P2 — Composite&lt;/div&gt;
+          &lt;div class="clm-calc-value"&gt;{{(c.data.calc.p2 * 100) | number:1}}%&lt;/div&gt;
+          &lt;div class="clm-calc-sub"&gt;Operational score&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-calc-card"&gt;
+          &lt;div class="clm-calc-label"&gt;P3 — Credit&lt;/div&gt;
+          &lt;div class="clm-calc-value"
+               ng-class="{
+                 'clm-val-ok':     c.data.calc.p3 &gt;= 0.75,
+                 'clm-val-warn':   c.data.calc.p3 &gt;= 0.5 &amp;&amp; c.data.calc.p3 &lt; 0.75,
+                 'clm-val-danger': c.data.calc.p3 &lt; 0.5
+               }"&gt;
+            {{(c.data.calc.p3 * 100) | number:0}}%
+          &lt;/div&gt;
+          &lt;div class="clm-calc-sub"&gt;{{c.data.calc.creditKey || '—'}}&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-calc-card"
+             ng-class="c.data.calc.isDeviation ? 'clm-calc-card-danger' : 'clm-calc-card-safe'"&gt;
+          &lt;div class="clm-calc-label"&gt;Safe Allowable&lt;/div&gt;
+          &lt;div class="clm-calc-value"
+               ng-class="c.data.calc.isDeviation ? 'clm-val-danger' : 'clm-val-ok'"&gt;
+            ₹{{c.data.calc.safeLimit | number:1}}L
+          &lt;/div&gt;
+          &lt;div class="clm-calc-sub"&gt;P1 × P2 × P3&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-calc-card"&gt;
+          &lt;div class="clm-calc-label"&gt;Approver&lt;/div&gt;
+          &lt;div class="clm-calc-value clm-val-approver"&gt;{{c.data.calc.approverRole || '—'}}&lt;/div&gt;
+          &lt;div class="clm-calc-sub" ng-if="c.data.calc.escalated" style="color:#e74c3c"&gt;
+            ↑ Escalated
+          &lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-calc-card"&gt;
+          &lt;div class="clm-calc-label"&gt;Aging Rating&lt;/div&gt;
+          &lt;div class="clm-calc-value"
+               ng-class="{
+                 'clm-val-ok':     c.data.calc.agingRating == 'a' || c.data.calc.agingRating == 'A',
+                 'clm-val-warn':   c.data.calc.agingRating == 'b' || c.data.calc.agingRating == 'B',
+                 'clm-val-danger': c.data.calc.agingRating == 'c' || c.data.calc.agingRating == 'C'
+               }"&gt;
+            {{c.data.calc.agingRating || '—'}}
+          &lt;/div&gt;
+          &lt;div class="clm-calc-sub"&gt;6-month history&lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;!-- NT Deviation alert --&gt;
+      &lt;div class="clm-alert clm-alert-danger" ng-if="c.data.calc.isDeviation"&gt;
+        &lt;div class="clm-alert-icon"&gt;⚠&lt;/div&gt;
+        &lt;div class="clm-alert-body"&gt;
+          &lt;strong&gt;Deviation&lt;/strong&gt; — Requested ₹{{c.data.requestedLimit / 100000 | number:1}}L exceeds
+          Safe Allowable Limit ₹{{c.data.calc.safeLimit | number:1}}L.
+          Mandatory deviation justification required below.
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-alert clm-alert-success" ng-if="!c.data.calc.isDeviation"&gt;
+        &lt;div class="clm-alert-icon"&gt;✓&lt;/div&gt;
+        &lt;div class="clm-alert-body"&gt;
+          &lt;strong&gt;Within Safe Limit&lt;/strong&gt; — Routes to &lt;strong&gt;{{c.data.calc.approverRole}}&lt;/strong&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- ══════════════════════════════════════════════════════
+         SECTION 3A: TRADE — Sales &amp; Risk Data
+    ══════════════════════════════════════════════════════ --&gt;
+    &lt;div class="clm-section" ng-if="c.data.customerType == 'Trade'"&gt;
+      &lt;div class="clm-section-title"&gt;
+        &lt;span class="clm-section-num"&gt;3&lt;/span&gt; Sales &amp;amp; Risk Data
+      &lt;/div&gt;
+      &lt;div class="clm-row"&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Avg Monthly Sales — Last 12M (MT)&lt;/label&gt;
+          &lt;input type="number" ng-model="c.data.avgMonthlySales"
+                 ng-change="c.recalculate()" class="clm-input" min="0" /&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Sales Last Month (₹)&lt;/label&gt;
+          &lt;input type="number" ng-model="c.data.salesLastMonth" class="clm-input" min="0" /&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Sales Last 6 Months (₹)&lt;/label&gt;
+          &lt;input type="number" ng-model="c.data.salesPrevMonth" class="clm-input" min="0" /&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-row"&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Cheque Bounces (Last 12 Months)&lt;/label&gt;
+          &lt;input type="number" ng-model="c.data.chequeBounces" class="clm-input" min="0" /&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Market Perception&lt;/label&gt;
+          &lt;select ng-model="c.data.marketPerception" class="clm-input"&gt;
+            &lt;option value=""&gt;-- Select --&lt;/option&gt;
+            &lt;option value="A"&gt;A — Good&lt;/option&gt;
+            &lt;option value="B"&gt;B — Average&lt;/option&gt;
+            &lt;option value="C"&gt;C — Non-Consistent&lt;/option&gt;
+            &lt;option value="D"&gt;D — Defaulter&lt;/option&gt;
+          &lt;/select&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- ══════════════════════════════════════════════════════
+         SECTION 3B: NON-TRADE / KEY — Project &amp; Risk Data
+    ══════════════════════════════════════════════════════ --&gt;
+    &lt;div class="clm-section"
+         ng-if="c.data.customerType == 'Non-Trade' || c.data.customerType == 'Key'"&gt;
+      &lt;div class="clm-section-title"&gt;
+        &lt;span class="clm-section-num"&gt;3&lt;/span&gt; Project &amp;amp; Risk Data
+      &lt;/div&gt;
+      &lt;div class="clm-row"&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Sales Last Month (₹)&lt;/label&gt;
+          &lt;input type="number" ng-model="c.data.salesLastMonth" class="clm-input" min="0" /&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Sales Previous Month (₹)&lt;/label&gt;
+          &lt;input type="number" ng-model="c.data.salesPrevMonth" class="clm-input" min="0" /&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;label&gt;Market Perception&lt;/label&gt;
+          &lt;select ng-model="c.data.marketPerception" class="clm-input"&gt;
+            &lt;option value=""&gt;-- Select --&lt;/option&gt;
+            &lt;option value="A"&gt;A — Good&lt;/option&gt;
+            &lt;option value="B"&gt;B — Average&lt;/option&gt;
+            &lt;option value="C"&gt;C — Non-Consistent&lt;/option&gt;
+            &lt;option value="D"&gt;D — Defaulter&lt;/option&gt;
+          &lt;/select&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;!-- Key customer: show current exposure across hierarchy --&gt;
+      &lt;div ng-if="c.data.customerType == 'Key' &amp;&amp; c.data.hierarchyData" class="clm-hierarchy-strip"&gt;
+        &lt;div class="clm-hierarchy-title"&gt;Group Exposure&lt;/div&gt;
+        &lt;div ng-repeat="node in c.data.hierarchyData" class="clm-hierarchy-node"&gt;
+          &lt;span class="clm-hierarchy-level"&gt;{{node.level}}&lt;/span&gt;
+          &lt;span class="clm-hierarchy-name"&gt;{{node.name}}&lt;/span&gt;
+          &lt;span class="clm-hierarchy-limit"&gt;₹{{node.limit | number:1}}L active&lt;/span&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- ══════════════════════════════════════════════════════
+         SECTION 4: BUSINESS JUSTIFICATION (all types)
+    ══════════════════════════════════════════════════════ --&gt;
+     &lt;div class="clm-section" ng-if="c.data.customerType == 'Trade'"&gt;
+      &lt;div class="clm-section-title"&gt;
+        &lt;span class="clm-section-num"&gt;4&lt;/span&gt; Business Justification &lt;span class="req"&gt;*&lt;/span&gt;
+      &lt;/div&gt;
+      &lt;textarea ng-model="c.data.justification"
+                class="clm-textarea" rows="4"
+                placeholder="Explain the business reason for this credit limit request..."
+                required&gt;&lt;/textarea&gt;
+
+      &lt;!-- Deviation justification (all types) --&gt;
+      &lt;div ng-if="c.data.calc.isDeviation" style="margin-top:12px"&gt;
+        &lt;label style="font-weight:600;color:#c0392b"&gt;
+          Deviation Justification &lt;span class="req"&gt;*&lt;/span&gt;
+          &lt;small&gt;(Required — request exceeds safe limit)&lt;/small&gt;
+        &lt;/label&gt;
+        &lt;textarea ng-model="c.data.deviationJustification"
+                  class="clm-textarea clm-textarea-danger" rows="3"
+                  placeholder="Explain why the requested limit exceeds the calculated safe limit..."
+                  ng-required="c.data.calc.isDeviation"&gt;&lt;/textarea&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- ERROR --&gt;
+    &lt;div class="clm-alert clm-alert-danger" ng-if="c.data.submitError"&gt;
+      &lt;div class="clm-alert-icon"&gt;✗&lt;/div&gt;
+      &lt;div class="clm-alert-body"&gt;{{c.data.submitError}}&lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- ACTIONS --&gt;
+    &lt;div class="clm-actions"&gt;
+      &lt;button type="button" class="clm-btn clm-btn-outline"
+              ng-click="c.saveDraft()" ng-disabled="c.data.saving"&gt;
+        {{c.data.saving ? 'Saving...' : 'Save Draft'}}
+      &lt;/button&gt;
+      &lt;button type="submit" class="clm-btn clm-btn-primary"
+              ng-disabled="clmForm.$invalid || c.data.submitting || !c.data.customerSysId"&gt;
+        {{c.data.submitting ? 'Submitting...' : 'Submit for Approval'}}
+      &lt;/button&gt;
+    &lt;/div&gt;
+
+  &lt;/form&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;653a298d97f33290be31fa17f053af59&lt;/id&gt;&lt;sys_created_by&gt;vedant.salunke@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-03-21 13:14:34&lt;/sys_created_on&gt;&lt;sys_id&gt;293aa98d97f33290be31fa17f053af43&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;vedant.salunke@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-03-21 13:14:34&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>256961729</payload_hash>
+        <record_name>CLM Trade Credit Limit Request</record_name>
+        <reverted_from/>
+        <source>57b38f622b2303104572f3745e91bf2a</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by/>
+        <sys_created_on>2026-09-28 21:32:03</sys_created_on>
+        <sys_id>4ee3cc503b08531087401044c3e45a11</sys_id>
+        <sys_mod_count/>
+        <sys_recorded_at>1a0e9ee98380000000</sys_recorded_at>
+        <sys_updated_by/>
+        <sys_updated_on/>
+        <type>Widget</type>
+        <update_guid>0ee3cc50cd085310343dce43ef9bce11</update_guid>
+        <update_guid_history>0ee3cc50cd085310343dce43ef9bce11:256961729</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="CLM Trade Credit Limit Request">8ae3cc503b08531087401044c3e45a12</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-16 04:19:00</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>14c007828d354d8083b17083eb196100</sys_id>
+        <sys_metadata>653a298d97f33290be31fa17f053af59</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>CLM Trade Credit Limit Request</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_653a298d97f33290be31fa17f053af59</sys_update_name>
+        <sys_update_version display_value="sp_widget_653a298d97f33290be31fa17f053af59">4ee3cc503b08531087401044c3e45a11</sys_update_version>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-16 04:19:00</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

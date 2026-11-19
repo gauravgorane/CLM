@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>false</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>sysapproval_approver</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition table="sysapproval_approver">state=requested^source_table=x_birl3_clm_clm_new_credit_request^EQ<item display_value="Requested" endquery="false" field="state" goto="false" newquery="false" operator="=" or="false" value="requested"/>
+            <item endquery="false" field="source_table" goto="false" newquery="false" operator="=" or="false" value="x_birl3_clm_clm_new_credit_request"/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>Auto Approve TSH</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[// (function executeRule(current, previous) {
+
+//     // Only process CLM Credit Requests
+//     if (current.source_table != 'x_birl3_clm_clm_new_credit_request')
+//         return;
+
+//     // Get Credit Request
+//     var req = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+
+//     if (!req.get(current.document_id))
+//         return;
+
+//     var initiator = req.getValue('initiator');
+//     var segment = req.getValue('segment');
+
+//     var firstApprover = '';
+
+//     // Determine first approver based on segment
+//     if (segment == 'Cement') {
+//         firstApprover = req.getValue('u_approver_tsh');
+//     }
+//     else if (segment == 'RMC') {
+//         firstApprover = req.getValue('u_approver_tsm');
+//     }
+//     else if (segment == 'BPD') {
+//         firstApprover = req.getValue('u_approver_tsh_bpd');
+//     }
+
+//     // Auto approve only if Initiator = First Approver
+//     if (!firstApprover || initiator != firstApprover)
+//         return;
+
+//     // Ensure this approval belongs to the first approver
+//     if (current.approver.toString() != firstApprover)
+//         return;
+
+//     current.setWorkflow(false);
+//     current.state = 'approved';
+//     current.comments = 'Auto Approved by TSH.';
+//     current.update();
+
+//     gs.info(
+//         'CLM Auto Approval: Approval auto-approved for request ' +
+//         req.getValue('request_number')
+//     );
+
+// })(current, previous);
+
+(function executeRule(current, previous) {
+
+    if (current.source_table != 'x_birl3_clm_clm_new_credit_request')
+        return;
+
+    var req = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+    if (!req.get(current.document_id))
+        return;
+
+    var initiator = req.getValue('initiator');
+    var segment   = req.getValue('segment');
+
+    var firstApprover = '';
+    if (segment == 'Cement') firstApprover = req.getValue('u_approver_tsh');
+    else if (segment == 'RMC') firstApprover = req.getValue('u_approver_tsm');
+    else if (segment == 'BPD') firstApprover = req.getValue('u_approver_tsh_bpd');
+
+    if (!firstApprover || initiator != firstApprover)
+        return;
+
+    if (current.approver.toString() != firstApprover)
+        return;
+
+    current.setWorkflow(false);
+    current.state = 'approved';
+    current.comments = 'Auto Approved by TSH.';
+    current.update();
+
+    // NEW: keep the parent request's "approved amount" in sync so the
+    // next approver's "Previous Approved Limit" card isn't blank/₹0.
+    // Auto-approve implies no override — the implicit approved figure
+    // is simply the code-level requested total for Trade.
+    if ((req.customer_type + '') === 'Trade') {
+        var codeLevelTotal = parseFloat(req.getValue('u_code_level_total_requested')) || 0;
+        if (!parseFloat(req.getValue('u_approved_code_limit'))) {
+            req.setValue('u_approved_code_limit', codeLevelTotal);
+            req.setValue('approved_limit', codeLevelTotal);
+            req.setWorkflow(false);
+            req.autoSysFields(false);
+            req.update();
+        }
+    }
+
+    gs.info(
+        'CLM Auto Approval: Approval auto-approved for request ' +
+        req.getValue('request_number')
+    );
+	new CLMApprovalLimit().save(requestSysId, approvalRecordSysId, limitValue);
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-05 13:47:59</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>da3a45252b1d87904572f3745e91bf1f</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>Auto Approve TSH</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_da3a45252b1d87904572f3745e91bf1f</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-07 17:12:07</sys_updated_on>
+        <template/>
+        <when>after</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=da3a45252b1d87904572f3745e91bf1f"/>
+</record_update>

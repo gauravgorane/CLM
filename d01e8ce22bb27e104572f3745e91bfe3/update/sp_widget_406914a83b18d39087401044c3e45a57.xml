@@ -1,0 +1,340 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[function widgetcontroller($scope, $timeout, $rootScope, spUtil) {
+    var c = this;
+    c.activeTab = 'overview';
+    c.businesses = c.data.businesses || [];
+    c.business = c.data.defaultBusiness || 'trade';
+
+    c.cache = {};
+    c.failed = {};
+    c.switching = false;          // true while the next business loads (current page fades)
+    var pending = {};
+    var prefetched = {};
+    var pendingBiz = null;
+    var pendingTab = null;
+    var ready = {};               // businesses whose portfolio has finished its first load
+    ready[c.business] = true;
+    var switchTimer = null;
+
+    var TAB_KEYS = {
+        overview: 'portfolio',
+        approval_requests: 'approval_requests',
+        customer360: 'customer360',
+        request_detail: 'request_detail'
+    };
+    var TAB_LABELS = { overview: 'Portfolio Overview', approval_requests: 'Approval Requests', customer360: 'Customer 360', request_detail: 'Request Detail' };
+    var PREFETCH_TABS = ['approval_requests', 'customer360', 'request_detail'];
+
+    function getBiz(key) {
+        for (var i = 0; i < c.businesses.length; i++) { if (c.businesses[i].key === key) return c.businesses[i]; }
+        return null;
+    }
+    function widgetId(bizKey, tabKey) {
+        var b = getBiz(bizKey);
+        return (b && b.widgets && b.widgets[tabKey]) || '';
+    }
+    function cacheKey(bizKey, tabKey) { return bizKey + ':' + tabKey; }
+
+    if (c.data.portfolioWidget) { c.cache[cacheKey(c.business, 'portfolio')] = c.data.portfolioWidget; }
+
+    c.getBusinessLabel = function() { var b = getBiz(c.business); return b ? b.label : ''; };
+    c.getTabLabel = function() { return TAB_LABELS[c.activeTab] || ''; };
+
+    function fetchWidget(bizKey, tabKey, done) {
+        var id = widgetId(bizKey, tabKey);
+        var key = cacheKey(bizKey, tabKey);
+        if (!id || c.cache[key] || c.failed[key] || pending[key]) { if (done) done(); return; }
+        pending[key] = true;
+        spUtil.get(id).then(function(response) {
+            if (response && (response.sys_id || response.template)) {
+                c.cache[key] = response;
+            } else {
+                console.warn('CLM dashboard: widget "' + id + '" did not load', response);
+                c.failed[key] = true;
+            }
+            pending[key] = false;
+            if (done) done();
+        }, function(err) {
+            console.warn('CLM dashboard: widget "' + id + '" failed', err);
+            pending[key] = false;
+            c.failed[key] = true;
+            if (done) done();
+        });
+    }
+
+    c.isConfigured = function() {
+        var tk = TAB_KEYS[c.activeTab];
+        return !!widgetId(c.business, tk) && !c.failed[cacheKey(c.business, tk)];
+    };
+    c.isTabReady = function() { return !!c.cache[cacheKey(c.business, TAB_KEYS[c.activeTab])]; };
+
+    c.switchTab = function(tabName) {
+        c.activeTab = tabName;
+        fetchWidget(c.business, TAB_KEYS[tabName]);
+    };
+
+    // ===================== BUSINESS SWITCH =====================
+    // Rule: the tab you are on is kept. Only Portfolio Overview stays Portfolio Overview.
+    function commitBusiness(bizKey, tabName) {
+        if (switchTimer) { $timeout.cancel(switchTimer); switchTimer = null; }
+        pendingBiz = null; pendingTab = null;
+        c.business = bizKey;
+        c.activeTab = tabName || c.activeTab;
+        c.switching = false;
+        $timeout(function() { prefetchOthers(bizKey); }, 10000);
+        $rootScope.$broadcast('clm.business.active', { business: bizKey, cg1: (getBiz(bizKey) || {}).cg1 });
+    }
+
+    c.setBusiness = function(bizKey) {
+        if (!bizKey || !getBiz(bizKey)) return;
+        if (bizKey === c.business && !pendingBiz) return;
+
+        var tabName = c.activeTab;                 // same tab in the new business
+        var tabKey = TAB_KEYS[tabName];
+
+        // Already loaded before: switch instantly
+        if (ready[bizKey] && tabName === 'overview') { commitBusiness(bizKey, tabName); return; }
+
+        pendingBiz = bizKey; pendingTab = tabName;
+        c.switching = true;
+
+        // Load the same tab of the new business in the background (current page fades meanwhile)
+        fetchWidget(bizKey, tabKey, function() {
+            // Overview waits for clm.portfolio.loaded; other tabs switch as soon as the widget is fetched
+            if (pendingBiz !== bizKey) return;
+            if (tabName !== 'overview' || c.failed[cacheKey(bizKey, tabKey)] || !widgetId(bizKey, tabKey)) {
+                commitBusiness(bizKey, tabName);
+            }
+        });
+
+        if (switchTimer) $timeout.cancel(switchTimer);
+        switchTimer = $timeout(function() { if (pendingBiz === bizKey) commitBusiness(bizKey, pendingTab); }, 20000);
+    };
+
+    var offBiz = $rootScope.$on('clm.business.changed', function(event, payload) {
+        $timeout(function() { c.setBusiness(payload && payload.business); });
+    });
+    var offSwitch = $rootScope.$on('clm.switch.tab', function(event, tabName) { $timeout(function() { c.switchTab(tabName); }); });
+
+    function prefetchOthers(bizKey) {
+        bizKey = bizKey || c.business;
+        if (prefetched[bizKey]) return;
+        prefetched[bizKey] = true;
+        (function next(i) {
+            if (i < PREFETCH_TABS.length) fetchWidget(bizKey, PREFETCH_TABS[i], function() { next(i + 1); });
+        })(0);
+    }
+
+    var offLoaded = $rootScope.$on('clm.portfolio.loaded', function(event, payload) {
+        var bizKey = (payload && payload.business) || c.business;
+        ready[bizKey] = true;
+        $timeout(function() {
+            if (pendingBiz === bizKey && pendingTab === 'overview') commitBusiness(bizKey, 'overview');
+            else prefetchOthers(bizKey);
+        }, 300);
+    });
+    $timeout(function() { prefetchOthers(c.business); }, 10000);
+
+    $scope.$on('$destroy', function() { offBiz(); offSwitch(); offLoaded(); if (switchTimer) $timeout.cancel(switchTimer); });
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.clm-dash {
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  color: #1f2933;
+  background: #f4f5f7;
+  padding-bottom: 24px;
+}
+
+/* ---------- Breadcrumb ---------- */
+.clm-breadcrumb {
+  padding: 10px 20px;
+  font-size: 13px;
+  color: #5b6470;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.clm-bc-sep { color: #b0b9c4; }
+.clm-bc-biz { font-weight: 700; color: #14141a; }
+
+/* ---------- Tabs ---------- */
+.clm-tabs {
+  display: flex;
+  gap: 28px;
+  padding: 0 20px;
+  background: #fff;
+  border-bottom: 1px solid #e3e6eb;
+}
+.clm-tab {
+  padding: 12px 2px;
+  color: #6b7280;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  text-decoration: none;
+}
+.clm-tab:hover { color: #374151; text-decoration: none; }
+.clm-tab.active { color: #14141a; border-bottom-color: #f5c500; }
+
+/* ---------- Loading ---------- */
+.clm-loading { text-align: center; padding: 20px; color: #8a93a0; font-size: 13px; }
+
+/* ---------- Business not built yet ---------- */
+.clm-unavailable { display: flex; flex-direction: column; align-items: center; gap: 8px; margin: 20px; padding: 56px 20px;
+  background: #fff; border: 1px solid #e3e6eb; border-radius: 8px; text-align: center; }
+.clm-unavailable .fa { font-size: 34px; color: #cdd4dc; }
+.clm-unavailable-title { font-size: 15px; font-weight: 700; color: #14141a; }
+.clm-unavailable-sub { font-size: 12px; color: #6b7280; }
+
+/* ---------- Business switch: fade + blur current page while the next one loads ---------- */
+.clm-content { transition: filter .25s ease, opacity .25s ease; }
+.clm-content.clm-switching { filter: blur(4px); opacity: .55; pointer-events: none; user-select: none; }
+.clm-switch-badge {
+  position: fixed; top: 140px; left: 50%; transform: translateX(-50%); z-index: 50;
+  background: #14141a; color: #fff; font-size: 13px; font-weight: 600;
+  padding: 8px 16px; border-radius: 20px; box-shadow: 0 4px 14px rgba(0,0,0,.25);
+}
+.clm-switch-badge .fa { margin-right: 6px; color: #f5c500; }
+
+/* Smooth fade while the business switches */
+.clm-content { transition: opacity .3s ease, filter .3s ease; }</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>false</has_preview>
+        <id>clm_nt_zhm_dashboard</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>clm_nt_zhm_dashboard</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    data.viewLabel = 'ZHM';
+    data.userName  = gs.getUserDisplayName();
+
+    // Leave '' for any widget that isn't built yet -> shows "not available yet".
+    // Fill in the real widget id as each one is built.
+    var ALL_BUSINESSES = [
+        {
+            key: 'trade', label: 'Trade', cg1: 'T00',
+            widgets: {
+                portfolio:         'clm_zhm_portfolio',
+                approval_requests: 'clm_zhm_approval_request',
+                customer360:       'clm_zhm_customer_360',
+                request_detail:    'clm_zhm_request_details'
+            }
+        },
+        {
+            key: 'nonTrade', label: 'Non-Trade', cg1: 'N01',
+            widgets: {
+                portfolio:         'clm_nt_zhm_portfolio',
+                approval_requests: 'clm_nt_zhm_approval_request',   
+                customer360:       'clm_nt_zhm_customer_360',   // not built yet
+                request_detail:    'clm_nt_zhm_request_details'    // not built yet
+            }
+        },
+        {
+            key: 'key', label: 'Key Customer', cg1: 'N00',
+            widgets: { portfolio: 'clm_key_zhm_portfolio', approval_requests: 'clm_key_zhm_approval_request', customer360: 'clm_key_zhm_customer_360', request_detail: '' }
+        }
+    ];
+    var access = new CLMBusinessAccess().getAccess('ZHM');   // use 'MD' on the MD dashboard
+    data.businesses = ALL_BUSINESSES.filter(function(b) { return !!access[b.key]; });
+
+    data.noAccess = data.businesses.length === 0;
+    data.defaultBusiness = data.noAccess ? '' : data.businesses[0].key;   // Trade first when the user has it
+
+    if (!data.noAccess) {
+        var defaultBiz = data.businesses[0];
+        if (defaultBiz.widgets.portfolio) {
+            data.portfolioWidget = $sp.getWidget(defaultBiz.widgets.portfolio, {});
+        }
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gayatri.bhandge@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-29 10:46:58</sys_created_on>
+        <sys_id>406914a83b18d39087401044c3e45a57</sys_id>
+        <sys_mod_count>7</sys_mod_count>
+        <sys_name>clm_nt_zhm_dashboard</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_406914a83b18d39087401044c3e45a57</sys_update_name>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-19 07:15:42</sys_updated_on>
+        <template><![CDATA[<div class="clm-dash" ng-cloak ng-if="c.data">
+  <div class="clm-unavailable" ng-if="c.data.noAccess">
+  <i class="fa fa-lock"></i>
+  <div class="clm-unavailable-title">You do not have access to any business dashboard</div>
+
+  <div class="clm-breadcrumb">
+    <span>Portfolio</span>
+    <span class="clm-bc-sep">&rsaquo;</span>
+    <span class="clm-bc-biz">{{c.getBusinessLabel()}}</span>
+  </div>
+  </div>
+  <div class="clm-tabs">
+    <a class="clm-tab" ng-class="{active: c.activeTab === 'overview'}" ng-click="c.switchTab('overview')">Portfolio Overview</a>
+    <a class="clm-tab" ng-class="{active: c.activeTab === 'approval_requests'}" ng-click="c.switchTab('approval_requests')">Approval Requests</a>
+    <a class="clm-tab" ng-class="{active: c.activeTab === 'customer360'}" ng-click="c.switchTab('customer360')">Customer 360</a>
+    <a class="clm-tab" ng-class="{active: c.activeTab === 'request_detail'}" ng-click="c.switchTab('request_detail')">Request Detail</a>
+  </div>
+ 
+  <!-- Everything below fades while the next business loads -->
+  <div class="clm-content"
+       ng-style="c.switching ? {'opacity': '0.35', 'filter': 'blur(2px)', 'pointer-events': 'none'} : {'opacity': '1', 'filter': 'none'}">
+
+    <!-- Portfolio widgets stay alive per business (ng-show) so returning to them is instant -->
+    <div ng-repeat="b in c.businesses" ng-if="c.cache[b.key + ':portfolio']"
+         ng-show="c.business === b.key && c.activeTab === 'overview'">
+      <sp-widget widget="c.cache[b.key + ':portfolio']"></sp-widget>
+    </div>
+
+    <!-- Other tabs: only the widget of the selected business is mounted -->
+    <div ng-repeat="b in c.businesses" ng-if="c.business === b.key && c.activeTab === 'approval_requests' && c.cache[b.key + ':approval_requests']">
+      <sp-widget widget="c.cache[b.key + ':approval_requests']"></sp-widget>
+    </div>
+
+    <div ng-repeat="b in c.businesses" ng-if="c.business === b.key && c.activeTab === 'customer360' && c.cache[b.key + ':customer360']">
+      <sp-widget widget="c.cache[b.key + ':customer360']"></sp-widget>
+    </div>
+
+    <div ng-repeat="b in c.businesses" ng-if="c.business === b.key && c.activeTab === 'request_detail' && c.cache[b.key + ':request_detail']">
+      <sp-widget widget="c.cache[b.key + ':request_detail']"></sp-widget>
+    </div>
+
+    <div class="clm-loading" ng-if="c.isConfigured() && !c.isTabReady() && !c.switching">
+      Loading&hellip;
+    </div>
+
+    <div class="clm-unavailable" ng-if="!c.isConfigured() && !c.switching">
+      <i class="fa fa-wrench"></i>
+      <div class="clm-unavailable-title">{{c.getBusinessLabel()}} &ndash; {{c.getTabLabel()}} is not available yet</div>
+      <div class="clm-unavailable-sub">Switch the Business filter in Portfolio Overview to continue.</div>
+    </div>
+
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>406914a83b18d39087401044c3e45a57</id>
+        <sys_created_by>gayatri.bhandge@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-29 10:46:58</sys_created_on>
+        <sys_id>c06914a83b18d39087401044c3e45a5e</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-29 10:46:58</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

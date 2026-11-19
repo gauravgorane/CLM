@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_nt_review_date_reminder_script</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function runMailScript(current, template, email, email_action, event) {
+    try {
+        // --- 1. Helpers & Parsers ---
+        function s(v) { return (v === null || v === undefined) ? '' : String(v).trim(); }
+
+        function parseNum(v) {
+            if (!v) return 0;
+            var strVal = String(v);
+            if (strVal.indexOf(';') > -1) strVal = strVal.split(';')[1];
+            var num = parseFloat(strVal);
+            return isNaN(num) ? 0 : num;
+        }
+
+        function formatINR(val) {
+            var n = parseNum(val);
+            if (n === 0) return '&#8377; 0';
+            var isNeg = n < 0;
+            n = Math.abs(Math.round(n));
+            var str = n.toString();
+            var lastThree = str.substring(str.length - 3);
+            var otherNumbers = str.substring(0, str.length - 3);
+            if (otherNumbers !== '') {
+                lastThree = ',' + lastThree;
+            }
+            var res = otherNumbers.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + lastThree;
+            return (isNeg ? '- &#8377; ' : '&#8377; ') + res;
+        }
+
+        function esc(str) {
+            return s(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        // Format yyyy-MM-dd -> dd-MMM-yyyy (aligned with Trade Review Date UI)
+        function formatNiceDate(dtStr) {
+            var clean = s(dtStr).split(' ')[0];
+            var p = clean.split('-');
+            if (p.length === 3 && p[0].length === 4) {
+                var mn = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+                var mIdx = parseInt(p[1], 10) - 1;
+                if (mIdx >= 0 && mIdx < 12) {
+                    return p[2] + '-' + mn[mIdx] + '-' + p[0];
+                }
+            }
+            return clean || '&mdash;';
+        }
+
+        // --- 2. Parse Event Payload Safely ---
+        var payload = {};
+        if (event && event.parm2) {
+            try {
+                payload = JSON.parse(String(event.parm2));
+            } catch (e) {
+                gs.warn('clm_nt_review_date_reminder_script: Failed to parse parm2 JSON, falling back to current record.');
+            }
+        }
+
+        var msCode          = s(payload.code) || 'T30';
+        var daysLeft        = (payload.daysLeft !== undefined) ? parseInt(payload.daysLeft, 10) : 30;
+        var reviewDate      = s(payload.reviewDate) || s(current.getValue('next_review_date')).split(' ')[0];
+        var panStr          = s(payload.pan) || s(current.getValue('pan'));
+        var zoneCode        = s(payload.zone) || s(current.getValue('zone'));
+        var failedSiteCodes = payload.failedSiteCodes || [];
+        var siteSysIds      = (payload.siteSysIds && payload.siteSysIds.length)
+            ? payload.siteSysIds
+            : [current.getUniqueValue()];
+
+        // --- 3. Query Live Site Records from Customer Master ---
+        var sites = [];
+        var bySeg = {};
+        var totalCrLimit = 0;
+        var groupCustomerName = '';
+        var zoneDisplay = zoneCode;
+
+        var siteGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        siteGr.addQuery('sys_id', 'IN', siteSysIds.join(','));
+        siteGr.orderBy('customer_code_sap');
+        siteGr.query();
+
+        while (siteGr.next()) {
+            var cCode  = s(siteGr.getValue('customer_code_sap'));
+            var cName  = s(siteGr.getValue('customer_name'));
+            var gName  = s(siteGr.getValue('group_customer_name'));
+            var seg    = s(siteGr.getDisplayValue('segment')) || s(siteGr.getValue('segment')) || 'Non-Trade';
+            var depot  = s(siteGr.getDisplayValue('depot')) || s(siteGr.getValue('depot')) || '&mdash;';
+            var clVal  = parseNum(siteGr.getValue('cr_limit'));
+            var revDt  = s(siteGr.getValue('next_review_date')).split(' ')[0] || reviewDate;
+            var hasQueueFail = (failedSiteCodes.indexOf(cCode) > -1);
+
+            if (!groupCustomerName) {
+                groupCustomerName = gName || cName || 'Corporate Group';
+            }
+            if (!zoneDisplay || zoneDisplay === zoneCode) {
+                var zDisp = s(siteGr.getDisplayValue('zone'));
+                if (zDisp && zDisp !== zoneCode) zoneDisplay = zDisp + ' (' + zoneCode + ')';
+            }
+
+            bySeg[seg] = (bySeg[seg] || 0) + 1;
+            totalCrLimit += clVal;
+
+            sites.push({
+                code: cCode,
+                name: cName,
+                segment: seg,
+                depot: depot,
+                crLimit: clVal,
+                reviewDate: revDt,
+                hasQueueFail: hasQueueFail
+            });
+        }
+
+        if (!groupCustomerName) {
+            groupCustomerName = s(current.getValue('group_customer_name')) || s(current.getValue('customer_name')) || 'Corporate Group';
+        }
+
+        // --- 4. Urgency Accent, Timing Wording & Subject Line ---
+        var isExpired = (msCode === 'EXP' || daysLeft <= 0);
+        var niceDate  = formatNiceDate(reviewDate);
+        var whenText  = isExpired
+            ? 'today'
+            : (daysLeft === 1 ? 'tomorrow' : 'in ' + daysLeft + ' days');
+
+        // Urgency color palette matching Trade Next Review Date Reminder
+        var accent = (isExpired || daysLeft <= 1)
+            ? '#c0392b'
+            : (daysLeft <= 7 || msCode === 'T7')
+                ? '#E87722'
+                : (daysLeft <= 15 || msCode === 'T15')
+                    ? '#b58105'
+                    : '#1782c5';
+
+        var idLabel = panStr ? (groupCustomerName + ' - PAN: ' + panStr) : groupCustomerName;
+        if (isExpired) {
+            email.setSubject('[CredX] ACTION REQUIRED: Review Date Expired Today - ' + idLabel + ' (Zone ' + zoneCode + ')');
+        } else {
+            email.setSubject('[CredX] Review Date Reminder (' + daysLeft + ' Days Left) - ' + idLabel + ' (Zone ' + zoneCode + ')');
+        }
+
+        // Target Portal URL (Non-Trade Bulk Review Date Update)
+        var instanceUrl = s(gs.getProperty('glide.servlet.uri'));
+        if (instanceUrl && !instanceUrl.endsWith('/')) instanceUrl += '/';
+        var portalUrl = instanceUrl + 'uclm?id=uclm_nt_next_review_date';
+
+        // Subline metadata for the callout card
+        var segTxt = Object.keys(bySeg).map(function(k) { return esc(k) + ': ' + bySeg[k]; }).join(' &middot; ');
+        var metaParts = [esc(whenText)];
+        if (zoneDisplay) metaParts.push('Zone: ' + esc(zoneDisplay));
+        if (segTxt) metaParts.push(segTxt);
+        metaParts.push('Total Limit: ' + formatINR(totalCrLimit));
+
+        // --- 5. Render HTML Body (Aligned with Trade Review Date Reminder UI) ---
+        var h = [];
+
+        // Greeting
+        h.push('<p style="margin:0 0 4px 0;font-size:14px;color:#5a6a7a;">Dear Zone Commercial Head,</p>');
+
+        // Empty-state guard (if records were already updated)
+        if (sites.length === 0) {
+            h.push('<p style="margin:12px 0;font-size:14px;color:#1a1a1a;">The review dates due on <b>' + esc(niceDate) + '</b> have since been updated. No action is needed.</p>');
+            template.print(h.join(''));
+            return;
+        }
+
+        // Context Copy
+        if (isExpired) {
+            h.push('<p style="margin:12px 0 16px 0;font-size:14px;line-height:1.6;color:#1a1a1a;">The credit limit review date for <b>' + sites.length +
+                   ' site(s)</b> under <b>' + esc(groupCustomerName) + '</b>' + (panStr ? ' (PAN: <b>' + esc(panStr) + '</b>)' : '') +
+                   ' in zone <b>' + esc(zoneDisplay || '&mdash;') + '</b> expired <b>today</b>. Please initiate a credit limit review or set a new review date immediately.</p>');
+        } else {
+            h.push('<p style="margin:12px 0 16px 0;font-size:14px;line-height:1.6;color:#1a1a1a;">The credit limit review date for <b>' + sites.length +
+                   ' site(s)</b> under <b>' + esc(groupCustomerName) + '</b>' + (panStr ? ' (PAN: <b>' + esc(panStr) + '</b>)' : '') +
+                   ' in zone <b>' + esc(zoneDisplay || '&mdash;') + '</b> expires <b>' + esc(whenText) + '</b>. Please set a new review date before it lapses.</p>');
+        }
+
+        // Left-Bordered Expiry Callout Card (Matches Trade Callout Card)
+        h.push('<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #e0e6ed;border-left:5px solid ' + accent +
+               ';border-radius:6px;background-color:#fafbfc;margin:0 0 18px 0;"><tr><td style="padding:14px 18px;">' +
+               '<div style="font-size:11px;letter-spacing:.8px;text-transform:uppercase;color:#5a6a7a;font-weight:bold;">' +
+               (isExpired ? 'Review date expired' : 'Review date expiry') + '</div>' +
+               '<div style="font-size:22px;font-weight:bold;color:' + accent + ';margin-top:4px;">' + esc(niceDate) + '</div>' +
+               '<div style="font-size:12px;color:#5a6a7a;margin-top:4px;">' +
+               '<b>' + esc(groupCustomerName) + '</b>' + (panStr ? ' &middot; PAN: <span style="font-family:monospace;font-weight:bold;color:#1a1a1a;">' + esc(panStr) + '</span>' : '') +
+               '</div>' +
+               '<div style="font-size:12px;color:#5a6a7a;margin-top:2px;">' + metaParts.join(' &middot; ') + '</div>' +
+               '</td></tr></table>');
+
+        // Failed SAP Queue Warning Callout (Preserved for Non-Trade Queue Retries)
+        if (failedSiteCodes.length > 0) {
+            h.push('<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #ffe69c;border-left:5px solid #E87722;border-radius:6px;background-color:#fff8e1;margin:0 0 18px 0;"><tr><td style="padding:12px 16px;">' +
+                   '<div style="font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:#856404;font-weight:bold;">Previous SAP Queue Sync Failed</div>' +
+                   '<div style="font-size:13px;color:#1a1a1a;line-height:1.5;margin-top:4px;">A prior review date update in the queue failed to sync with SAP for site(s): <b>' + esc(failedSiteCodes.join(', ')) + '</b>. Please retry or resubmit in the Bulk Review Date Update screen.</div>' +
+                   '</td></tr></table>');
+        }
+
+        // Bordered Site Breakdown Table (Matches Trade Table Styling & Stacked Name/Code Cell)
+        var th   = 'style="background-color:#eef1f5;color:#2b3440;padding:9px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;text-align:left;border:1px solid #dde3ea;"';
+        var thR  = 'style="background-color:#eef1f5;color:#2b3440;padding:9px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;text-align:right;border:1px solid #dde3ea;"';
+        var td   = 'style="padding:9px 10px;font-size:13px;color:#1a1a1a;border:1px solid #e6eaef;vertical-align:top;"';
+        var tdR  = 'style="padding:9px 10px;font-size:13px;color:#1a1a1a;border:1px solid #e6eaef;vertical-align:top;text-align:right;white-space:nowrap;"';
+
+        h.push('<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:0 0 8px 0;"><thead><tr>' +
+               '<th ' + th + '>Customer Site</th>' +
+               '<th ' + th + '>Segment</th>' +
+               '<th ' + thR + '>Credit Limit</th>' +
+               '<th ' + th + '>Review Date</th>' +
+               '<th ' + th + '>Queue Status</th>' +
+               '</tr></thead><tbody>');
+
+        for (var i = 0; i < sites.length; i++) {
+            var st = sites[i];
+            var queueHtml = st.hasQueueFail
+                ? '<span style="display:inline-block;padding:2px 7px;font-size:10px;font-weight:bold;border-radius:3px;text-transform:uppercase;background-color:#FFEBEE;color:#C8102E;border:1px solid #FFCDD2;">Last Sync Failed</span>'
+                : '<span style="font-size:12px;color:#5a6a7a;">No Pending Update</span>';
+
+            h.push('<tr>' +
+                   '<td ' + td + '><b>' + esc(st.name || 'Site') + '</b><br><span style="font-size:12px;color:#5a6a7a;font-family:monospace;">(' + esc(st.code || 'N/A') + ')</span></td>' +
+                   '<td ' + td + '>' + esc(st.segment) + '</td>' +
+                   '<td ' + tdR + '><b>' + formatINR(st.crLimit) + '</b></td>' +
+                   '<td ' + td + ' style="padding:9px 10px;font-size:13px;border:1px solid #e6eaef;vertical-align:top;white-space:nowrap;color:' + (isExpired ? '#c0392b' : '#1a1a1a') + ';font-weight:' + (isExpired ? 'bold' : 'normal') + ';">' + esc(formatNiceDate(st.reviewDate)) + '</td>' +
+                   '<td ' + td + '>' + queueHtml + '</td>' +
+                   '</tr>');
+        }
+
+        h.push('</tbody></table>');
+
+        // Left-Aligned CTA Button (Matches Trade Next Review Date Reminder Button)
+        h.push('<p style="margin:16px 0 0 0;"><a href="' + portalUrl + '" target="_blank" style="display:inline-block;background-color:#E87722;color:#ffffff;font-weight:bold;' +
+               'font-size:14px;text-decoration:none;padding:10px 22px;border-radius:6px;">Update review dates</a></p>');
+
+        template.print(h.join(''));
+
+    } catch (ex) {
+        gs.error('CLM MailScript clm_nt_review_date_reminder_script error: ' + ex.message);
+        template.print('<div style="font-family: Arial, sans-serif; color: #d9534f;">Error rendering Next Review Date expiry reminder details.</div>');
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-12 10:29:28</sys_created_on>
+        <sys_id>8aa9d8493b68df5087401044c3e45aa9</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>clm_nt_review_date_reminder_script</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_8aa9d8493b68df5087401044c3e45aa9</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-17 07:27:50</sys_updated_on>
+    </sys_script_email>
+</record_update>

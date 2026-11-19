@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_key_rejected_details</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function runMailScript(current, template, email, email_action, event) {
+
+    function esc(s) { return GlideStringUtil.escapeHTML((s || '') + '').replace(/\n/g, '<br>'); }
+    function inr(v) {
+        var n = Math.round(parseFloat(v) || 0);
+        var s = Math.abs(n).toString();
+        var last = s.slice(-3), rest = s.slice(0, -3);
+        if (rest) { last = ',' + last; rest = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ','); }
+        return (n < 0 ? '-' : '') + '&#8377;' + rest + last;
+    }
+    function stepState(gr) {
+        var raw = ((gr.getValue('state') || '') + ' ' + (gr.getDisplayValue('state') || '')).toLowerCase();
+        if (/\brejected\b/.test(raw)) return 'rejected';
+        if (/returned|cancel|sent back/.test(raw)) return 'returned';
+        if (/\bapproved\b/.test(raw)) return 'approved';
+        return 'pending';
+    }
+    function stepComment(gr) {
+        var v = gr.getValue('comments');
+        if (v) return v;
+        try {
+            var jf = new GlideRecord('sys_journal_field');
+            jf.addQuery('element_id', gr.getUniqueValue());
+            jf.addQuery('element', 'comments');
+            jf.orderByDesc('sys_created_on');
+            jf.setLimit(1);
+            jf.query();
+            if (jf.next()) return jf.getValue('value') || '';
+        } catch (e) {}
+        return '';
+    }
+
+    var TD = 'style="padding:9px 12px;font-size:13px;color:#1a1a1a;border:1px solid #e0e6ed;"';
+    var TL = 'style="padding:9px 12px;font-size:13px;color:#3a4451;background-color:#fffcf0;border:1px solid #e0e6ed;width:38%;"';
+    var TH = 'style="padding:8px 12px;font-size:12px;color:#2b3440;background-color:#eef1f5;border:1px solid #e0e6ed;text-align:left;"';
+    var OPEN = '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">';
+    function head(t) { template.print('<p style="margin:22px 0 8px 0;font-size:12px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#3a4451;">' + t + '</p>'); }
+    function row(l, v) { template.print('<tr><td ' + TL + '>' + l + '</td><td ' + TD + '>' + v + '</td></tr>'); }
+
+    // steps
+    var steps = [];
+    var st = new GlideRecord('x_birl3_clm_key_approval_step');
+    st.addQuery('request', current.getUniqueValue());
+    st.orderBy('sequence');
+    st.query();
+    while (st.next()) {
+        steps.push({
+            role: st.getDisplayValue('role_name') || st.getDisplayValue('level') || 'Approver',
+            approver: st.getDisplayValue('approver'),
+            state: stepState(st),
+            limit: st.getValue('approved_limit'),
+            comments: stepComment(st),
+            when: st.getDisplayValue('actioned_on')
+        });
+    }
+    var rej = null;
+    steps.forEach(function(x) { if (x.state === 'rejected') rej = x; });
+
+    var reason = (rej && rej.comments) || current.getValue('rejection_reason') || '';
+    var by = (rej && rej.approver) || current.getDisplayValue('approver') || '';
+    var role = rej ? rej.role : '';
+    var when = rej ? rej.when : '';
+
+    // reason banner
+    template.print('<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:0 0 6px 0;"><tr>' +
+        '<td style="background-color:#fef5f4;border:1px solid #f5c2bc;border-radius:6px;padding:14px 16px;">' +
+        '<div style="font-size:12px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#b3261e;">Reason for rejection</div>' +
+        '<div style="font-size:14px;color:#1a1a1a;margin-top:6px;line-height:1.6;">' + (esc(reason) || 'No reason was recorded.') + '</div>' +
+        (by ? '<div style="font-size:12px;color:#5a6a7a;margin-top:8px;">Rejected by ' + esc(by) + (role ? ' (' + esc(role) + ')' : '') + (when ? ' on ' + esc(when) : '') + '</div>' : '') +
+        '</td></tr></table>');
+
+    // summary
+    head('Request summary');
+    template.print(OPEN);
+    row('Request', '<b>' + esc(current.getValue('number')) + '</b>');
+    row('Grandparent / Group Code', esc(current.getValue('grandparent_code')) + ' / ' + esc(current.getValue('group_code')));
+    row('Segment', esc(current.getValue('segment')));
+    row('Requested Limit', inr(current.getValue('total_requested_limit')));
+    template.print('</table>');
+
+    // history
+    var acted = steps.filter(function(x) { return x.state !== 'pending'; });
+    if (acted.length) {
+        head('Approval history');
+        template.print(OPEN);
+        template.print('<tr><th ' + TH + '>Level</th><th ' + TH + '>Approver</th><th ' + TH + '>Decision</th><th ' + TH + '>Comments</th><th ' + TH + '>Date</th></tr>');
+        acted.forEach(function(x) {
+            var d = x.state.charAt(0).toUpperCase() + x.state.slice(1);
+            template.print('<tr><td ' + TD + '>' + esc(x.role) + '</td><td ' + TD + '>' + esc(x.approver) + '</td><td ' + TD + '>' + d +
+                '</td><td ' + TD + '>' + (esc(x.comments) || '-') + '</td><td ' + TD + '>' + (esc(x.when) || '-') + '</td></tr>');
+        });
+        template.print('</table>');
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-03 10:08:18</sys_created_on>
+        <sys_id>17508e422bd41b10335bf9fe4e91bff3</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_key_rejected_details</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_17508e422bd41b10335bf9fe4e91bff3</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-03 10:08:18</sys_updated_on>
+    </sys_script_email>
+</record_update>

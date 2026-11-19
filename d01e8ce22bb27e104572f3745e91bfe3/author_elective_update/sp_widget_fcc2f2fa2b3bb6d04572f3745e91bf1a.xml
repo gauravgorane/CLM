@@ -1,0 +1,1575 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($timeout) {
+    var c = this;
+    var trendChart = null;
+    var agingChart = null;
+
+    c.tab = 'portfolio';
+    c.search = '';
+    c.filters = { segment: 'all', depot: 'all' };
+    c.segmentOptions = ['all', 'Cement', 'RMC', 'BPD'];
+    c.depotOptions = ['all'];
+
+    c.fmt = function(n) {
+        n = parseFloat(n) || 0;
+        if (n >= 10000000) return '₹' + (n / 10000000).toFixed(1) + ' Cr';
+        if (n >= 100000) return '₹' + (n / 100000).toFixed(1) + 'L';
+        if (n >= 1000) return '₹' + (n / 1000).toFixed(0) + 'K';
+        return '₹' + n;
+    };
+
+    c.statusColor = function(status) {
+        return status === 'Blocked' ? 'red' : status === 'Warning' ? 'amber' : 'green';
+    };
+
+    c.filteredCustomers = function() {
+        var q = (c.search || '').toLowerCase();
+        var rows = (c.data.portfolio && c.data.portfolio.rows) || [];
+        return rows.filter(function(r) {
+            if (c.filters.segment !== 'all' && r.segment !== c.filters.segment) return false;
+            if (c.filters.depot !== 'all' && r.depot !== c.filters.depot) return false;
+            if (q &&
+                (r.code || '').toLowerCase().indexOf(q) === -1 &&
+                (r.name || '').toLowerCase().indexOf(q) === -1 &&
+                (r.pan || '').toLowerCase().indexOf(q) === -1) return false;
+            return true;
+        });
+    };
+
+    c.switchTab = function(tab) {
+        c.tab = tab;
+        if (tab === 'portfolio') {
+            $timeout(buildAgingChart, 100);
+        }
+        if (tab === 'approvals') {
+            $timeout(buildTrendChart, 100);
+        }
+    };
+
+    c.openCustomer360 = function(code) {
+        c.data.action = 'getCustomer360';
+        c.data.code = code;
+        c.server.update().then(function() {
+            c.tab = 'c360';
+        });
+    };
+
+    c.openRequestDetail = function(number) {
+        c.data.action = 'getRequestDetail';
+        c.data.number = number;
+        c.server.update().then(function() {
+            c.tab = 'reqdetail';
+        });
+    };
+
+    c.$onInit = function() {
+        var depots = {};
+        ((c.data.portfolio && c.data.portfolio.rows) || []).forEach(function(r) {
+            if (r.depot) depots[r.depot] = true;
+        });
+        c.depotOptions = ['all'].concat(Object.keys(depots));
+        $timeout(buildAgingChart, 500);
+    };
+
+    // ---------------------------------------------------------------
+    // Chart Definitions
+    // ---------------------------------------------------------------
+    function buildTrendChart() {
+        if (typeof Chart === 'undefined') return;
+        var canvas = document.getElementById('clmApprovalTrend');
+        if (!canvas) return;
+        var trend = (c.data.approvals && c.data.approvals.monthlyTrend) || [];
+        if (!trend.length) return;
+
+        var states = {};
+        trend.forEach(function(row) {
+            for (var k in row) { if (k !== 'month') states[k] = true; }
+        });
+        var palette = { Submitted: '#1a5ca8', Approved: '#1b7a3e', Pending: '#b45309', Rejected: '#c41c1c' };
+
+        var datasets = Object.keys(states).map(function(state) {
+            return {
+                label: state,
+                data: trend.map(function(row) { return row[state] || 0; }),
+                borderColor: palette[state] || '#888',
+                backgroundColor: 'transparent',
+                tension: 0.3
+            };
+        });
+
+        if (trendChart) trendChart.destroy();
+        trendChart = new Chart(canvas, {
+            type: 'line',
+            data: { labels: trend.map(function(row) { return row.month; }), datasets: datasets },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
+        });
+    }
+
+    function buildAgingChart() {
+        if (typeof Chart === 'undefined') return;
+        var canvas = document.getElementById('cAgingPortfolio');
+        if (!canvas) return;
+
+        var ag = c.data.portfolio.agingTotals;
+        var datasets = [
+            { label: 'Not Due', data: [ag.notDue], backgroundColor: '#1b7a3e' },
+            { label: '0-30D', data: [ag.d0_30], backgroundColor: '#f5c400' },
+            { label: '31-60D', data: [ag.d31_60], backgroundColor: '#b45309' },
+            { label: '61-90D', data: [ag.d61_90], backgroundColor: '#c41c1c' },
+            { label: '>90D', data: [ag.gt90], backgroundColor: '#7f1d1d' }
+        ];
+
+        if (agingChart) agingChart.destroy();
+        agingChart = new Chart(canvas, {
+            type: 'bar',
+            data: { labels: ['Current Portfolio Aging'], datasets: datasets },
+            options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { stacked: true }, y: { stacked: true } } }
+        });
+    }
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.clm-dash {
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 13px;
+  color: #1d2125;
+  background: #f2f4f7;
+  min-height: 100vh;
+
+  --accent: #1a5ca8;
+  --red: #c41c1c;
+  --green: #1b7a3e;
+  --amber: #b45309;
+  --teal: #107e7d;
+  --border: #d5d8e0;
+  --muted: #6b7585;
+
+  .sn-topbar { height: 48px; background: #1a1a1a; border-bottom: 3px solid #f5c400; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; margin-bottom: 16px; }
+  .sn-topbar-user { font-size: 11px; color: rgba(255,255,255,.7); font-weight: 600; }
+  .sn-logo-badge { background: #f5c400; border-radius: 3px; padding: 3px 8px; }
+  .sn-logo-text { font-size: 13px; font-weight: 800; color: #1a1a1a; line-height: 1; }
+  .sn-logo-sub { font-size: 8px; font-weight: 700; color: #1a1a1a; letter-spacing: .08em; }
+  .sn-topbar-title { font-size: 12px; color: rgba(255,255,255,.6); margin-left: 6px; }
+  .sn-topbar-module { font-size: 13px; font-weight: 600; color: #fff; margin-left: 6px; }
+
+  .clm-tabs {
+    display: flex; list-style: none; margin: 0 20px 16px; padding: 0; border-bottom: 2px solid var(--border); background: #fff;
+    li a { display: block; padding: 10px 18px; font-weight: 500; color: var(--muted); text-decoration: none; cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -2px; }
+    li.active a { color: #1a1a1a; font-weight: 600; border-bottom-color: #f5c400; }
+  }
+
+  .sn-panel { padding: 0 20px 20px; }
+
+  .clm-filter-strip {
+    background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 10px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .clm-filter-label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; }
+  .clm-select, .clm-search { border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; font-size: 12px; font-family: inherit; }
+  .clm-filter-summary { margin-left: auto; font-size: 11px; color: var(--muted); }
+
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .kpi-card { background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 14px; }
+  .kpi-name { font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; }
+  .kpi-value { font-size: 22px; font-weight: 700; }
+  .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  .sc-blue  { border-left: 4px solid var(--accent); .kpi-value { color: var(--accent); } }
+  .sc-amber { border-left: 4px solid var(--amber);  .kpi-value { color: var(--amber); } }
+  .sc-green { border-left: 4px solid var(--green);  .kpi-value { color: var(--green); } }
+  .sc-red   { border-left: 4px solid var(--red);    .kpi-value { color: var(--red); } }
+  .sc-teal  { border-left: 4px solid var(--teal);   .kpi-value { color: var(--teal); } }
+
+  .chart-grid-3 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  .full-span { grid-column: 1 / -1; }
+
+  .clm-chart-card { background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 14px; margin-bottom: 16px; }
+  .clm-chart-title { font-size: 12px; font-weight: 600; margin-bottom: 10px; }
+  .clm-chart-wrap { position: relative; height: 160px; }
+
+  .clm-table {
+    width: 100%; border-collapse: collapse; background: #fff; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+    th { text-align: left; padding: 8px 12px; font-size: 10px; font-weight: 700; color: var(--muted); text-transform: uppercase; background: #f8f9fa; border-bottom: 1px solid var(--border); }
+    td { padding: 9px 12px; border-bottom: 1px solid #f0f2f5; font-size: 12px; }
+    tr { cursor: pointer; }
+    tr:hover td { background: #f5f7ff; }
+  }
+
+  .chip { display: inline-block; padding: 2px 7px; border-radius: 3px; font-size: 11px; font-weight: 600; background: #dbeafe; color: #1d4ed8; }
+  .chip-green { background: #dcfce7; color: #166534; }
+  .chip-amber { background: #fef9c3; color: #92400e; }
+  .chip-red   { background: #fee2e2; color: #991b1b; }
+
+  .seg-chip { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 700; }
+  .seg-cement { background: #ede9fe; color: #5b21b6; }
+  .seg-rmc    { background: #d1fae5; color: #065f46; }
+  .seg-bpd    { background: #fef9c3; color: #78350f; }
+
+  .util-wrap { display: flex; align-items: center; gap: 6px; }
+  .util-bar { flex: 1; height: 4px; background: #e5e7eb; border-radius: 2px; }
+  .util-fill { height: 100%; border-radius: 2px; }
+
+  .empty-state { padding: 40px; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.6; }
+  .empty-state code { background: #eef0f3; padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+  .btn-back { background: #fff; border: 1px solid var(--border); padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
+
+  .justification-box { margin: 14px 0; }
+  .justification-box label { font-size: 11px; font-weight: 700; color: var(--muted); display: block; margin-bottom: 4px; }
+  .justification-box p { padding: 10px 12px; background: #f8f9fa; border-left: 3px solid var(--accent); font-size: 12px; line-height: 1.6; margin: 0; }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>copy_of_clmtrade</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>copy of clmtrade</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    /* ============================================================
+       CLM PORTFOLIO DASHBOARD — Server Script (TSH-scoped)
+       ============================================================
+       Each logged-in TSH sees only:
+         - Customers where Customer Master's `tsh` field = them
+         - Requests where Credit Request's `initiator` field = them
+       Matched against sys_id / display name / login name together,
+       since reference fields can resolve inconsistently depending
+       on how the record was created (mirrors the OR-pattern already
+       used for `initiator` in the View My Requests widget).
+    ============================================================ */
+
+    var TABLE_CUSTOMER = 'x_birl3_clm_clm_customer_master1';
+    var TABLE_REQUEST  = 'x_birl3_clm_clm_new_credit_request';
+    var TABLE_AGING    = 'x_birl3_clm_clm_aging_snapshot';
+    var TABLE_APPROVAL = 'sysapproval_approver';
+
+    var CUST_FIELDS = {
+        name:        'customer_name',
+        code:        'customer_code_sap',
+        pan:         'pan',
+        segment:     'segment',
+        sd:          'current_sd_amount',
+        limit:       'current_credit_limit',
+        active:      'is_active',
+        blockStatus: 'credit_block_status',
+        tsh:         'tsh',
+        depot:       'depot',
+        avgSales:    'avg_monthly_sales_mt'
+    };
+
+    var REQ_FIELDS = {
+        customer:               'customer',
+        segment:                'segment',
+        state:                  'state',
+        requested:              'requested_limit',
+        approved:               'approved_limit',
+        outstanding:            'outstanding_amount',
+        netExposure:            'net_exposure',
+        safeLimit:              'safe_allowable_limit',
+        isDeviation:            'is_deviation',
+        deviationJustification: 'deviation_justification',
+        businessJustification:  'business_justification',
+        initiator:              'initiator',
+        approver:               'approver',
+        reqApproverLevel:       'required_approver_level',
+        requestNumber:          'number'
+    };
+
+    var data = data || {};
+
+    // Exposed so the widget can show "Viewing as: <name>" — useful while
+    // testing scoping, since an empty dashboard and a correctly-scoped
+    // empty dashboard look identical otherwise.
+    data.currentUser = {
+        id:   gs.getUserID(),
+        name: gs.getUserDisplayName()
+    };
+
+    if (input && input.action === 'getCustomer360') {
+        data.customer360 = getCustomer360(input.code);
+    } else if (input && input.action === 'getRequestDetail') {
+        data.requestDetail = getRequestDetail(input.number);
+    } else {
+        data.portfolio = buildPortfolio();
+        data.approvals = buildApprovals();
+    }
+
+    // ---------------------------------------------------------------
+    // SCOPING HELPER
+    // ---------------------------------------------------------------
+    // Adds an OR-condition group to `gr` matching the current user
+    // against `field` by sys_id, display name, and login name.
+    function scopeToCurrentUser(gr, field) {
+        var uid   = gs.getUserID();
+        var dname = gs.getUserDisplayName();
+        var lname = gs.getUserName();
+
+        var qc = gr.addQuery(field, uid);
+        qc.addOrCondition(field, dname);
+        qc.addOrCondition(field, lname);
+        return qc;
+    }
+
+    // ---------------------------------------------------------------
+    // PORTFOLIO OVERVIEW — scoped to customers where tsh = current user
+    // ---------------------------------------------------------------
+    function buildPortfolio() {
+        var rows = [];
+        var totals = { limit: 0, os: 0, customers: 0, overdue90: 0 };
+        var agingTotals = { notDue: 0, d0_30: 0, d31_60: 0, d61_90: 0, gt90: 0 };
+
+        var gr = new GlideRecord(TABLE_CUSTOMER);
+        gr.addQuery(CUST_FIELDS.active, 'true'); // FIX: string, not JS boolean — true_false fields store 'true'/'false'
+        scopeToCurrentUser(gr, CUST_FIELDS.tsh);
+        gr.query();
+
+        while (gr.next()) {
+            var sysId = gr.getUniqueValue();
+            var limit = parseFloat(gr.getValue(CUST_FIELDS.limit) || 0);
+
+            var aging = getAgingData(sysId);
+            var os = aging ? aging.total : 0;
+
+            var status = gr.getValue(CUST_FIELDS.blockStatus) ? 'Blocked' : 'Active';
+
+            rows.push({
+                sys_id:      sysId,
+                code:        gr.getValue(CUST_FIELDS.code),
+                name:        gr.getValue(CUST_FIELDS.name),
+                pan:         gr.getValue(CUST_FIELDS.pan),
+                segment:     gr.getDisplayValue(CUST_FIELDS.segment),
+                depot:       gr.getDisplayValue(CUST_FIELDS.depot),
+                limit:       limit,
+                outstanding: os,
+                available:   Math.max(0, limit - os),
+                utilisation: limit > 0 ? Math.round((os / limit) * 100) : 0,
+                status:      status,
+                od90:        aging ? aging.gt90 : 0
+            });
+
+            totals.limit += limit;
+            totals.os += os;
+            totals.customers++;
+            if (aging) {
+                totals.overdue90 += aging.gt90;
+                agingTotals.notDue += aging.notDue;
+                agingTotals.d0_30  += aging.d0_30;
+                agingTotals.d31_60 += aging.d31_60;
+                agingTotals.d61_90 += aging.d61_90;
+                agingTotals.gt90   += aging.gt90;
+            }
+        }
+
+        return { rows: rows, totals: totals, agingTotals: agingTotals };
+    }
+
+    // ---------------------------------------------------------------
+    // APPROVAL REQUESTS — scoped to requests where initiator = current user
+    // ---------------------------------------------------------------
+    function buildApprovals() {
+        var rows = [];
+        var counts = {};
+        var monthly = {};
+
+        var gr = new GlideRecord(TABLE_REQUEST);
+        scopeToCurrentUser(gr, REQ_FIELDS.initiator);
+        gr.orderByDesc('sys_created_on');
+        gr.setLimit(200);
+        gr.query();
+
+        while (gr.next()) {
+            var state = gr.getDisplayValue(REQ_FIELDS.state);
+            counts[state] = (counts[state] || 0) + 1;
+
+            var created = gr.getValue('sys_created_on') || '';
+            var monthKey = created.substring(0, 7);
+            if (monthKey) {
+                if (!monthly[monthKey]) monthly[monthKey] = {};
+                monthly[monthKey][state] = (monthly[monthKey][state] || 0) + 1;
+            }
+
+            rows.push({
+                sys_id:       gr.getUniqueValue(),
+                number:       gr.getValue(REQ_FIELDS.requestNumber),
+                customer:     gr.getDisplayValue(REQ_FIELDS.customer),
+                customerName: gr.customer.customer_name.toString(),
+                segment:      gr.getDisplayValue(REQ_FIELDS.segment),
+                state:        state,
+                requested:    parseFloat(gr.getValue(REQ_FIELDS.requested) || 0),
+                approved:     gr.getValue(REQ_FIELDS.approved) ? parseFloat(gr.getValue(REQ_FIELDS.approved)) : null,
+                outstanding:  parseFloat(gr.getValue(REQ_FIELDS.outstanding) || 0),
+                isDeviation:  gr.getValue(REQ_FIELDS.isDeviation) == '1' || gr.getValue(REQ_FIELDS.isDeviation) == 'true'
+            });
+        }
+
+        var trend = Object.keys(monthly).sort().map(function(m) {
+            var row = { month: m };
+            for (var st in monthly[m]) row[st] = monthly[m][st];
+            return row;
+        });
+
+        return { rows: rows, counts: counts, monthlyTrend: trend };
+    }
+
+    // ---------------------------------------------------------------
+    // CUSTOMER 360 & REQUEST DETAIL
+    // ---------------------------------------------------------------
+    // NOTE: these are NOT re-scoped to current user. They only ever run
+    // against a code/number that came from the already-scoped lists
+    // above (the user clicked a row they were already allowed to see).
+    function getCustomer360(code) {
+        var gr = new GlideRecord(TABLE_CUSTOMER);
+        gr.addQuery(CUST_FIELDS.code, code);
+        gr.query();
+        if (!gr.next()) return null;
+
+        var profile = {};
+        for (var key in CUST_FIELDS) {
+            profile[key] = gr.getDisplayValue(CUST_FIELDS[key]);
+        }
+        profile.sys_id = gr.getUniqueValue();
+        profile.status = gr.getValue(CUST_FIELDS.blockStatus) ? 'Blocked' : 'Active';
+
+        profile.aging = getAgingData(profile.sys_id);
+
+        var history = [];
+        var rgr = new GlideRecord(TABLE_REQUEST);
+        rgr.addQuery(REQ_FIELDS.customer, profile.sys_id);
+        rgr.orderByDesc('sys_created_on');
+        rgr.query();
+        while (rgr.next()) {
+            history.push({
+                number:    rgr.getValue(REQ_FIELDS.requestNumber),
+                state:     rgr.getDisplayValue(REQ_FIELDS.state),
+                requested: parseFloat(rgr.getValue(REQ_FIELDS.requested) || 0),
+                approved:  rgr.getValue(REQ_FIELDS.approved) ? parseFloat(rgr.getValue(REQ_FIELDS.approved)) : null,
+                created:   rgr.getValue('sys_created_on')
+            });
+        }
+        profile.requestHistory = history;
+        return profile;
+    }
+
+    function getRequestDetail(number) {
+        var gr = new GlideRecord(TABLE_REQUEST);
+        gr.addQuery(REQ_FIELDS.requestNumber, number);
+        gr.query();
+        if (!gr.next()) return null;
+
+        var detail = {};
+        for (var key in REQ_FIELDS) {
+            detail[key] = gr.getDisplayValue(REQ_FIELDS[key]);
+        }
+        detail.sys_id = gr.getUniqueValue();
+        detail.isDeviation = gr.getValue(REQ_FIELDS.isDeviation) == '1' || gr.getValue(REQ_FIELDS.isDeviation) == 'true';
+
+        var trail = [];
+        var appGr = new GlideRecord(TABLE_APPROVAL);
+        appGr.addQuery('document_id', detail.sys_id);
+        appGr.orderBy('sys_created_on');
+        appGr.query();
+        while (appGr.next()) {
+            trail.push({
+                approver: appGr.getDisplayValue('approver'),
+                state:    appGr.getDisplayValue('state'),
+                comments: appGr.getValue('comments'),
+                updated:  appGr.getValue('sys_updated_on')
+            });
+        }
+        detail.approvalTrail = trail;
+
+        return detail;
+    }
+
+    // ---------------------------------------------------------------
+    // HELPER: AGING ROLLUP
+    // ---------------------------------------------------------------
+    function getAgingData(customerSysId) {
+        var gr = new GlideRecord(TABLE_AGING);
+        gr.addQuery('customer', customerSysId);
+        gr.orderByDesc('sys_created_on');
+        gr.setLimit(1);
+        gr.query();
+        if (!gr.next()) return null;
+
+        var total = parseFloat(gr.getValue('total_outstanding') || 0);
+
+        var b0_30   = parseFloat(gr.getValue('bucket_0_30_days') || 0);
+        var b31_45  = parseFloat(gr.getValue('bucket_31_45_days') || 0);
+        var b46_60  = parseFloat(gr.getValue('bucket_46_60_days') || 0);
+        var b61_75  = parseFloat(gr.getValue('bucket_61_75_days') || 0);
+        var b76_90  = parseFloat(gr.getValue('bucket_76_90_days') || 0);
+        var b91_120 = parseFloat(gr.getValue('bucket_91_120_days') || 0);
+        var bGt120  = parseFloat(gr.getValue('bucket_gt120_days') || 0);
+
+        var d31_60 = b31_45 + b46_60;
+        var d61_90 = b61_75 + b76_90;
+        var gt90   = b91_120 + bGt120;
+
+        var overdueSum = b0_30 + d31_60 + d61_90 + gt90;
+        var notDue = Math.max(0, total - overdueSum);
+
+        return {
+            snapshotMonth: gr.getDisplayValue('snapshot_month'),
+            total:  total,
+            notDue: notDue,
+            d0_30:  b0_30,
+            d31_60: d31_60,
+            d61_90: d61_90,
+            gt90:   gt90
+        };
+    }
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-27 05:00:54</sys_created_on>
+        <sys_id>fcc2f2fa2b3bb6d04572f3745e91bf1a</sys_id>
+        <sys_mod_count>6</sys_mod_count>
+        <sys_name>copy of clmtrade</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_fcc2f2fa2b3bb6d04572f3745e91bf1a</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-19 05:19:52</sys_updated_on>
+        <template><![CDATA[<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+<div class="clm-dash sn-shell">
+
+  <div class="sn-topbar">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div class="sn-logo-badge"><div class="sn-logo-text">UltraTech</div><div class="sn-logo-sub">CEMENT</div></div>
+      <div style="width:1px;height:20px;background:rgba(255,255,255,.2)"></div>
+      <span class="sn-topbar-module">Credit Lifecycle Management</span>
+      <div style="width:1px;height:20px;background:rgba(255,255,255,.2)"></div>
+      <span class="sn-topbar-title">TSH Dashboard</span>
+    </div>
+    <div class="sn-topbar-user" ng-if="c.data.currentUser">Viewing as: {{c.data.currentUser.name}}</div>
+  </div>
+
+  <ul class="clm-tabs">
+    <li ng-class="{active: c.tab==='portfolio'}"><a href ng-click="c.switchTab('portfolio')">Portfolio Overview</a></li>
+    <li ng-class="{active: c.tab==='approvals'}"><a href ng-click="c.switchTab('approvals')">Approval Requests</a></li>
+    <li ng-class="{active: c.tab==='c360'}"><a href ng-click="c.switchTab('c360')">Customer 360</a></li>
+    <li ng-class="{active: c.tab==='reqdetail'}"><a href ng-click="c.switchTab('reqdetail')">Request Detail</a></li>
+  </ul>
+
+  <div class="sn-panel" ng-show="c.tab==='portfolio'">
+
+    <div class="clm-filter-strip">
+      <span class="clm-filter-label">]]>📍<![CDATA[ Interactive Filters</span>
+      <select class="clm-select" ng-model="c.filters.segment" ng-options="s as s for s in c.segmentOptions"></select>
+      <select class="clm-select" ng-model="c.filters.depot" ng-options="d as d for d in c.depotOptions"></select>
+      <input class="clm-search" type="text" placeholder="Search code, name, PAN..." ng-model="c.search">
+      <span class="clm-filter-summary">Showing <b>{{c.filteredCustomers().length}}</b> customers</span>
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi-card sc-blue">
+        <div class="kpi-name">IND-001 · Total Approved Limit</div>
+        <div class="kpi-value">{{c.fmt(c.data.portfolio.totals.limit)}}</div>
+        <div class="kpi-sub">{{c.data.portfolio.totals.customers}} active codes</div>
+      </div>
+      <div class="kpi-card sc-amber">
+        <div class="kpi-name">IND-002 · Gross Exposure</div>
+        <div class="kpi-value">{{c.fmt(c.data.portfolio.totals.os)}}</div>
+        <div class="kpi-sub">Outstanding</div>
+      </div>
+      <div class="kpi-card sc-green">
+        <div class="kpi-name">IND-003 · Available Limit</div>
+        <div class="kpi-value">{{c.fmt(c.data.portfolio.totals.limit - c.data.portfolio.totals.os)}}</div>
+      </div>
+      <div class="kpi-card sc-teal">
+        <div class="kpi-name">IND-004 · Credit Utilization %</div>
+        <div class="kpi-value">{{c.data.portfolio.totals.limit > 0 ? ((c.data.portfolio.totals.os / c.data.portfolio.totals.limit) * 100).toFixed(1) : 0}}%</div>
+      </div>
+      <div class="kpi-card sc-red">
+        <div class="kpi-name">IND-006 · Overdue >90D</div>
+        <div class="kpi-value">{{c.fmt(c.data.portfolio.totals.overdue90)}}</div>
+        <div class="kpi-sub">High risk overdue</div>
+      </div>
+    </div>
+
+    <div class="chart-grid-3">
+       <div class="clm-chart-card"><div class="clm-chart-title">IND-012 · Sales Volume MoM (MT)</div><div class="clm-chart-wrap"><canvas id="cVol"></canvas></div></div>
+       <div class="clm-chart-card"><div class="clm-chart-title">IND-013 · Sales Value MoM (₹)</div><div class="clm-chart-wrap"><canvas id="cVal"></canvas></div></div>
+       <div class="clm-chart-card full-span">
+         <div class="clm-chart-title">IND-005 · Aging Bucket Breakdown (x_birl3_clm_clm_aging_snapshot)</div>
+         <div class="clm-chart-wrap" style="height:140px"><canvas id="cAgingPortfolio"></canvas></div>
+       </div>
+    </div>
+
+    <table class="clm-table">
+      <thead>
+        <tr>
+          <th>Code</th><th>Name / PAN</th><th>Seg</th><th>Depot</th><th>Status</th>
+          <th>Outstanding</th><th>Limit</th><th>Available</th><th>Utilisation</th><th>Overdue >90D</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr ng-repeat="row in c.filteredCustomers()" ng-click="c.openCustomer360(row.code)">
+          <td style="font-weight:600;color:var(--accent)">{{row.code}}</td>
+          <td><div style="font-weight:500">{{row.name}}</div><small>{{row.pan}}</small></td>
+          <td><span class="seg-chip seg-{{row.segment | lowercase}}">{{row.segment}}</span></td>
+          <td>{{row.depot}}</td>
+          <td><span class="chip chip-{{c.statusColor(row.status)}}">{{row.status}}</span></td>
+          <td style="font-weight:600">{{c.fmt(row.outstanding)}}</td>
+          <td>{{c.fmt(row.limit)}}</td>
+          <td style="color:var(--green)">{{c.fmt(row.available)}}</td>
+          <td>
+             <div class="util-wrap">
+               <div class="util-bar"><div class="util-fill" ng-style="{'width': row.utilisation + '%', 'background': row.utilisation > 80 ? 'var(--red)' : 'var(--green)'}"></div></div>
+               <span style="font-size:11px;font-weight:600;min-width:34px;text-align:right">{{row.utilisation}}%</span>
+             </div>
+          </td>
+          <td style="color:var(--red)">{{row.od90 > 0 ? c.fmt(row.od90) : '\u2014'}}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="empty-state" ng-if="c.data.portfolio.rows.length === 0">
+      No customers found where TSH = {{c.data.currentUser.name}}. If this looks wrong, check the
+      <code>tsh</code> field on Customer Master records — it must reference this exact user.
+    </div>
+  </div>
+
+  <div class="sn-panel" ng-show="c.tab==='approvals'">
+
+    <div class="kpi-grid">
+      <div class="kpi-card sc-blue" ng-repeat="(state, count) in c.data.approvals.counts">
+        <div class="kpi-name">{{state}}</div>
+        <div class="kpi-value">{{count}}</div>
+      </div>
+    </div>
+
+    <div class="clm-chart-card">
+      <div class="clm-chart-title">Approval Pipeline by Month</div>
+      <div class="clm-chart-wrap"><canvas id="clmApprovalTrend"></canvas></div>
+    </div>
+
+    <table class="clm-table">
+      <thead>
+        <tr><th>Request #</th><th>Customer</th><th>Seg</th><th>State</th><th>Requested</th><th>Approved</th><th>Outstanding</th><th>Deviation</th></tr>
+      </thead>
+      <tbody>
+        <tr ng-repeat="row in c.data.approvals.rows" ng-click="c.openRequestDetail(row.number)">
+          <td style="font-weight:600;color:var(--accent)">{{row.number}}</td>
+          <td><div style="font-weight:500">{{row.customerName}}</div><small>{{row.customer}}</small></td>
+          <td><span class="seg-chip seg-{{row.segment | lowercase}}">{{row.segment}}</span></td>
+          <td><span class="chip">{{row.state}}</span></td>
+          <td style="font-weight:600">{{c.fmt(row.requested)}}</td>
+          <td style="color:var(--green)">{{row.approved ? c.fmt(row.approved) : '\u2014'}}</td>
+          <td>{{c.fmt(row.outstanding)}}</td>
+          <td><span ng-if="row.isDeviation" class="chip chip-red">Deviation</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="empty-state" ng-if="c.data.approvals.rows.length === 0">
+      No requests found where Initiator = {{c.data.currentUser.name}}.
+    </div>
+  </div>
+
+  <div class="sn-panel" ng-show="c.tab==='c360'">
+    <div ng-if="!c.data.customer360" class="empty-state">Click a customer row in Portfolio Overview to load their profile.</div>
+    <div ng-if="c.data.customer360">
+      
+      <div class="clm-filter-strip" style="margin-bottom:14px">
+        <div style="font-size:11px;color:var(--muted)">Viewing</div>
+        <div style="font-size:15px;font-weight:700;color:var(--text);margin-left:8px">{{c.data.customer360.name}}</div>
+        <span class="chip chip-blue" style="margin-left:8px">{{c.data.customer360.code}}</span>
+        <span class="chip">{{c.data.customer360.status}}</span>
+      </div>
+
+      <div class="kpi-grid">
+         <div class="kpi-card sc-blue"><div class="kpi-name">Current Limit</div><div class="kpi-value">{{c.fmt(c.data.customer360.limit)}}</div></div>
+         <div class="kpi-card sc-amber"><div class="kpi-name">SD Amount</div><div class="kpi-value">{{c.fmt(c.data.customer360.sd)}}</div></div>
+         <div class="kpi-card sc-green"><div class="kpi-name">Avg Monthly Sales</div><div class="kpi-value">{{c.data.customer360.avgSales}} MT</div></div>
+         <div class="kpi-card sc-red"><div class="kpi-name">Overdue >90D</div><div class="kpi-value">{{c.data.customer360.aging ? c.fmt(c.data.customer360.aging.gt90) : '₹0'}}</div></div>
+      </div>
+
+      <div class="clm-chart-card" ng-if="c.data.customer360.aging">
+        <div class="clm-chart-title">Current Aging Snapshot ({{c.data.customer360.aging.snapshotMonth}})</div>
+        <div style="display:flex;height:24px;border-radius:4px;overflow:hidden;margin-top:12px">
+           <div style="background:#1b7a3e;width:{{(c.data.customer360.aging.notDue/c.data.customer360.aging.total)*100}}%" title="Not Due: {{c.fmt(c.data.customer360.aging.notDue)}}"></div>
+           <div style="background:#f5c400;width:{{(c.data.customer360.aging.d0_30/c.data.customer360.aging.total)*100}}%" title="0-30: {{c.fmt(c.data.customer360.aging.d0_30)}}"></div>
+           <div style="background:#b45309;width:{{(c.data.customer360.aging.d31_60/c.data.customer360.aging.total)*100}}%" title="31-60: {{c.fmt(c.data.customer360.aging.d31_60)}}"></div>
+           <div style="background:#c41c1c;width:{{(c.data.customer360.aging.d61_90/c.data.customer360.aging.total)*100}}%" title="61-90: {{c.fmt(c.data.customer360.aging.d61_90)}}"></div>
+           <div style="background:#7f1d1d;width:{{(c.data.customer360.aging.gt90/c.data.customer360.aging.total)*100}}%" title=">90: {{c.fmt(c.data.customer360.aging.gt90)}}"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:6px">
+           <span>Not Due: {{c.fmt(c.data.customer360.aging.notDue)}}</span>
+           <span>0-30D: {{c.fmt(c.data.customer360.aging.d0_30)}}</span>
+           <span>31-60D: {{c.fmt(c.data.customer360.aging.d31_60)}}</span>
+           <span>61-90D: {{c.fmt(c.data.customer360.aging.d61_90)}}</span>
+           <span style="color:var(--red);font-weight:700">>90D: {{c.fmt(c.data.customer360.aging.gt90)}}</span>
+        </div>
+      </div>
+
+      <table class="clm-table">
+        <thead><tr><th>Request #</th><th>State</th><th>Requested</th><th>Approved</th><th>Date</th></tr></thead>
+        <tbody>
+          <tr ng-repeat="h in c.data.customer360.requestHistory" ng-click="c.openRequestDetail(h.number)">
+            <td style="font-weight:600;color:var(--accent)">{{h.number}}</td><td><span class="chip">{{h.state}}</span></td>
+            <td>{{c.fmt(h.requested)}}</td>
+            <td style="color:var(--green)">{{h.approved ? c.fmt(h.approved) : '\u2014'}}</td><td>{{h.created}}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="sn-panel" ng-show="c.tab==='reqdetail'">
+    <div ng-if="!c.data.requestDetail" class="empty-state">Click a request row in Approval Requests to load its detail.</div>
+    <div ng-if="c.data.requestDetail">
+      
+      <div class="clm-filter-strip" style="margin-bottom:14px;justify-content:space-between">
+        <div style="display:flex;align-items:center">
+          <div style="font-size:20px;font-weight:800">{{c.data.requestDetail.requestNumber}}</div>
+          <span class="chip" style="margin-left:12px">{{c.data.requestDetail.state}}</span>
+        </div>
+        <button ng-click="c.switchTab('approvals')" class="btn-back">← Back to Requests</button>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <table class="clm-table" style="margin-bottom:14px">
+            <tbody>
+              <tr><td style="color:var(--muted)">Requested Limit</td><td style="font-weight:700;font-size:14px;color:var(--accent)">{{c.fmt(c.data.requestDetail.requested)}}</td></tr>
+              <tr><td style="color:var(--muted)">Approved Limit</td><td style="font-weight:700;font-size:14px;color:var(--green)">{{c.data.requestDetail.approved ? c.fmt(c.data.requestDetail.approved) : 'Pending'}}</td></tr>
+              <tr><td style="color:var(--muted)">Net Exposure</td><td>{{c.fmt(c.data.requestDetail.netExposure)}}</td></tr>
+              <tr><td style="color:var(--muted)">Safe Allowable Limit</td><td>{{c.fmt(c.data.requestDetail.safeLimit)}}</td></tr>
+              <tr><td style="color:var(--muted)">Required Approver Level</td><td><span class="chip chip-blue">{{c.data.requestDetail.reqApproverLevel}}</span></td></tr>
+              <tr><td style="color:var(--muted)">Initiator</td><td>{{c.data.requestDetail.initiator}}</td></tr>
+            </tbody>
+          </table>
+
+          <div class="justification-box">
+            <label>Business Justification</label>
+            <p>{{c.data.requestDetail.businessJustification || 'No justification provided.'}}</p>
+          </div>
+          <div class="justification-box" ng-if="c.data.requestDetail.isDeviation">
+            <label style="color:var(--red)">Deviation Justification</label>
+            <p style="border-color:var(--red)">{{c.data.requestDetail.deviationJustification}}</p>
+          </div>
+        </div>
+
+        <div class="clm-chart-card" style="height:fit-content">
+          <div class="clm-chart-title">sysapproval_approver Workflow Trail</div>
+          <div style="position:relative;padding-left:24px;margin-top:12px">
+            <div style="position:absolute;left:9px;top:6px;bottom:6px;width:1px;background:var(--border)"></div>
+            <div style="position:relative;margin-bottom:18px" ng-repeat="app in c.data.requestDetail.approvalTrail">
+              <div style="position:absolute;left:-19px;top:3px;width:10px;height:10px;border-radius:50%;border:2px solid var(--accent);background:{{app.state === 'Approved' ? 'var(--green)' : app.state === 'Rejected' ? 'var(--red)' : '#fff'}}"></div>
+              <div style="font-size:12px;font-weight:600">{{app.approver}}</div>
+              <div style="font-size:11px;color:var(--muted)">{{app.state}} · {{app.updated}}</div>
+              <div ng-if="app.comments" style="font-size:11px;padding:6px 10px;border-radius:4px;background:#f8f9fa;margin-top:4px;line-height:1.4">"{{app.comments}}"</div>
+            </div>
+            <div ng-if="c.data.requestDetail.approvalTrail.length === 0" style="color:var(--muted);font-size:11px">No approval records generated yet.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>]]></template>
+    </sp_widget>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_fcc2f2fa2b3bb6d04572f3745e91bf1a</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function($timeout) {
+    var c = this;
+    var trendChart = null;
+    var agingChart = null;
+
+    c.tab = 'portfolio';
+    c.search = '';
+    c.filters = { segment: 'all', depot: 'all' };
+    c.segmentOptions = ['all', 'Cement', 'RMC', 'BPD'];
+    c.depotOptions = ['all'];
+
+    c.fmt = function(n) {
+        n = parseFloat(n) || 0;
+        if (n &gt;= 10000000) return '₹' + (n / 10000000).toFixed(1) + ' Cr';
+        if (n &gt;= 100000) return '₹' + (n / 100000).toFixed(1) + 'L';
+        if (n &gt;= 1000) return '₹' + (n / 1000).toFixed(0) + 'K';
+        return '₹' + n;
+    };
+
+    c.statusColor = function(status) {
+        return status === 'Blocked' ? 'red' : status === 'Warning' ? 'amber' : 'green';
+    };
+
+    c.filteredCustomers = function() {
+        var q = (c.search || '').toLowerCase();
+        var rows = (c.data.portfolio &amp;&amp; c.data.portfolio.rows) || [];
+        return rows.filter(function(r) {
+            if (c.filters.segment !== 'all' &amp;&amp; r.segment !== c.filters.segment) return false;
+            if (c.filters.depot !== 'all' &amp;&amp; r.depot !== c.filters.depot) return false;
+            if (q &amp;&amp;
+                (r.code || '').toLowerCase().indexOf(q) === -1 &amp;&amp;
+                (r.name || '').toLowerCase().indexOf(q) === -1 &amp;&amp;
+                (r.pan || '').toLowerCase().indexOf(q) === -1) return false;
+            return true;
+        });
+    };
+
+    c.switchTab = function(tab) {
+        c.tab = tab;
+        if (tab === 'portfolio') {
+            $timeout(buildAgingChart, 100);
+        }
+        if (tab === 'approvals') {
+            $timeout(buildTrendChart, 100);
+        }
+    };
+
+    c.openCustomer360 = function(code) {
+        c.data.action = 'getCustomer360';
+        c.data.code = code;
+        c.server.update().then(function() {
+            c.tab = 'c360';
+        });
+    };
+
+    c.openRequestDetail = function(number) {
+        c.data.action = 'getRequestDetail';
+        c.data.number = number;
+        c.server.update().then(function() {
+            c.tab = 'reqdetail';
+        });
+    };
+
+    c.$onInit = function() {
+        var depots = {};
+        ((c.data.portfolio &amp;&amp; c.data.portfolio.rows) || []).forEach(function(r) {
+            if (r.depot) depots[r.depot] = true;
+        });
+        c.depotOptions = ['all'].concat(Object.keys(depots));
+        $timeout(buildAgingChart, 500);
+    };
+
+    // ---------------------------------------------------------------
+    // Chart Definitions
+    // ---------------------------------------------------------------
+    function buildTrendChart() {
+        if (typeof Chart === 'undefined') return;
+        var canvas = document.getElementById('clmApprovalTrend');
+        if (!canvas) return;
+        var trend = (c.data.approvals &amp;&amp; c.data.approvals.monthlyTrend) || [];
+        if (!trend.length) return;
+
+        var states = {};
+        trend.forEach(function(row) {
+            for (var k in row) { if (k !== 'month') states[k] = true; }
+        });
+        var palette = { Submitted: '#1a5ca8', Approved: '#1b7a3e', Pending: '#b45309', Rejected: '#c41c1c' };
+
+        var datasets = Object.keys(states).map(function(state) {
+            return {
+                label: state,
+                data: trend.map(function(row) { return row[state] || 0; }),
+                borderColor: palette[state] || '#888',
+                backgroundColor: 'transparent',
+                tension: 0.3
+            };
+        });
+
+        if (trendChart) trendChart.destroy();
+        trendChart = new Chart(canvas, {
+            type: 'line',
+            data: { labels: trend.map(function(row) { return row.month; }), datasets: datasets },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
+        });
+    }
+
+    function buildAgingChart() {
+        if (typeof Chart === 'undefined') return;
+        var canvas = document.getElementById('cAgingPortfolio');
+        if (!canvas) return;
+
+        var ag = c.data.portfolio.agingTotals;
+        var datasets = [
+            { label: 'Not Due', data: [ag.notDue], backgroundColor: '#1b7a3e' },
+            { label: '0-30D', data: [ag.d0_30], backgroundColor: '#f5c400' },
+            { label: '31-60D', data: [ag.d31_60], backgroundColor: '#b45309' },
+            { label: '61-90D', data: [ag.d61_90], backgroundColor: '#c41c1c' },
+            { label: '&gt;90D', data: [ag.gt90], backgroundColor: '#7f1d1d' }
+        ];
+
+        if (agingChart) agingChart.destroy();
+        agingChart = new Chart(canvas, {
+            type: 'bar',
+            data: { labels: ['Current Portfolio Aging'], datasets: datasets },
+            options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { stacked: true }, y: { stacked: true } } }
+        });
+    }
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;.clm-dash {
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 13px;
+  color: #1d2125;
+  background: #f2f4f7;
+  min-height: 100vh;
+
+  --accent: #1a5ca8;
+  --red: #c41c1c;
+  --green: #1b7a3e;
+  --amber: #b45309;
+  --teal: #107e7d;
+  --border: #d5d8e0;
+  --muted: #6b7585;
+
+  .sn-topbar { height: 48px; background: #1a1a1a; border-bottom: 3px solid #f5c400; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; margin-bottom: 16px; }
+  .sn-topbar-user { font-size: 11px; color: rgba(255,255,255,.7); font-weight: 600; }
+  .sn-logo-badge { background: #f5c400; border-radius: 3px; padding: 3px 8px; }
+  .sn-logo-text { font-size: 13px; font-weight: 800; color: #1a1a1a; line-height: 1; }
+  .sn-logo-sub { font-size: 8px; font-weight: 700; color: #1a1a1a; letter-spacing: .08em; }
+  .sn-topbar-title { font-size: 12px; color: rgba(255,255,255,.6); margin-left: 6px; }
+  .sn-topbar-module { font-size: 13px; font-weight: 600; color: #fff; margin-left: 6px; }
+
+  .clm-tabs {
+    display: flex; list-style: none; margin: 0 20px 16px; padding: 0; border-bottom: 2px solid var(--border); background: #fff;
+    li a { display: block; padding: 10px 18px; font-weight: 500; color: var(--muted); text-decoration: none; cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -2px; }
+    li.active a { color: #1a1a1a; font-weight: 600; border-bottom-color: #f5c400; }
+  }
+
+  .sn-panel { padding: 0 20px 20px; }
+
+  .clm-filter-strip {
+    background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 10px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .clm-filter-label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; }
+  .clm-select, .clm-search { border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; font-size: 12px; font-family: inherit; }
+  .clm-filter-summary { margin-left: auto; font-size: 11px; color: var(--muted); }
+
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .kpi-card { background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 14px; }
+  .kpi-name { font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; }
+  .kpi-value { font-size: 22px; font-weight: 700; }
+  .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  .sc-blue  { border-left: 4px solid var(--accent); .kpi-value { color: var(--accent); } }
+  .sc-amber { border-left: 4px solid var(--amber);  .kpi-value { color: var(--amber); } }
+  .sc-green { border-left: 4px solid var(--green);  .kpi-value { color: var(--green); } }
+  .sc-red   { border-left: 4px solid var(--red);    .kpi-value { color: var(--red); } }
+  .sc-teal  { border-left: 4px solid var(--teal);   .kpi-value { color: var(--teal); } }
+
+  .chart-grid-3 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  .full-span { grid-column: 1 / -1; }
+
+  .clm-chart-card { background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 14px; margin-bottom: 16px; }
+  .clm-chart-title { font-size: 12px; font-weight: 600; margin-bottom: 10px; }
+  .clm-chart-wrap { position: relative; height: 160px; }
+
+  .clm-table {
+    width: 100%; border-collapse: collapse; background: #fff; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+    th { text-align: left; padding: 8px 12px; font-size: 10px; font-weight: 700; color: var(--muted); text-transform: uppercase; background: #f8f9fa; border-bottom: 1px solid var(--border); }
+    td { padding: 9px 12px; border-bottom: 1px solid #f0f2f5; font-size: 12px; }
+    tr { cursor: pointer; }
+    tr:hover td { background: #f5f7ff; }
+  }
+
+  .chip { display: inline-block; padding: 2px 7px; border-radius: 3px; font-size: 11px; font-weight: 600; background: #dbeafe; color: #1d4ed8; }
+  .chip-green { background: #dcfce7; color: #166534; }
+  .chip-amber { background: #fef9c3; color: #92400e; }
+  .chip-red   { background: #fee2e2; color: #991b1b; }
+
+  .seg-chip { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 700; }
+  .seg-cement { background: #ede9fe; color: #5b21b6; }
+  .seg-rmc    { background: #d1fae5; color: #065f46; }
+  .seg-bpd    { background: #fef9c3; color: #78350f; }
+
+  .util-wrap { display: flex; align-items: center; gap: 6px; }
+  .util-bar { flex: 1; height: 4px; background: #e5e7eb; border-radius: 2px; }
+  .util-fill { height: 100%; border-radius: 2px; }
+
+  .empty-state { padding: 40px; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.6; }
+  .empty-state code { background: #eef0f3; padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+  .btn-back { background: #fff; border: 1px solid var(--border); padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
+
+  .justification-box { margin: 14px 0; }
+  .justification-box label { font-size: 11px; font-weight: 700; color: var(--muted); display: block; margin-bottom: 4px; }
+  .justification-box p { padding: 10px 12px; background: #f8f9fa; border-left: 3px solid var(--accent); font-size: 12px; line-height: 1.6; margin: 0; }
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id&gt;copy_of_clmtrade&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;copy of clmtrade&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+    /* ============================================================
+       CLM PORTFOLIO DASHBOARD — Server Script (TSH-scoped)
+       ============================================================
+       Each logged-in TSH sees only:
+         - Customers where Customer Master's `tsh` field = them
+         - Requests where Credit Request's `initiator` field = them
+       Matched against sys_id / display name / login name together,
+       since reference fields can resolve inconsistently depending
+       on how the record was created (mirrors the OR-pattern already
+       used for `initiator` in the View My Requests widget).
+    ============================================================ */
+
+    var TABLE_CUSTOMER = 'x_birl3_clm_clm_customer_master1';
+    var TABLE_REQUEST  = 'x_birl3_clm_clm_new_credit_request';
+    var TABLE_AGING    = 'x_birl3_clm_clm_aging_snapshot';
+    var TABLE_APPROVAL = 'sysapproval_approver';
+
+    var CUST_FIELDS = {
+        name:        'customer_name',
+        code:        'customer_code_sap',
+        pan:         'pan',
+        segment:     'segment',
+        sd:          'current_sd_amount',
+        limit:       'current_credit_limit',
+        active:      'is_active',
+        blockStatus: 'credit_block_status',
+        tsh:         'tsh',
+        depot:       'depot',
+        avgSales:    'avg_monthly_sales_mt'
+    };
+
+    var REQ_FIELDS = {
+        customer:               'customer',
+        segment:                'segment',
+        state:                  'state',
+        requested:              'requested_limit',
+        approved:               'approved_limit',
+        outstanding:            'outstanding_amount',
+        netExposure:            'net_exposure',
+        safeLimit:              'safe_allowable_limit',
+        isDeviation:            'is_deviation',
+        deviationJustification: 'deviation_justification',
+        businessJustification:  'business_justification',
+        initiator:              'initiator',
+        approver:               'approver',
+        reqApproverLevel:       'required_approver_level',
+        requestNumber:          'number'
+    };
+
+    var data = data || {};
+
+    // Exposed so the widget can show "Viewing as: &lt;name&gt;" — useful while
+    // testing scoping, since an empty dashboard and a correctly-scoped
+    // empty dashboard look identical otherwise.
+    data.currentUser = {
+        id:   gs.getUserID(),
+        name: gs.getUserDisplayName()
+    };
+
+    if (input &amp;&amp; input.action === 'getCustomer360') {
+        data.customer360 = getCustomer360(input.code);
+    } else if (input &amp;&amp; input.action === 'getRequestDetail') {
+        data.requestDetail = getRequestDetail(input.number);
+    } else {
+        data.portfolio = buildPortfolio();
+        data.approvals = buildApprovals();
+    }
+
+    // ---------------------------------------------------------------
+    // SCOPING HELPER
+    // ---------------------------------------------------------------
+    // Adds an OR-condition group to `gr` matching the current user
+    // against `field` by sys_id, display name, and login name.
+    function scopeToCurrentUser(gr, field) {
+        var uid   = gs.getUserID();
+        var dname = gs.getUserDisplayName();
+        var lname = gs.getUserName();
+
+        var qc = gr.addQuery(field, uid);
+        qc.addOrCondition(field, dname);
+        qc.addOrCondition(field, lname);
+        return qc;
+    }
+
+    // ---------------------------------------------------------------
+    // PORTFOLIO OVERVIEW — scoped to customers where tsh = current user
+    // ---------------------------------------------------------------
+    function buildPortfolio() {
+        var rows = [];
+        var totals = { limit: 0, os: 0, customers: 0, overdue90: 0 };
+        var agingTotals = { notDue: 0, d0_30: 0, d31_60: 0, d61_90: 0, gt90: 0 };
+
+        var gr = new GlideRecord(TABLE_CUSTOMER);
+        gr.addQuery(CUST_FIELDS.active, 'true'); // FIX: string, not JS boolean — true_false fields store 'true'/'false'
+        scopeToCurrentUser(gr, CUST_FIELDS.tsh);
+        gr.query();
+
+        while (gr.next()) {
+            var sysId = gr.getUniqueValue();
+            var limit = parseFloat(gr.getValue(CUST_FIELDS.limit) || 0);
+
+            var aging = getAgingData(sysId);
+            var os = aging ? aging.total : 0;
+
+            var status = gr.getValue(CUST_FIELDS.blockStatus) ? 'Blocked' : 'Active';
+
+            rows.push({
+                sys_id:      sysId,
+                code:        gr.getValue(CUST_FIELDS.code),
+                name:        gr.getValue(CUST_FIELDS.name),
+                pan:         gr.getValue(CUST_FIELDS.pan),
+                segment:     gr.getDisplayValue(CUST_FIELDS.segment),
+                depot:       gr.getDisplayValue(CUST_FIELDS.depot),
+                limit:       limit,
+                outstanding: os,
+                available:   Math.max(0, limit - os),
+                utilisation: limit &gt; 0 ? Math.round((os / limit) * 100) : 0,
+                status:      status,
+                od90:        aging ? aging.gt90 : 0
+            });
+
+            totals.limit += limit;
+            totals.os += os;
+            totals.customers++;
+            if (aging) {
+                totals.overdue90 += aging.gt90;
+                agingTotals.notDue += aging.notDue;
+                agingTotals.d0_30  += aging.d0_30;
+                agingTotals.d31_60 += aging.d31_60;
+                agingTotals.d61_90 += aging.d61_90;
+                agingTotals.gt90   += aging.gt90;
+            }
+        }
+
+        return { rows: rows, totals: totals, agingTotals: agingTotals };
+    }
+
+    // ---------------------------------------------------------------
+    // APPROVAL REQUESTS — scoped to requests where initiator = current user
+    // ---------------------------------------------------------------
+    function buildApprovals() {
+        var rows = [];
+        var counts = {};
+        var monthly = {};
+
+        var gr = new GlideRecord(TABLE_REQUEST);
+        scopeToCurrentUser(gr, REQ_FIELDS.initiator);
+        gr.orderByDesc('sys_created_on');
+        gr.setLimit(200);
+        gr.query();
+
+        while (gr.next()) {
+            var state = gr.getDisplayValue(REQ_FIELDS.state);
+            counts[state] = (counts[state] || 0) + 1;
+
+            var created = gr.getValue('sys_created_on') || '';
+            var monthKey = created.substring(0, 7);
+            if (monthKey) {
+                if (!monthly[monthKey]) monthly[monthKey] = {};
+                monthly[monthKey][state] = (monthly[monthKey][state] || 0) + 1;
+            }
+
+            rows.push({
+                sys_id:       gr.getUniqueValue(),
+                number:       gr.getValue(REQ_FIELDS.requestNumber),
+                customer:     gr.getDisplayValue(REQ_FIELDS.customer),
+                customerName: gr.customer.customer_name.toString(),
+                segment:      gr.getDisplayValue(REQ_FIELDS.segment),
+                state:        state,
+                requested:    parseFloat(gr.getValue(REQ_FIELDS.requested) || 0),
+                approved:     gr.getValue(REQ_FIELDS.approved) ? parseFloat(gr.getValue(REQ_FIELDS.approved)) : null,
+                outstanding:  parseFloat(gr.getValue(REQ_FIELDS.outstanding) || 0),
+                isDeviation:  gr.getValue(REQ_FIELDS.isDeviation) == '1' || gr.getValue(REQ_FIELDS.isDeviation) == 'true'
+            });
+        }
+
+        var trend = Object.keys(monthly).sort().map(function(m) {
+            var row = { month: m };
+            for (var st in monthly[m]) row[st] = monthly[m][st];
+            return row;
+        });
+
+        return { rows: rows, counts: counts, monthlyTrend: trend };
+    }
+
+    // ---------------------------------------------------------------
+    // CUSTOMER 360 &amp; REQUEST DETAIL
+    // ---------------------------------------------------------------
+    // NOTE: these are NOT re-scoped to current user. They only ever run
+    // against a code/number that came from the already-scoped lists
+    // above (the user clicked a row they were already allowed to see).
+    function getCustomer360(code) {
+        var gr = new GlideRecord(TABLE_CUSTOMER);
+        gr.addQuery(CUST_FIELDS.code, code);
+        gr.query();
+        if (!gr.next()) return null;
+
+        var profile = {};
+        for (var key in CUST_FIELDS) {
+            profile[key] = gr.getDisplayValue(CUST_FIELDS[key]);
+        }
+        profile.sys_id = gr.getUniqueValue();
+        profile.status = gr.getValue(CUST_FIELDS.blockStatus) ? 'Blocked' : 'Active';
+
+        profile.aging = getAgingData(profile.sys_id);
+
+        var history = [];
+        var rgr = new GlideRecord(TABLE_REQUEST);
+        rgr.addQuery(REQ_FIELDS.customer, profile.sys_id);
+        rgr.orderByDesc('sys_created_on');
+        rgr.query();
+        while (rgr.next()) {
+            history.push({
+                number:    rgr.getValue(REQ_FIELDS.requestNumber),
+                state:     rgr.getDisplayValue(REQ_FIELDS.state),
+                requested: parseFloat(rgr.getValue(REQ_FIELDS.requested) || 0),
+                approved:  rgr.getValue(REQ_FIELDS.approved) ? parseFloat(rgr.getValue(REQ_FIELDS.approved)) : null,
+                created:   rgr.getValue('sys_created_on')
+            });
+        }
+        profile.requestHistory = history;
+        return profile;
+    }
+
+    function getRequestDetail(number) {
+        var gr = new GlideRecord(TABLE_REQUEST);
+        gr.addQuery(REQ_FIELDS.requestNumber, number);
+        gr.query();
+        if (!gr.next()) return null;
+
+        var detail = {};
+        for (var key in REQ_FIELDS) {
+            detail[key] = gr.getDisplayValue(REQ_FIELDS[key]);
+        }
+        detail.sys_id = gr.getUniqueValue();
+        detail.isDeviation = gr.getValue(REQ_FIELDS.isDeviation) == '1' || gr.getValue(REQ_FIELDS.isDeviation) == 'true';
+
+        var trail = [];
+        var appGr = new GlideRecord(TABLE_APPROVAL);
+        appGr.addQuery('document_id', detail.sys_id);
+        appGr.orderBy('sys_created_on');
+        appGr.query();
+        while (appGr.next()) {
+            trail.push({
+                approver: appGr.getDisplayValue('approver'),
+                state:    appGr.getDisplayValue('state'),
+                comments: appGr.getValue('comments'),
+                updated:  appGr.getValue('sys_updated_on')
+            });
+        }
+        detail.approvalTrail = trail;
+
+        return detail;
+    }
+
+    // ---------------------------------------------------------------
+    // HELPER: AGING ROLLUP
+    // ---------------------------------------------------------------
+    function getAgingData(customerSysId) {
+        var gr = new GlideRecord(TABLE_AGING);
+        gr.addQuery('customer', customerSysId);
+        gr.orderByDesc('sys_created_on');
+        gr.setLimit(1);
+        gr.query();
+        if (!gr.next()) return null;
+
+        var total = parseFloat(gr.getValue('total_outstanding') || 0);
+
+        var b0_30   = parseFloat(gr.getValue('bucket_0_30_days') || 0);
+        var b31_45  = parseFloat(gr.getValue('bucket_31_45_days') || 0);
+        var b46_60  = parseFloat(gr.getValue('bucket_46_60_days') || 0);
+        var b61_75  = parseFloat(gr.getValue('bucket_61_75_days') || 0);
+        var b76_90  = parseFloat(gr.getValue('bucket_76_90_days') || 0);
+        var b91_120 = parseFloat(gr.getValue('bucket_91_120_days') || 0);
+        var bGt120  = parseFloat(gr.getValue('bucket_gt120_days') || 0);
+
+        var d31_60 = b31_45 + b46_60;
+        var d61_90 = b61_75 + b76_90;
+        var gt90   = b91_120 + bGt120;
+
+        var overdueSum = b0_30 + d31_60 + d61_90 + gt90;
+        var notDue = Math.max(0, total - overdueSum);
+
+        return {
+            snapshotMonth: gr.getDisplayValue('snapshot_month'),
+            total:  total,
+            notDue: notDue,
+            d0_30:  b0_30,
+            d31_60: d31_60,
+            d61_90: d61_90,
+            gt90:   gt90
+        };
+    }
+
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;vedant.salunke@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-03-27 05:00:54&lt;/sys_created_on&gt;&lt;sys_id&gt;fcc2f2fa2b3bb6d04572f3745e91bf1a&lt;/sys_id&gt;&lt;sys_mod_count&gt;6&lt;/sys_mod_count&gt;&lt;sys_name&gt;copy of clmtrade&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_fcc2f2fa2b3bb6d04572f3745e91bf1a&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;vedant.salunke@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-06-19 05:19:52&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"&gt;&lt;/script&gt;
+
+&lt;div class="clm-dash sn-shell"&gt;
+
+  &lt;div class="sn-topbar"&gt;
+    &lt;div style="display:flex;align-items:center;gap:10px"&gt;
+      &lt;div class="sn-logo-badge"&gt;&lt;div class="sn-logo-text"&gt;UltraTech&lt;/div&gt;&lt;div class="sn-logo-sub"&gt;CEMENT&lt;/div&gt;&lt;/div&gt;
+      &lt;div style="width:1px;height:20px;background:rgba(255,255,255,.2)"&gt;&lt;/div&gt;
+      &lt;span class="sn-topbar-module"&gt;Credit Lifecycle Management&lt;/span&gt;
+      &lt;div style="width:1px;height:20px;background:rgba(255,255,255,.2)"&gt;&lt;/div&gt;
+      &lt;span class="sn-topbar-title"&gt;TSH Dashboard&lt;/span&gt;
+    &lt;/div&gt;
+    &lt;div class="sn-topbar-user" ng-if="c.data.currentUser"&gt;Viewing as: {{c.data.currentUser.name}}&lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;ul class="clm-tabs"&gt;
+    &lt;li ng-class="{active: c.tab==='portfolio'}"&gt;&lt;a href ng-click="c.switchTab('portfolio')"&gt;Portfolio Overview&lt;/a&gt;&lt;/li&gt;
+    &lt;li ng-class="{active: c.tab==='approvals'}"&gt;&lt;a href ng-click="c.switchTab('approvals')"&gt;Approval Requests&lt;/a&gt;&lt;/li&gt;
+    &lt;li ng-class="{active: c.tab==='c360'}"&gt;&lt;a href ng-click="c.switchTab('c360')"&gt;Customer 360&lt;/a&gt;&lt;/li&gt;
+    &lt;li ng-class="{active: c.tab==='reqdetail'}"&gt;&lt;a href ng-click="c.switchTab('reqdetail')"&gt;Request Detail&lt;/a&gt;&lt;/li&gt;
+  &lt;/ul&gt;
+
+  &lt;div class="sn-panel" ng-show="c.tab==='portfolio'"&gt;
+
+    &lt;div class="clm-filter-strip"&gt;
+      &lt;span class="clm-filter-label"&gt;]]&gt;📍&lt;![CDATA[ Interactive Filters&lt;/span&gt;
+      &lt;select class="clm-select" ng-model="c.filters.segment" ng-options="s as s for s in c.segmentOptions"&gt;&lt;/select&gt;
+      &lt;select class="clm-select" ng-model="c.filters.depot" ng-options="d as d for d in c.depotOptions"&gt;&lt;/select&gt;
+      &lt;input class="clm-search" type="text" placeholder="Search code, name, PAN..." ng-model="c.search"&gt;
+      &lt;span class="clm-filter-summary"&gt;Showing &lt;b&gt;{{c.filteredCustomers().length}}&lt;/b&gt; customers&lt;/span&gt;
+    &lt;/div&gt;
+
+    &lt;div class="kpi-grid"&gt;
+      &lt;div class="kpi-card sc-blue"&gt;
+        &lt;div class="kpi-name"&gt;IND-001 · Total Approved Limit&lt;/div&gt;
+        &lt;div class="kpi-value"&gt;{{c.fmt(c.data.portfolio.totals.limit)}}&lt;/div&gt;
+        &lt;div class="kpi-sub"&gt;{{c.data.portfolio.totals.customers}} active codes&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="kpi-card sc-amber"&gt;
+        &lt;div class="kpi-name"&gt;IND-002 · Gross Exposure&lt;/div&gt;
+        &lt;div class="kpi-value"&gt;{{c.fmt(c.data.portfolio.totals.os)}}&lt;/div&gt;
+        &lt;div class="kpi-sub"&gt;Outstanding&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="kpi-card sc-green"&gt;
+        &lt;div class="kpi-name"&gt;IND-003 · Available Limit&lt;/div&gt;
+        &lt;div class="kpi-value"&gt;{{c.fmt(c.data.portfolio.totals.limit - c.data.portfolio.totals.os)}}&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="kpi-card sc-teal"&gt;
+        &lt;div class="kpi-name"&gt;IND-004 · Credit Utilization %&lt;/div&gt;
+        &lt;div class="kpi-value"&gt;{{c.data.portfolio.totals.limit &gt; 0 ? ((c.data.portfolio.totals.os / c.data.portfolio.totals.limit) * 100).toFixed(1) : 0}}%&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="kpi-card sc-red"&gt;
+        &lt;div class="kpi-name"&gt;IND-006 · Overdue &gt;90D&lt;/div&gt;
+        &lt;div class="kpi-value"&gt;{{c.fmt(c.data.portfolio.totals.overdue90)}}&lt;/div&gt;
+        &lt;div class="kpi-sub"&gt;High risk overdue&lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="chart-grid-3"&gt;
+       &lt;div class="clm-chart-card"&gt;&lt;div class="clm-chart-title"&gt;IND-012 · Sales Volume MoM (MT)&lt;/div&gt;&lt;div class="clm-chart-wrap"&gt;&lt;canvas id="cVol"&gt;&lt;/canvas&gt;&lt;/div&gt;&lt;/div&gt;
+       &lt;div class="clm-chart-card"&gt;&lt;div class="clm-chart-title"&gt;IND-013 · Sales Value MoM (₹)&lt;/div&gt;&lt;div class="clm-chart-wrap"&gt;&lt;canvas id="cVal"&gt;&lt;/canvas&gt;&lt;/div&gt;&lt;/div&gt;
+       &lt;div class="clm-chart-card full-span"&gt;
+         &lt;div class="clm-chart-title"&gt;IND-005 · Aging Bucket Breakdown (x_birl3_clm_clm_aging_snapshot)&lt;/div&gt;
+         &lt;div class="clm-chart-wrap" style="height:140px"&gt;&lt;canvas id="cAgingPortfolio"&gt;&lt;/canvas&gt;&lt;/div&gt;
+       &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;table class="clm-table"&gt;
+      &lt;thead&gt;
+        &lt;tr&gt;
+          &lt;th&gt;Code&lt;/th&gt;&lt;th&gt;Name / PAN&lt;/th&gt;&lt;th&gt;Seg&lt;/th&gt;&lt;th&gt;Depot&lt;/th&gt;&lt;th&gt;Status&lt;/th&gt;
+          &lt;th&gt;Outstanding&lt;/th&gt;&lt;th&gt;Limit&lt;/th&gt;&lt;th&gt;Available&lt;/th&gt;&lt;th&gt;Utilisation&lt;/th&gt;&lt;th&gt;Overdue &gt;90D&lt;/th&gt;
+        &lt;/tr&gt;
+      &lt;/thead&gt;
+      &lt;tbody&gt;
+        &lt;tr ng-repeat="row in c.filteredCustomers()" ng-click="c.openCustomer360(row.code)"&gt;
+          &lt;td style="font-weight:600;color:var(--accent)"&gt;{{row.code}}&lt;/td&gt;
+          &lt;td&gt;&lt;div style="font-weight:500"&gt;{{row.name}}&lt;/div&gt;&lt;small&gt;{{row.pan}}&lt;/small&gt;&lt;/td&gt;
+          &lt;td&gt;&lt;span class="seg-chip seg-{{row.segment | lowercase}}"&gt;{{row.segment}}&lt;/span&gt;&lt;/td&gt;
+          &lt;td&gt;{{row.depot}}&lt;/td&gt;
+          &lt;td&gt;&lt;span class="chip chip-{{c.statusColor(row.status)}}"&gt;{{row.status}}&lt;/span&gt;&lt;/td&gt;
+          &lt;td style="font-weight:600"&gt;{{c.fmt(row.outstanding)}}&lt;/td&gt;
+          &lt;td&gt;{{c.fmt(row.limit)}}&lt;/td&gt;
+          &lt;td style="color:var(--green)"&gt;{{c.fmt(row.available)}}&lt;/td&gt;
+          &lt;td&gt;
+             &lt;div class="util-wrap"&gt;
+               &lt;div class="util-bar"&gt;&lt;div class="util-fill" ng-style="{'width': row.utilisation + '%', 'background': row.utilisation &gt; 80 ? 'var(--red)' : 'var(--green)'}"&gt;&lt;/div&gt;&lt;/div&gt;
+               &lt;span style="font-size:11px;font-weight:600;min-width:34px;text-align:right"&gt;{{row.utilisation}}%&lt;/span&gt;
+             &lt;/div&gt;
+          &lt;/td&gt;
+          &lt;td style="color:var(--red)"&gt;{{row.od90 &gt; 0 ? c.fmt(row.od90) : '\u2014'}}&lt;/td&gt;
+        &lt;/tr&gt;
+      &lt;/tbody&gt;
+    &lt;/table&gt;
+
+    &lt;div class="empty-state" ng-if="c.data.portfolio.rows.length === 0"&gt;
+      No customers found where TSH = {{c.data.currentUser.name}}. If this looks wrong, check the
+      &lt;code&gt;tsh&lt;/code&gt; field on Customer Master records — it must reference this exact user.
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;div class="sn-panel" ng-show="c.tab==='approvals'"&gt;
+
+    &lt;div class="kpi-grid"&gt;
+      &lt;div class="kpi-card sc-blue" ng-repeat="(state, count) in c.data.approvals.counts"&gt;
+        &lt;div class="kpi-name"&gt;{{state}}&lt;/div&gt;
+        &lt;div class="kpi-value"&gt;{{count}}&lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="clm-chart-card"&gt;
+      &lt;div class="clm-chart-title"&gt;Approval Pipeline by Month&lt;/div&gt;
+      &lt;div class="clm-chart-wrap"&gt;&lt;canvas id="clmApprovalTrend"&gt;&lt;/canvas&gt;&lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;table class="clm-table"&gt;
+      &lt;thead&gt;
+        &lt;tr&gt;&lt;th&gt;Request #&lt;/th&gt;&lt;th&gt;Customer&lt;/th&gt;&lt;th&gt;Seg&lt;/th&gt;&lt;th&gt;State&lt;/th&gt;&lt;th&gt;Requested&lt;/th&gt;&lt;th&gt;Approved&lt;/th&gt;&lt;th&gt;Outstanding&lt;/th&gt;&lt;th&gt;Deviation&lt;/th&gt;&lt;/tr&gt;
+      &lt;/thead&gt;
+      &lt;tbody&gt;
+        &lt;tr ng-repeat="row in c.data.approvals.rows" ng-click="c.openRequestDetail(row.number)"&gt;
+          &lt;td style="font-weight:600;color:var(--accent)"&gt;{{row.number}}&lt;/td&gt;
+          &lt;td&gt;&lt;div style="font-weight:500"&gt;{{row.customerName}}&lt;/div&gt;&lt;small&gt;{{row.customer}}&lt;/small&gt;&lt;/td&gt;
+          &lt;td&gt;&lt;span class="seg-chip seg-{{row.segment | lowercase}}"&gt;{{row.segment}}&lt;/span&gt;&lt;/td&gt;
+          &lt;td&gt;&lt;span class="chip"&gt;{{row.state}}&lt;/span&gt;&lt;/td&gt;
+          &lt;td style="font-weight:600"&gt;{{c.fmt(row.requested)}}&lt;/td&gt;
+          &lt;td style="color:var(--green)"&gt;{{row.approved ? c.fmt(row.approved) : '\u2014'}}&lt;/td&gt;
+          &lt;td&gt;{{c.fmt(row.outstanding)}}&lt;/td&gt;
+          &lt;td&gt;&lt;span ng-if="row.isDeviation" class="chip chip-red"&gt;Deviation&lt;/span&gt;&lt;/td&gt;
+        &lt;/tr&gt;
+      &lt;/tbody&gt;
+    &lt;/table&gt;
+
+    &lt;div class="empty-state" ng-if="c.data.approvals.rows.length === 0"&gt;
+      No requests found where Initiator = {{c.data.currentUser.name}}.
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;div class="sn-panel" ng-show="c.tab==='c360'"&gt;
+    &lt;div ng-if="!c.data.customer360" class="empty-state"&gt;Click a customer row in Portfolio Overview to load their profile.&lt;/div&gt;
+    &lt;div ng-if="c.data.customer360"&gt;
+      
+      &lt;div class="clm-filter-strip" style="margin-bottom:14px"&gt;
+        &lt;div style="font-size:11px;color:var(--muted)"&gt;Viewing&lt;/div&gt;
+        &lt;div style="font-size:15px;font-weight:700;color:var(--text);margin-left:8px"&gt;{{c.data.customer360.name}}&lt;/div&gt;
+        &lt;span class="chip chip-blue" style="margin-left:8px"&gt;{{c.data.customer360.code}}&lt;/span&gt;
+        &lt;span class="chip"&gt;{{c.data.customer360.status}}&lt;/span&gt;
+      &lt;/div&gt;
+
+      &lt;div class="kpi-grid"&gt;
+         &lt;div class="kpi-card sc-blue"&gt;&lt;div class="kpi-name"&gt;Current Limit&lt;/div&gt;&lt;div class="kpi-value"&gt;{{c.fmt(c.data.customer360.limit)}}&lt;/div&gt;&lt;/div&gt;
+         &lt;div class="kpi-card sc-amber"&gt;&lt;div class="kpi-name"&gt;SD Amount&lt;/div&gt;&lt;div class="kpi-value"&gt;{{c.fmt(c.data.customer360.sd)}}&lt;/div&gt;&lt;/div&gt;
+         &lt;div class="kpi-card sc-green"&gt;&lt;div class="kpi-name"&gt;Avg Monthly Sales&lt;/div&gt;&lt;div class="kpi-value"&gt;{{c.data.customer360.avgSales}} MT&lt;/div&gt;&lt;/div&gt;
+         &lt;div class="kpi-card sc-red"&gt;&lt;div class="kpi-name"&gt;Overdue &gt;90D&lt;/div&gt;&lt;div class="kpi-value"&gt;{{c.data.customer360.aging ? c.fmt(c.data.customer360.aging.gt90) : '₹0'}}&lt;/div&gt;&lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div class="clm-chart-card" ng-if="c.data.customer360.aging"&gt;
+        &lt;div class="clm-chart-title"&gt;Current Aging Snapshot ({{c.data.customer360.aging.snapshotMonth}})&lt;/div&gt;
+        &lt;div style="display:flex;height:24px;border-radius:4px;overflow:hidden;margin-top:12px"&gt;
+           &lt;div style="background:#1b7a3e;width:{{(c.data.customer360.aging.notDue/c.data.customer360.aging.total)*100}}%" title="Not Due: {{c.fmt(c.data.customer360.aging.notDue)}}"&gt;&lt;/div&gt;
+           &lt;div style="background:#f5c400;width:{{(c.data.customer360.aging.d0_30/c.data.customer360.aging.total)*100}}%" title="0-30: {{c.fmt(c.data.customer360.aging.d0_30)}}"&gt;&lt;/div&gt;
+           &lt;div style="background:#b45309;width:{{(c.data.customer360.aging.d31_60/c.data.customer360.aging.total)*100}}%" title="31-60: {{c.fmt(c.data.customer360.aging.d31_60)}}"&gt;&lt;/div&gt;
+           &lt;div style="background:#c41c1c;width:{{(c.data.customer360.aging.d61_90/c.data.customer360.aging.total)*100}}%" title="61-90: {{c.fmt(c.data.customer360.aging.d61_90)}}"&gt;&lt;/div&gt;
+           &lt;div style="background:#7f1d1d;width:{{(c.data.customer360.aging.gt90/c.data.customer360.aging.total)*100}}%" title="&gt;90: {{c.fmt(c.data.customer360.aging.gt90)}}"&gt;&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:6px"&gt;
+           &lt;span&gt;Not Due: {{c.fmt(c.data.customer360.aging.notDue)}}&lt;/span&gt;
+           &lt;span&gt;0-30D: {{c.fmt(c.data.customer360.aging.d0_30)}}&lt;/span&gt;
+           &lt;span&gt;31-60D: {{c.fmt(c.data.customer360.aging.d31_60)}}&lt;/span&gt;
+           &lt;span&gt;61-90D: {{c.fmt(c.data.customer360.aging.d61_90)}}&lt;/span&gt;
+           &lt;span style="color:var(--red);font-weight:700"&gt;&gt;90D: {{c.fmt(c.data.customer360.aging.gt90)}}&lt;/span&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;table class="clm-table"&gt;
+        &lt;thead&gt;&lt;tr&gt;&lt;th&gt;Request #&lt;/th&gt;&lt;th&gt;State&lt;/th&gt;&lt;th&gt;Requested&lt;/th&gt;&lt;th&gt;Approved&lt;/th&gt;&lt;th&gt;Date&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;
+        &lt;tbody&gt;
+          &lt;tr ng-repeat="h in c.data.customer360.requestHistory" ng-click="c.openRequestDetail(h.number)"&gt;
+            &lt;td style="font-weight:600;color:var(--accent)"&gt;{{h.number}}&lt;/td&gt;&lt;td&gt;&lt;span class="chip"&gt;{{h.state}}&lt;/span&gt;&lt;/td&gt;
+            &lt;td&gt;{{c.fmt(h.requested)}}&lt;/td&gt;
+            &lt;td style="color:var(--green)"&gt;{{h.approved ? c.fmt(h.approved) : '\u2014'}}&lt;/td&gt;&lt;td&gt;{{h.created}}&lt;/td&gt;
+          &lt;/tr&gt;
+        &lt;/tbody&gt;
+      &lt;/table&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;div class="sn-panel" ng-show="c.tab==='reqdetail'"&gt;
+    &lt;div ng-if="!c.data.requestDetail" class="empty-state"&gt;Click a request row in Approval Requests to load its detail.&lt;/div&gt;
+    &lt;div ng-if="c.data.requestDetail"&gt;
+      
+      &lt;div class="clm-filter-strip" style="margin-bottom:14px;justify-content:space-between"&gt;
+        &lt;div style="display:flex;align-items:center"&gt;
+          &lt;div style="font-size:20px;font-weight:800"&gt;{{c.data.requestDetail.requestNumber}}&lt;/div&gt;
+          &lt;span class="chip" style="margin-left:12px"&gt;{{c.data.requestDetail.state}}&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;button ng-click="c.switchTab('approvals')" class="btn-back"&gt;← Back to Requests&lt;/button&gt;
+      &lt;/div&gt;
+
+      &lt;div style="display:grid;grid-template-columns:1fr 1fr;gap:16px"&gt;
+        &lt;div&gt;
+          &lt;table class="clm-table" style="margin-bottom:14px"&gt;
+            &lt;tbody&gt;
+              &lt;tr&gt;&lt;td style="color:var(--muted)"&gt;Requested Limit&lt;/td&gt;&lt;td style="font-weight:700;font-size:14px;color:var(--accent)"&gt;{{c.fmt(c.data.requestDetail.requested)}}&lt;/td&gt;&lt;/tr&gt;
+              &lt;tr&gt;&lt;td style="color:var(--muted)"&gt;Approved Limit&lt;/td&gt;&lt;td style="font-weight:700;font-size:14px;color:var(--green)"&gt;{{c.data.requestDetail.approved ? c.fmt(c.data.requestDetail.approved) : 'Pending'}}&lt;/td&gt;&lt;/tr&gt;
+              &lt;tr&gt;&lt;td style="color:var(--muted)"&gt;Net Exposure&lt;/td&gt;&lt;td&gt;{{c.fmt(c.data.requestDetail.netExposure)}}&lt;/td&gt;&lt;/tr&gt;
+              &lt;tr&gt;&lt;td style="color:var(--muted)"&gt;Safe Allowable Limit&lt;/td&gt;&lt;td&gt;{{c.fmt(c.data.requestDetail.safeLimit)}}&lt;/td&gt;&lt;/tr&gt;
+              &lt;tr&gt;&lt;td style="color:var(--muted)"&gt;Required Approver Level&lt;/td&gt;&lt;td&gt;&lt;span class="chip chip-blue"&gt;{{c.data.requestDetail.reqApproverLevel}}&lt;/span&gt;&lt;/td&gt;&lt;/tr&gt;
+              &lt;tr&gt;&lt;td style="color:var(--muted)"&gt;Initiator&lt;/td&gt;&lt;td&gt;{{c.data.requestDetail.initiator}}&lt;/td&gt;&lt;/tr&gt;
+            &lt;/tbody&gt;
+          &lt;/table&gt;
+
+          &lt;div class="justification-box"&gt;
+            &lt;label&gt;Business Justification&lt;/label&gt;
+            &lt;p&gt;{{c.data.requestDetail.businessJustification || 'No justification provided.'}}&lt;/p&gt;
+          &lt;/div&gt;
+          &lt;div class="justification-box" ng-if="c.data.requestDetail.isDeviation"&gt;
+            &lt;label style="color:var(--red)"&gt;Deviation Justification&lt;/label&gt;
+            &lt;p style="border-color:var(--red)"&gt;{{c.data.requestDetail.deviationJustification}}&lt;/p&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-chart-card" style="height:fit-content"&gt;
+          &lt;div class="clm-chart-title"&gt;sysapproval_approver Workflow Trail&lt;/div&gt;
+          &lt;div style="position:relative;padding-left:24px;margin-top:12px"&gt;
+            &lt;div style="position:absolute;left:9px;top:6px;bottom:6px;width:1px;background:var(--border)"&gt;&lt;/div&gt;
+            &lt;div style="position:relative;margin-bottom:18px" ng-repeat="app in c.data.requestDetail.approvalTrail"&gt;
+              &lt;div style="position:absolute;left:-19px;top:3px;width:10px;height:10px;border-radius:50%;border:2px solid var(--accent);background:{{app.state === 'Approved' ? 'var(--green)' : app.state === 'Rejected' ? 'var(--red)' : '#fff'}}"&gt;&lt;/div&gt;
+              &lt;div style="font-size:12px;font-weight:600"&gt;{{app.approver}}&lt;/div&gt;
+              &lt;div style="font-size:11px;color:var(--muted)"&gt;{{app.state}} · {{app.updated}}&lt;/div&gt;
+              &lt;div ng-if="app.comments" style="font-size:11px;padding:6px 10px;border-radius:4px;background:#f8f9fa;margin-top:4px;line-height:1.4"&gt;"{{app.comments}}"&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div ng-if="c.data.requestDetail.approvalTrail.length === 0" style="color:var(--muted);font-size:11px"&gt;No approval records generated yet.&lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>1193144808</payload_hash>
+        <record_name>copy of clmtrade</record_name>
+        <reverted_from/>
+        <source>57b38f622b2303104572f3745e91bf2a</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by/>
+        <sys_created_on>2026-09-28 21:32:03</sys_created_on>
+        <sys_id>e3e300903b08531087401044c3e45aa2</sys_id>
+        <sys_mod_count/>
+        <sys_recorded_at>1a0e9ee98380000000</sys_recorded_at>
+        <sys_updated_by/>
+        <sys_updated_on/>
+        <type>Widget</type>
+        <update_guid>a3e30090600853103ac39b1536f3a8a2</update_guid>
+        <update_guid_history>a3e30090600853103ac39b1536f3a8a2:1193144808</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="copy of clmtrade">23e300903b08531087401044c3e45aa3</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-16 04:19:05</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>08831f92ab2f4d7c8269011be42f6ca1</sys_id>
+        <sys_metadata>fcc2f2fa2b3bb6d04572f3745e91bf1a</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>copy of clmtrade</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_fcc2f2fa2b3bb6d04572f3745e91bf1a</sys_update_name>
+        <sys_update_version display_value="sp_widget_fcc2f2fa2b3bb6d04572f3745e91bf1a">e3e300903b08531087401044c3e45aa2</sys_update_version>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-16 04:19:05</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

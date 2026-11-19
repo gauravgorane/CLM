@@ -1,0 +1,4215 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[/**
+ * CLM VIEW MY REQUESTS — Client Script
+ */
+
+api.controller = function($scope) {
+    var c = this;
+
+    // ── Init ────
+    c.data.filteredRequests = [];
+    c.data.selectedRequest  = null;
+    c.data.filterSegment    = '';
+    c.data.filterType       = '';
+    c.data.filterStatus     = '';
+    c.data.refreshing       = false;
+    c.data.lastRefreshed    = '';
+
+    // ── Build filtered list ───────
+    c.applyFilters = function() {
+        var seg  = c.data.filterSegment   || '';
+        var typ  = c.data.filterType      || '';
+        var stat = c.data.filterStatus    || '';
+
+        c.data.filteredRequests = (c.data.requests || []).filter(function(req) {
+            if (seg  && req.segment       !== seg)  return false;
+            if (typ  && req.customer_type !== typ)  return false;
+            if (stat && req.state         !== stat) return false;
+            return true;
+        });
+    };
+
+    // Watch filters
+    $scope.$watch(function() { return c.data.filterSegment; }, function() { c.applyFilters(); });
+    $scope.$watch(function() { return c.data.filterType;    }, function() { c.applyFilters(); });
+    $scope.$watch(function() { return c.data.filterStatus;  }, function() { c.applyFilters(); });
+
+    // ── Load requests on init ─────────────────────────
+    if (c.data.requests && c.data.requests.length > 0) {
+        c.applyFilters();
+        c.data.lastRefreshed = new Date().toLocaleTimeString();
+    } else {
+        c.refreshRequests();
+    }
+
+    // ── Refresh ────────────────────────────────────────
+    c.refreshRequests = function() {
+        c.data.refreshing = true;
+        c.server.get({ action: 'refresh' })
+        .then(function(r) {
+            c.data.refreshing    = false;
+            c.data.lastRefreshed = new Date().toLocaleTimeString();
+            if (r.data.requests) {
+                c.data.requests = r.data.requests;
+            } else {
+                c.data.requests = [];
+            }
+            c.applyFilters();
+        }).catch(function() {
+            c.data.refreshing = false;
+            c.data.requests   = c.data.requests || [];
+            c.applyFilters();
+        });
+    };
+// Add search functionality
+c.data.searchTerm = '';
+
+c.applySearch = function() {
+    if (!c.data.searchTerm || c.data.searchTerm.trim() === '') {
+        c.data.filteredRequests = c.data.requests.filter(req => {
+            var seg = c.data.filterSegment || '';
+            var typ = c.data.filterType || '';
+            var stat = c.data.filterStatus || '';
+            
+            if (seg && req.segment !== seg) return false;
+            if (typ && req.customer_type !== typ) return false;
+            if (stat && req.state !== stat) return false;
+            return true;
+        });
+        return;
+    }
+    
+    var searchTerm = c.data.searchTerm.toLowerCase().trim();
+    c.data.filteredRequests = c.data.requests.filter(function(req) {
+        var seg = c.data.filterSegment || '';
+        var typ = c.data.filterType || '';
+        var stat = c.data.filterStatus || '';
+        
+        // Skip if filters don't match
+        if (seg && req.segment !== seg) return false;
+        if (typ && req.customer_type !== typ) return false;
+        if (stat && req.state !== stat) return false;
+        
+        // Check if search term matches customer name or request number
+        return (req.customer_name && req.customer_name.toLowerCase().includes(searchTerm)) ||
+               (req.number && req.number.toLowerCase().includes(searchTerm));
+    });
+};
+
+// Update filter functions to also apply search
+function updateFilters() {
+    c.applyFilters();
+    c.applySearch();
+}
+
+$scope.$watch(function() { return c.data.filterSegment; }, updateFilters);
+$scope.$watch(function() { return c.data.filterType; }, updateFilters);
+$scope.$watch(function() { return c.data.filterStatus; }, updateFilters);
+    // ── Open detail ────────────────────────────────────
+   c.openRequest = function(req) {
+
+    // Reload fresh data from server
+    c.server.get({ action: 'refresh' }).then(function(r) {
+
+        c.data.requests = r.data.requests;
+
+        // Find updated record
+        var updated = c.data.requests.find(function(item) {
+            return item.sys_id === req.sys_id;
+        });
+
+        c.data.selectedRequest = updated || req;
+    });
+};
+
+    c.closeRequest = function() {
+        c.data.selectedRequest = null;
+    };
+
+    // ── Actions ────────────────────────────────────────
+   // Replace the existing createNewRequest function
+c.createNewRequest = function() {
+    // Check if we're in a detail view of a rejected request
+    if (c.data.selectedRequest && c.data.selectedRequest.state === 'Rejected') {
+        window.location.href = 'https://abgdev.service-now.com/uclm?id=clmtrade';
+    } else {
+        // For other cases, go to standard new request form
+        window.location.href = '/x_birl3_clm_clm_new_credit_request.do?sys_id=-1';
+    }
+};
+
+    c.editRequest = function() {
+        // Navigate to edit the returned request
+        if (c.data.selectedRequest && c.data.selectedRequest.sys_id) {
+            window.location.href = '/x_birl3_clm_clm_new_credit_request.do?sys_id=' + c.data.selectedRequest.sys_id;
+        }
+    };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* ============================================================
+   CLM VIEW MY REQUESTS — CSS (UltraTech Cement Theme)
+   FULLY RESPONSIVE + MOBILE OPTIMIZED
+   ============================================================ */
+
+.clm-my-requests {
+  font-family: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  color: #1a1a1a;
+  box-sizing: border-box;
+}
+.approval-tracker {
+  display: flex;
+  align-items: center;
+  margin: 20px 0 30px;
+}
+.clm-mr-detail-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.approval-tracker {
+  margin-right: 10px;
+}
+.clm-aging-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.clm-aging-table th {
+  background: #000;
+  color: #FFF21A;
+  padding: 8px;
+  border: 1px solid #ddd;
+  text-align: center;
+}
+
+.clm-aging-table td {
+  padding: 8px;
+  border: 1px solid #ddd;
+  text-align: right;
+}
+
+.clm-aging-table td:first-child {
+  text-align: left;
+  font-weight: 600;
+}
+.clm-ap-detail-left {
+  flex: 1;
+  border-right: 1px solid #e0e6ed;
+  min-width: 0;
+  overflow-x: auto;   /* ✅ ADD THIS */
+}
+.clm-title-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1;                /* ✅ take remaining space */
+  min-width: 0;           /* ✅ REQUIRED for text wrapping */
+}
+
+.clm-title-text {
+  flex: 1;                /* ✅ allow expansion */
+  min-width: 0;
+  white-space: normal;    /* ✅ allow wrapping */
+  word-break: break-word; /* ✅ break long names */
+}
+
+.clm-aging-table {
+  width: 100%;
+  min-width: 800px;   /* ✅ ADD THIS */
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.circle {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #ccc;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+
+.circle.done {
+  background: #2ecc71; /* green */
+}
+
+.circle.pending {
+  background: #bdc3c7; /* grey */
+}
+
+.circle.rejected {
+  background: #e74c3c; /* red */
+}
+
+.line {
+  width: 60px;
+  height: 3px;
+  background: #ccc;
+  margin: 0 10px;
+}
+
+.label {
+  position: absolute;
+  top: 42px;
+  width: 120px;
+  text-align: center;
+  font-size: 12px;
+  left: -45px;
+}
+.approval-tracker {
+  display: flex;
+  align-items: center;
+  margin: 20px 0;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.circle {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #ccc;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.circle.done {
+  background: #2ecc71;
+}
+
+.circle.pending {
+  background: #bdc3c7;
+}
+
+.circle.rejected {
+  background: #e74c3c;
+}
+
+.line {
+  width: 60px;
+  height: 3px;
+  background: #ccc;
+  margin: 0 10px;
+}
+
+.label {
+  position: absolute;
+  top: 40px;
+  width: 100px;
+  text-align: center;
+  font-size: 12px;
+  left: -35px;
+}
+
+/* ── Header ── */
+.clm-mr-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #000000;
+  color: #fff;
+  padding: 20px 28px;
+  border-radius: 8px 8px 0 0;
+  border-top: 4px solid #FFF21A;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.clm-mr-title {
+  font-size: 20px;
+  font-weight: 600;
+}
+.clm-mr-subtitle {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.65);
+  margin-top: 3px;
+  width: 100%;
+}
+.clm-mr-count-badge {
+  background: #FFF21A;
+  color: #000000;
+  padding: 5px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 700;
+  margin-left: auto;
+}
+
+/* ── Empty ── */
+.clm-mr-empty {
+  text-align: center;
+  padding: 60px 28px;
+  background: #fff;
+  border: 1px solid #e0e6ed;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+}
+.clm-mr-empty-icon {
+  font-size: 40px;
+  margin-bottom: 12px;
+}
+.clm-mr-empty-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #000000;
+  margin-bottom: 6px;
+}
+.clm-mr-empty-sub {
+  color: #7f8c9a;
+}
+
+/* ── Filters ── */
+.clm-mr-filters {
+  display: flex;
+  gap: 16px;
+  padding: 16px 20px;
+  background: #f8f8f8;
+  border-bottom: 1px solid #dde3ea;
+  flex-wrap: wrap;
+}
+.clm-mr-filter-item {
+  flex: 1;
+  min-width: 140px;
+}
+.clm-mr-filter-item label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #7f8c9a;
+  margin-bottom: 4px;
+}
+.clm-mr-select {
+  width: 100%;
+  padding: 7px 10px;
+  border: 2px solid #000000;
+  border-radius: 4px;
+  font-size: 13px;
+  background: #fff;
+  color: #000000;
+  font-weight: 500;
+  box-sizing: border-box;
+}
+.clm-mr-select:focus {
+  outline: none;
+  border-color: #FFF21A;
+  box-shadow: 0 0 0 2px rgba(255, 242, 26, 0.2);
+}
+
+/* ── List ── */
+.clm-mr-list {
+  background: #fff;
+  border: 1px solid #e0e6ed;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+}
+
+/* ── Card ── */
+.clm-mr-card {
+  padding: 16px 20px;
+  border-bottom: 1px solid #e8eef3;
+  cursor: pointer;
+  transition: background 0.1s, border-left 0.1s;
+  border-left: 4px solid transparent;
+}
+.clm-mr-card:last-child {
+  border-bottom: none;
+}
+.clm-mr-card:hover {
+  background: #f9f9f9;
+  border-left-color: #FFF21A;
+}
+
+.clm-mr-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  gap: 8px;
+}
+.clm-mr-card-num {
+  font-size: 12px;
+  color: #7f8c9a;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.clm-mr-card-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: #000000;
+  flex: 1;
+}
+.clm-mr-card-right {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.clm-badge {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.clm-badge-segment {
+  background: #f0f0f0;
+  color: #000000;
+  border: 1px solid #000000;
+}
+
+/* Status badges */
+.clm-badge-status.clm-status-submitted {
+  background: #e8f0f8;
+  color: #1a3a5c;
+  border: 1px solid #1a3a5c;
+}
+.clm-badge-status.clm-status-approved {
+  background: #eafaf1;
+  color: #1e8449;
+  border: 1px solid #1e8449;
+}
+.clm-badge-status.clm-status-rejected {
+  background: #fdf3f2;
+  color: #c0392b;
+  border: 1px solid #c0392b;
+}
+.clm-badge-status.clm-status-returned {
+  background: #fef5e7;
+  color: #d68910;
+  border: 1px solid #d68910;
+}
+
+.clm-mr-card-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  margin-bottom: 12px;
+}
+.clm-mr-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.clm-mr-metric-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #7f8c9a;
+}
+.clm-mr-metric-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #000000;
+}
+
+.clm-mr-card-footer {
+  display: flex;
+  gap: 20px;
+  font-size: 12px;
+  color: #a0aab4;
+  flex-wrap: wrap;
+}
+.clm-mr-footer-cta {
+  margin-left: auto;
+  color: #000000;
+  font-weight: 700;
+}
+
+/* ── Detail view ── */
+.clm-mr-detail {
+  background: #fff;
+  border: 1px solid #e0e6ed;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+}
+.clm-mr-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  background: #f8f8f8;
+  border-bottom: 2px solid #FFF21A;
+  flex-wrap: wrap;
+}
+.clm-back-btn {
+  background: #fff;
+  border: 2px solid #000000;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #000000;
+  cursor: pointer;
+  white-space: nowrap;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.clm-back-btn:hover {
+  background: #f0f0f0;
+}
+.clm-mr-detail-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #000000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+/* Summary row */
+.clm-mr-summary-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  border-bottom: 2px solid #FFF21A;
+}
+.clm-mr-summary-card {
+  flex: 1;
+  min-width: 120px;
+  padding: 14px 16px;
+  border-right: 1px solid #e0e6ed;
+  text-align: center;
+}
+.clm-mr-summary-card:last-child {
+  border-right: none;
+}
+.clm-summary-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #7f8c9a;
+  margin-bottom: 6px;
+}
+.clm-summary-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: #000000;
+}
+
+/* Detail body */
+.clm-mr-detail-body {
+  display: flex;
+  gap: 0;
+}
+.clm-mr-detail-left {
+  flex: 1;
+  border-right: 1px solid #e0e6ed;
+  min-width: 0;
+}
+.clm-mr-detail-right {
+  flex: 1.5;
+  min-width: 0;
+}
+
+.clm-mr-detail-section {
+  padding: 20px;
+  border-bottom: 1px solid #e8eef3;
+}
+.clm-mr-detail-section:last-child {
+  border-bottom: none;
+}
+.clm-mr-detail-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #000000;
+  margin-bottom: 14px;
+  border-bottom: 2px solid #FFF21A;
+  padding-bottom: 8px;
+}
+
+.clm-mr-kv-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid #f0f4f8;
+  font-size: 13px;
+  gap: 12px;
+}
+.clm-mr-kv-row:last-child {
+  border-bottom: none;
+}
+.clm-mr-kv-key {
+  color: #7f8c9a;
+  font-weight: 600;
+  flex: 0 0 40%;
+}
+.clm-mr-kv-val {
+  font-weight: 600;
+  color: #000000;
+  text-align: right;
+  flex: 1;
+}
+
+/* Aging bars */
+.clm-aging-bar-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.clm-aging-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.clm-aging-label {
+  width: 130px;
+  flex-shrink: 0;
+  color: #5a6a7a;
+}
+.clm-aging-bar-bg {
+  flex: 1;
+  height: 10px;
+  background: #f0f4f8;
+  border-radius: 5px;
+  overflow: hidden;
+}
+.clm-aging-bar {
+  height: 100%;
+  border-radius: 5px;
+  transition: width 0.4s;
+  min-width: 2px;
+}
+.clm-aging-safe {
+  background: #FFF21A;
+}
+.clm-aging-warn {
+  background: #f39c12;
+}
+.clm-aging-crit {
+  background: #e67e22;
+}
+.clm-aging-toxic {
+  background: #e74c3c;
+}
+.clm-aging-pct {
+  width: 40px;
+  text-align: right;
+  font-weight: 600;
+  color: #5a6a7a;
+  flex-shrink: 0;
+}
+
+/* Justification text */
+.clm-mr-justification-text {
+  font-size: 14px;
+  line-height: 1.6;
+  color: #000000;
+  background: #f9f9f9;
+  border: 2px solid #000000;
+  border-radius: 5px;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-x: auto;
+  min-height: 80px;
+  max-height: 200px;
+  scrollbar-width: thin;
+}
+
+.clm-justification-dev {
+  background: #fffbf0;
+  border-color: #FFF21A;
+}
+
+.clm-justification-return {
+  background: #fef5e7;
+  border-color: #f39c12;
+}
+
+.clm-justification-reject {
+  background: #fdf3f2;
+  border-color: #e74c3c;
+  min-height: 100px;
+}
+
+/* Action section */
+.clm-mr-action-section {
+  background: #f8f8f8;
+}
+.clm-mr-action-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* Buttons */
+.clm-btn {
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s;
+  flex: 1;
+  min-width: 120px;
+}
+.clm-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.clm-btn-outline {
+  background: transparent;
+  color: #000000;
+  border: 2px solid #000000;
+}
+.clm-btn-outline:hover:not(:disabled) {
+  background: #f0f0f0;
+}
+
+/* Refresh button */
+.clm-refresh-btn {
+  background: #FFF21A;
+  border: 2px solid #000000;
+  color: #000000;
+  padding: 7px 16px;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.clm-refresh-btn:hover:not(:disabled) {
+  background: #000000;
+  color: #FFF21A;
+}
+.clm-refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Last refreshed timestamp */
+.clm-mr-refreshed {
+  font-size: 11px;
+  color: #7f8c9a;
+  padding: 6px 20px;
+  background: #f8f8f8;
+  border-bottom: 1px solid #e0e6ed;
+  border-left: 1px solid #e0e6ed;
+  border-right: 1px solid #e0e6ed;
+  text-align: right;
+  border-top: 2px solid #FFF21A;
+}
+
+/* No filter results */
+.clm-mr-no-filter {
+  padding: 24px;
+  text-align: center;
+  color: #aab4be;
+  font-size: 14px;
+}
+
+/* Value states */
+.clm-val-ok {
+  color: #27ae60 !important;
+}
+.clm-val-warn {
+  color: #f39c12 !important;
+}
+.clm-val-danger {
+  color: #e74c3c !important;
+}
+
+/* Customer type pills */
+.clm-type-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.clm-pill-trade {
+  background: #f0f0f0;
+  color: #000000;
+  border: 1px solid #000000;
+}
+.clm-pill-nontrade {
+  background: #FFF21A;
+  color: #000000;
+  font-weight: 700;
+}
+.clm-pill-key {
+  background: #000000;
+  color: #FFF21A;
+}
+
+/* ============================================================
+   SEARCH CONTAINER &amp; INPUT — CSS (UltraTech Cement Theme)
+   ============================================================ */
+
+.clm-mr-search-container {
+  padding: 16px 20px;
+  background: linear-gradient(135deg, #f8f8f8 0%, #fafafa 100%);
+  border-bottom: 2px solid #FFF21A;
+  position: relative;
+  margin: 0 !important;
+}
+
+.clm-mr-search-input {
+  width: 100%;
+  padding: 12px 16px 12px 40px;
+  border: 2px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  background: #ffffff;
+  color: #333333;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  font-family: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  box-sizing: border-box;
+}
+
+.clm-mr-search-input::placeholder {
+  color: #999999;
+  font-weight: 400;
+  opacity: 0.8;
+}
+
+.clm-mr-search-input:hover {
+  border-color: #000000;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.1);
+}
+
+.clm-mr-search-input:focus {
+  outline: none;
+  border-color: #FFF21A;
+  box-shadow: 0 0 0 3px rgba(255, 242, 26, 0.15),
+    0 4px 12px rgba(255, 242, 26, 0.2),
+    inset 0 1px 2px rgba(0, 0, 0, 0.02);
+  background: #fafafa;
+}
+
+.clm-mr-search-input:not(:placeholder-shown) {
+  border-color: #FFF21A;
+  box-shadow: 0 3px 8px rgba(255, 242, 26, 0.15);
+}
+
+.clm-mr-search-input:not(:placeholder-shown):hover {
+  border-color: #FFF21A;
+  box-shadow: 0 4px 12px rgba(255, 242, 26, 0.2);
+}
+
+.clm-mr-search-input:disabled {
+  background: #f0f0f0;
+  color: #999999;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.clm-mr-search-container::before {
+  content: "🔍";
+  position: absolute;
+  left: 36px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 16px;
+  opacity: 0.5;
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+
+.clm-mr-search-input:focus ~ .clm-mr-search-container::before {
+  opacity: 1;
+}
+
+/* ============================================================
+   FORCE FULL-WIDTH WIDGET (ServiceNow Override)
+   ============================================================ */
+
+.sn-widget-content,
+.sn-widget-content &gt; div,
+.container,
+.container-fluid {
+  max-width: 100% !important;
+  width: 100% !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+
+body,
+html {
+  width: 100%;
+}
+
+/* Inner padding so content doesn't stick to edges */
+.clm-mr-header,
+.clm-mr-search-container,
+.clm-mr-filters,
+.clm-mr-list,
+.clm-mr-detail {
+  padding-left: 24px;
+  padding-right: 24px;
+}
+
+/* ============================================================
+   TABLET BREAKPOINT — 768px
+   ============================================================ */
+
+@media (max-width: 768px) {
+  .clm-mr-header {
+    padding: 16px 20px;
+  }
+
+  .clm-mr-title {
+    font-size: 18px;
+  }
+
+  .clm-mr-subtitle {
+    font-size: 12px;
+  }
+
+  .clm-mr-count-badge {
+    padding: 4px 12px;
+    font-size: 12px;
+  }
+
+  .clm-mr-filters {
+    padding: 12px 16px;
+    gap: 12px;
+  }
+
+  .clm-mr-filter-item {
+    flex: 0 0 calc(50% - 6px);
+    min-width: unset;
+  }
+
+  .clm-mr-card {
+    padding: 14px 16px;
+  }
+
+  .clm-mr-card-metrics {
+    gap: 16px;
+  }
+
+  .clm-mr-card-footer {
+    gap: 12px;
+    font-size: 11px;
+  }
+
+  .clm-mr-detail-body {
+    flex-direction: column;
+  }
+
+  .clm-mr-detail-left {
+    border-right: none;
+    border-bottom: 1px solid #e0e6ed;
+  }
+
+  .clm-mr-summary-card {
+    min-width: 100px;
+    padding: 12px 14px;
+    font-size: 13px;
+  }
+
+  .clm-summary-value {
+    font-size: 16px;
+  }
+
+  .clm-mr-detail-section {
+    padding: 16px;
+  }
+
+  .clm-mr-detail-section-title {
+    font-size: 11px;
+    margin-bottom: 12px;
+  }
+
+  .clm-mr-kv-row {
+    padding: 5px 0;
+    font-size: 12px;
+  }
+
+  .clm-aging-label {
+    width: 110px;
+    font-size: 11px;
+  }
+
+  .clm-aging-row {
+    font-size: 11px;
+  }
+
+  .clm-mr-detail-header {
+    padding: 12px 16px;
+    gap: 12px;
+  }
+
+  .clm-back-btn {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  .clm-mr-detail-title {
+    font-size: 14px;
+  }
+
+  .clm-btn {
+    padding: 8px 16px;
+    font-size: 13px;
+  }
+
+  /* Inner padding for tablet */
+  .clm-mr-header,
+  .clm-mr-search-container,
+  .clm-mr-filters,
+  .clm-mr-list,
+  .clm-mr-detail {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}
+
+/* ============================================================
+   MOBILE BREAKPOINT — 480px
+   ============================================================ */
+
+@media (max-width: 480px) {
+  .clm-mr-header {
+    padding: 14px 16px;
+    gap: 10px;
+    align-items: flex-start;
+  }
+
+  .clm-mr-title {
+    font-size: 16px;
+    flex: 1;
+  }
+
+  .clm-mr-subtitle {
+    font-size: 11px;
+    width: 100%;
+    margin-top: 6px;
+  }
+
+  .clm-mr-count-badge {
+    padding: 3px 10px;
+    font-size: 11px;
+    margin-left: auto;
+    align-self: center;
+  }
+
+  .clm-mr-search-container {
+    padding: 12px 14px;
+  }
+
+  .clm-mr-search-input {
+    padding: 10px 14px 10px 34px;
+    font-size: 13px;
+  }
+
+  .clm-mr-search-container::before {
+    left: 28px;
+    font-size: 14px;
+  }
+
+  .clm-mr-filters {
+    padding: 10px 14px;
+    gap: 10px;
+    flex-direction: column;
+  }
+
+  .clm-mr-filter-item {
+    flex: 1;
+    min-width: unset;
+  }
+
+  .clm-mr-select {
+    font-size: 12px;
+    padding: 6px 8px;
+  }
+
+  .clm-mr-card {
+    padding: 12px 14px;
+  }
+
+  .clm-mr-card-top {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .clm-mr-card-num {
+    font-size: 11px;
+  }
+
+  .clm-mr-card-name {
+    font-size: 14px;
+  }
+
+  .clm-mr-card-right {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .clm-badge {
+    padding: 2px 6px;
+    font-size: 10px;
+  }
+
+  .clm-mr-card-metrics {
+    gap: 16px;
+    font-size: 12px;
+  }
+
+  .clm-mr-metric-label {
+    font-size: 10px;
+  }
+
+  .clm-mr-metric-value {
+    font-size: 13px;
+  }
+
+  .clm-mr-card-footer {
+    flex-direction: column;
+    gap: 8px;
+    font-size: 11px;
+  }
+
+  .clm-mr-footer-cta {
+    margin-left: 0;
+  }
+
+  .clm-mr-detail-header {
+    padding: 12px 14px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .clm-back-btn {
+    padding: 5px 10px;
+    font-size: 12px;
+    order: -1;
+    flex-shrink: 0;
+  }
+
+  .clm-mr-detail-title {
+    font-size: 13px;
+    width: 100%;
+    order: 1;
+  }
+
+  .clm-mr-summary-row {
+    border-bottom: none;
+  }
+
+  .clm-mr-summary-card {
+    flex: 0 0 calc(50% - 1px);
+    min-width: unset;
+    padding: 10px 12px;
+    border-right: none;
+    border-bottom: 1px solid #e0e6ed;
+  }
+
+  .clm-mr-summary-card:nth-child(odd) {
+    border-right: 1px solid #e0e6ed;
+  }
+
+  .clm-mr-summary-card:nth-child(2n + 3) {
+    border-bottom: 1px solid #e0e6ed;
+  }
+
+  .clm-summary-label {
+    font-size: 10px;
+    margin-bottom: 4px;
+  }
+
+  .clm-summary-value {
+    font-size: 14px;
+  }
+
+  .clm-mr-detail-section {
+    padding: 12px 14px;
+  }
+
+  .clm-mr-detail-section-title {
+    font-size: 11px;
+    margin-bottom: 10px;
+    letter-spacing: 0.5px;
+  }
+
+  .clm-mr-kv-row {
+    flex-direction: column;
+    padding: 6px 0;
+    border-bottom: 1px solid #f0f4f8;
+    gap: 2px;
+  }
+
+  .clm-mr-kv-key {
+    flex: 1;
+    text-align: left;
+  }
+
+  .clm-mr-kv-val {
+    text-align: left;
+    flex: 1;
+  }
+
+  .clm-aging-label {
+    width: 100px;
+    font-size: 10px;
+  }
+
+  .clm-aging-row {
+    font-size: 11px;
+  }
+
+  .clm-aging-pct {
+    width: 35px;
+    font-size: 10px;
+  }
+
+  .clm-mr-justification-text {
+    font-size: 13px;
+    padding: 10px;
+    min-height: 70px;
+    max-height: 150px;
+  }
+
+  .clm-mr-action-actions {
+    flex-direction: column;
+  }
+
+   .clm-btn {
+    width: 100%;
+    padding: 10px 16px;
+    font-size: 13px;
+    min-width: unset;
+  }
+
+  .clm-btn:disabled {
+    opacity: 0.55;
+  }
+
+  .clm-btn-outline {
+    background: transparent;
+    color: #000000;
+    border: 2px solid #000000;
+  }
+
+  .clm-btn-outline:hover:not(:disabled) {
+    background: #f0f0f0;
+  }
+
+  .clm-refresh-btn {
+    padding: 6px 12px;
+    font-size: 12px;
+    gap: 4px;
+  }
+
+  .clm-mr-refreshed {
+    padding: 6px 14px;
+    font-size: 10px;
+    text-align: right;
+  }
+
+  .clm-mr-empty {
+    padding: 40px 20px;
+  }
+
+  .clm-mr-empty-icon {
+    font-size: 32px;
+    margin-bottom: 10px;
+  }
+
+  .clm-mr-empty-title {
+    font-size: 16px;
+    margin-bottom: 6px;
+  }
+
+  .clm-mr-empty-sub {
+    font-size: 12px;
+  }
+
+  .clm-mr-no-filter {
+    padding: 20px 14px;
+    font-size: 13px;
+  }
+
+  /* Inner padding for mobile */
+  .clm-mr-header,
+  .clm-mr-search-container,
+  .clm-mr-filters,
+  .clm-mr-list,
+  .clm-mr-detail {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .clm-type-pill {
+    padding: 1px 5px;
+    font-size: 9px;
+    margin-left: 3px;
+  }
+}
+
+/* ============================================================
+   EXTRA SMALL DEVICES — 360px
+   ============================================================ */
+
+@media (max-width: 360px) {
+  .clm-mr-header {
+    padding: 12px 12px;
+  }
+
+  .clm-mr-title {
+    font-size: 15px;
+  }
+
+  .clm-mr-subtitle {
+    font-size: 10px;
+  }
+
+  .clm-mr-search-input {
+    font-size: 12px;
+    padding: 9px 12px 9px 32px;
+  }
+
+  .clm-mr-search-container::before {
+    left: 24px;
+    font-size: 13px;
+  }
+
+  .clm-mr-filters {
+    padding: 8px 12px;
+  }
+
+  .clm-mr-card {
+    padding: 10px 12px;
+  }
+
+  .clm-mr-card-metrics {
+    gap: 12px;
+  }
+
+  .clm-mr-metric-value {
+    font-size: 12px;
+  }
+
+  .clm-mr-detail-section {
+    padding: 10px 12px;
+  }
+
+  .clm-mr-kv-val {
+    font-size: 12px;
+  }
+
+  .clm-aging-label {
+    width: 80px;
+    font-size: 9px;
+  }
+
+  .clm-mr-detail-title {
+    font-size: 12px;
+    gap: 4px;
+  }
+
+  .clm-back-btn {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+
+  .clm-badge {
+    padding: 2px 5px;
+    font-size: 9px;
+  }
+
+  .clm-mr-summary-card {
+    padding: 8px 10px;
+  }
+
+  .clm-summary-label {
+    font-size: 9px;
+  }
+
+  .clm-summary-value {
+    font-size: 13px;
+  }
+
+  .clm-btn {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .clm-mr-justification-text {
+    font-size: 12px;
+    padding: 8px;
+  }
+
+  /* Inner padding for extra small */
+  .clm-mr-header,
+  .clm-mr-search-container,
+  .clm-mr-filters,
+  .clm-mr-list,
+  .clm-mr-detail {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+}
+
+/* ============================================================
+   DESKTOP BREAKPOINT — 1024px+
+   ============================================================ */
+
+@media (min-width: 1024px) {
+  .clm-mr-header,
+  .clm-mr-search-container,
+  .clm-mr-filters,
+  .clm-mr-list,
+  .clm-mr-detail {
+    padding-left: 28px;
+    padding-right: 28px;
+  }
+
+  .clm-mr-card-metrics {
+    gap: 32px;
+  }
+
+  .clm-mr-summary-card {
+    min-width: 140px;
+  }
+}
+
+/* ============================================================
+   ULTRA WIDE — 1600px+
+   ============================================================ */
+
+@media (min-width: 1600px) {
+  .clm-mr-header,
+  .clm-mr-search-container,
+  .clm-mr-filters,
+  .clm-mr-list,
+  .clm-mr-detail {
+    padding-left: 48px;
+    padding-right: 48px;
+  }
+
+  .clm-mr-card-metrics {
+    gap: 40px;
+  }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>view_my_credit_request_safe_side</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>view my credit request safe side</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    var action = input && input.action;
+    var currentUserId = gs.getUserID();
+
+    function loadMyRequests() {
+        var results = [];
+
+        var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        gr.addQuery('initiator', currentUserId);  // KEY: Filter by current user
+        gr.orderByDesc('sys_created_on');
+        gr.query();
+
+        while (gr.next()) {
+					// Approval Steps
+var steps = [];
+var appGR = new GlideRecord('sysapproval_approver');
+appGR.addQuery('sysapproval', gr.sys_id);
+appGR.orderBy('sys_created_on');
+appGR.query();
+
+while (appGR.next()) {
+    steps.push({
+        name: appGR.approver.getDisplayValue(),
+        state: appGR.state + ''
+    });
+}
+
+// Add initial + final step
+steps.unshift({ name: "Submitted", state: "approved" });
+
+if (gr.state == 'Approved') {
+    steps.push({ name: "Completed", state: "approved" });
+} else {
+    steps.push({ name: "Completed", state: "pending" });
+}
+            var custSysId = gr.customer + '';
+            var custName  = '';
+            var custCode  = '';
+
+            var cGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+            if (custSysId && cGr.get(custSysId)) {
+                custName = cGr.customer_name    + '';
+                custCode = cGr.customer_code_sap + '';
+            } else {
+                custName = gr.customer.getDisplayValue() || 'Unknown';
+                custCode = 'N/A';
+            }
+
+            var approverName = '';
+            if (gr.approver) {
+                var aGr = new GlideRecord('sys_user');
+                if (aGr.get(gr.approver + '')) {
+                    approverName = aGr.name + '';
+                }
+            }
+
+            var total=0, safe=0, warning=0, critical=0, toxic=0;
+            var agGr = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+            agGr.addQuery('customer', custSysId);
+            agGr.orderByDesc('snapshot_month');
+            agGr.setLimit(6);
+            agGr.query();
+
+            while (agGr.next()) {
+                total    += parseFloat(agGr.total_outstanding)   || 0;
+                safe     += (parseFloat(agGr.bucket_0_30_days)   || 0)
+                          + (parseFloat(agGr.bucket_31_45_days)  || 0)
+                          + (parseFloat(agGr.bucket_46_60_days)  || 0);
+                warning  += parseFloat(agGr.bucket_61_75_days)   || 0;
+                critical += parseFloat(agGr.bucket_76_90_days)   || 0;
+                toxic    += (parseFloat(agGr.bucket_91_120_days) || 0)
+                          + (parseFloat(agGr.bucket_gt120_days)  || 0);
+            }
+					var agingTable = [];
+
+var agGr2 = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+agGr2.addQuery('customer', custSysId);
+agGr2.orderByDesc('snapshot_month');
+agGr2.setLimit(6);
+agGr2.query();
+
+while (agGr2.next()) {
+    agingTable.push({
+        month: agGr2.snapshot_month.getDisplayValue(),
+        b0_30: parseFloat(agGr2.bucket_0_30_days) || 0,
+        b31_45: parseFloat(agGr2.bucket_31_45_days) || 0,
+        b46_60: parseFloat(agGr2.bucket_46_60_days) || 0,
+        b61_75: parseFloat(agGr2.bucket_61_75_days) || 0,
+        b76_90: parseFloat(agGr2.bucket_76_90_days) || 0,
+        b91_120: parseFloat(agGr2.bucket_91_120_days) || 0,
+        b120: parseFloat(agGr2.bucket_gt120_days) || 0,
+        total: parseFloat(agGr2.total_outstanding) || 0
+    });
+}
+
+            var agingDetail = null;
+            if (total > 0) {
+                agingDetail = {
+                    safe_pct:  Math.round((safe  / total) * 100),
+                    warn_pct:  Math.round((warning / total) * 100),
+                    crit_pct:  Math.round((critical / total) * 100),
+                    toxic_pct: Math.round((toxic / total) * 100)
+                };
+            }
+
+           var reviewDateStr = '';
+try { 
+    reviewDateStr = gr.getValue('next_review_date') || ''; 
+} catch(e) {}
+
+            var decidedDate = '';
+            if (gr.state != 'Submitted' && gr.sys_updated_on) {
+                decidedDate = gr.sys_updated_on.getDisplayValue();
+            }
+
+            results.push({
+							approval_steps: steps,
+                sys_id:                  gr.sys_id + '',
+                number:                  gr.request_number + '',
+                customer_name:           custName,
+                customer_code:           custCode,
+                customer_type:           gr.customer_type + '',
+                segment:                 gr.segment + '',
+                state:                   gr.state + '',
+                requested_limit:         parseFloat(gr.requested_limit)    / 100000,
+                approved_limit:          parseFloat(gr.approved_limit)     / 100000,
+                active_sd:               parseFloat(gr.active_sd)          / 100000,
+                net_exposure:            parseFloat(gr.net_exposure)        / 100000,
+                max_allowable:           parseFloat(gr.max_allowable_limit) / 100000,
+                system_mult:             gr.system_multiplier + '',
+                implied_mult:            parseFloat(gr.implied_multiplier)  || 0,
+                is_deviation:            gr.is_deviation + '' === 'true',
+                nod:                     parseFloat(gr.nod_days)            || 0,
+                aging_rating:            gr.aging_rating + '',
+                aging_detail:            agingDetail,
+                vintage_days:            parseInt(gr.customer_vintage_days) || 0,
+                market_perception:       gr.market_perception + '',
+                justification:           gr.business_justification + '',
+                deviation_justification: gr.deviation_justification + '',
+                return_comments:         gr.return_comments + '',
+                rejection_reason:        gr.rejection_reason + '',
+                next_review_date:        reviewDateStr,
+                approver_name:           approverName,
+                created:                 gr.sys_created_on.getDisplayValue(),
+                decided:                 decidedDate,
+							aging_table: agingTable,
+                p1_macl:                 parseFloat(gr.p1_macl) / 100000,
+                p2_composite:            parseFloat(gr.p2_composite) || 0,
+                p3_credit:               parseFloat(gr.p3_credit) || 0
+            });
+        }
+        return results;
+    }
+
+    // ── Refresh ───────────────────────────────────────
+    if (action === 'refresh') {
+        data.requests = loadMyRequests();
+        return;
+    }
+
+    // Default load
+    data.requests = loadMyRequests();
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-04-20 06:47:24</sys_created_on>
+        <sys_id>26413ee697d00f14be31fa17f053af54</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>view my credit request safe side</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_26413ee697d00f14be31fa17f053af54</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-04-20 06:47:24</sys_updated_on>
+        <template><![CDATA[<!--
+  CLM VIEW MY REQUESTS — Widget HTML
+  Shows all requests submitted by the logged-in user
+-->
+
+<div class="clm-my-requests">
+
+  <!-- ── HEADER ── -->
+  <div class="clm-mr-header">
+    <div>
+      <div class="clm-mr-title">My Requests</div>
+      <div class="clm-mr-subtitle">Track all your submitted credit limit requests</div>
+    </div>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <button class="clm-refresh-btn"
+              ng-click="c.refreshRequests()"
+              ng-disabled="c.data.refreshing">
+        <span ng-if="!c.data.refreshing">↻ Refresh</span>
+        <span ng-if="c.data.refreshing">↻ Refreshing...</span>
+      </button>
+      <div class="clm-mr-count-badge" ng-if="c.data.requests && c.data.requests.length > 0">
+        {{c.data.requests.length}} total
+      </div>
+    </div>
+  </div>
+  <!-- Add this after the header title -->
+<div class="clm-mr-search-container" style="margin: 12px 20px 0;">
+  <input type="text" 
+         class="clm-mr-search-input" 
+         placeholder="Search by customer name or request number (e.g., CLM1023)"
+         ng-model="c.data.searchTerm"
+         ng-change="c.applySearch()"
+         style="width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+</div>
+
+  <!-- ── LAST REFRESHED ── -->
+  <div class="clm-mr-refreshed" ng-if="c.data.lastRefreshed">
+    Last refreshed: {{c.data.lastRefreshed}}
+  </div>
+
+  <!-- ── EMPTY STATE ── -->
+  <div class="clm-mr-empty"
+       ng-if="!c.data.selectedRequest && (!c.data.requests || c.data.requests.length === 0)">
+    <div class="clm-mr-empty-icon">]]>📋<![CDATA[</div>
+    <div class="clm-mr-empty-title">No requests yet</div>
+    <div class="clm-mr-empty-sub">You haven't submitted any credit limit requests.</div>
+    <button class="clm-btn clm-btn-outline" style="margin-top:16px"
+            ng-click="c.createNewRequest()">+ Create New Request</button>
+  </div>
+
+  <!-- ── REQUEST LIST ── -->
+  <div class="clm-mr-list"
+       ng-if="!c.data.selectedRequest && c.data.requests && c.data.requests.length > 0">
+
+    <!-- Filter bar -->
+    <div class="clm-mr-filters">
+      <div class="clm-mr-filter-item">
+        <label>FILTER BY SEGMENT</label>
+        <select ng-model="c.data.filterSegment" class="clm-mr-select">
+          <option value="">All Segments</option>
+          <option value="Cement">Cement</option>
+          <option value="RMC">RMC</option>
+          <option value="BPD">BPD</option>
+        </select>
+      </div>
+      <div class="clm-mr-filter-item">
+        <label>FILTER BY TYPE</label>
+        <select ng-model="c.data.filterType" class="clm-mr-select">
+          <option value="">All Types</option>
+          <option value="Trade">Trade</option>
+          <option value="Non-Trade">Non-Trade</option>
+          <option value="Key">Key</option>
+        </select>
+      </div>
+      <div class="clm-mr-filter-item">
+        <label>FILTER BY STATUS</label>
+        <select ng-model="c.data.filterStatus" class="clm-mr-select">
+          <option value="">All Statuses</option>
+          <option value="Submitted">Submitted</option>
+          <option value="Approved">Approved</option>
+          <option value="Rejected">Rejected</option>
+          <option value="Returned">Returned</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Request cards -->
+    <div class="clm-mr-card"
+         ng-repeat="req in c.data.filteredRequests"
+         ng-click="c.openRequest(req)">
+
+      <div class="clm-mr-card-top">
+        <div class="clm-mr-card-left">
+          <div class="clm-mr-card-num">
+            {{req.number}}
+            <span class="clm-type-pill clm-pill-trade"    ng-if="req.customer_type == 'Trade'">Trade</span>
+            <span class="clm-type-pill clm-pill-nontrade" ng-if="req.customer_type == 'Non-Trade'">Non-Trade</span>
+            <span class="clm-type-pill clm-pill-key"      ng-if="req.customer_type == 'Key'">Key</span>
+          </div>
+          <div class="clm-mr-card-name">{{req.customer_name}}</div>
+        </div>
+        <div class="clm-mr-card-right">
+          <span class="clm-badge clm-badge-segment">{{req.segment}}</span>
+          <span class="clm-badge clm-badge-status clm-status-submitted" ng-if="req.state == 'Submitted'">SUBMITTED</span>
+          <span class="clm-badge clm-badge-status clm-status-approved" ng-if="req.state == 'Approved'">APPROVED</span>
+          <span class="clm-badge clm-badge-status clm-status-rejected" ng-if="req.state == 'Rejected'">REJECTED</span>
+          <span class="clm-badge clm-badge-status clm-status-returned" ng-if="req.state == 'Returned'">RETURNED</span>
+        </div>
+      </div>
+
+      <!-- Trade metrics -->
+      <div class="clm-mr-card-metrics" ng-if="req.customer_type == 'Trade'">
+        <div class="clm-mr-metric">
+          <span class="clm-mr-metric-label">Requested</span>
+          <span class="clm-mr-metric-value">₹{{req.requested_limit | number:2}}L</span>
+        </div>
+        <div class="clm-mr-metric">
+          <span class="clm-mr-metric-label">Approved</span>
+          <span class="clm-mr-metric-value">₹{{req.approved_limit | number:2}}L</span>
+        </div>
+       
+      </div>
+
+      <!-- Non-Trade / Key metrics -->
+      <div class="clm-mr-card-metrics" ng-if="req.customer_type != 'Trade'">
+        <div class="clm-mr-metric">
+          <span class="clm-mr-metric-label">Requested</span>
+          <span class="clm-mr-metric-value">₹{{req.requested_limit | number:1}}L</span>
+        </div>
+        <div class="clm-mr-metric">
+          <span class="clm-mr-metric-label">Approved</span>
+          <span class="clm-mr-metric-value">₹{{req.approved_limit | number:1}}L</span>
+        </div>
+        <div class="clm-mr-metric">
+          <span class="clm-mr-metric-label">Aging</span>
+          <span class="clm-mr-metric-value clm-val-ok"     ng-if="req.aging_rating == 'a'">{{req.aging_rating}}</span>
+          <span class="clm-mr-metric-value clm-val-warn"   ng-if="req.aging_rating == 'b'">{{req.aging_rating}}</span>
+          <span class="clm-mr-metric-value clm-val-danger" ng-if="req.aging_rating == 'c'">{{req.aging_rating}}</span>
+        </div>
+      </div>
+
+      <div class="clm-mr-card-footer">
+        <span class="clm-mr-footer-item">Submitted: {{req.created}}</span>
+        <span class="clm-mr-footer-item" ng-if="req.decided">Decided: {{req.decided}}</span>
+        <span class="clm-mr-footer-cta">View Details →</span>
+      </div>
+    </div>
+
+    <div class="clm-mr-no-filter" ng-if="c.data.filteredRequests && c.data.filteredRequests.length === 0">
+      No requests match the selected filters.
+    </div>
+  </div>
+
+  <!-- ── DETAIL VIEW ── -->
+  <div class="clm-mr-detail" ng-if="c.data.selectedRequest">
+
+    <div class="clm-mr-detail-header">
+      <!-- APPROVAL TRACKER -->
+
+      <button class="clm-back-btn" ng-click="c.closeRequest()">← Back</button>
+      <div class="clm-mr-detail-title">
+        <!-- APPROVAL TRACKER -->
+<div class="approval-tracker"
+     ng-if="c.data.selectedRequest.approval_steps">
+
+  <div class="step"
+       ng-repeat="step in c.data.selectedRequest.approval_steps track by $index">
+
+  <div class="circle"
+     ng-class="{
+       'done': step.state == 'approved',
+       'pending': step.state == 'requested',
+       'rejected': step.state == 'rejected'
+     }">
+      <span ng-if="step.state=='approved'">✔</span>
+      <span ng-if="step.state=='pending'">●</span>
+      <span ng-if="step.state=='rejected'">✖</span>
+    </div>
+
+    <div class="label">{{step.name}}</div>
+
+    <div class="line" ng-if="!$last"></div>
+  </div>
+
+</div>
+        
+      {{c.data.selectedRequest.number}} — {{c.data.selectedRequest.customer_name}}
+   
+       
+        <span class="clm-badge clm-badge-segment">{{c.data.selectedRequest.segment}}</span>
+        <span class="clm-type-pill clm-pill-trade"    ng-if="c.data.selectedRequest.customer_type == 'Trade'">Trade</span>
+        <span class="clm-type-pill clm-pill-nontrade" ng-if="c.data.selectedRequest.customer_type == 'Non-Trade'">Non-Trade</span>
+        <span class="clm-type-pill clm-pill-key"      ng-if="c.data.selectedRequest.customer_type == 'Key'">Key</span>
+        <span class="clm-badge clm-badge-status clm-status-submitted" ng-if="c.data.selectedRequest.state == 'Submitted'">SUBMITTED</span>
+        <span class="clm-badge clm-badge-status clm-status-approved" ng-if="c.data.selectedRequest.state == 'Approved'">APPROVED</span>
+        <span class="clm-badge clm-badge-status clm-status-rejected" ng-if="c.data.selectedRequest.state == 'Rejected'">REJECTED</span>
+        <span class="clm-badge clm-badge-status clm-status-returned" ng-if="c.data.selectedRequest.state == 'Returned'">RETURNED</span>
+      </div>
+      
+      
+     
+      
+      
+    </div>
+
+    <!-- Summary row TRADE -->
+    <div class="clm-mr-summary-row" ng-if="c.data.selectedRequest.customer_type == 'Trade'">
+      <div class="clm-mr-summary-card">
+        <div class="clm-summary-label">Requested</div>
+        <div class="clm-summary-value">₹{{c.data.selectedRequest.requested_limit | number:2}}L</div>
+      </div>
+      <div class="clm-mr-summary-card">
+        <div class="clm-summary-label">Approved</div>
+        <div class="clm-summary-value">₹{{c.data.selectedRequest.approved_limit | number:2}}L</div>
+      </div>
+      <div class="clm-mr-summary-card">
+        <div class="clm-summary-label">Net Exposure</div>
+        <div class="clm-summary-value">₹{{c.data.selectedRequest.net_exposure | number:2}}L</div>
+      </div>
+      <div class="clm-mr-summary-card">
+        <div class="clm-summary-label">Max Allowable</div>
+        <div class="clm-summary-value">₹{{c.data.selectedRequest.max_allowable | number:2}}L</div>
+      </div>
+      <div class="clm-mr-summary-card">
+        <div class="clm-summary-label">Multiplier</div>
+        <div class="clm-summary-value">{{c.data.selectedRequest.implied_mult | number:2}}x</div>
+      </div>
+    </div>
+
+    <!-- Summary row NON-TRADE/KEY -->
+    <div class="clm-mr-summary-row" ng-if="c.data.selectedRequest.customer_type != 'Trade'">
+      <div class="clm-mr-summary-card">
+        <div class="clm-summary-label">Requested</div>
+        <div class="clm-summary-value">₹{{c.data.selectedRequest.requested_limit | number:1}}L</div>
+      </div>
+      <div class="clm-mr-summary-card">
+        <div class="clm-summary-label">Approved</div>
+        <div class="clm-summary-value">₹{{c.data.selectedRequest.approved_limit | number:1}}L</div>
+      </div>
+      <div class="clm-mr-summary-card">
+        <div class="clm-summary-label">P1 — MACL</div>
+        <div class="clm-summary-value">₹{{c.data.selectedRequest.p1_macl | number:1}}L</div>
+      </div>
+      <div class="clm-mr-summary-card">
+        <div class="clm-summary-label">P2 — Composite</div>
+        <div class="clm-summary-value">{{(c.data.selectedRequest.p2_composite * 100) | number:1}}%</div>
+      </div>
+      <div class="clm-mr-summary-card">
+        <div class="clm-summary-label">P3 — Credit</div>
+        <div class="clm-summary-value">{{(c.data.selectedRequest.p3_credit * 100) | number:0}}%</div>
+      </div>
+    </div>
+
+    <!-- Body -->
+    <div class="clm-mr-detail-body">
+      <div class="clm-mr-detail-left">
+        <div class="clm-mr-detail-section">
+          <div class="clm-mr-detail-section-title">Request Information</div>
+          <div class="clm-mr-kv-row"><span class="clm-mr-kv-key">Request Number</span><span class="clm-mr-kv-val">{{c.data.selectedRequest.number}}</span></div>
+          <div class="clm-mr-kv-row"><span class="clm-mr-kv-key">Customer Code</span><span class="clm-mr-kv-val">{{c.data.selectedRequest.customer_code}}</span></div>
+          <div class="clm-mr-kv-row"><span class="clm-mr-kv-key">Type</span><span class="clm-mr-kv-val">{{c.data.selectedRequest.customer_type}}</span></div>
+          <div class="clm-mr-kv-row"><span class="clm-mr-kv-key">Segment</span><span class="clm-mr-kv-val">{{c.data.selectedRequest.segment}}</span></div>
+          <div class="clm-mr-kv-row"><span class="clm-mr-kv-key">Status</span><span class="clm-mr-kv-val">{{c.data.selectedRequest.state}}</span></div>
+          <div class="clm-mr-kv-row"><span class="clm-mr-kv-key">Submitted On</span><span class="clm-mr-kv-val">{{c.data.selectedRequest.created}}</span></div>
+          <div class="clm-mr-kv-row" ng-if="c.data.selectedRequest.decided"><span class="clm-mr-kv-key">Decided On</span><span class="clm-mr-kv-val">{{c.data.selectedRequest.decided}}</span></div>
+          <div class="clm-mr-kv-row" ng-if="c.data.selectedRequest.approver_name"><span class="clm-mr-kv-val">Decided By</span><span class="clm-mr-kv-val">{{c.data.selectedRequest.approver_name}}</span></div>
+        </div>
+
+        <div class="clm-mr-detail-section" ng-if="c.data.selectedRequest.aging_detail">
+          <div class="clm-mr-detail-section-title">6-Month Aging Breakdown</div>
+          <div class="clm-aging-row">
+            <span class="clm-aging-label">0–60 Days (Safe)</span>
+            <div class="clm-aging-bar-bg"><div class="clm-aging-bar clm-aging-safe" ng-style="{width: c.data.selectedRequest.aging_detail.safe_pct + '%'}"></div></div>
+            <span class="clm-aging-pct">{{c.data.selectedRequest.aging_detail.safe_pct}}%</span>
+          </div>
+          <div class="clm-aging-row">
+            <span class="clm-aging-label">61–75 Days</span>
+            <div class="clm-aging-bar-bg"><div class="clm-aging-bar clm-aging-warn" ng-style="{width: c.data.selectedRequest.aging_detail.warn_pct + '%'}"></div></div>
+            <span class="clm-aging-pct">{{c.data.selectedRequest.aging_detail.warn_pct}}%</span>
+          </div>
+          <div class="clm-aging-row">
+            <span class="clm-aging-label">76–90 Days</span>
+            <div class="clm-aging-bar-bg"><div class="clm-aging-bar clm-aging-crit" ng-style="{width: c.data.selectedRequest.aging_detail.crit_pct + '%'}"></div></div>
+            <span class="clm-aging-pct">{{c.data.selectedRequest.aging_detail.crit_pct}}%</span>
+          </div>
+          <div class="clm-aging-row">
+            <span class="clm-aging-label">&gt;90 Days (Toxic)</span>
+            <div class="clm-aging-bar-bg"><div class="clm-aging-bar clm-aging-toxic" ng-style="{width: c.data.selectedRequest.aging_detail.toxic_pct + '%'}"></div></div>
+            <span class="clm-aging-pct">{{c.data.selectedRequest.aging_detail.toxic_pct}}%</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="clm-mr-detail-right">
+        <div class="clm-mr-detail-section">
+          <div class="clm-mr-detail-section-title">Business Justification</div>
+          <div class="clm-mr-justification-text">{{c.data.selectedRequest.justification || 'Not provided'}}</div>
+        </div>
+
+        <div class="clm-mr-detail-section" ng-if="c.data.selectedRequest.is_deviation">
+          <div class="clm-mr-detail-section-title" style="color:#c0392b">⚠ Deviation Justification</div>
+          <div class="clm-mr-justification-text clm-justification-dev">{{c.data.selectedRequest.deviation_justification || 'Not provided'}}</div>
+        </div>
+
+        <div class="clm-mr-detail-section" ng-if="c.data.selectedRequest.state == 'Returned'">
+          <div class="clm-mr-detail-section-title" style="color:#f39c12">↩ Return Comments</div>
+          <div class="clm-mr-justification-text clm-justification-return">{{c.data.selectedRequest.return_comments || 'No comments'}}</div>
+        </div>
+
+        <div class="clm-mr-detail-section" ng-if="c.data.selectedRequest.state == 'Rejected'">
+          <div class="clm-mr-detail-section-title" style="color:#e74c3c">✕ Rejection Reason</div>
+          <div class="clm-mr-justification-text clm-justification-reject">{{c.data.selectedRequest.rejection_reason || 'No reason provided'}}</div>
+        </div>
+
+        <div class="clm-mr-detail-section" ng-if="c.data.selectedRequest.state == 'Approved'">
+          <div class="clm-mr-detail-section-title" style="color:#27ae60">✓ Approval Details</div>
+          <div class="clm-mr-kv-row"><span class="clm-mr-kv-key">Approved Limit</span><span class="clm-mr-kv-val">₹{{c.data.selectedRequest.approved_limit | number:2}}L</span></div>
+          <div class="clm-mr-kv-row" ng-if="c.data.selectedRequest.next_review_date"><span class="clm-mr-kv-key">Next Review Date</span><span class="clm-mr-kv-val">{{c.data.selectedRequest.next_review_date}}</span></div>
+        </div>
+         
+
+        <!-- Action buttons based on status -->
+        <div class="clm-mr-detail-section clm-mr-action-section" ng-if="c.data.selectedRequest.state == 'Returned'">
+          <div class="clm-mr-detail-section-title">Actions</div>
+          <p style="font-size:13px; color:#666; margin-bottom:12px;">This request was returned. You can edit and resubmit it.</p>
+          <div class="clm-mr-action-actions">
+            <button class="clm-btn clm-btn-outline" ng-click="c.editRequest()">✏️ Edit &amp; Resubmit</button>
+          </div>
+        </div>
+       
+
+</div>
+
+        <div class="clm-mr-detail-section clm-mr-action-section" ng-if="c.data.selectedRequest.state == 'Rejected'">
+          <div class="clm-mr-detail-section-title">Actions</div>
+          <p style="font-size:13px; color:#666; margin-bottom:12px;">This request was rejected. You can create a new request.</p>
+          <div class="clm-mr-action-actions">
+            <button class="clm-btn clm-btn-outline" ng-click="c.createNewRequest()">+ New Request</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+ <div class="clm-ap-detail-section"
+     ng-if="c.data.selectedRequest.aging_table && c.data.selectedRequest.aging_table.length > 0">
+               <div class="clm-ap-detail-section-title">
+    6-Month Aging Breakdown (Table)
+  </div>
+
+  <table class="clm-aging-table">
+    <thead>
+      <tr>
+        <th>Month</th>
+        <th>0-30</th>
+        <th>31-45</th>
+        <th>46-60</th>
+        <th>61-75</th>
+        <th>76-90</th>
+        <th>91-120</th>
+        <th>>120</th>
+        <th>Total</th>
+      </tr>
+    </thead>
+
+    <tbody>
+      <tr ng-repeat="row in c.data.selectedRequest.aging_table">
+        <td>{{row.month}}</td>
+        <td>{{row.b0_30 | number}}</td>
+        <td>{{row.b31_45 | number}}</td>
+        <td>{{row.b46_60 | number}}</td>
+        <td>{{row.b61_75 | number}}</td>
+        <td>{{row.b76_90 | number}}</td>
+        <td>{{row.b91_120 | number}}</td>
+        <td>{{row.b120 | number}}</td>
+        <td><b>{{row.total | number}}</b></td>
+      </tr>
+    </tbody>
+  </table>
+
+</div>]]></template>
+    </sp_widget>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_26413ee697d00f14be31fa17f053af54</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[/**
+ * CLM VIEW MY REQUESTS — Client Script
+ */
+
+api.controller = function($scope) {
+    var c = this;
+
+    // ── Init ────
+    c.data.filteredRequests = [];
+    c.data.selectedRequest  = null;
+    c.data.filterSegment    = '';
+    c.data.filterType       = '';
+    c.data.filterStatus     = '';
+    c.data.refreshing       = false;
+    c.data.lastRefreshed    = '';
+
+    // ── Build filtered list ───────
+    c.applyFilters = function() {
+        var seg  = c.data.filterSegment   || '';
+        var typ  = c.data.filterType      || '';
+        var stat = c.data.filterStatus    || '';
+
+        c.data.filteredRequests = (c.data.requests || []).filter(function(req) {
+            if (seg  &amp;&amp; req.segment       !== seg)  return false;
+            if (typ  &amp;&amp; req.customer_type !== typ)  return false;
+            if (stat &amp;&amp; req.state         !== stat) return false;
+            return true;
+        });
+    };
+
+    // Watch filters
+    $scope.$watch(function() { return c.data.filterSegment; }, function() { c.applyFilters(); });
+    $scope.$watch(function() { return c.data.filterType;    }, function() { c.applyFilters(); });
+    $scope.$watch(function() { return c.data.filterStatus;  }, function() { c.applyFilters(); });
+
+    // ── Load requests on init ─────────────────────────
+    if (c.data.requests &amp;&amp; c.data.requests.length &gt; 0) {
+        c.applyFilters();
+        c.data.lastRefreshed = new Date().toLocaleTimeString();
+    } else {
+        c.refreshRequests();
+    }
+
+    // ── Refresh ────────────────────────────────────────
+    c.refreshRequests = function() {
+        c.data.refreshing = true;
+        c.server.get({ action: 'refresh' })
+        .then(function(r) {
+            c.data.refreshing    = false;
+            c.data.lastRefreshed = new Date().toLocaleTimeString();
+            if (r.data.requests) {
+                c.data.requests = r.data.requests;
+            } else {
+                c.data.requests = [];
+            }
+            c.applyFilters();
+        }).catch(function() {
+            c.data.refreshing = false;
+            c.data.requests   = c.data.requests || [];
+            c.applyFilters();
+        });
+    };
+// Add search functionality
+c.data.searchTerm = '';
+
+c.applySearch = function() {
+    if (!c.data.searchTerm || c.data.searchTerm.trim() === '') {
+        c.data.filteredRequests = c.data.requests.filter(req =&gt; {
+            var seg = c.data.filterSegment || '';
+            var typ = c.data.filterType || '';
+            var stat = c.data.filterStatus || '';
+            
+            if (seg &amp;&amp; req.segment !== seg) return false;
+            if (typ &amp;&amp; req.customer_type !== typ) return false;
+            if (stat &amp;&amp; req.state !== stat) return false;
+            return true;
+        });
+        return;
+    }
+    
+    var searchTerm = c.data.searchTerm.toLowerCase().trim();
+    c.data.filteredRequests = c.data.requests.filter(function(req) {
+        var seg = c.data.filterSegment || '';
+        var typ = c.data.filterType || '';
+        var stat = c.data.filterStatus || '';
+        
+        // Skip if filters don't match
+        if (seg &amp;&amp; req.segment !== seg) return false;
+        if (typ &amp;&amp; req.customer_type !== typ) return false;
+        if (stat &amp;&amp; req.state !== stat) return false;
+        
+        // Check if search term matches customer name or request number
+        return (req.customer_name &amp;&amp; req.customer_name.toLowerCase().includes(searchTerm)) ||
+               (req.number &amp;&amp; req.number.toLowerCase().includes(searchTerm));
+    });
+};
+
+// Update filter functions to also apply search
+function updateFilters() {
+    c.applyFilters();
+    c.applySearch();
+}
+
+$scope.$watch(function() { return c.data.filterSegment; }, updateFilters);
+$scope.$watch(function() { return c.data.filterType; }, updateFilters);
+$scope.$watch(function() { return c.data.filterStatus; }, updateFilters);
+    // ── Open detail ────────────────────────────────────
+   c.openRequest = function(req) {
+
+    // Reload fresh data from server
+    c.server.get({ action: 'refresh' }).then(function(r) {
+
+        c.data.requests = r.data.requests;
+
+        // Find updated record
+        var updated = c.data.requests.find(function(item) {
+            return item.sys_id === req.sys_id;
+        });
+
+        c.data.selectedRequest = updated || req;
+    });
+};
+
+    c.closeRequest = function() {
+        c.data.selectedRequest = null;
+    };
+
+    // ── Actions ────────────────────────────────────────
+   // Replace the existing createNewRequest function
+c.createNewRequest = function() {
+    // Check if we're in a detail view of a rejected request
+    if (c.data.selectedRequest &amp;&amp; c.data.selectedRequest.state === 'Rejected') {
+        window.location.href = 'https://abgdev.service-now.com/uclm?id=clmtrade';
+    } else {
+        // For other cases, go to standard new request form
+        window.location.href = '/x_birl3_clm_clm_new_credit_request.do?sys_id=-1';
+    }
+};
+
+    c.editRequest = function() {
+        // Navigate to edit the returned request
+        if (c.data.selectedRequest &amp;&amp; c.data.selectedRequest.sys_id) {
+            window.location.href = '/x_birl3_clm_clm_new_credit_request.do?sys_id=' + c.data.selectedRequest.sys_id;
+        }
+    };
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;/* ============================================================
+   CLM VIEW MY REQUESTS — CSS (UltraTech Cement Theme)
+   FULLY RESPONSIVE + MOBILE OPTIMIZED
+   ============================================================ */
+
+.clm-my-requests {
+  font-family: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  color: #1a1a1a;
+  box-sizing: border-box;
+}
+.approval-tracker {
+  display: flex;
+  align-items: center;
+  margin: 20px 0 30px;
+}
+.clm-mr-detail-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.approval-tracker {
+  margin-right: 10px;
+}
+.clm-aging-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.clm-aging-table th {
+  background: #000;
+  color: #FFF21A;
+  padding: 8px;
+  border: 1px solid #ddd;
+  text-align: center;
+}
+
+.clm-aging-table td {
+  padding: 8px;
+  border: 1px solid #ddd;
+  text-align: right;
+}
+
+.clm-aging-table td:first-child {
+  text-align: left;
+  font-weight: 600;
+}
+.clm-ap-detail-left {
+  flex: 1;
+  border-right: 1px solid #e0e6ed;
+  min-width: 0;
+  overflow-x: auto;   /* ✅ ADD THIS */
+}
+.clm-title-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1;                /* ✅ take remaining space */
+  min-width: 0;           /* ✅ REQUIRED for text wrapping */
+}
+
+.clm-title-text {
+  flex: 1;                /* ✅ allow expansion */
+  min-width: 0;
+  white-space: normal;    /* ✅ allow wrapping */
+  word-break: break-word; /* ✅ break long names */
+}
+
+.clm-aging-table {
+  width: 100%;
+  min-width: 800px;   /* ✅ ADD THIS */
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.circle {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #ccc;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+
+.circle.done {
+  background: #2ecc71; /* green */
+}
+
+.circle.pending {
+  background: #bdc3c7; /* grey */
+}
+
+.circle.rejected {
+  background: #e74c3c; /* red */
+}
+
+.line {
+  width: 60px;
+  height: 3px;
+  background: #ccc;
+  margin: 0 10px;
+}
+
+.label {
+  position: absolute;
+  top: 42px;
+  width: 120px;
+  text-align: center;
+  font-size: 12px;
+  left: -45px;
+}
+.approval-tracker {
+  display: flex;
+  align-items: center;
+  margin: 20px 0;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.circle {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #ccc;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.circle.done {
+  background: #2ecc71;
+}
+
+.circle.pending {
+  background: #bdc3c7;
+}
+
+.circle.rejected {
+  background: #e74c3c;
+}
+
+.line {
+  width: 60px;
+  height: 3px;
+  background: #ccc;
+  margin: 0 10px;
+}
+
+.label {
+  position: absolute;
+  top: 40px;
+  width: 100px;
+  text-align: center;
+  font-size: 12px;
+  left: -35px;
+}
+
+/* ── Header ── */
+.clm-mr-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #000000;
+  color: #fff;
+  padding: 20px 28px;
+  border-radius: 8px 8px 0 0;
+  border-top: 4px solid #FFF21A;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.clm-mr-title {
+  font-size: 20px;
+  font-weight: 600;
+}
+.clm-mr-subtitle {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.65);
+  margin-top: 3px;
+  width: 100%;
+}
+.clm-mr-count-badge {
+  background: #FFF21A;
+  color: #000000;
+  padding: 5px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 700;
+  margin-left: auto;
+}
+
+/* ── Empty ── */
+.clm-mr-empty {
+  text-align: center;
+  padding: 60px 28px;
+  background: #fff;
+  border: 1px solid #e0e6ed;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+}
+.clm-mr-empty-icon {
+  font-size: 40px;
+  margin-bottom: 12px;
+}
+.clm-mr-empty-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #000000;
+  margin-bottom: 6px;
+}
+.clm-mr-empty-sub {
+  color: #7f8c9a;
+}
+
+/* ── Filters ── */
+.clm-mr-filters {
+  display: flex;
+  gap: 16px;
+  padding: 16px 20px;
+  background: #f8f8f8;
+  border-bottom: 1px solid #dde3ea;
+  flex-wrap: wrap;
+}
+.clm-mr-filter-item {
+  flex: 1;
+  min-width: 140px;
+}
+.clm-mr-filter-item label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #7f8c9a;
+  margin-bottom: 4px;
+}
+.clm-mr-select {
+  width: 100%;
+  padding: 7px 10px;
+  border: 2px solid #000000;
+  border-radius: 4px;
+  font-size: 13px;
+  background: #fff;
+  color: #000000;
+  font-weight: 500;
+  box-sizing: border-box;
+}
+.clm-mr-select:focus {
+  outline: none;
+  border-color: #FFF21A;
+  box-shadow: 0 0 0 2px rgba(255, 242, 26, 0.2);
+}
+
+/* ── List ── */
+.clm-mr-list {
+  background: #fff;
+  border: 1px solid #e0e6ed;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+}
+
+/* ── Card ── */
+.clm-mr-card {
+  padding: 16px 20px;
+  border-bottom: 1px solid #e8eef3;
+  cursor: pointer;
+  transition: background 0.1s, border-left 0.1s;
+  border-left: 4px solid transparent;
+}
+.clm-mr-card:last-child {
+  border-bottom: none;
+}
+.clm-mr-card:hover {
+  background: #f9f9f9;
+  border-left-color: #FFF21A;
+}
+
+.clm-mr-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  gap: 8px;
+}
+.clm-mr-card-num {
+  font-size: 12px;
+  color: #7f8c9a;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.clm-mr-card-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: #000000;
+  flex: 1;
+}
+.clm-mr-card-right {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.clm-badge {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.clm-badge-segment {
+  background: #f0f0f0;
+  color: #000000;
+  border: 1px solid #000000;
+}
+
+/* Status badges */
+.clm-badge-status.clm-status-submitted {
+  background: #e8f0f8;
+  color: #1a3a5c;
+  border: 1px solid #1a3a5c;
+}
+.clm-badge-status.clm-status-approved {
+  background: #eafaf1;
+  color: #1e8449;
+  border: 1px solid #1e8449;
+}
+.clm-badge-status.clm-status-rejected {
+  background: #fdf3f2;
+  color: #c0392b;
+  border: 1px solid #c0392b;
+}
+.clm-badge-status.clm-status-returned {
+  background: #fef5e7;
+  color: #d68910;
+  border: 1px solid #d68910;
+}
+
+.clm-mr-card-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  margin-bottom: 12px;
+}
+.clm-mr-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.clm-mr-metric-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #7f8c9a;
+}
+.clm-mr-metric-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #000000;
+}
+
+.clm-mr-card-footer {
+  display: flex;
+  gap: 20px;
+  font-size: 12px;
+  color: #a0aab4;
+  flex-wrap: wrap;
+}
+.clm-mr-footer-cta {
+  margin-left: auto;
+  color: #000000;
+  font-weight: 700;
+}
+
+/* ── Detail view ── */
+.clm-mr-detail {
+  background: #fff;
+  border: 1px solid #e0e6ed;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+}
+.clm-mr-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  background: #f8f8f8;
+  border-bottom: 2px solid #FFF21A;
+  flex-wrap: wrap;
+}
+.clm-back-btn {
+  background: #fff;
+  border: 2px solid #000000;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #000000;
+  cursor: pointer;
+  white-space: nowrap;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.clm-back-btn:hover {
+  background: #f0f0f0;
+}
+.clm-mr-detail-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #000000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+/* Summary row */
+.clm-mr-summary-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  border-bottom: 2px solid #FFF21A;
+}
+.clm-mr-summary-card {
+  flex: 1;
+  min-width: 120px;
+  padding: 14px 16px;
+  border-right: 1px solid #e0e6ed;
+  text-align: center;
+}
+.clm-mr-summary-card:last-child {
+  border-right: none;
+}
+.clm-summary-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #7f8c9a;
+  margin-bottom: 6px;
+}
+.clm-summary-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: #000000;
+}
+
+/* Detail body */
+.clm-mr-detail-body {
+  display: flex;
+  gap: 0;
+}
+.clm-mr-detail-left {
+  flex: 1;
+  border-right: 1px solid #e0e6ed;
+  min-width: 0;
+}
+.clm-mr-detail-right {
+  flex: 1.5;
+  min-width: 0;
+}
+
+.clm-mr-detail-section {
+  padding: 20px;
+  border-bottom: 1px solid #e8eef3;
+}
+.clm-mr-detail-section:last-child {
+  border-bottom: none;
+}
+.clm-mr-detail-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #000000;
+  margin-bottom: 14px;
+  border-bottom: 2px solid #FFF21A;
+  padding-bottom: 8px;
+}
+
+.clm-mr-kv-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid #f0f4f8;
+  font-size: 13px;
+  gap: 12px;
+}
+.clm-mr-kv-row:last-child {
+  border-bottom: none;
+}
+.clm-mr-kv-key {
+  color: #7f8c9a;
+  font-weight: 600;
+  flex: 0 0 40%;
+}
+.clm-mr-kv-val {
+  font-weight: 600;
+  color: #000000;
+  text-align: right;
+  flex: 1;
+}
+
+/* Aging bars */
+.clm-aging-bar-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.clm-aging-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.clm-aging-label {
+  width: 130px;
+  flex-shrink: 0;
+  color: #5a6a7a;
+}
+.clm-aging-bar-bg {
+  flex: 1;
+  height: 10px;
+  background: #f0f4f8;
+  border-radius: 5px;
+  overflow: hidden;
+}
+.clm-aging-bar {
+  height: 100%;
+  border-radius: 5px;
+  transition: width 0.4s;
+  min-width: 2px;
+}
+.clm-aging-safe {
+  background: #FFF21A;
+}
+.clm-aging-warn {
+  background: #f39c12;
+}
+.clm-aging-crit {
+  background: #e67e22;
+}
+.clm-aging-toxic {
+  background: #e74c3c;
+}
+.clm-aging-pct {
+  width: 40px;
+  text-align: right;
+  font-weight: 600;
+  color: #5a6a7a;
+  flex-shrink: 0;
+}
+
+/* Justification text */
+.clm-mr-justification-text {
+  font-size: 14px;
+  line-height: 1.6;
+  color: #000000;
+  background: #f9f9f9;
+  border: 2px solid #000000;
+  border-radius: 5px;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-x: auto;
+  min-height: 80px;
+  max-height: 200px;
+  scrollbar-width: thin;
+}
+
+.clm-justification-dev {
+  background: #fffbf0;
+  border-color: #FFF21A;
+}
+
+.clm-justification-return {
+  background: #fef5e7;
+  border-color: #f39c12;
+}
+
+.clm-justification-reject {
+  background: #fdf3f2;
+  border-color: #e74c3c;
+  min-height: 100px;
+}
+
+/* Action section */
+.clm-mr-action-section {
+  background: #f8f8f8;
+}
+.clm-mr-action-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* Buttons */
+.clm-btn {
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s;
+  flex: 1;
+  min-width: 120px;
+}
+.clm-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.clm-btn-outline {
+  background: transparent;
+  color: #000000;
+  border: 2px solid #000000;
+}
+.clm-btn-outline:hover:not(:disabled) {
+  background: #f0f0f0;
+}
+
+/* Refresh button */
+.clm-refresh-btn {
+  background: #FFF21A;
+  border: 2px solid #000000;
+  color: #000000;
+  padding: 7px 16px;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.clm-refresh-btn:hover:not(:disabled) {
+  background: #000000;
+  color: #FFF21A;
+}
+.clm-refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Last refreshed timestamp */
+.clm-mr-refreshed {
+  font-size: 11px;
+  color: #7f8c9a;
+  padding: 6px 20px;
+  background: #f8f8f8;
+  border-bottom: 1px solid #e0e6ed;
+  border-left: 1px solid #e0e6ed;
+  border-right: 1px solid #e0e6ed;
+  text-align: right;
+  border-top: 2px solid #FFF21A;
+}
+
+/* No filter results */
+.clm-mr-no-filter {
+  padding: 24px;
+  text-align: center;
+  color: #aab4be;
+  font-size: 14px;
+}
+
+/* Value states */
+.clm-val-ok {
+  color: #27ae60 !important;
+}
+.clm-val-warn {
+  color: #f39c12 !important;
+}
+.clm-val-danger {
+  color: #e74c3c !important;
+}
+
+/* Customer type pills */
+.clm-type-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.clm-pill-trade {
+  background: #f0f0f0;
+  color: #000000;
+  border: 1px solid #000000;
+}
+.clm-pill-nontrade {
+  background: #FFF21A;
+  color: #000000;
+  font-weight: 700;
+}
+.clm-pill-key {
+  background: #000000;
+  color: #FFF21A;
+}
+
+/* ============================================================
+   SEARCH CONTAINER &amp;amp; INPUT — CSS (UltraTech Cement Theme)
+   ============================================================ */
+
+.clm-mr-search-container {
+  padding: 16px 20px;
+  background: linear-gradient(135deg, #f8f8f8 0%, #fafafa 100%);
+  border-bottom: 2px solid #FFF21A;
+  position: relative;
+  margin: 0 !important;
+}
+
+.clm-mr-search-input {
+  width: 100%;
+  padding: 12px 16px 12px 40px;
+  border: 2px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  background: #ffffff;
+  color: #333333;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  font-family: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  box-sizing: border-box;
+}
+
+.clm-mr-search-input::placeholder {
+  color: #999999;
+  font-weight: 400;
+  opacity: 0.8;
+}
+
+.clm-mr-search-input:hover {
+  border-color: #000000;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.1);
+}
+
+.clm-mr-search-input:focus {
+  outline: none;
+  border-color: #FFF21A;
+  box-shadow: 0 0 0 3px rgba(255, 242, 26, 0.15),
+    0 4px 12px rgba(255, 242, 26, 0.2),
+    inset 0 1px 2px rgba(0, 0, 0, 0.02);
+  background: #fafafa;
+}
+
+.clm-mr-search-input:not(:placeholder-shown) {
+  border-color: #FFF21A;
+  box-shadow: 0 3px 8px rgba(255, 242, 26, 0.15);
+}
+
+.clm-mr-search-input:not(:placeholder-shown):hover {
+  border-color: #FFF21A;
+  box-shadow: 0 4px 12px rgba(255, 242, 26, 0.2);
+}
+
+.clm-mr-search-input:disabled {
+  background: #f0f0f0;
+  color: #999999;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.clm-mr-search-container::before {
+  content: "🔍";
+  position: absolute;
+  left: 36px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 16px;
+  opacity: 0.5;
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+
+.clm-mr-search-input:focus ~ .clm-mr-search-container::before {
+  opacity: 1;
+}
+
+/* ============================================================
+   FORCE FULL-WIDTH WIDGET (ServiceNow Override)
+   ============================================================ */
+
+.sn-widget-content,
+.sn-widget-content &amp;gt; div,
+.container,
+.container-fluid {
+  max-width: 100% !important;
+  width: 100% !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+
+body,
+html {
+  width: 100%;
+}
+
+/* Inner padding so content doesn't stick to edges */
+.clm-mr-header,
+.clm-mr-search-container,
+.clm-mr-filters,
+.clm-mr-list,
+.clm-mr-detail {
+  padding-left: 24px;
+  padding-right: 24px;
+}
+
+/* ============================================================
+   TABLET BREAKPOINT — 768px
+   ============================================================ */
+
+@media (max-width: 768px) {
+  .clm-mr-header {
+    padding: 16px 20px;
+  }
+
+  .clm-mr-title {
+    font-size: 18px;
+  }
+
+  .clm-mr-subtitle {
+    font-size: 12px;
+  }
+
+  .clm-mr-count-badge {
+    padding: 4px 12px;
+    font-size: 12px;
+  }
+
+  .clm-mr-filters {
+    padding: 12px 16px;
+    gap: 12px;
+  }
+
+  .clm-mr-filter-item {
+    flex: 0 0 calc(50% - 6px);
+    min-width: unset;
+  }
+
+  .clm-mr-card {
+    padding: 14px 16px;
+  }
+
+  .clm-mr-card-metrics {
+    gap: 16px;
+  }
+
+  .clm-mr-card-footer {
+    gap: 12px;
+    font-size: 11px;
+  }
+
+  .clm-mr-detail-body {
+    flex-direction: column;
+  }
+
+  .clm-mr-detail-left {
+    border-right: none;
+    border-bottom: 1px solid #e0e6ed;
+  }
+
+  .clm-mr-summary-card {
+    min-width: 100px;
+    padding: 12px 14px;
+    font-size: 13px;
+  }
+
+  .clm-summary-value {
+    font-size: 16px;
+  }
+
+  .clm-mr-detail-section {
+    padding: 16px;
+  }
+
+  .clm-mr-detail-section-title {
+    font-size: 11px;
+    margin-bottom: 12px;
+  }
+
+  .clm-mr-kv-row {
+    padding: 5px 0;
+    font-size: 12px;
+  }
+
+  .clm-aging-label {
+    width: 110px;
+    font-size: 11px;
+  }
+
+  .clm-aging-row {
+    font-size: 11px;
+  }
+
+  .clm-mr-detail-header {
+    padding: 12px 16px;
+    gap: 12px;
+  }
+
+  .clm-back-btn {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  .clm-mr-detail-title {
+    font-size: 14px;
+  }
+
+  .clm-btn {
+    padding: 8px 16px;
+    font-size: 13px;
+  }
+
+  /* Inner padding for tablet */
+  .clm-mr-header,
+  .clm-mr-search-container,
+  .clm-mr-filters,
+  .clm-mr-list,
+  .clm-mr-detail {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}
+
+/* ============================================================
+   MOBILE BREAKPOINT — 480px
+   ============================================================ */
+
+@media (max-width: 480px) {
+  .clm-mr-header {
+    padding: 14px 16px;
+    gap: 10px;
+    align-items: flex-start;
+  }
+
+  .clm-mr-title {
+    font-size: 16px;
+    flex: 1;
+  }
+
+  .clm-mr-subtitle {
+    font-size: 11px;
+    width: 100%;
+    margin-top: 6px;
+  }
+
+  .clm-mr-count-badge {
+    padding: 3px 10px;
+    font-size: 11px;
+    margin-left: auto;
+    align-self: center;
+  }
+
+  .clm-mr-search-container {
+    padding: 12px 14px;
+  }
+
+  .clm-mr-search-input {
+    padding: 10px 14px 10px 34px;
+    font-size: 13px;
+  }
+
+  .clm-mr-search-container::before {
+    left: 28px;
+    font-size: 14px;
+  }
+
+  .clm-mr-filters {
+    padding: 10px 14px;
+    gap: 10px;
+    flex-direction: column;
+  }
+
+  .clm-mr-filter-item {
+    flex: 1;
+    min-width: unset;
+  }
+
+  .clm-mr-select {
+    font-size: 12px;
+    padding: 6px 8px;
+  }
+
+  .clm-mr-card {
+    padding: 12px 14px;
+  }
+
+  .clm-mr-card-top {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .clm-mr-card-num {
+    font-size: 11px;
+  }
+
+  .clm-mr-card-name {
+    font-size: 14px;
+  }
+
+  .clm-mr-card-right {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .clm-badge {
+    padding: 2px 6px;
+    font-size: 10px;
+  }
+
+  .clm-mr-card-metrics {
+    gap: 16px;
+    font-size: 12px;
+  }
+
+  .clm-mr-metric-label {
+    font-size: 10px;
+  }
+
+  .clm-mr-metric-value {
+    font-size: 13px;
+  }
+
+  .clm-mr-card-footer {
+    flex-direction: column;
+    gap: 8px;
+    font-size: 11px;
+  }
+
+  .clm-mr-footer-cta {
+    margin-left: 0;
+  }
+
+  .clm-mr-detail-header {
+    padding: 12px 14px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .clm-back-btn {
+    padding: 5px 10px;
+    font-size: 12px;
+    order: -1;
+    flex-shrink: 0;
+  }
+
+  .clm-mr-detail-title {
+    font-size: 13px;
+    width: 100%;
+    order: 1;
+  }
+
+  .clm-mr-summary-row {
+    border-bottom: none;
+  }
+
+  .clm-mr-summary-card {
+    flex: 0 0 calc(50% - 1px);
+    min-width: unset;
+    padding: 10px 12px;
+    border-right: none;
+    border-bottom: 1px solid #e0e6ed;
+  }
+
+  .clm-mr-summary-card:nth-child(odd) {
+    border-right: 1px solid #e0e6ed;
+  }
+
+  .clm-mr-summary-card:nth-child(2n + 3) {
+    border-bottom: 1px solid #e0e6ed;
+  }
+
+  .clm-summary-label {
+    font-size: 10px;
+    margin-bottom: 4px;
+  }
+
+  .clm-summary-value {
+    font-size: 14px;
+  }
+
+  .clm-mr-detail-section {
+    padding: 12px 14px;
+  }
+
+  .clm-mr-detail-section-title {
+    font-size: 11px;
+    margin-bottom: 10px;
+    letter-spacing: 0.5px;
+  }
+
+  .clm-mr-kv-row {
+    flex-direction: column;
+    padding: 6px 0;
+    border-bottom: 1px solid #f0f4f8;
+    gap: 2px;
+  }
+
+  .clm-mr-kv-key {
+    flex: 1;
+    text-align: left;
+  }
+
+  .clm-mr-kv-val {
+    text-align: left;
+    flex: 1;
+  }
+
+  .clm-aging-label {
+    width: 100px;
+    font-size: 10px;
+  }
+
+  .clm-aging-row {
+    font-size: 11px;
+  }
+
+  .clm-aging-pct {
+    width: 35px;
+    font-size: 10px;
+  }
+
+  .clm-mr-justification-text {
+    font-size: 13px;
+    padding: 10px;
+    min-height: 70px;
+    max-height: 150px;
+  }
+
+  .clm-mr-action-actions {
+    flex-direction: column;
+  }
+
+   .clm-btn {
+    width: 100%;
+    padding: 10px 16px;
+    font-size: 13px;
+    min-width: unset;
+  }
+
+  .clm-btn:disabled {
+    opacity: 0.55;
+  }
+
+  .clm-btn-outline {
+    background: transparent;
+    color: #000000;
+    border: 2px solid #000000;
+  }
+
+  .clm-btn-outline:hover:not(:disabled) {
+    background: #f0f0f0;
+  }
+
+  .clm-refresh-btn {
+    padding: 6px 12px;
+    font-size: 12px;
+    gap: 4px;
+  }
+
+  .clm-mr-refreshed {
+    padding: 6px 14px;
+    font-size: 10px;
+    text-align: right;
+  }
+
+  .clm-mr-empty {
+    padding: 40px 20px;
+  }
+
+  .clm-mr-empty-icon {
+    font-size: 32px;
+    margin-bottom: 10px;
+  }
+
+  .clm-mr-empty-title {
+    font-size: 16px;
+    margin-bottom: 6px;
+  }
+
+  .clm-mr-empty-sub {
+    font-size: 12px;
+  }
+
+  .clm-mr-no-filter {
+    padding: 20px 14px;
+    font-size: 13px;
+  }
+
+  /* Inner padding for mobile */
+  .clm-mr-header,
+  .clm-mr-search-container,
+  .clm-mr-filters,
+  .clm-mr-list,
+  .clm-mr-detail {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .clm-type-pill {
+    padding: 1px 5px;
+    font-size: 9px;
+    margin-left: 3px;
+  }
+}
+
+/* ============================================================
+   EXTRA SMALL DEVICES — 360px
+   ============================================================ */
+
+@media (max-width: 360px) {
+  .clm-mr-header {
+    padding: 12px 12px;
+  }
+
+  .clm-mr-title {
+    font-size: 15px;
+  }
+
+  .clm-mr-subtitle {
+    font-size: 10px;
+  }
+
+  .clm-mr-search-input {
+    font-size: 12px;
+    padding: 9px 12px 9px 32px;
+  }
+
+  .clm-mr-search-container::before {
+    left: 24px;
+    font-size: 13px;
+  }
+
+  .clm-mr-filters {
+    padding: 8px 12px;
+  }
+
+  .clm-mr-card {
+    padding: 10px 12px;
+  }
+
+  .clm-mr-card-metrics {
+    gap: 12px;
+  }
+
+  .clm-mr-metric-value {
+    font-size: 12px;
+  }
+
+  .clm-mr-detail-section {
+    padding: 10px 12px;
+  }
+
+  .clm-mr-kv-val {
+    font-size: 12px;
+  }
+
+  .clm-aging-label {
+    width: 80px;
+    font-size: 9px;
+  }
+
+  .clm-mr-detail-title {
+    font-size: 12px;
+    gap: 4px;
+  }
+
+  .clm-back-btn {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+
+  .clm-badge {
+    padding: 2px 5px;
+    font-size: 9px;
+  }
+
+  .clm-mr-summary-card {
+    padding: 8px 10px;
+  }
+
+  .clm-summary-label {
+    font-size: 9px;
+  }
+
+  .clm-summary-value {
+    font-size: 13px;
+  }
+
+  .clm-btn {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+
+  .clm-mr-justification-text {
+    font-size: 12px;
+    padding: 8px;
+  }
+
+  /* Inner padding for extra small */
+  .clm-mr-header,
+  .clm-mr-search-container,
+  .clm-mr-filters,
+  .clm-mr-list,
+  .clm-mr-detail {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+}
+
+/* ============================================================
+   DESKTOP BREAKPOINT — 1024px+
+   ============================================================ */
+
+@media (min-width: 1024px) {
+  .clm-mr-header,
+  .clm-mr-search-container,
+  .clm-mr-filters,
+  .clm-mr-list,
+  .clm-mr-detail {
+    padding-left: 28px;
+    padding-right: 28px;
+  }
+
+  .clm-mr-card-metrics {
+    gap: 32px;
+  }
+
+  .clm-mr-summary-card {
+    min-width: 140px;
+  }
+}
+
+/* ============================================================
+   ULTRA WIDE — 1600px+
+   ============================================================ */
+
+@media (min-width: 1600px) {
+  .clm-mr-header,
+  .clm-mr-search-container,
+  .clm-mr-filters,
+  .clm-mr-list,
+  .clm-mr-detail {
+    padding-left: 48px;
+    padding-right: 48px;
+  }
+
+  .clm-mr-card-metrics {
+    gap: 40px;
+  }
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id&gt;view_my_credit_request_safe_side&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;view my credit request safe side&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+    var action = input &amp;&amp; input.action;
+    var currentUserId = gs.getUserID();
+
+    function loadMyRequests() {
+        var results = [];
+
+        var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        gr.addQuery('initiator', currentUserId);  // KEY: Filter by current user
+        gr.orderByDesc('sys_created_on');
+        gr.query();
+
+        while (gr.next()) {
+					// Approval Steps
+var steps = [];
+var appGR = new GlideRecord('sysapproval_approver');
+appGR.addQuery('sysapproval', gr.sys_id);
+appGR.orderBy('sys_created_on');
+appGR.query();
+
+while (appGR.next()) {
+    steps.push({
+        name: appGR.approver.getDisplayValue(),
+        state: appGR.state + ''
+    });
+}
+
+// Add initial + final step
+steps.unshift({ name: "Submitted", state: "approved" });
+
+if (gr.state == 'Approved') {
+    steps.push({ name: "Completed", state: "approved" });
+} else {
+    steps.push({ name: "Completed", state: "pending" });
+}
+            var custSysId = gr.customer + '';
+            var custName  = '';
+            var custCode  = '';
+
+            var cGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+            if (custSysId &amp;&amp; cGr.get(custSysId)) {
+                custName = cGr.customer_name    + '';
+                custCode = cGr.customer_code_sap + '';
+            } else {
+                custName = gr.customer.getDisplayValue() || 'Unknown';
+                custCode = 'N/A';
+            }
+
+            var approverName = '';
+            if (gr.approver) {
+                var aGr = new GlideRecord('sys_user');
+                if (aGr.get(gr.approver + '')) {
+                    approverName = aGr.name + '';
+                }
+            }
+
+            var total=0, safe=0, warning=0, critical=0, toxic=0;
+            var agGr = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+            agGr.addQuery('customer', custSysId);
+            agGr.orderByDesc('snapshot_month');
+            agGr.setLimit(6);
+            agGr.query();
+
+            while (agGr.next()) {
+                total    += parseFloat(agGr.total_outstanding)   || 0;
+                safe     += (parseFloat(agGr.bucket_0_30_days)   || 0)
+                          + (parseFloat(agGr.bucket_31_45_days)  || 0)
+                          + (parseFloat(agGr.bucket_46_60_days)  || 0);
+                warning  += parseFloat(agGr.bucket_61_75_days)   || 0;
+                critical += parseFloat(agGr.bucket_76_90_days)   || 0;
+                toxic    += (parseFloat(agGr.bucket_91_120_days) || 0)
+                          + (parseFloat(agGr.bucket_gt120_days)  || 0);
+            }
+					var agingTable = [];
+
+var agGr2 = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+agGr2.addQuery('customer', custSysId);
+agGr2.orderByDesc('snapshot_month');
+agGr2.setLimit(6);
+agGr2.query();
+
+while (agGr2.next()) {
+    agingTable.push({
+        month: agGr2.snapshot_month.getDisplayValue(),
+        b0_30: parseFloat(agGr2.bucket_0_30_days) || 0,
+        b31_45: parseFloat(agGr2.bucket_31_45_days) || 0,
+        b46_60: parseFloat(agGr2.bucket_46_60_days) || 0,
+        b61_75: parseFloat(agGr2.bucket_61_75_days) || 0,
+        b76_90: parseFloat(agGr2.bucket_76_90_days) || 0,
+        b91_120: parseFloat(agGr2.bucket_91_120_days) || 0,
+        b120: parseFloat(agGr2.bucket_gt120_days) || 0,
+        total: parseFloat(agGr2.total_outstanding) || 0
+    });
+}
+
+            var agingDetail = null;
+            if (total &gt; 0) {
+                agingDetail = {
+                    safe_pct:  Math.round((safe  / total) * 100),
+                    warn_pct:  Math.round((warning / total) * 100),
+                    crit_pct:  Math.round((critical / total) * 100),
+                    toxic_pct: Math.round((toxic / total) * 100)
+                };
+            }
+
+           var reviewDateStr = '';
+try { 
+    reviewDateStr = gr.getValue('next_review_date') || ''; 
+} catch(e) {}
+
+            var decidedDate = '';
+            if (gr.state != 'Submitted' &amp;&amp; gr.sys_updated_on) {
+                decidedDate = gr.sys_updated_on.getDisplayValue();
+            }
+
+            results.push({
+							approval_steps: steps,
+                sys_id:                  gr.sys_id + '',
+                number:                  gr.request_number + '',
+                customer_name:           custName,
+                customer_code:           custCode,
+                customer_type:           gr.customer_type + '',
+                segment:                 gr.segment + '',
+                state:                   gr.state + '',
+                requested_limit:         parseFloat(gr.requested_limit)    / 100000,
+                approved_limit:          parseFloat(gr.approved_limit)     / 100000,
+                active_sd:               parseFloat(gr.active_sd)          / 100000,
+                net_exposure:            parseFloat(gr.net_exposure)        / 100000,
+                max_allowable:           parseFloat(gr.max_allowable_limit) / 100000,
+                system_mult:             gr.system_multiplier + '',
+                implied_mult:            parseFloat(gr.implied_multiplier)  || 0,
+                is_deviation:            gr.is_deviation + '' === 'true',
+                nod:                     parseFloat(gr.nod_days)            || 0,
+                aging_rating:            gr.aging_rating + '',
+                aging_detail:            agingDetail,
+                vintage_days:            parseInt(gr.customer_vintage_days) || 0,
+                market_perception:       gr.market_perception + '',
+                justification:           gr.business_justification + '',
+                deviation_justification: gr.deviation_justification + '',
+                return_comments:         gr.return_comments + '',
+                rejection_reason:        gr.rejection_reason + '',
+                next_review_date:        reviewDateStr,
+                approver_name:           approverName,
+                created:                 gr.sys_created_on.getDisplayValue(),
+                decided:                 decidedDate,
+							aging_table: agingTable,
+                p1_macl:                 parseFloat(gr.p1_macl) / 100000,
+                p2_composite:            parseFloat(gr.p2_composite) || 0,
+                p3_credit:               parseFloat(gr.p3_credit) || 0
+            });
+        }
+        return results;
+    }
+
+    // ── Refresh ───────────────────────────────────────
+    if (action === 'refresh') {
+        data.requests = loadMyRequests();
+        return;
+    }
+
+    // Default load
+    data.requests = loadMyRequests();
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;vedant.salunke@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-04-20 06:47:24&lt;/sys_created_on&gt;&lt;sys_id&gt;26413ee697d00f14be31fa17f053af54&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_name&gt;view my credit request safe side&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_26413ee697d00f14be31fa17f053af54&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;vedant.salunke@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-04-20 06:47:24&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;!--
+  CLM VIEW MY REQUESTS — Widget HTML
+  Shows all requests submitted by the logged-in user
+--&gt;
+
+&lt;div class="clm-my-requests"&gt;
+
+  &lt;!-- ── HEADER ── --&gt;
+  &lt;div class="clm-mr-header"&gt;
+    &lt;div&gt;
+      &lt;div class="clm-mr-title"&gt;My Requests&lt;/div&gt;
+      &lt;div class="clm-mr-subtitle"&gt;Track all your submitted credit limit requests&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div style="display:flex; align-items:center; gap:12px;"&gt;
+      &lt;button class="clm-refresh-btn"
+              ng-click="c.refreshRequests()"
+              ng-disabled="c.data.refreshing"&gt;
+        &lt;span ng-if="!c.data.refreshing"&gt;↻ Refresh&lt;/span&gt;
+        &lt;span ng-if="c.data.refreshing"&gt;↻ Refreshing...&lt;/span&gt;
+      &lt;/button&gt;
+      &lt;div class="clm-mr-count-badge" ng-if="c.data.requests &amp;&amp; c.data.requests.length &gt; 0"&gt;
+        {{c.data.requests.length}} total
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+  &lt;!-- Add this after the header title --&gt;
+&lt;div class="clm-mr-search-container" style="margin: 12px 20px 0;"&gt;
+  &lt;input type="text" 
+         class="clm-mr-search-input" 
+         placeholder="Search by customer name or request number (e.g., CLM1023)"
+         ng-model="c.data.searchTerm"
+         ng-change="c.applySearch()"
+         style="width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;"&gt;
+&lt;/div&gt;
+
+  &lt;!-- ── LAST REFRESHED ── --&gt;
+  &lt;div class="clm-mr-refreshed" ng-if="c.data.lastRefreshed"&gt;
+    Last refreshed: {{c.data.lastRefreshed}}
+  &lt;/div&gt;
+
+  &lt;!-- ── EMPTY STATE ── --&gt;
+  &lt;div class="clm-mr-empty"
+       ng-if="!c.data.selectedRequest &amp;&amp; (!c.data.requests || c.data.requests.length === 0)"&gt;
+    &lt;div class="clm-mr-empty-icon"&gt;]]&gt;📋&lt;![CDATA[&lt;/div&gt;
+    &lt;div class="clm-mr-empty-title"&gt;No requests yet&lt;/div&gt;
+    &lt;div class="clm-mr-empty-sub"&gt;You haven't submitted any credit limit requests.&lt;/div&gt;
+    &lt;button class="clm-btn clm-btn-outline" style="margin-top:16px"
+            ng-click="c.createNewRequest()"&gt;+ Create New Request&lt;/button&gt;
+  &lt;/div&gt;
+
+  &lt;!-- ── REQUEST LIST ── --&gt;
+  &lt;div class="clm-mr-list"
+       ng-if="!c.data.selectedRequest &amp;&amp; c.data.requests &amp;&amp; c.data.requests.length &gt; 0"&gt;
+
+    &lt;!-- Filter bar --&gt;
+    &lt;div class="clm-mr-filters"&gt;
+      &lt;div class="clm-mr-filter-item"&gt;
+        &lt;label&gt;FILTER BY SEGMENT&lt;/label&gt;
+        &lt;select ng-model="c.data.filterSegment" class="clm-mr-select"&gt;
+          &lt;option value=""&gt;All Segments&lt;/option&gt;
+          &lt;option value="Cement"&gt;Cement&lt;/option&gt;
+          &lt;option value="RMC"&gt;RMC&lt;/option&gt;
+          &lt;option value="BPD"&gt;BPD&lt;/option&gt;
+        &lt;/select&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-mr-filter-item"&gt;
+        &lt;label&gt;FILTER BY TYPE&lt;/label&gt;
+        &lt;select ng-model="c.data.filterType" class="clm-mr-select"&gt;
+          &lt;option value=""&gt;All Types&lt;/option&gt;
+          &lt;option value="Trade"&gt;Trade&lt;/option&gt;
+          &lt;option value="Non-Trade"&gt;Non-Trade&lt;/option&gt;
+          &lt;option value="Key"&gt;Key&lt;/option&gt;
+        &lt;/select&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-mr-filter-item"&gt;
+        &lt;label&gt;FILTER BY STATUS&lt;/label&gt;
+        &lt;select ng-model="c.data.filterStatus" class="clm-mr-select"&gt;
+          &lt;option value=""&gt;All Statuses&lt;/option&gt;
+          &lt;option value="Submitted"&gt;Submitted&lt;/option&gt;
+          &lt;option value="Approved"&gt;Approved&lt;/option&gt;
+          &lt;option value="Rejected"&gt;Rejected&lt;/option&gt;
+          &lt;option value="Returned"&gt;Returned&lt;/option&gt;
+        &lt;/select&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- Request cards --&gt;
+    &lt;div class="clm-mr-card"
+         ng-repeat="req in c.data.filteredRequests"
+         ng-click="c.openRequest(req)"&gt;
+
+      &lt;div class="clm-mr-card-top"&gt;
+        &lt;div class="clm-mr-card-left"&gt;
+          &lt;div class="clm-mr-card-num"&gt;
+            {{req.number}}
+            &lt;span class="clm-type-pill clm-pill-trade"    ng-if="req.customer_type == 'Trade'"&gt;Trade&lt;/span&gt;
+            &lt;span class="clm-type-pill clm-pill-nontrade" ng-if="req.customer_type == 'Non-Trade'"&gt;Non-Trade&lt;/span&gt;
+            &lt;span class="clm-type-pill clm-pill-key"      ng-if="req.customer_type == 'Key'"&gt;Key&lt;/span&gt;
+          &lt;/div&gt;
+          &lt;div class="clm-mr-card-name"&gt;{{req.customer_name}}&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-mr-card-right"&gt;
+          &lt;span class="clm-badge clm-badge-segment"&gt;{{req.segment}}&lt;/span&gt;
+          &lt;span class="clm-badge clm-badge-status clm-status-submitted" ng-if="req.state == 'Submitted'"&gt;SUBMITTED&lt;/span&gt;
+          &lt;span class="clm-badge clm-badge-status clm-status-approved" ng-if="req.state == 'Approved'"&gt;APPROVED&lt;/span&gt;
+          &lt;span class="clm-badge clm-badge-status clm-status-rejected" ng-if="req.state == 'Rejected'"&gt;REJECTED&lt;/span&gt;
+          &lt;span class="clm-badge clm-badge-status clm-status-returned" ng-if="req.state == 'Returned'"&gt;RETURNED&lt;/span&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;!-- Trade metrics --&gt;
+      &lt;div class="clm-mr-card-metrics" ng-if="req.customer_type == 'Trade'"&gt;
+        &lt;div class="clm-mr-metric"&gt;
+          &lt;span class="clm-mr-metric-label"&gt;Requested&lt;/span&gt;
+          &lt;span class="clm-mr-metric-value"&gt;₹{{req.requested_limit | number:2}}L&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-mr-metric"&gt;
+          &lt;span class="clm-mr-metric-label"&gt;Approved&lt;/span&gt;
+          &lt;span class="clm-mr-metric-value"&gt;₹{{req.approved_limit | number:2}}L&lt;/span&gt;
+        &lt;/div&gt;
+       
+      &lt;/div&gt;
+
+      &lt;!-- Non-Trade / Key metrics --&gt;
+      &lt;div class="clm-mr-card-metrics" ng-if="req.customer_type != 'Trade'"&gt;
+        &lt;div class="clm-mr-metric"&gt;
+          &lt;span class="clm-mr-metric-label"&gt;Requested&lt;/span&gt;
+          &lt;span class="clm-mr-metric-value"&gt;₹{{req.requested_limit | number:1}}L&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-mr-metric"&gt;
+          &lt;span class="clm-mr-metric-label"&gt;Approved&lt;/span&gt;
+          &lt;span class="clm-mr-metric-value"&gt;₹{{req.approved_limit | number:1}}L&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;div class="clm-mr-metric"&gt;
+          &lt;span class="clm-mr-metric-label"&gt;Aging&lt;/span&gt;
+          &lt;span class="clm-mr-metric-value clm-val-ok"     ng-if="req.aging_rating == 'a'"&gt;{{req.aging_rating}}&lt;/span&gt;
+          &lt;span class="clm-mr-metric-value clm-val-warn"   ng-if="req.aging_rating == 'b'"&gt;{{req.aging_rating}}&lt;/span&gt;
+          &lt;span class="clm-mr-metric-value clm-val-danger" ng-if="req.aging_rating == 'c'"&gt;{{req.aging_rating}}&lt;/span&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div class="clm-mr-card-footer"&gt;
+        &lt;span class="clm-mr-footer-item"&gt;Submitted: {{req.created}}&lt;/span&gt;
+        &lt;span class="clm-mr-footer-item" ng-if="req.decided"&gt;Decided: {{req.decided}}&lt;/span&gt;
+        &lt;span class="clm-mr-footer-cta"&gt;View Details →&lt;/span&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="clm-mr-no-filter" ng-if="c.data.filteredRequests &amp;&amp; c.data.filteredRequests.length === 0"&gt;
+      No requests match the selected filters.
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;!-- ── DETAIL VIEW ── --&gt;
+  &lt;div class="clm-mr-detail" ng-if="c.data.selectedRequest"&gt;
+
+    &lt;div class="clm-mr-detail-header"&gt;
+      &lt;!-- APPROVAL TRACKER --&gt;
+
+      &lt;button class="clm-back-btn" ng-click="c.closeRequest()"&gt;← Back&lt;/button&gt;
+      &lt;div class="clm-mr-detail-title"&gt;
+        &lt;!-- APPROVAL TRACKER --&gt;
+&lt;div class="approval-tracker"
+     ng-if="c.data.selectedRequest.approval_steps"&gt;
+
+  &lt;div class="step"
+       ng-repeat="step in c.data.selectedRequest.approval_steps track by $index"&gt;
+
+  &lt;div class="circle"
+     ng-class="{
+       'done': step.state == 'approved',
+       'pending': step.state == 'requested',
+       'rejected': step.state == 'rejected'
+     }"&gt;
+      &lt;span ng-if="step.state=='approved'"&gt;✔&lt;/span&gt;
+      &lt;span ng-if="step.state=='pending'"&gt;●&lt;/span&gt;
+      &lt;span ng-if="step.state=='rejected'"&gt;✖&lt;/span&gt;
+    &lt;/div&gt;
+
+    &lt;div class="label"&gt;{{step.name}}&lt;/div&gt;
+
+    &lt;div class="line" ng-if="!$last"&gt;&lt;/div&gt;
+  &lt;/div&gt;
+
+&lt;/div&gt;
+        
+      {{c.data.selectedRequest.number}} — {{c.data.selectedRequest.customer_name}}
+   
+       
+        &lt;span class="clm-badge clm-badge-segment"&gt;{{c.data.selectedRequest.segment}}&lt;/span&gt;
+        &lt;span class="clm-type-pill clm-pill-trade"    ng-if="c.data.selectedRequest.customer_type == 'Trade'"&gt;Trade&lt;/span&gt;
+        &lt;span class="clm-type-pill clm-pill-nontrade" ng-if="c.data.selectedRequest.customer_type == 'Non-Trade'"&gt;Non-Trade&lt;/span&gt;
+        &lt;span class="clm-type-pill clm-pill-key"      ng-if="c.data.selectedRequest.customer_type == 'Key'"&gt;Key&lt;/span&gt;
+        &lt;span class="clm-badge clm-badge-status clm-status-submitted" ng-if="c.data.selectedRequest.state == 'Submitted'"&gt;SUBMITTED&lt;/span&gt;
+        &lt;span class="clm-badge clm-badge-status clm-status-approved" ng-if="c.data.selectedRequest.state == 'Approved'"&gt;APPROVED&lt;/span&gt;
+        &lt;span class="clm-badge clm-badge-status clm-status-rejected" ng-if="c.data.selectedRequest.state == 'Rejected'"&gt;REJECTED&lt;/span&gt;
+        &lt;span class="clm-badge clm-badge-status clm-status-returned" ng-if="c.data.selectedRequest.state == 'Returned'"&gt;RETURNED&lt;/span&gt;
+      &lt;/div&gt;
+      
+      
+     
+      
+      
+    &lt;/div&gt;
+
+    &lt;!-- Summary row TRADE --&gt;
+    &lt;div class="clm-mr-summary-row" ng-if="c.data.selectedRequest.customer_type == 'Trade'"&gt;
+      &lt;div class="clm-mr-summary-card"&gt;
+        &lt;div class="clm-summary-label"&gt;Requested&lt;/div&gt;
+        &lt;div class="clm-summary-value"&gt;₹{{c.data.selectedRequest.requested_limit | number:2}}L&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-mr-summary-card"&gt;
+        &lt;div class="clm-summary-label"&gt;Approved&lt;/div&gt;
+        &lt;div class="clm-summary-value"&gt;₹{{c.data.selectedRequest.approved_limit | number:2}}L&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-mr-summary-card"&gt;
+        &lt;div class="clm-summary-label"&gt;Net Exposure&lt;/div&gt;
+        &lt;div class="clm-summary-value"&gt;₹{{c.data.selectedRequest.net_exposure | number:2}}L&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-mr-summary-card"&gt;
+        &lt;div class="clm-summary-label"&gt;Max Allowable&lt;/div&gt;
+        &lt;div class="clm-summary-value"&gt;₹{{c.data.selectedRequest.max_allowable | number:2}}L&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-mr-summary-card"&gt;
+        &lt;div class="clm-summary-label"&gt;Multiplier&lt;/div&gt;
+        &lt;div class="clm-summary-value"&gt;{{c.data.selectedRequest.implied_mult | number:2}}x&lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- Summary row NON-TRADE/KEY --&gt;
+    &lt;div class="clm-mr-summary-row" ng-if="c.data.selectedRequest.customer_type != 'Trade'"&gt;
+      &lt;div class="clm-mr-summary-card"&gt;
+        &lt;div class="clm-summary-label"&gt;Requested&lt;/div&gt;
+        &lt;div class="clm-summary-value"&gt;₹{{c.data.selectedRequest.requested_limit | number:1}}L&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-mr-summary-card"&gt;
+        &lt;div class="clm-summary-label"&gt;Approved&lt;/div&gt;
+        &lt;div class="clm-summary-value"&gt;₹{{c.data.selectedRequest.approved_limit | number:1}}L&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-mr-summary-card"&gt;
+        &lt;div class="clm-summary-label"&gt;P1 — MACL&lt;/div&gt;
+        &lt;div class="clm-summary-value"&gt;₹{{c.data.selectedRequest.p1_macl | number:1}}L&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-mr-summary-card"&gt;
+        &lt;div class="clm-summary-label"&gt;P2 — Composite&lt;/div&gt;
+        &lt;div class="clm-summary-value"&gt;{{(c.data.selectedRequest.p2_composite * 100) | number:1}}%&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="clm-mr-summary-card"&gt;
+        &lt;div class="clm-summary-label"&gt;P3 — Credit&lt;/div&gt;
+        &lt;div class="clm-summary-value"&gt;{{(c.data.selectedRequest.p3_credit * 100) | number:0}}%&lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- Body --&gt;
+    &lt;div class="clm-mr-detail-body"&gt;
+      &lt;div class="clm-mr-detail-left"&gt;
+        &lt;div class="clm-mr-detail-section"&gt;
+          &lt;div class="clm-mr-detail-section-title"&gt;Request Information&lt;/div&gt;
+          &lt;div class="clm-mr-kv-row"&gt;&lt;span class="clm-mr-kv-key"&gt;Request Number&lt;/span&gt;&lt;span class="clm-mr-kv-val"&gt;{{c.data.selectedRequest.number}}&lt;/span&gt;&lt;/div&gt;
+          &lt;div class="clm-mr-kv-row"&gt;&lt;span class="clm-mr-kv-key"&gt;Customer Code&lt;/span&gt;&lt;span class="clm-mr-kv-val"&gt;{{c.data.selectedRequest.customer_code}}&lt;/span&gt;&lt;/div&gt;
+          &lt;div class="clm-mr-kv-row"&gt;&lt;span class="clm-mr-kv-key"&gt;Type&lt;/span&gt;&lt;span class="clm-mr-kv-val"&gt;{{c.data.selectedRequest.customer_type}}&lt;/span&gt;&lt;/div&gt;
+          &lt;div class="clm-mr-kv-row"&gt;&lt;span class="clm-mr-kv-key"&gt;Segment&lt;/span&gt;&lt;span class="clm-mr-kv-val"&gt;{{c.data.selectedRequest.segment}}&lt;/span&gt;&lt;/div&gt;
+          &lt;div class="clm-mr-kv-row"&gt;&lt;span class="clm-mr-kv-key"&gt;Status&lt;/span&gt;&lt;span class="clm-mr-kv-val"&gt;{{c.data.selectedRequest.state}}&lt;/span&gt;&lt;/div&gt;
+          &lt;div class="clm-mr-kv-row"&gt;&lt;span class="clm-mr-kv-key"&gt;Submitted On&lt;/span&gt;&lt;span class="clm-mr-kv-val"&gt;{{c.data.selectedRequest.created}}&lt;/span&gt;&lt;/div&gt;
+          &lt;div class="clm-mr-kv-row" ng-if="c.data.selectedRequest.decided"&gt;&lt;span class="clm-mr-kv-key"&gt;Decided On&lt;/span&gt;&lt;span class="clm-mr-kv-val"&gt;{{c.data.selectedRequest.decided}}&lt;/span&gt;&lt;/div&gt;
+          &lt;div class="clm-mr-kv-row" ng-if="c.data.selectedRequest.approver_name"&gt;&lt;span class="clm-mr-kv-val"&gt;Decided By&lt;/span&gt;&lt;span class="clm-mr-kv-val"&gt;{{c.data.selectedRequest.approver_name}}&lt;/span&gt;&lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-mr-detail-section" ng-if="c.data.selectedRequest.aging_detail"&gt;
+          &lt;div class="clm-mr-detail-section-title"&gt;6-Month Aging Breakdown&lt;/div&gt;
+          &lt;div class="clm-aging-row"&gt;
+            &lt;span class="clm-aging-label"&gt;0–60 Days (Safe)&lt;/span&gt;
+            &lt;div class="clm-aging-bar-bg"&gt;&lt;div class="clm-aging-bar clm-aging-safe" ng-style="{width: c.data.selectedRequest.aging_detail.safe_pct + '%'}"&gt;&lt;/div&gt;&lt;/div&gt;
+            &lt;span class="clm-aging-pct"&gt;{{c.data.selectedRequest.aging_detail.safe_pct}}%&lt;/span&gt;
+          &lt;/div&gt;
+          &lt;div class="clm-aging-row"&gt;
+            &lt;span class="clm-aging-label"&gt;61–75 Days&lt;/span&gt;
+            &lt;div class="clm-aging-bar-bg"&gt;&lt;div class="clm-aging-bar clm-aging-warn" ng-style="{width: c.data.selectedRequest.aging_detail.warn_pct + '%'}"&gt;&lt;/div&gt;&lt;/div&gt;
+            &lt;span class="clm-aging-pct"&gt;{{c.data.selectedRequest.aging_detail.warn_pct}}%&lt;/span&gt;
+          &lt;/div&gt;
+          &lt;div class="clm-aging-row"&gt;
+            &lt;span class="clm-aging-label"&gt;76–90 Days&lt;/span&gt;
+            &lt;div class="clm-aging-bar-bg"&gt;&lt;div class="clm-aging-bar clm-aging-crit" ng-style="{width: c.data.selectedRequest.aging_detail.crit_pct + '%'}"&gt;&lt;/div&gt;&lt;/div&gt;
+            &lt;span class="clm-aging-pct"&gt;{{c.data.selectedRequest.aging_detail.crit_pct}}%&lt;/span&gt;
+          &lt;/div&gt;
+          &lt;div class="clm-aging-row"&gt;
+            &lt;span class="clm-aging-label"&gt;&amp;gt;90 Days (Toxic)&lt;/span&gt;
+            &lt;div class="clm-aging-bar-bg"&gt;&lt;div class="clm-aging-bar clm-aging-toxic" ng-style="{width: c.data.selectedRequest.aging_detail.toxic_pct + '%'}"&gt;&lt;/div&gt;&lt;/div&gt;
+            &lt;span class="clm-aging-pct"&gt;{{c.data.selectedRequest.aging_detail.toxic_pct}}%&lt;/span&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div class="clm-mr-detail-right"&gt;
+        &lt;div class="clm-mr-detail-section"&gt;
+          &lt;div class="clm-mr-detail-section-title"&gt;Business Justification&lt;/div&gt;
+          &lt;div class="clm-mr-justification-text"&gt;{{c.data.selectedRequest.justification || 'Not provided'}}&lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-mr-detail-section" ng-if="c.data.selectedRequest.is_deviation"&gt;
+          &lt;div class="clm-mr-detail-section-title" style="color:#c0392b"&gt;⚠ Deviation Justification&lt;/div&gt;
+          &lt;div class="clm-mr-justification-text clm-justification-dev"&gt;{{c.data.selectedRequest.deviation_justification || 'Not provided'}}&lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-mr-detail-section" ng-if="c.data.selectedRequest.state == 'Returned'"&gt;
+          &lt;div class="clm-mr-detail-section-title" style="color:#f39c12"&gt;↩ Return Comments&lt;/div&gt;
+          &lt;div class="clm-mr-justification-text clm-justification-return"&gt;{{c.data.selectedRequest.return_comments || 'No comments'}}&lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-mr-detail-section" ng-if="c.data.selectedRequest.state == 'Rejected'"&gt;
+          &lt;div class="clm-mr-detail-section-title" style="color:#e74c3c"&gt;✕ Rejection Reason&lt;/div&gt;
+          &lt;div class="clm-mr-justification-text clm-justification-reject"&gt;{{c.data.selectedRequest.rejection_reason || 'No reason provided'}}&lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-mr-detail-section" ng-if="c.data.selectedRequest.state == 'Approved'"&gt;
+          &lt;div class="clm-mr-detail-section-title" style="color:#27ae60"&gt;✓ Approval Details&lt;/div&gt;
+          &lt;div class="clm-mr-kv-row"&gt;&lt;span class="clm-mr-kv-key"&gt;Approved Limit&lt;/span&gt;&lt;span class="clm-mr-kv-val"&gt;₹{{c.data.selectedRequest.approved_limit | number:2}}L&lt;/span&gt;&lt;/div&gt;
+          &lt;div class="clm-mr-kv-row" ng-if="c.data.selectedRequest.next_review_date"&gt;&lt;span class="clm-mr-kv-key"&gt;Next Review Date&lt;/span&gt;&lt;span class="clm-mr-kv-val"&gt;{{c.data.selectedRequest.next_review_date}}&lt;/span&gt;&lt;/div&gt;
+        &lt;/div&gt;
+         
+
+        &lt;!-- Action buttons based on status --&gt;
+        &lt;div class="clm-mr-detail-section clm-mr-action-section" ng-if="c.data.selectedRequest.state == 'Returned'"&gt;
+          &lt;div class="clm-mr-detail-section-title"&gt;Actions&lt;/div&gt;
+          &lt;p style="font-size:13px; color:#666; margin-bottom:12px;"&gt;This request was returned. You can edit and resubmit it.&lt;/p&gt;
+          &lt;div class="clm-mr-action-actions"&gt;
+            &lt;button class="clm-btn clm-btn-outline" ng-click="c.editRequest()"&gt;✏️ Edit &amp;amp; Resubmit&lt;/button&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+       
+
+&lt;/div&gt;
+
+        &lt;div class="clm-mr-detail-section clm-mr-action-section" ng-if="c.data.selectedRequest.state == 'Rejected'"&gt;
+          &lt;div class="clm-mr-detail-section-title"&gt;Actions&lt;/div&gt;
+          &lt;p style="font-size:13px; color:#666; margin-bottom:12px;"&gt;This request was rejected. You can create a new request.&lt;/p&gt;
+          &lt;div class="clm-mr-action-actions"&gt;
+            &lt;button class="clm-btn clm-btn-outline" ng-click="c.createNewRequest()"&gt;+ New Request&lt;/button&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+ &lt;div class="clm-ap-detail-section"
+     ng-if="c.data.selectedRequest.aging_table &amp;&amp; c.data.selectedRequest.aging_table.length &gt; 0"&gt;
+               &lt;div class="clm-ap-detail-section-title"&gt;
+    6-Month Aging Breakdown (Table)
+  &lt;/div&gt;
+
+  &lt;table class="clm-aging-table"&gt;
+    &lt;thead&gt;
+      &lt;tr&gt;
+        &lt;th&gt;Month&lt;/th&gt;
+        &lt;th&gt;0-30&lt;/th&gt;
+        &lt;th&gt;31-45&lt;/th&gt;
+        &lt;th&gt;46-60&lt;/th&gt;
+        &lt;th&gt;61-75&lt;/th&gt;
+        &lt;th&gt;76-90&lt;/th&gt;
+        &lt;th&gt;91-120&lt;/th&gt;
+        &lt;th&gt;&gt;120&lt;/th&gt;
+        &lt;th&gt;Total&lt;/th&gt;
+      &lt;/tr&gt;
+    &lt;/thead&gt;
+
+    &lt;tbody&gt;
+      &lt;tr ng-repeat="row in c.data.selectedRequest.aging_table"&gt;
+        &lt;td&gt;{{row.month}}&lt;/td&gt;
+        &lt;td&gt;{{row.b0_30 | number}}&lt;/td&gt;
+        &lt;td&gt;{{row.b31_45 | number}}&lt;/td&gt;
+        &lt;td&gt;{{row.b46_60 | number}}&lt;/td&gt;
+        &lt;td&gt;{{row.b61_75 | number}}&lt;/td&gt;
+        &lt;td&gt;{{row.b76_90 | number}}&lt;/td&gt;
+        &lt;td&gt;{{row.b91_120 | number}}&lt;/td&gt;
+        &lt;td&gt;{{row.b120 | number}}&lt;/td&gt;
+        &lt;td&gt;&lt;b&gt;{{row.total | number}}&lt;/b&gt;&lt;/td&gt;
+      &lt;/tr&gt;
+    &lt;/tbody&gt;
+  &lt;/table&gt;
+
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>1597929622</payload_hash>
+        <record_name>view my credit request safe side</record_name>
+        <reverted_from/>
+        <source>57b38f622b2303104572f3745e91bf2a</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by/>
+        <sys_created_on>2026-09-28 21:32:03</sys_created_on>
+        <sys_id>9de38c503b08531087401044c3e45a83</sys_id>
+        <sys_mod_count/>
+        <sys_recorded_at>1a0e9ee98380000000</sys_recorded_at>
+        <sys_updated_by/>
+        <sys_updated_on/>
+        <type>Widget</type>
+        <update_guid>5de38c502c08531009a4127cc6178983</update_guid>
+        <update_guid_history>5de38c502c08531009a4127cc6178983:1597929622</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="view my credit request safe side">1de38c503b08531087401044c3e45a84</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-16 04:18:57</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>017a945bc69c46f68949f261577c3991</sys_id>
+        <sys_metadata>26413ee697d00f14be31fa17f053af54</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>view my credit request safe side</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_26413ee697d00f14be31fa17f053af54</sys_update_name>
+        <sys_update_version display_value="sp_widget_26413ee697d00f14be31fa17f053af54">9de38c503b08531087401044c3e45a83</sys_update_version>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-16 04:18:57</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

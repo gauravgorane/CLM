@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller=function() {  /* widget controller */  var c = this;};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* ---------- Top bar ---------- */
+.clm-topbar-custom {
+  display: flex;
+  justify-content: space-between; 
+  align-items: center;
+  height: 48px;
+  background: var(--ut-black, #1a1a1a);
+  border-bottom: 3px solid #f5c400;
+  padding: 0 16px;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+/* Logo Section */
+.sn-logo-badge {
+  background: #f5c400;
+  padding: 4px 8px;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+}
+
+.sn-logo-text {
+  font-weight: 800;
+  font-size: 15px;
+  color: #14141a;
+}
+
+.sn-logo-sub {
+  font-size: 8px;
+  font-weight: 700;
+  color: #1a1a1a;
+  letter-spacing: .08em;
+}
+
+/* Module Texts */
+.sn-topbar-module {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.sn-topbar-view {
+  font-size: 13px;
+  font-weight: 400;
+  color: #a0aec0;
+}
+
+/* Right Group */
+.topbar-right {
+  display: flex;
+  align-items: center;
+}
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3bb273;
+  margin-right: 6px;
+}
+
+.live-text {
+  color: #3bb273;
+  font-size: 13px;
+  margin-right: 24px;
+}
+
+.avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #f5c400;
+  color: #14141a;
+  font-weight: 700;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 10px;
+}
+
+.user-name {
+  font-weight: 500;
+  font-size: 13px;
+  color: #ffffff;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clm_tsh_header</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>clm_tsh_header</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    // 1. Dynamic Date Logic
+    var gdt = new GlideDateTime();
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    
+    // getMonthLocalTime() returns 1-12, so we subtract 1 for the array index
+    var monthIndex = gdt.getMonthLocalTime() - 1; 
+    var year = gdt.getYearLocalTime();
+    
+    data.liveDateText = months[monthIndex] + ' ' + year;
+
+    // 2. User Profile Logic
+    data.userName = gs.getUserDisplayName();
+    data.userInitials = '';
+    
+    if (data.userName) {
+        var names = data.userName.split(' ');
+        if (names.length > 1) {
+            data.userInitials = names[0].charAt(0).toUpperCase() + names[names.length - 1].charAt(0).toUpperCase();
+        } else {
+            data.userInitials = names[0].charAt(0).toUpperCase();
+        }
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>jatin.sharma@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-01 12:13:03</sys_created_on>
+        <sys_id>0f4ea2f12bb947104572f3745e91bfa3</sys_id>
+        <sys_mod_count>8</sys_mod_count>
+        <sys_name>clm_tsh_header</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_0f4ea2f12bb947104572f3745e91bfa3</sys_update_name>
+        <sys_updated_by>jatin.sharma@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-08 06:28:45</sys_updated_on>
+        <template><![CDATA[<div class="clm-topbar-custom">
+  <div style="display:flex;align-items:center;gap:10px;">
+    
+    <div class="sn-logo-badge">
+      <div class="sn-logo-text">UltraTech</div>
+      <div class="sn-logo-sub">CEMENT</div>
+    </div>
+    
+    <div style="width:1px;height:20px;background:rgba(255,255,255,.2)"></div>
+    
+    <span class="sn-topbar-module">Performance Analytics</span>
+    
+    <div style="width:1px;height:20px;background:rgba(255,255,255,.2)"></div>
+    
+    <span class="sn-topbar-view">CLM Dashboard</span>
+    
+  </div>
+
+  <div class="topbar-right">
+    <span class="live-dot"></span>
+    <span class="live-text">Live &middot; {{c.data.liveDateText}}</span>
+    <div class="avatar">{{c.data.userInitials}}</div>
+    <span class="user-name">{{c.data.userName}}</span>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>0f4ea2f12bb947104572f3745e91bfa3</id>
+        <sys_created_by>jatin.sharma@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-01 12:13:03</sys_created_on>
+        <sys_id>8f4ee6f12bb947104572f3745e91bfc2</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>jatin.sharma@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-01 12:13:03</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

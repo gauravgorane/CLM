@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sn_aia_tool">
+    <sn_aia_tool action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <description>Creates or updates the Customer Performance record for a company with the stock price, market insight, news highlights and final recommendation. Call only after the full report is written.</description>
+        <input_schema>[{"name":"company_name","description":"","mandatory":false},{"name":"current_stock_price","description":"Price with currency, exchange and as-of date","mandatory":false},{"name":"final_recommendation","description":"Starts with “Risk Category:”","mandatory":false},{"name":"customer_name","description":"","mandatory":true},{"name":"recent_news","description":"4–6 lines: “* Headline (Publisher, DD Mon YYYY) | url”","mandatory":false},{"name":"financial_highlights","description":"3–6 lines, each starting with “* “ as “* Label: fact”","mandatory":false},{"name":"major_developments","description":"3–5 lines, each starting with “* “ as “* Label: fact”","mandatory":false},{"name":"company_overview","description":"One paragraph of 80 to 120 words: what the company does, sector, scale, market cap, recent share price trend and current position.","mandatory":false}]</input_schema>
+        <name>Save Vendor Risk Assessment</name>
+        <record_type>custom</record_type>
+        <script><![CDATA[(function(inputs, _agentic_context_) {
+    var TABLE = 'x_birl3_clm_customer_performance';
+    var CUST_TABLE = 'x_birl3_clm_clm_customer_master1';
+    var REF_FIELD = 'customer_name';            // Reference on Customer Performance
+    var CUST_NAME_FIELD = 'customer_name';      // Customer Name on CLM Customer Masters
+    var CUST_CODE_FIELD = 'customer_code_sap';  // Customer Code SAP on CLM Customer Masters
+
+    var customerInput = (inputs.customer_name || '').toString().trim();
+    if (!customerInput) return fail('customer_name is required');
+
+    try {
+        // 1. Resolve the customer
+        var cust = resolveCustomer(customerInput);
+        if (cust.status !== 'found') return JSON.stringify(cust);
+
+        // 2. Upsert the Customer Performance record (one per customer)
+        var perf = new GlideRecord(TABLE);
+        perf.addQuery(REF_FIELD, cust.sys_id);
+        perf.orderByDesc('sys_updated_on');
+        perf.setLimit(1);
+        perf.query();
+
+        var isUpdate = perf.next();
+        if (!isUpdate) perf.initialize();
+
+        perf.setValue(REF_FIELD, cust.sys_id);
+        perf.setValue('company_name', inputs.company_name || cust.name || '');
+        perf.setValue('current_stock_price', inputs.current_stock_price || '');
+        perf.setValue('market_stock_insight', inputs.company_overview || '');   // Company Overview
+        perf.setValue('financial_highlights', inputs.financial_highlights || '');
+        perf.setValue('major_developments', inputs.major_developments || '');
+        perf.setValue('key_news_highlights', inputs.recent_news || '');         // Recent News
+        perf.setValue('final_recommendation', inputs.final_recommendation || '');
+        perf.setValue('assessment_status', 'completed');
+
+        var sysId = isUpdate ? perf.update() : perf.insert();
+        if (!sysId) return fail('Save failed: ' + perf.getLastErrorMessage());
+
+        return JSON.stringify({
+            status: 'success',
+            action: isUpdate ? 'updated' : 'created',
+            customer: cust.name,
+            sys_id: sysId
+        });
+
+    } catch (e) {
+        gs.error('[CLM VRI] Save failed: ' + (e.message || e));
+        return fail(String(e.message || e));
+    }
+
+    // ---------- Helpers ----------
+
+    function resolveCustomer(input) {
+        var cleaned = input.replace(/\s+/g, ' ').trim();
+
+        // A) sys_id from the widget / trigger
+        if (/^[0-9a-f]{32}$/i.test(cleaned)) {
+            var name = '';
+            var byId = new GlideRecord(CUST_TABLE);
+            if (byId.get(cleaned)) name = byId.getValue(CUST_NAME_FIELD);
+            return { status: 'found', sys_id: cleaned, name: name };
+        }
+
+        // B) Exact SAP customer code
+        var byCode = new GlideRecord(CUST_TABLE);
+        byCode.addQuery(CUST_CODE_FIELD, cleaned);
+        byCode.setLimit(2);
+        byCode.query();
+        var codeMatches = [];
+        while (byCode.next()) {
+            codeMatches.push({ sys_id: byCode.getUniqueValue(), name: byCode.getValue(CUST_NAME_FIELD) });
+        }
+        if (codeMatches.length === 1) {
+            return { status: 'found', sys_id: codeMatches[0].sys_id, name: codeMatches[0].name };
+        }
+
+        // C) Customer name: exact, starts with, contains
+        var operators = ['=', 'STARTSWITH', 'CONTAINS'];
+        for (var i = 0; i < operators.length; i++) {
+            var gr = new GlideRecord(CUST_TABLE);
+            gr.addQuery(CUST_NAME_FIELD, operators[i], cleaned);
+            gr.setLimit(20);
+            gr.query();
+
+            var matches = [];
+            while (gr.next()) {
+                matches.push({
+                    sys_id: gr.getUniqueValue(),
+                    name: gr.getValue(CUST_NAME_FIELD),
+                    code: gr.getValue(CUST_CODE_FIELD),
+                    active: gr.getValue('is_active')
+                });
+            }
+
+            var active = matches.filter(function(m) { return m.active == '1' || m.active == 'true'; });
+            if (active.length === 1) return { status: 'found', sys_id: active[0].sys_id, name: active[0].name };
+            if (matches.length === 1) return { status: 'found', sys_id: matches[0].sys_id, name: matches[0].name };
+
+            if (matches.length > 1) {
+                return {
+                    status: 'multiple_matches',
+                    message: 'More than one customer matches "' + cleaned + '". Ask the user to type the exact SAP customer code from this list. Do not choose one yourself.',
+                    candidates: matches.map(function(m) { return m.name + ' (' + m.code + ')'; })
+                };
+            }
+        }
+
+        return {
+            status: 'not_found',
+            message: 'No customer found in ' + CUST_TABLE + ' matching "' + cleaned + '".'
+        };
+    }
+
+    function fail(msg) {
+        return JSON.stringify({ status: 'error', message: msg });
+    }
+
+})(inputs, _agentic_context_);]]></script>
+        <sys_class_name>sn_aia_tool</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-29 06:32:27</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>af1f5b9c97505b50be31fa17f053af41</sys_id>
+        <sys_mod_count>7</sys_mod_count>
+        <sys_name>Save Vendor Risk Assessment</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sn_aia_tool_af1f5b9c97505b50be31fa17f053af41</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-30 06:59:41</sys_updated_on>
+        <target_document/>
+        <target_document_table>sn_aia_tool</target_document_table>
+        <type>script</type>
+    </sn_aia_tool>
+</record_update>

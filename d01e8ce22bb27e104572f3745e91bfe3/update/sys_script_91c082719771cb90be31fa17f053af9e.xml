@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_clm_customer_master1</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition/>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>Auto-populate TSH from Role Mapping</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous) {
+
+    var roleMap = {
+        'Cement': 'TSH',
+        'BPD': 'TSH_BPD',
+        'RMC': 'TSM',
+        'Ready Mix concrete': 'TSM'
+    };
+
+    var segment = current.getValue('segment');
+    var role = roleMap[segment];
+
+    if (!role) {
+        gs.info('CLM: No role mapping defined for segment=' + segment + ' on customer ' + current.getValue('number'));
+        return;
+    }
+
+    // Only recompute if something relevant changed (or tsh not yet set)
+    if (!current.tsh.nil() && !current.zone.changes() && !current.region.changes() &&
+        !current.depot.changes() && !current.segment.changes()) {
+        return;
+    }
+
+    var zone = current.getValue('zone');
+    var region = current.getValue('region');
+    var depot = current.getValue('depot');
+
+    // Resolve the correct user for this key
+    var mapping = new GlideRecord('x_birl3_clm_role_user_mapping');
+    mapping.addActiveQuery();
+    mapping.addQuery('u_role', role);
+    mapping.addQuery('u_segment', segment);
+    mapping.addQuery('u_zone', zone);
+    mapping.addQuery('u_region', region);
+    if (role !== 'TSM') {
+        mapping.addQuery('u_depot', depot);
+    }
+    mapping.query();
+
+    if (!mapping.next()) {
+        gs.info('CLM: No ' + role + ' mapping found for customer ' + current.getValue('number') +
+                ' (segment=' + segment + ', zone=' + zone + ', region=' + region + ', depot=' + depot + ')');
+        return;
+    }
+
+    var resolvedUser = mapping.getValue('u_user');
+
+    // Find the SHARED TSH record by combo key (NOT by customer)
+    var tsh = new GlideRecord('x_birl3_clm_tsh');
+    tsh.addQuery('u_role', role);
+    tsh.addQuery('segment', segment);
+    tsh.addQuery('zone', zone);
+    tsh.addQuery('region', region);
+    if (role !== 'TSM') {
+        tsh.addQuery('depot', depot);
+    }
+    tsh.query();
+
+    var tshSysId;
+    if (tsh.next()) {
+        if (tsh.getValue('name') !== resolvedUser) {
+            tsh.setValue('name', resolvedUser);
+            tsh.update();
+        }
+        tshSysId = tsh.getUniqueValue();
+    } else {
+        var newTsh = new GlideRecord('x_birl3_clm_tsh');
+        newTsh.initialize();
+        newTsh.setValue('name', resolvedUser);
+        newTsh.setValue('u_role', role);
+        newTsh.setValue('zone', zone);
+        newTsh.setValue('zone_name', current.getValue('zone_name'));
+        newTsh.setValue('region', region);
+        newTsh.setValue('region_name', current.getValue('region_name'));
+        newTsh.setValue('depot', role !== 'TSM' ? depot : '');
+        newTsh.setValue('segment', segment);
+        tshSysId = newTsh.insert();
+    }
+
+    current.tsh = tshSysId;
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-01 08:55:26</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>91c082719771cb90be31fa17f053af9e</sys_id>
+        <sys_mod_count>6</sys_mod_count>
+        <sys_name>Auto-populate TSH from Role Mapping</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_91c082719771cb90be31fa17f053af9e</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-04 13:30:41</sys_updated_on>
+        <template/>
+        <when>before</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=91c082719771cb90be31fa17f053af9e"/>
+</record_update>

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sn_aia_tool">
+    <sn_aia_tool action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <description>Find all the customer name and take it as input for the AI Agent as company name</description>
+        <input_schema>[]</input_schema>
+        <name>Find Customer name in customer master table</name>
+        <record_type>custom</record_type>
+        <script><![CDATA[(function(inputs) {
+
+    var customers = [];
+
+    var gr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+    gr.addQuery('is_active', true);
+    gr.query();
+
+    while (gr.next()) {
+        customers.push(gr.getValue('customer_name'));
+    }
+
+    return {
+        customer_names: customers
+    };
+
+})(inputs);]]></script>
+        <sys_class_name>sn_aia_tool</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-25 10:32:58</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>599be5de97f77e90be31fa17f053af29</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>Find Customer name in customer master table</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sn_aia_tool_599be5de97f77e90be31fa17f053af29</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-03-25 10:32:58</sys_updated_on>
+        <target_document/>
+        <target_document_table>sn_aia_tool</target_document_table>
+        <type>script</type>
+    </sn_aia_tool>
+</record_update>

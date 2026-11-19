@@ -1,0 +1,1171 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[function widgetcontroller($scope, $rootScope) {
+	var c = this;
+	c.searchNumber = '';
+	c.searchError = '';
+	c.loading = false;
+	c.searched = false;
+	c.suggestions = [];
+	// If the page already loaded a record via server script on initial load,
+	// mark as "searched" so the empty-state message doesn't flash.
+	if (c.data.record) {
+		c.searched = true;
+		c.searchNumber = c.data.record.number;
+	}
+	/**
+	 * Formats a raw numeric value into the "₹XX.XL" (Lakh) display format.
+	 */
+	c.formatLakh = function(value) {
+		if (value === undefined || value === null || isNaN(value)) {
+			return '--';
+		}
+		var lakhValue = value / 100000;
+		var sign = lakhValue < 0 ? '-' : '';
+		var absValue = Math.abs(lakhValue);
+		return '₹' + sign + absValue.toFixed(1) + 'L';
+	};
+	/**
+	 * TYPEAHEAD / AUTOCOMPLETE SUGGESTIONS
+	 * Lightweight lookup triggered as the user types in the search bar.
+	 */
+	c.getSuggestions = function(val) {
+		if (!val || val.trim().length < 2) {
+			c.suggestions = [];
+			return;
+		}
+
+		c.server.get({
+			action: 'suggest',
+			term: val.trim()
+		}).then(function(response) {
+			if (response.data && response.data.suggestions) {
+				c.suggestions = response.data.suggestions;
+			} else {
+				c.suggestions = [];
+			}
+		});
+	};
+	/**
+	 * Handler when a user clicks an item from the autocomplete dropdown list.
+	 */
+	c.selectSuggestion = function(item) {
+		c.searchNumber = item.number;
+		c.suggestions = [];
+		c.search();
+	};
+	/**
+	 * Looks up a request by Request Number, Customer Name, PAN, or Customer Code.
+	 */
+	c.search = function() {
+		if (!c.searchNumber || !c.searchNumber.trim()) {
+			c.searchError = 'Enter a Request Number, PAN, Customer Code, or Name to search.';
+			return;
+		}
+		c.loading = true;
+		c.searchError = '';
+		c.suggestions = []; // Clear suggestions on manual search trigger
+		c.server.get({
+			action: 'search',
+			term: c.searchNumber.trim()
+		}).then(function(response) {
+			c.loading = false;
+			c.searched = true;
+			if (response.data.record) {
+				c.data.record = response.data.record;
+				c.searchNumber = c.data.record.number; // Keep input aligned with resolved record
+				c.searchError = '';
+			} else {
+				c.data.record = null;
+				c.searchError = response.data.error || 'No request found matching your search.';
+			}
+		}, function() {
+			c.loading = false;
+			c.searched = true;
+			c.searchError = 'Something went wrong while searching. Please try again.';
+		});
+	};
+	// Navigate back to the requests list.
+	c.goToRequests = function() {
+		window.location.href = '?id=clm_request_list';
+	};
+	// Navigate to Customer 360 for this request's customer.
+	c.goToCustomer360 = function() {
+		if (!c.data.record) {
+			return;
+		}
+		window.location.href = '?id=customer_360&sys_id=' + c.data.record.sysId;
+	};
+
+	// ========================================================
+	// Cross-Widget Broadcasting — receives the request `number` clicked in
+	// Approval Requests and loads it via the existing exact-match search
+	// (the `number` field is unique per ServiceNow's auto-numbering, so a
+	// plain c.search() call here is already unambiguous).
+	// ========================================================
+	$rootScope.$on('clm.request.selected', function(event, payload) {
+		if (!payload || !payload.number) { return; }
+		c.searchNumber = payload.number;
+		c.search();
+	});
+
+	// Pending-value pickup: if this tab is ng-if'd (rather than ng-show'd) in
+	// clm_dashboard, this widget gets destroyed/recreated on every tab
+	// switch, so it may not have existed yet — and therefore had no
+	// listener — at the moment clm.request.selected was broadcast.
+	// $rootScope.clmPendingRequestNumber is the fallback for that case.
+	if ($rootScope.clmPendingRequestNumber) {
+		var pendingNumber = $rootScope.clmPendingRequestNumber;
+		delete $rootScope.clmPendingRequestNumber;
+		c.searchNumber = pendingNumber;
+		c.search();
+	}
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* ===================== BASE PORTAL &amp; TYPOGRAPHY ===================== */
+.clm-detail-portal {
+	font-family: "Helvetica Neue", Arial, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+	color: #1a1a1a;
+	max-width: 1200px;
+	margin: 0 auto;
+	padding: 8px;
+	font-size: 12.5px;
+}
+
+/* ===================== SEARCH BAR (100% MATCH TO CUSTOMER 360) ===================== */
+/* The outer card container */
+.clm-search-bar {
+	background: #ffffff;
+	border: 1px solid #cbd5e1;
+	border-radius: 4px;
+	padding: 12px 16px;
+	margin-bottom: 16px;
+	box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+	display: flex;
+	align-items: center;
+	justify-content: flex-start;
+	gap: 12px;
+}
+
+.clm-search-label {
+	font-weight: 700;
+	font-size: 12px;
+	color: #4a5568;
+	letter-spacing: 0.5px;
+	white-space: nowrap;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	text-transform: uppercase;
+}
+
+.clm-search-icon {
+	font-size: 16px;
+}
+
+/* 
+ * CRITICAL FIX: In Customer 360, the input uses 'flex: 0 1 300px' inside a wrapper.
+ * Using !important here overrides whatever flex-grow was pushing your button to the far right!
+ */
+.clm-search-input {
+	flex: 0 1 300px !important;
+	width: 300px !important;
+	height: 36px;
+	padding: 6px 12px;
+	border: 1px solid #cbd5e1;
+	border-radius: 4px;
+	font-size: 13px;
+	color: #1a1a1a;
+	background: #ffffff;
+	outline: none;
+	box-sizing: border-box;
+	transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.clm-search-input:focus {
+	border-color: #1c4e9c;
+	box-shadow: 0 0 0 3px rgba(28, 78, 156, 0.12);
+}
+
+/* Exact match for Customer 360 primary button */
+.clm-search-bar .clm-btn-primary,
+.clm-search-bar .clm-btn {
+	background: #1c4e9c !important;
+	color: #fff !important;
+	border: none !important;
+	border-radius: 4px;
+	padding: 0 16px;
+	height: 36px;
+	font-size: 13px;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background 0.15s ease;
+	white-space: nowrap;
+	flex: 0 0 auto;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.clm-search-bar .clm-btn-primary:hover,
+.clm-search-bar .clm-btn:hover {
+	background: #163d7a !important;
+}
+
+.clm-search-error {
+	font-size: 11.5px;
+	color: #b3261e;
+	font-weight: 600;
+	width: 100%;
+	margin-top: 4px;
+}
+
+/* ===================== RIBBON ===================== */
+.clm-ribbon {
+	display: flex;
+	justify-content: space-between;
+	align-items: flex-start;
+	background: #ffffff;
+	border: 1px solid #cbd5e1;
+	border-radius: 4px;
+	padding: 8px 14px;
+	margin-bottom: 8px;
+}
+
+.clm-label {
+	font-size: 9.5px;
+	font-weight: 600;
+	letter-spacing: 0.05em;
+	color: #9ca3af;
+	text-transform: uppercase;
+}
+
+.clm-number {
+	font-size: 17px;
+	font-weight: 700;
+	color: #1a1a1a;
+	margin-top: 1px;
+	line-height: 1.2;
+}
+
+.clm-subline {
+	font-size: 11.5px;
+	color: #6b7280;
+	margin-top: 2px;
+}
+
+.clm-subline .clm-dot {
+	margin: 0 6px;
+	color: #d1d5db;
+}
+
+.clm-ribbon-right {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+}
+
+.clm-badge {
+	font-size: 10.5px;
+	font-weight: 600;
+	padding: 2px 7px;
+	border-radius: 3px;
+	white-space: nowrap;
+}
+
+.clm-badge-red {
+	background: #fde3e3;
+	color: #b3261e;
+}
+
+.clm-btn {
+	font-size: 11.5px;
+	font-weight: 500;
+	padding: 4px 10px;
+	border-radius: 4px;
+	border: 1px solid #cbd5e1;
+	background: #ffffff;
+	color: #374151;
+	cursor: pointer;
+	white-space: nowrap;
+	line-height: 1.4;
+}
+
+.clm-btn:hover {
+	background: #f9fafb;
+}
+
+.clm-btn-primary {
+	background: #1c4e9c;
+	border-color: #1c4e9c;
+	color: #ffffff;
+}
+
+.clm-btn-primary:hover {
+	background: #163d7a;
+}
+
+/* ===================== LIMIT BANNER ===================== */
+.clm-limit-banner {
+	background: #eef4fe;
+	border: 1px solid #e0eafc;
+	border-radius: 8px;
+	padding: 20px 32px;
+	margin-bottom: 8px;
+}
+
+.clm-limit-inner {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	max-width: 620px;
+	margin: 0 auto;
+}
+
+.clm-limit-block {
+	text-align: left;
+}
+
+.clm-limit-block-right {
+	text-align: right;
+}
+
+.clm-limit-label {
+	font-size: 12px;
+	font-weight: 600;
+	letter-spacing: 0.03em;
+	color: #64748b;
+	text-transform: uppercase;
+}
+
+.clm-limit-pct {
+	color: #1c4e9c;
+	font-weight: 700;
+	font-size: 12px;
+	margin-left: 4px;
+	text-transform: none;
+	letter-spacing: normal;
+}
+
+.clm-pct-neg {
+	color: #b3261e;
+}
+
+.clm-limit-value {
+	font-size: 28px;
+	font-weight: 700;
+	color: #334155;
+	margin-top: 4px;
+	line-height: 1.2;
+}
+
+.clm-limit-value-blue {
+	color: #1c4e9c;
+}
+
+.clm-limit-arrow {
+	font-size: 18px;
+	color: #7c93b8;
+	padding: 0 12px;
+}
+
+/* ===================== COLUMN LAYOUT ===================== */
+.clm-columns {
+	display: flex;
+	gap: 8px;
+	align-items: flex-start;
+}
+
+.clm-col-left {
+	flex: 1 1 58%;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	min-width: 0;
+}
+
+.clm-col-right {
+	flex: 1 1 42%;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	min-width: 0;
+}
+
+@media (max-width: 860px) {
+	.clm-columns {
+		flex-direction: column;
+	}
+}
+
+/* ===================== CARDS &amp; DATA ROWS ===================== */
+.clm-card {
+	background: #ffffff;
+	border: 1px solid #cbd5e1;
+	border-radius: 4px;
+	padding: 10px 14px;
+	margin-bottom: 16px;
+	box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+
+.clm-card-title {
+	font-size: 12.5px;
+	font-weight: 700;
+	color: #1a1a1a;
+	margin-bottom: 2px;
+}
+
+.clm-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 6px 0;
+	border-bottom: 1px solid #f1f2f4;
+	font-size: 12px;
+}
+
+.clm-row-last {
+	border-bottom: none;
+}
+
+.clm-row-label {
+	color: #6b7280;
+}
+
+.clm-row-value {
+	font-weight: 600;
+	color: #1a1a1a;
+}
+
+.clm-text-blue {
+	color: #1c4e9c;
+}
+
+.clm-text-red {
+	color: #b3261e;
+}
+
+.clm-pill {
+	font-size: 10.5px;
+	font-weight: 600;
+	padding: 2px 7px;
+	border-radius: 3px;
+}
+
+.clm-pill-green {
+	background: #dbf5e3;
+	color: #1f9d55;
+}
+
+.clm-pill-red {
+	background: #fde3e3;
+	color: #b3261e;
+}
+
+.clm-justification-box {
+	border-left: 2px solid #1c4e9c;
+	background: #f8f9fb;
+	padding: 7px 11px;
+	font-size: 12px;
+	color: #374151;
+	border-radius: 0 3px 3px 0;
+}
+
+/* ===================== WORKFLOW TRAIL ===================== */
+.clm-workflow {
+	position: relative;
+	padding-left: 2px;
+}
+
+.clm-workflow-step {
+	display: flex;
+	gap: 9px;
+	position: relative;
+	padding-bottom: 12px;
+}
+
+.clm-workflow-step:not(:last-child)::before {
+	content: "";
+	position: absolute;
+	left: 3px;
+	top: 13px;
+	bottom: 0;
+	width: 1px;
+	background: #e5e7eb;
+}
+
+.clm-workflow-dot {
+	flex: 0 0 auto;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	margin-top: 4px;
+	background: #1c4e9c;
+}
+
+.clm-workflow-dot.clm-dot-rejected {
+	background: #b3261e;
+}
+
+.clm-workflow-dot.clm-dot-approved {
+	background: #1f9d55;
+}
+
+.clm-workflow-content {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.clm-workflow-header {
+	font-size: 12px;
+	font-weight: 700;
+	color: #1a1a1a;
+}
+
+.clm-workflow-role {
+	color: #1a1a1a;
+}
+
+.clm-workflow-meta {
+	font-size: 10.5px;
+	color: #9ca3af;
+	margin-top: 1px;
+}
+
+.clm-workflow-comment {
+	margin-top: 6px;
+	background: #fde3e3;
+	color: #7f1d1d;
+	font-size: 11.5px;
+	font-style: normal;
+	border-left: 2px solid #b3261e;
+	padding: 5px 9px;
+	border-radius: 0 3px 3px 0;
+}
+
+.clm-workflow-banner {
+	margin-top: 4px;
+	background: #fde3e3;
+	color: #b3261e;
+	font-weight: 700;
+	font-size: 11.5px;
+	text-align: center;
+	letter-spacing: 0.03em;
+	padding: 7px;
+	border-radius: 3px;
+}
+
+/* ===================== EMPTY STATE &amp; UTILITIES ===================== */
+.clm-empty {
+	text-align: center;
+	color: #6b7280;
+	padding: 28px;
+	font-size: 12.5px;
+}
+
+/* =========================================
+   Typeahead / Autocomplete (UNTOUCHED)
+   ========================================= */
+.clm-typeahead-wrapper {
+    position: relative;
+    flex: 0 1 300px;
+}
+
+.clm-typeahead-wrapper .clm-search-input {
+    flex: none;
+    width: 100%;
+}
+
+.clm-suggestions {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    background: #ffffff;
+    border: 1px solid #c3cfe0;
+    border-radius: 4px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.10);
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+    z-index: 9999;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+.clm-suggestions::before {
+    content: '';
+    display: block;
+    height: 2px;
+    background: #1c4e9c;
+    border-radius: 4px 4px 0 0;
+    margin-bottom: 2px;
+}
+
+.clm-suggestions li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 12.5px;
+    gap: 12px;
+    border-bottom: 1px solid #f1f4f8;
+}
+
+.clm-suggestions li:last-child {
+    border-bottom: none;
+}
+
+.clm-suggestions li:hover {
+    background: #eef4ff;
+}
+
+.clm-sug-name {
+    font-weight: 600;
+    color: #1a1a1a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+}
+
+.clm-sug-meta {
+    font-size: 11px;
+    color: #718096;
+    white-space: nowrap;
+    flex-shrink: 0;
+    background: #f4f5f7;
+    padding: 2px 6px;
+    border-radius: 3px;
+    letter-spacing: 0.2px;
+}
+
+.clm-suggestions-loading {
+    pointer-events: none;
+}
+
+.clm-suggestions-loading li {
+    color: #a0aec0;
+    font-style: italic;
+    font-size: 12px;
+    padding: 10px 12px;
+    border-bottom: none;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clm_request_detail</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>clm_request_detail</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+	/* ==========================================================================
+	   CLM Request Detail — Server Script
+	   Source of Truth: x_birl3_clm_clm_customer_master1
+	   Target Table:    x_birl3_clm_clm_new_credit_request
+	   ========================================================================== */
+
+	data.record = null;
+	data.error = '';
+	data.initialLoad = false;
+
+	// ------------------------------------------------------------------
+	// TYPEAHEAD BRANCH: Suggests across Request Number, PAN, SAP Code, & Name
+	// ------------------------------------------------------------------
+	if (input && input.action === 'suggest') {
+		var term = (input.term || '').trim();
+		data.suggestions = [];
+
+		if (term.length < 2) { return; }
+
+		var seen = {}; // Deduplicate by Request Number
+
+		// 1. Search directly by Request Number in New Credit Request table
+		var grReqSug = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+		grReqSug.addQuery('number', 'STARTSWITH', term);
+		grReqSug.orderByDesc('sys_created_on');
+		grReqSug.setLimit(4);
+		grReqSug.query();
+
+		while (grReqSug.next()) {
+			var reqNum = grReqSug.getValue('number');
+			if (!seen[reqNum]) {
+				seen[reqNum] = true;
+				data.suggestions.push(buildSuggestionItem(grReqSug));
+			}
+		}
+
+		// 2. Search Master Table (Source of Truth) for PAN, SAP Code, or Name
+		var grMasterSug = new GlideRecord('x_birl3_clm_clm_customer_master1');
+		var qMaster = grMasterSug.addQuery('customer_code_sap', 'STARTSWITH', term);
+		qMaster.addOrCondition('pan', 'STARTSWITH', term);
+		qMaster.addOrCondition('customer_name', 'STARTSWITH', term);
+		qMaster.addOrCondition('customer_name', 'CONTAINS', term);
+		grMasterSug.setLimit(6);
+		grMasterSug.query();
+
+		while (grMasterSug.next() && data.suggestions.length < 8) {
+			var custSysId = grMasterSug.getUniqueValue();
+			
+			// Find the latest credit request for this matched customer
+			var grCustReq = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+			grCustReq.addQuery('customer', custSysId);
+			grCustReq.orderByDesc('sys_created_on');
+			grCustReq.setLimit(1);
+			grCustReq.query();
+
+			if (grCustReq.next()) {
+				var custReqNum = grCustReq.getValue('number');
+				if (!seen[custReqNum]) {
+					seen[custReqNum] = true;
+					data.suggestions.push(buildSuggestionItem(grCustReq, grMasterSug));
+				}
+			}
+		}
+		return;
+	}
+
+	/**
+	 * Helper to build suggestion dropdown object
+	 */
+	function buildSuggestionItem(grReq, grMaster) {
+		var name = 'Unknown Customer';
+		var code = '';
+		var pan = '';
+
+		// If Master record is provided directly, use it as Source of Truth
+		if (grMaster) {
+			name = grMaster.getValue('customer_name') || name;
+			code = grMaster.getValue('customer_code_sap') || '';
+			pan  = grMaster.getValue('pan') || '';
+		} 
+		// Otherwise, explicitly lookup Master table using the customer reference
+		else if (grReq.getValue('customer')) {
+			var grM = new GlideRecord('x_birl3_clm_clm_customer_master1');
+			if (grM.get(grReq.getValue('customer'))) {
+				name = grM.getValue('customer_name') || name;
+				code = grM.getValue('customer_code_sap') || '';
+				pan  = grM.getValue('pan') || '';
+			}
+		}
+
+		return {
+			number: grReq.getValue('number'),
+			name: name,
+			code: code,
+			pan: pan
+		};
+	}
+
+	/**
+	 * Builds the complete record payload, enforcing Master Table as Source of Truth
+	 */
+	function buildRecordPayload(gr) {
+		var currentLimit = parseFloat(gr.getValue('current_credit_limit')) || 0;
+		var requestedLimit = parseFloat(gr.getValue('requested_limit')) || 0;
+		var outstanding = parseFloat(gr.getValue('outstanding_amount')) || 0;
+		var activeSd = parseFloat(gr.getValue('active_sd')) || 0;
+
+		var increaseAmount = requestedLimit - currentLimit;
+		var increasePct = (currentLimit !== 0) ? Math.round((increaseAmount / currentLimit) * 100) : 0;
+		var utilisationPctStr = (currentLimit > 0) ? ((outstanding / currentLimit) * 100).toFixed(1) + '%' : 'N/A';
+
+		// ---- Date & Days Left Calculation ----
+		var reviewDateStr = gr.getValue('next_review_date');
+		var reviewIn = 'No date set';
+		if (reviewDateStr) {
+			var reviewDate = new GlideDateTime(reviewDateStr);
+			var today = new GlideDateTime();
+			var daysDiff = GlideDateTime.subtract(today, reviewDate).getRoundedDayPart();
+			
+			if (daysDiff > 0) reviewIn = reviewDateStr + ' / ' + daysDiff + ' days left';
+			else if (daysDiff === 0) reviewIn = reviewDateStr + ' / Due today';
+			else reviewIn = reviewDateStr + ' / ' + Math.abs(daysDiff) + ' days overdue';
+		}
+
+		// ---- Overdue > 90 Days Cross-Reference ----
+		var overdue90 = 0;
+		var customerId = gr.getValue('customer'); 
+		if (customerId) {
+			var grOut = new GlideRecord('x_birl3_clm_customer_outstanding');
+			grOut.addQuery('customer', customerId); 
+			grOut.query();
+			if (grOut.next()) {
+				overdue90 = parseFloat(grOut.getValue('ageing_gt90')) || 0;
+			}
+		}
+
+		// ---- SOURCE OF TRUTH: Explicitly fetch from Customer Master Table ----
+		var customerName = '';
+		var customerPan = '';
+		var customerCode = '';
+		var commodity = gr.getDisplayValue('segment');
+
+		if (customerId) {
+			var grMaster = new GlideRecord('x_birl3_clm_clm_customer_master1');
+			if (grMaster.get(customerId)) {
+				customerName = grMaster.getValue('customer_name') || '';
+				customerPan  = grMaster.getValue('pan') || '';
+				customerCode = grMaster.getValue('customer_code_sap') || '';
+				if (!commodity) commodity = grMaster.getDisplayValue('segment');
+			}
+		}
+
+		return {
+			sysId: gr.getUniqueValue(),
+			number: gr.getValue('number'),
+
+			customerName: customerName,
+			customerPan: customerPan,
+			customerCode: customerCode,
+			commodity: commodity,
+
+			previousLimit: currentLimit,
+			requestedLimit: requestedLimit,
+			increaseAmount: increaseAmount,
+			increasePct: increasePct,
+
+			pendingStage: gr.getDisplayValue('state'),
+			tshJustification: gr.getValue('business_justification'),
+
+			approvedAmount: 'Pending',
+			securityDeposit: activeSd,
+			utilisationPct: utilisationPctStr,
+
+			accountStatus: '--',
+			riskClassification: '--',
+			
+			outstandingAmount: outstanding,
+			overdue90: overdue90,
+			reviewIn: reviewIn,
+
+			statusBadge1: '',
+			statusBadge2: '',
+
+			workflowTrail: [
+				{ role: 'TSH', actor: '', action: 'Submitted', date: '', duration: '', comment: '', dotClass: '' },
+				{ role: 'RHM', actor: '', action: 'Rejected', date: '', duration: '', comment: '', dotClass: 'clm-dot-rejected' }
+			],
+			finalDecisionLabel: ''
+		};
+	}
+
+	function lookupBySysId(sysId) {
+		var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+		if (gr.get(sysId)) {
+			return buildRecordPayload(gr);
+		}
+		return null;
+	}
+
+	/**
+	 * MULTI-TABLE RESOLUTION ARCHITECTURE
+	 * Resolves Request Number OR queries Master Table for Name/PAN/SAP Code.
+	 */
+	function lookupByTerm(searchTerm) {
+		if (!searchTerm) return null;
+		
+		// 1. Check if the search term matches a Request Number directly
+		var grReq = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+		if (grReq.get('number', searchTerm)) {
+			return buildRecordPayload(grReq);
+		}
+
+		// 2. Query Master Table (Source of Truth) for PAN, SAP Code, or Customer Name
+		var matchingCustIds = [];
+		var grMaster = new GlideRecord('x_birl3_clm_clm_customer_master1');
+		var qc = grMaster.addQuery('customer_code_sap', searchTerm);
+		qc.addOrCondition('pan', searchTerm);
+		qc.addOrCondition('customer_name', 'CONTAINS', searchTerm);
+		grMaster.query();
+		
+		while (grMaster.next()) {
+			matchingCustIds.push(grMaster.getUniqueValue());
+		}
+
+		// 3. If matching customers exist in Master, fetch their latest Credit Request
+		if (matchingCustIds.length > 0) {
+			var grCustReq = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+			grCustReq.addQuery('customer', 'IN', matchingCustIds);
+			grCustReq.orderByDesc('sys_created_on');
+			grCustReq.setLimit(1);
+			grCustReq.query();
+			
+			if (grCustReq.next()) {
+				return buildRecordPayload(grCustReq);
+			}
+		}
+
+		// 4. Fallback: Fuzzy search on Request Number (for partial number inputs)
+		var grFuzzy = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+		grFuzzy.addQuery('number', 'CONTAINS', searchTerm);
+		grFuzzy.orderByDesc('sys_created_on');
+		grFuzzy.setLimit(1);
+		grFuzzy.query();
+		if (grFuzzy.next()) {
+			return buildRecordPayload(grFuzzy);
+		}
+
+		return null;
+	}
+
+	// ---------------------------------------------------------------------
+	// AJAX MODE: Explicit Client Search
+	// ---------------------------------------------------------------------
+	if (input && input.action === 'search') {
+		var searchVal = (input.term || input.number || '').trim();
+		if (searchVal) {
+			data.record = lookupByTerm(searchVal);
+			if (!data.record) {
+				data.error = 'No request found matching "' + searchVal + '".';
+			}
+		} else if (input.sys_id) {
+			data.record = lookupBySysId(input.sys_id);
+			if (!data.record) {
+				data.error = 'No request found for that sys_id.';
+			}
+		}
+		return;
+	}
+
+	// ---------------------------------------------------------------------
+	// INITIAL PAGE LOAD MODE
+	// ---------------------------------------------------------------------
+	var sysId = $sp.getParameter('sys_id') || (options && options.record_id);
+	var rawSearch = (options && (options.search || options.customer_code)) || $sp.getParameter('search') || '';
+	var searchTerm = rawSearch.trim();
+
+	if (sysId) {
+		data.record = lookupBySysId(sysId);
+	} else if (searchTerm) {
+		data.record = lookupByTerm(searchTerm);
+	} else {
+		data.initialLoad = true;
+	}
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>jatin.sharma@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-01 11:06:03</sys_created_on>
+        <sys_id>a9fe5eb12b3d07104572f3745e91bfaa</sys_id>
+        <sys_mod_count>22</sys_mod_count>
+        <sys_name>clm_request_detail</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_a9fe5eb12b3d07104572f3745e91bfaa</sys_update_name>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-09 05:47:21</sys_updated_on>
+        <template><![CDATA[<div class="clm-detail-portal">
+
+  <div class="clm-search-bar" style="position: relative; overflow: visible !important;">
+    <div class="clm-search-label">
+      <span class="clm-search-icon">&#128269;</span> CUSTOMER SEARCH
+    </div>
+    
+    <!-- WRAPPER: Aligns dropdown directly under the input and prevents CSS clipping -->
+    <div style="position: relative; flex: 1; margin: 0 10px;">
+      <input
+        type="text"
+        class="clm-search-input"
+        style="width: 100%;"
+        placeholder="e.g. CLM0001418, PAN, SAP Code, or Name..."
+        ng-model="c.searchNumber"
+        ng-model-options="{ debounce: 300 }"
+        ng-change="c.getSuggestions(c.searchNumber)"
+        ng-keyup="$event.keyCode === 13 && c.search()" />
+
+      <!-- Autocomplete Dropdown List -->
+      <ul class="dropdown-menu" 
+          style="display: block !important; width: 100%; position: absolute; top: 100%; left: 0; z-index: 99999; max-height: 280px; overflow-y: auto; box-shadow: 0 6px 12px rgba(0,0,0,0.175); border: 1px solid #ccc; background-color: #fff; margin-top: 2px; padding: 0;" 
+          ng-if="c.suggestions && c.suggestions.length > 0">
+        <li ng-repeat="item in c.suggestions" style="border-bottom: 1px solid #f1f1f1; list-style: none;">
+          <a href="javascript:void(0)" 
+             ng-click="c.selectSuggestion(item)" 
+             style="padding: 10px 15px; display: block; text-decoration: none; color: #333; cursor: pointer;">
+            <div style="font-weight: 600; color: #1f8476;">{{item.number}}</div>
+            <div>
+              <strong>{{item.name}}</strong>
+              <span class="text-muted" ng-if="item.code">({{item.code}})</span>
+            </div>
+            <div class="text-muted small" ng-if="item.pan">PAN: {{item.pan}}</div>
+          </a>
+        </li>
+      </ul>
+    </div>
+
+    <button type="button" class="clm-btn clm-btn-primary" ng-click="c.search()" ng-disabled="c.loading">
+      {{c.loading ? 'Searching...' : 'Search'}}
+    </button>
+    <span class="clm-search-error" ng-if="c.searchError">{{c.searchError}}</span>
+  </div>
+
+  <div class="clm-detail-body" ng-if="c.data.record">
+
+    <div class="clm-ribbon">
+      <div class="clm-ribbon-left">
+        <div class="clm-label">REQUEST DETAIL</div>
+        <div class="clm-number">{{c.data.record.number}}</div>
+        <div class="clm-subline">
+          {{c.data.record.customerName}}
+          <span class="clm-dot">&middot;</span>
+          {{c.data.record.customerPan}}
+          <span class="clm-dot">&middot;</span>
+          {{c.data.record.commodity}}
+        </div>
+      </div>
+      <div class="clm-ribbon-right">
+        <span class="clm-badge clm-badge-red" ng-if="c.data.record.statusBadge1">{{c.data.record.statusBadge1}}</span>
+        <span class="clm-badge clm-badge-red" ng-if="c.data.record.statusBadge2">{{c.data.record.statusBadge2}}</span>
+        <button type="button" class="clm-btn clm-btn-outline" ng-click="c.goToRequests()">&larr; Requests</button>
+        <button type="button" class="clm-btn clm-btn-primary" ng-click="c.goToCustomer360()">Customer 360 &rarr;</button>
+      </div>
+    </div>
+
+    <div class="clm-limit-banner">
+      <div class="clm-limit-inner">
+        <div class="clm-limit-block">
+          <div class="clm-limit-label">PREVIOUS LIMIT</div>
+          <div class="clm-limit-value">{{c.formatLakh(c.data.record.previousLimit)}}</div>
+        </div>
+        <div class="clm-limit-arrow">&rarr;</div>
+        <div class="clm-limit-block clm-limit-block-right">
+          <div class="clm-limit-label">
+            REQUESTED
+            <span class="clm-limit-pct" ng-class="{'clm-pct-neg': c.data.record.increasePct < 0}">
+              {{c.data.record.increasePct >= 0 ? '+' : ''}}{{c.data.record.increasePct}}%
+            </span>
+          </div>
+          <div class="clm-limit-value clm-limit-value-blue">{{c.formatLakh(c.data.record.requestedLimit)}}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="clm-columns">
+
+      <div class="clm-col-left">
+
+        <div class="clm-card">
+          <div class="clm-card-title">Request Financials</div>
+
+          <div class="clm-row">
+            <span class="clm-row-label">Previous Limit</span>
+            <span class="clm-row-value">{{c.formatLakh(c.data.record.previousLimit)}}</span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Requested Limit</span>
+            <span class="clm-row-value clm-text-blue">{{c.formatLakh(c.data.record.requestedLimit)}}</span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Increase</span>
+            <span class="clm-row-value clm-text-blue">
+              {{c.data.record.increaseAmount >= 0 ? '+' : ''}}{{c.formatLakh(c.data.record.increaseAmount)}}
+              ({{c.data.record.increasePct >= 0 ? '+' : ''}}{{c.data.record.increasePct}}%)
+            </span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Approved Amount</span>
+            <span class="clm-row-value">{{c.data.record.approvedAmount}}</span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Security Deposit (SD)</span>
+            <span class="clm-row-value">{{c.formatLakh(c.data.record.securityDeposit)}}</span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Utilisation at Request</span>
+            <span class="clm-row-value clm-text-red">{{c.data.record.utilisationPct}}</span>
+          </div>
+          <div class="clm-row clm-row-last">
+            <span class="clm-row-label">Pending Stage</span>
+            <span class="clm-pill clm-pill-green">{{c.data.record.pendingStage}}</span>
+          </div>
+        </div>
+
+        <div class="clm-card">
+          <div class="clm-card-title">Customer Snapshot at Submission</div>
+
+          <div class="clm-row">
+            <span class="clm-row-label">Account Status</span>
+            <span class="clm-pill clm-pill-red">{{c.data.record.accountStatus}}</span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Risk</span>
+            <span class="clm-pill clm-pill-red">{{c.data.record.riskClassification}}</span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Outstanding</span>
+            <span class="clm-row-value clm-text-blue">{{c.formatLakh(c.data.record.outstandingAmount)}}</span>
+          </div>
+          <div class="clm-row">
+            <span class="clm-row-label">Overdue &gt;90 Days</span>
+            <span class="clm-row-value clm-text-red">{{c.formatLakh(c.data.record.overdue90)}}</span>
+          </div>
+          <div class="clm-row clm-row-last">
+            <span class="clm-row-label">Review In</span>
+            <span class="clm-row-value clm-text-red">{{c.data.record.reviewIn}}</span>
+          </div>
+        </div>
+
+        <div class="clm-card">
+          <div class="clm-card-title">TSH Justification</div>
+          <div class="clm-justification-box">{{c.data.record.tshJustification}}</div>
+        </div>
+
+      </div>
+
+      <div class="clm-col-right">
+        <div class="clm-card">
+          <div class="clm-card-title">Approval Workflow Trail</div>
+          <div class="clm-workflow">
+            <div class="clm-workflow-step" ng-repeat="step in c.data.record.workflowTrail">
+              <div class="clm-workflow-dot" ng-class="step.dotClass"></div>
+              <div class="clm-workflow-content">
+                <div class="clm-workflow-header">
+                  <span class="clm-workflow-role">{{step.role}}</span>
+                  &mdash; {{step.actor}}
+                </div>
+                <div class="clm-workflow-meta">{{step.action}} &middot; {{step.date}} <span ng-if="step.duration">&middot; {{step.duration}}</span></div>
+                <div class="clm-workflow-comment" ng-if="step.comment">&ldquo;{{step.comment}}&rdquo;</div>
+              </div>
+            </div>
+            <div class="clm-workflow-banner" ng-if="c.data.record.finalDecisionLabel">
+              {{c.data.record.finalDecisionLabel}}
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="clm-empty" ng-if="!c.data.record && c.searched && !c.loading">
+    No credit request found matching your search.
+  </div>
+  <div class="clm-empty" ng-if="!c.data.record && !c.searched">
+    Search by Request Number, PAN, Customer Code, or Name above to view details.
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>a9fe5eb12b3d07104572f3745e91bfaa</id>
+        <sys_created_by>jatin.sharma@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-01 11:06:03</sys_created_on>
+        <sys_id>a5fe5eb12b3d07104572f3745e91bfb0</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>jatin.sharma@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-01 11:06:03</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

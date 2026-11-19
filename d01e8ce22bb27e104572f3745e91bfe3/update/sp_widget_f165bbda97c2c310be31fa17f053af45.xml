@@ -1,0 +1,1974 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[function widgetcontroller($scope, $rootScope, $timeout) {
+  var c = this;
+
+  // ===================================================================
+  // Period = last 6 months (dynamic, always ending at the CURRENT
+  // month), shown as a plain <select> — same style as Segment/Status.
+  // No "All Time"/custom-range option — default is the CURRENT month.
+  // c.filters.period is always a 'YYYY-MM' string.
+  // ===================================================================
+var MONTH_SHORT_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+var todayForPeriod = new Date();
+// CHANGED: anchor is now the CURRENT month (not last month), so the
+// list ends at the current month and defaults to the current month.
+var anchorDateForPeriod = new Date(todayForPeriod.getFullYear(), todayForPeriod.getMonth(), 1);
+
+function buildLast6Months() {
+    var arr = [];
+    for (var i = 5; i >= 0; i--) {
+        var d = new Date(anchorDateForPeriod.getFullYear(), anchorDateForPeriod.getMonth() - i, 1);
+        var y = d.getFullYear();
+        var mIdx = d.getMonth();
+        var monthStr = (mIdx + 1) < 10 ? ('0' + (mIdx + 1)) : String(mIdx + 1);
+        arr.push({ value: y + '-' + monthStr, label: MONTH_SHORT_NAMES[mIdx] + ' ' + String(y).slice(-2) });
+    }
+    return arr;
+}
+
+  c.last6Months = buildLast6Months();
+  c.defaultPeriod = c.last6Months[c.last6Months.length - 1].value;
+
+  c.filters = {
+    region: '',
+    // Default segment comes from the server's resolved selectedSegment
+    // (first role-mapped segment for this user).
+    segment: (c.data && c.data.selectedSegment) || '',
+    status: '',
+    // Period defaults to the server's resolved selectedPeriod
+    // (falls back to the current month), never blank.
+    period: (c.data && c.data.selectedPeriod) || c.defaultPeriod,
+    search: ''
+  };
+
+  c.pagination = { currentPage: 1, rowsPerPage: 10 };
+  c.hoverIndex = -1;
+  c.showTooltip = false;
+  c.tooltipLeft = 0;
+  c.tooltipTop = 0;
+  c.paginatedRequests = [];
+  c.kpiFilter = '';
+
+  // ---- Region dropdown (unchanged, kept for parity even though its
+  // UI block remains commented out) ----
+  c.dropdownOpen = { region: false };
+  var OPTS_MAP = { region: 'regions' };
+
+  c.openDropdown = function(field) { c.dropdownOpen[field] = true; };
+  c.closeDropdown = function(field) {
+      $timeout(function() { c.dropdownOpen[field] = false; }, 150);
+  };
+  c.onFilterInput = function(field) { c.dropdownOpen[field] = true; c.applyFilters(); };
+  c.getFilteredOptions = function(field) {
+      var optsKey = OPTS_MAP[field];
+      var all = (c.data && c.data.filterOpts && c.data.filterOpts[optsKey]) || [];
+      var term = (c.filters[field] || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(opt) { return String(opt).toLowerCase().indexOf(term) !== -1; });
+  };
+  c.selectOption = function(field, value) {
+      c.filters[field] = value;
+      c.dropdownOpen[field] = false;
+      c.applyFilters();
+  };
+  c.clearFilter = function(field, $event) {
+      if ($event) { $event.preventDefault(); }
+      c.filters[field] = '';
+      c.applyFilters();
+  };
+
+  // ===================================================================
+  // Depot multiselect — same pattern as TSH Portfolio, with a
+  // "Select All / Clear" pair and an "All Depots" default display.
+  // ===================================================================
+  c.filters.depots = [];
+  c.depotDropdownOpen = false;
+  c.depotSearch = '';
+  c.selectedDepotLabels = [];
+
+  c.openDepotDropdown = function() { c.depotDropdownOpen = true; };
+  c.closeDepotDropdown = function() { c.depotDropdownOpen = false; };
+
+  c.toggleDepot = function(d) {
+      var idx = c.filters.depots.indexOf(d.value);
+      if (idx === -1) {
+          c.filters.depots.push(d.value);
+          c.selectedDepotLabels.push(d.label);
+      } else {
+          c.filters.depots.splice(idx, 1);
+          c.selectedDepotLabels.splice(idx, 1);
+      }
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.selectAllDepots = function() {
+      var allDepots = (c.data && c.data.filterOpts && c.data.filterOpts.depots) || [];
+      c.filters.depots = allDepots.map(function(d) { return d.value; });
+      c.selectedDepotLabels = allDepots.map(function(d) { return d.label; });
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.clearAllDepots = function() {
+      c.filters.depots = [];
+      c.selectedDepotLabels = [];
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.isDepotSelected = function(d) { return c.filters.depots.indexOf(d.value) !== -1; };
+
+  c.getFilteredDepots = function() {
+      var all = (c.data && c.data.filterOpts && c.data.filterOpts.depots) || [];
+      var term = (c.depotSearch || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(d) {
+          return String(d.label || '').toLowerCase().indexOf(term) !== -1 ||
+                 String(d.value || '').toLowerCase().indexOf(term) !== -1;
+      });
+  };
+
+  c.getDepotDisplayText = function() {
+      if (!c.selectedDepotLabels || c.selectedDepotLabels.length === 0) return 'All Depots';
+      if (c.selectedDepotLabels.length === 1) return c.selectedDepotLabels[0];
+      return c.selectedDepotLabels.length + ' depots selected';
+  };
+
+  function outsideClickListenerDepot(event) {
+      if (c.depotDropdownOpen) {
+          var depotEl = document.getElementById('clmApprovalDepotMultiselect');
+          if (depotEl && !depotEl.contains(event.target)) {
+              c.depotDropdownOpen = false;
+              $scope.$applyAsync();
+          }
+      }
+  }
+  document.addEventListener('click', outsideClickListenerDepot);
+  $scope.$on('$destroy', function() {
+      document.removeEventListener('click', outsideClickListenerDepot);
+  });
+
+  // ---- FIXED: now broadcasts an OBJECT { number: ... } to match the
+  // Request Detail widget's listener signature (payload.number). ----
+  c.openRequestDetail = function(r) {
+      if (!r || !r.requestCode) return;
+      $rootScope.clmPendingRequestNumber = r.requestCode;
+      $rootScope.$broadcast('clm.request.selected', { number: r.requestCode });
+      $rootScope.$broadcast('clm.switch.tab', 'request_detail');
+  };
+
+  c.applyFilters = function() {
+    c.pagination.currentPage = 1;
+    c.data.filters = {
+      region: c.filters.region,
+      depots: c.filters.depots,
+      segment: c.filters.segment,
+      status: c.filters.status,
+      period: c.filters.period
+    };
+    c.server.update().then(function() {
+      // Sync the segment dropdown to whatever the server resolved
+      // as the active segment — covers first load, an invalid/stale
+      // segment, and the depot list changing scope when segment changes.
+      if (c.data.selectedSegment && c.filters.segment !== c.data.selectedSegment) {
+          c.filters.segment = c.data.selectedSegment;
+      }
+      // Sync the period dropdown to whatever the server resolved
+      // (covers first load when c.filters.period hadn't been sent yet).
+      if (c.data.selectedPeriod && c.filters.period !== c.data.selectedPeriod) {
+          c.filters.period = c.data.selectedPeriod;
+      }
+      // If any previously selected depots no longer belong to the newly
+      // scoped depot list (segment changed), the server already ignored
+      // them server-side; clear them client-side too so the multiselect
+      // doesn't show stale/invalid selections.
+      var validDepots = (c.data.filterOpts && c.data.filterOpts.depots) || [];
+      var validValues = validDepots.map(function(d) { return d.value; });
+      var keptIdx = [];
+      c.filters.depots.forEach(function(dv, i) {
+          if (validValues.indexOf(dv) !== -1) keptIdx.push(i);
+      });
+      if (keptIdx.length !== c.filters.depots.length) {
+          c.filters.depots = keptIdx.map(function(i) { return c.filters.depots[i]; });
+          c.selectedDepotLabels = keptIdx.map(function(i) { return c.selectedDepotLabels[i]; });
+      }
+      c.runSearch();
+    });
+  };
+
+  c.setKpiFilter = function(state) {
+      if (c.kpiFilter === state) {
+          c.kpiFilter = '';
+      } else {
+          c.kpiFilter = state;
+          c.pagination.currentPage = 1;
+          $timeout(function() {
+              var el = document.getElementById('clmRequestsTableContainer');
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }, 100);
+      }
+      c.runSearch();
+  };
+
+  c.runSearch = function() {
+    var term = (c.filters.search || '').toString().toLowerCase().trim();
+
+    (c.data.requests || []).forEach(function(r) {
+      var isHidden = false;
+
+      if (term) {
+        var fields = [r.requestCode, r.customerCode, r.customerName, r.pan];
+        var matched = fields.some(function(f) {
+          return (f || '').toString().toLowerCase().indexOf(term) > -1;
+        });
+        if (!matched) isHidden = true;
+      }
+
+      if (!isHidden && c.kpiFilter) {
+          if (c.kpiFilter === 'deviated') {
+              if (!r.isDeviation) isHidden = true;
+          } else {
+              var statLower = (r.status || '').toLowerCase();
+              if (c.kpiFilter === 'pending' && statLower.indexOf('submit') === -1) isHidden = true;
+              if (c.kpiFilter === 'approved' && statLower.indexOf('approv') === -1) isHidden = true;
+              if (c.kpiFilter === 'sendback' && statLower.indexOf('return') === -1 && statLower.indexOf('send') === -1) isHidden = true;
+              if (c.kpiFilter === 'rejected' && statLower.indexOf('reject') === -1) isHidden = true;
+          }
+      }
+
+      r._hidden = isHidden;
+    });
+
+    c.pagination.currentPage = 1;
+    c.updatePaginatedRequests();
+  };
+
+  c.updatePaginatedRequests = function() {
+    var visible = (c.data.requests || []).filter(function(r) { return !r._hidden; });
+    var start = (c.pagination.currentPage - 1) * c.pagination.rowsPerPage;
+    var end = start + c.pagination.rowsPerPage;
+    c.paginatedRequests = visible.slice(start, end);
+  };
+
+  c.getVisibleRecordsCount = function() {
+    return (c.data.requests || []).filter(function(r) { return !r._hidden; }).length;
+  };
+
+  c.getTotalPages = function() {
+    var visible = (c.data.requests || []).filter(function(r) { return !r._hidden; });
+    return Math.ceil(visible.length / c.pagination.rowsPerPage) || 1;
+  };
+
+  c.getPageNumbers = function() {
+    var total = c.getTotalPages();
+    var pages = [];
+    var maxVisible = 5;
+    var start = Math.max(1, c.pagination.currentPage - Math.floor(maxVisible / 2));
+    var end = Math.min(total, start + maxVisible - 1);
+
+    if (end - start < maxVisible - 1) {
+      start = Math.max(1, end - maxVisible + 1);
+    }
+
+    for (var i = start; i <= end; i++) {
+      pages.push(i);
+    }
+    return pages;
+  };
+
+  c.previousPage = function() {
+    if (c.pagination.currentPage > 1) { c.pagination.currentPage--; c.updatePaginatedRequests(); }
+  };
+  c.nextPage = function() {
+    if (c.pagination.currentPage < c.getTotalPages()) { c.pagination.currentPage++; c.updatePaginatedRequests(); }
+  };
+  c.goToPage = function(pageNum) {
+    c.pagination.currentPage = pageNum; c.updatePaginatedRequests();
+  };
+  c.onRowsPerPageChange = function() {
+    c.pagination.currentPage = 1; c.updatePaginatedRequests();
+  };
+
+  $scope.$watch('c.filters.search', c.runSearch);
+
+  c.chartX = function(i) {
+    var n = (c.data.chart.months || []).length;
+    if (n <= 1) return 40;
+    return 40 + (i * (860 / (n - 1)));
+  };
+
+  c.linePoints = function(key) {
+    var months = c.data.chart.months || [];
+    var series = (c.data.chart.series || {})[key] || [];
+    var max = c.data.chart.max || 1;
+    var pts = [];
+    months.forEach(function(m, i) {
+      var v = series[i] || 0;
+      pts.push(c.chartX(i) + ',' + (220 - (v / max) * 200));
+    });
+    return pts.join(' ');
+  };
+
+  c.onMouseOverMonth = function(ev, index) {
+    c.hoverIndex = index;
+    c.showTooltip = true;
+    var targetRect = ev.currentTarget.getBoundingClientRect();
+    var containerRect = ev.currentTarget.closest('.clm-chart-body').getBoundingClientRect();
+    c.tooltipLeft = (targetRect.left + targetRect.width / 2) - containerRect.left;
+    c.tooltipTop = (targetRect.top - containerRect.top) + 40;
+  };
+
+  c.onMouseLeaveChart = function() { c.hoverIndex = -1; c.showTooltip = false; };
+
+  c.statusClass = function(status) {
+    var s = (status || '').toLowerCase();
+    if (s.indexOf('submit') > -1 || s.indexOf('pend') > -1) return 'st-submitted';
+    if (s.indexOf('approv') > -1) return 'st-approved';
+    if (s.indexOf('return') > -1 || s.indexOf('send') > -1) return 'st-sendback';
+    if (s.indexOf('reject') > -1) return 'st-rejected';
+    return 'st-default';
+  };
+
+  c.segClass = function(seg) {
+    var s = (seg || '').toLowerCase();
+    if (s.indexOf('cement') > -1) return 'seg-cement';
+    if (s.indexOf('rmc') > -1) return 'seg-rmc';
+    if (s.indexOf('bpd') > -1) return 'seg-bpd';
+    return 'seg-default';
+  };
+
+  c.yAxisTicks = [];
+  for (var val = 0; val <= 8; val++) {
+    var yCoord = 220 - (val / 8) * 200;
+    c.yAxisTicks.push({ label: val, y: yCoord });
+  }
+
+  c.updatePaginatedRequests();
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.clm-dash {
+ font-family: "Helvetica Neue", Arial, sans-serif;
+  color: #1f2933;
+  font-size: 13px;
+  padding: 0;
+  margin: 0;
+  width: 100%;
+  box-sizing: border-box;
+
+  /* ---- Filter Card ---- */
+ .clm-filter-card {
+    margin: 0 0 16px 0;
+    background: #fff;
+    border: 1px solid #e3e6eb;
+    border-radius: 8px;
+    padding: 14px 18px;
+    box-sizing: border-box;
+    width: 100%;
+  }
+
+  .clm-filter-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .clm-filter-field {
+    flex: 1;
+    min-width: 160px;
+    position: relative;
+
+    span {
+      color: #1f2933;
+      font-weight: 600;
+      font-size: 13px; 
+      margin-bottom: 4px;
+      display: block;
+    }
+
+    select.form-control,
+    input.form-control {
+      height: 34px;
+      padding: 0 10px;
+      font-size: 13px;
+      color: #1f2933;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      width: 100%;
+      background-color: #ffffff;
+      outline: none;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-sizing: border-box;
+
+      &amp;:hover { border-color: #a0aec0; background-color: #f7fafc; }
+      &amp;:focus { border-color: #1c4e9c; background-color: #ffffff; }
+      &amp;::placeholder { color: #6b7280; }
+    }
+  }
+
+  /* Custom searchable dropdowns */
+  .clm-custom-dropdown { position: relative; z-index: 10; }
+  .clm-dropdown-wrapper { position: relative; width: 100%; }
+  .clm-dropdown-input { padding: 0 26px 0 10px !important; }
+  .clm-custom-dropdown.open .clm-dropdown-input { border-color: #1c4e9c; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+  .clm-dropdown-clear { position: absolute; right: 8px; top: 10px; color: #6b7280; font-size: 12px; cursor: pointer; }
+  .clm-dropdown-clear:hover { color: #1f2933; }
+  
+  .clm-dropdown-list {
+    position: absolute; top: 34px; left: 0; right: 0; z-index: 50;
+    background: #ffffff; border: 1px solid #1c4e9c; border-top: none;
+    border-bottom-left-radius: 4px; border-bottom-right-radius: 4px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1); list-style: none; padding: 0; margin: 0;
+    max-height: 200px; overflow-y: auto;
+  }
+  .clm-dropdown-list li { padding: 8px 12px; font-size: 13px; color: #1f2933; cursor: pointer; }
+  .clm-dropdown-list li:hover { background-color: #f0f4f9; }
+  .clm-dropdown-list li.active { background-color: #1c4e9c; color: #ffffff; }
+  .clm-dropdown-empty { color: #6b7280 !important; cursor: default !important; font-style: italic; }
+
+
+  .clm-custom-range {
+   display: flex;
+    align-items: center;
+    flex-direction: row;
+    gap: 6px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+    
+    input[type="date"] {
+      height: 34px;
+      padding: 0 10px;
+      font-size: 13px;
+      color: #1f2933;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      transition: all 0.2s ease;
+      width: auto;
+      
+      &amp;:hover { border-color: #a0aec0; background-color: #f7fafc; }
+    }
+    span { color: #1f2933; font-size: 13px; font-weight: 600; }
+  }
+  
+  .clm-apply-btn {
+    height: 34px;
+    padding: 0 16px;
+    font-size: 13px;
+    font-weight: 600;
+    border: none;
+    border-radius: 4px;
+    background: #1c4e9c;
+    color: #fff;
+    cursor: pointer;
+    transition: background 0.2s ease;
+    
+    &amp;:hover { background: #153e7e; }
+  }
+
+  /* ---- KPI Tiles ---- */
+  .clm-scorecards {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+    margin: 0 0 16px 0;
+  }
+
+.clm-card {
+    position: relative; 
+    background: #fff;
+    border: 1px solid #e3e6eb;
+    border-left: 4px solid #c9ced6;
+    border-radius: 6px;
+    padding: 14px 16px;
+    min-height: 100px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+    transition: background-color 0.3s, box-shadow 0.3s;
+    box-sizing: border-box;
+  }
+  .clm-card-id { font-size: 10px; font-weight: 700; letter-spacing: .3px; color: #718096; margin-bottom: 6px; }
+  .clm-card-value { font-size: 24px; font-weight: 700; line-height: 1.1; }
+  .clm-card-sub { font-size: 11px; color: #8a93a0; margin-top: 4px; }
+  
+  .clm-card-blue   { border-left-color: #1c4e9c; .clm-card-value { color: #1c4e9c; } }
+  .clm-card-green  { border-left-color: #38a169; .clm-card-value { color: #38a169; } }
+  .clm-card-purple { border-left-color: #7c5cf0; .clm-card-value { color: #7c5cf0; } }
+  .clm-card-red    { border-left-color: #e53e3e; .clm-card-value { color: #e53e3e; } }
+  .clm-card-orange { border-left-color: #dd6b20; .clm-card-value { color: #dd6b20; } }
+
+  /* ---- Info Icon on KPI Tiles ---- */
+ .clm-kpi-info { 
+    position: absolute; 
+    top: 10px; 
+    right: 10px; 
+    color: #2b6cb0; 
+    font-size: 15px; 
+    transition: all 0.2s ease;
+    cursor: pointer;
+    z-index: 5;
+  }
+  .clm-kpi-info:hover { 
+    color: #1c4e9c; 
+    transform: scale(1.15); 
+  }
+  
+  /* ---- Chart Panel ---- */
+  .clm-chart-panel {
+    background: #fff; 
+    border: 1px solid #e3e6eb; 
+    border-radius: 8px; 
+    padding: 16px 20px; 
+    margin: 0 0 16px 0; 
+    width: 100%;
+    box-sizing: border-box;
+  }
+ .clm-chart-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .clm-chart-title { font-weight: 700; font-size: 13px; color: #1f2933; }
+  .clm-chart-badge { background: #f0e6ff; color: #6b21a8; font-size: 11px; font-weight: 700; padding: 2px 10px; border-radius: 10px; }
+  .clm-legend { margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; }
+  .legend-item { font-size: 11px; font-weight: 700; color: #1f2933; display: flex; align-items: center; gap: 6px; }
+  .dot {
+    width: 10px; height: 10px; border-radius: 2px; display: inline-block;
+    &amp;.blue   { background: #1c4e9c; }
+    &amp;.green  { background: #38a169; }
+    &amp;.orange { background: #dd6b20; }
+    &amp;.purple { background: #7c5cf0; }
+    &amp;.red    { background: #e53e3e; }
+  }
+  .clm-chart-body { 
+    position: relative; 
+    width: 100%;
+    height: auto;
+    overflow: visible; 
+  }
+  .clm-svg { 
+    width: 100%; 
+    height: 280px;
+    display: block;
+    overflow: visible;
+  }
+  
+  /* Prevents line width distortion when zooming in/out */
+  .clm-svg polyline, .clm-svg line {
+    vector-effect: non-scaling-stroke;
+  }
+
+ .grid-line { stroke: #e2e8f0; stroke-width: 1; stroke-dasharray: 4; }
+  .axis-label { font-size: 11px; fill: #718096; font-family: "Helvetica Neue", Arial, sans-serif; }
+  polyline { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+  .line-blue   { stroke: #1c4e9c; }
+  .line-green  { stroke: #38a169; }
+  .line-orange { stroke: #dd6b20; }
+  .line-purple { stroke: #7c5cf0; }
+  .line-red    { stroke: #e53e3e; }
+
+  .clm-chart-tooltip {
+    position: absolute;
+    background: rgba(30, 30, 30, 0.85);
+    color: #ffffff;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 11.5px;
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    pointer-events: none;
+    z-index: 100;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    transform: translate(-50%, -100%);
+    min-width: 110px;
+    text-align: left;
+    white-space: nowrap;
+
+    .tooltip-title {
+      font-weight: 700;
+      margin-bottom: 6px;
+      border-bottom: 1px solid rgba(255,255,255,0.2);
+      padding-bottom: 4px;
+    }
+    .tooltip-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 3px 0;
+      font-weight: 500;
+    }
+    .tooltip-color {
+      width: 10px;
+      height: 10px;
+      display: inline-block;
+      border-radius: 2px;
+      &amp;.blue   { background: #1c4e9c; }
+      &amp;.green  { background: #38a169; }
+      &amp;.orange { background: #dd6b20; }
+      &amp;.purple { background: #7c5cf0; }
+      &amp;.red    { background: #e53e3e; }
+    }
+  }
+
+
+  /* ---- Table Panel ---- */
+   /* ---- Table Panel (Optimized for One-Page Desktop Fit) ---- */
+  .clm-table-panel { 
+    background: #fff; 
+    border: 1px solid #e3e6eb; 
+    border-radius: 8px; 
+    padding: 16px 20px; 
+    margin: 0 0 16px 0;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  
+  .clm-table-header { 
+    display: flex; 
+    align-items: center; 
+    margin-bottom: 14px; 
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  
+  .clm-table-title { font-weight: 700; font-size: 13px; color: #1f2933; }
+  
+  .clm-table-wrapper {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+
+  .clm-search-section {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+  }
+
+  .clm-search-box {
+    position: relative;
+    display: flex; 
+    align-items: center;
+    width: 420px;
+    max-width: 100%;
+    
+    i { 
+      position: absolute;
+      left: 12px; 
+      color: #a0aec0; 
+      font-size: 13px; 
+    }
+    input { 
+      width: 100%;
+      height: 34px;
+      border: 1px solid #cbd5e1; 
+      border-radius: 6px; 
+      padding: 0 10px 0 32px; 
+      font-size: 13px; 
+      color: #1f2933;
+      outline: none;
+      transition: border 0.2s;
+      box-sizing: border-box;
+      
+      &amp;:focus { border-color: #1c4e9c; }
+      &amp;::placeholder { color: #6b7280; }
+    }
+  }
+
+  .clm-table-top-controls {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    justify-content: flex-end;
+    font-size: 12px;
+    color: #4a5568;
+    flex-wrap: wrap;
+  }
+
+  .clm-records-label {
+    color: #4a5568;
+    font-weight: 500;
+    strong { color: #1f2933; font-weight: 600; }
+  }
+
+  .clm-rows-label {
+    color: #4a5568;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .clm-rows-select {
+    padding: 4px 8px;
+    height: 32px;
+    font-size: 12px;
+    color: #1f2933;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background: #fff;
+    cursor: pointer;
+    min-width: 60px;
+    outline: none;
+  }
+
+  /* Compact Table Scroll container */
+  .clm-table-scroll { 
+    overflow-y: auto;
+    max-height: 380px; 
+    border: 1px solid #e3e6eb;
+    border-radius: 6px;
+    width: 100%;
+    
+    &amp;::-webkit-scrollbar { width: 8px; height: 8px; }
+    &amp;::-webkit-scrollbar-track { background: #f8f9fa; border-radius: 4px; }
+    &amp;::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+      &amp;:hover { background: #a0aec0; }
+    }
+  }
+  
+  .clm-table {
+    width: 100%; 
+    border-collapse: collapse; 
+    font-size: 11px;
+    table-layout: auto;
+
+    thead {
+      position: sticky;
+      top: 0;
+      background: #f8f9fa;
+      z-index: 10;
+    }
+    thead th { 
+      text-align: left; 
+      color: #718096; 
+      font-weight: 600; 
+      font-size: 9px; 
+      text-transform: uppercase;
+      letter-spacing: .3px; 
+      padding: 10px 6px; /* Tightened from 12px to 6px */
+      border-bottom: 2px solid #cbd5e1; 
+      box-shadow: 0 2px 2px -1px rgba(0,0,0,0.1);
+      white-space: nowrap; 
+    }
+    tbody td { 
+      padding: 8px 6px; /* Tightened from 10px 12px to 8px 6px */
+      border-bottom: 1px solid #edf2f7; 
+      color: #1f2933;
+      vertical-align: middle;
+      white-space: nowrap; 
+    }
+
+    /* Smart text wrapping prevents horizontal scrolling on desktop */
+    tbody td.col-customer,
+    thead th.col-customer {
+      white-space: normal;
+      word-break: break-word;
+      min-width: 130px;
+      max-width: 180px;
+    }
+
+    tbody td.col-submitted-by,
+    thead th.col-submitted-by {
+      white-space: normal;
+      word-break: break-all;
+      min-width: 110px;
+      max-width: 150px;
+    }
+
+    tbody td.col-region,
+    thead th.col-region,
+    tbody td.col-depot,
+    thead th.col-depot {
+      white-space: normal;
+      max-width: 110px;
+    }
+
+    tbody tr:hover { background: #f7fafc; }
+  }
+
+  .clm-link { color: #1c4e9c; text-decoration: none; font-weight: 600; }
+  .clm-cust-name { font-weight: 600; }
+  .clm-cust-code { font-size: 10px; color: #718096; }
+  .clm-no-data { text-align: center; color: #a0aec0; padding: 20px 0; font-style: italic; }
+
+  /* ---- Pagination Controls ---- */
+  .clm-pagination-bottom {
+    display: flex;
+    justify-content: flex-end; 
+    align-items: center;
+    margin-top: 14px;
+    padding: 10px 0;
+    border-top: 1px solid #edf2f7;
+  }
+
+  .clm-pagination-controls {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .clm-page-btn {
+    min-width: 32px;
+    height: 32px;
+    padding: 0 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background: #fff;
+    color: #4a5568;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s ease;
+
+    &amp;:hover:not(:disabled) {
+      background: #eef2f7;
+    }
+
+    &amp;.active {
+      background: #1c4e9c;
+      color: #fff;
+      border-color: #1c4e9c;
+    }
+
+    &amp;:disabled {
+      color: #a0aec0;
+      background: #f8f9fa;
+      border-color: #e2e8f0;
+      cursor: not-allowed;
+    }
+  }
+
+  /* ---- Badges ---- */
+  .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 10px; font-weight: 600; }
+  .status-badge {
+    &amp;.st-submitted { background: #ebf8ff; color: #1c4e9c; }
+    &amp;.st-approved  { background: #e3f4ea; color: #1f7a4d; }
+    &amp;.st-pending   { background: #fffdf0; color: #975a16; }
+    &amp;.st-sendback  { background: #f0e6ff; color: #6b21a8; }
+    &amp;.st-rejected  { background: #fdeaea; color: #e53e3e; }
+    &amp;.st-default   { background: #f8f9fa; color: #4a5568; }
+  }
+  .stage-badge { background: #eef2ff; color: #4f46e5; }
+  .seg-badge {
+    &amp;.seg-cement  { background: #ede9fe; color: #5b21b6; }
+    &amp;.seg-rmc     { background: #e3f4ea; color: #1f7a4d; }
+    &amp;.seg-bpd     { background: #fffdf0; color: #975a16; }
+    &amp;.seg-default { background: transparent; color: #1f2933; font-weight: 500; }
+  }
+
+  /* ===================== Responsive Media Queries ===================== */
+  @media (max-width: 1024px) {
+    .clm-scorecards {
+      grid-template-columns: repeat(3, 1fr);
+    }
+  }
+
+  @media (max-width: 768px) {
+    .clm-filter-row {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
+    }
+    
+    .clm-filter-field {
+      width: 100%;
+      min-width: 100%;
+    }
+
+    .clm-scorecards {
+      grid-template-columns: repeat(2, 1fr);
+    }
+
+    .clm-chart-header {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .clm-legend {
+      margin-left: 0;
+      justify-content: flex-start;
+    }
+
+    .clm-table-wrapper {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
+    }
+
+    .clm-search-box {
+      width: 100%;
+    }
+
+    .clm-table-top-controls {
+      justify-content: space-between;
+      width: 100%;
+    }
+
+    /* Enables horizontal swipe ONLY on small touch screens where 13 columns physically cannot fit */
+    .clm-table-scroll {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .clm-scorecards {
+      grid-template-columns: 1fr;
+    }
+
+    .clm-custom-range {
+      flex-direction: column;
+      align-items: stretch;
+      
+      input[type="date"], .clm-apply-btn {
+        width: 100%;
+      }
+      span {
+        text-align: center;
+      }
+    }
+  }
+}
+/* ---------- Depot Multiselect ---------- */
+.clm-multiselect-field { position: relative; }
+.clm-multiselect-container { position: relative; width: 100%; min-width: 160px; }
+.clm-multiselect-trigger {
+  display: flex; align-items: center; justify-content: space-between; width: 100%; height: 34px; padding: 0 10px;
+  font-size: 13px; border: 1px solid #cbd5e1; border-radius: 4px; background: #ffffff; cursor: pointer;
+  box-sizing: border-box; transition: border-color 0.2s;
+}
+.clm-multiselect-trigger:hover { border-color: #a0aec0; }
+.clm-multiselect-container.open .clm-multiselect-trigger { border-color: #1c4e9c; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+/*.clm-multiselect-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #5b6470; flex: 1; }*/
+.clm-multiselect-text {
+overflow: hidden;
+
+text-overflow: ellipsis;
+
+white-space: nowrap;
+
+color: #1f2933;
+
+flex: 1;
+
+font-weight: 400 !important;
+
+}
+.clm-multiselect-arrow { color: #a0aec0; font-size: 10px; margin-left: 6px; }
+.clm-multiselect-dropdown {
+  position: absolute; top: 34px; left: 0; right: 0; z-index: 60; background: #fff; border: 1px solid #1c4e9c;
+  border-top: none; border-bottom-left-radius: 6px; border-bottom-right-radius: 6px; box-shadow: 0 6px 14px rgba(0,0,0,0.12);
+  max-height: 280px; display: flex; flex-direction: column; overflow: hidden;
+}
+.clm-multiselect-actions { display: flex; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid #e3e6eb; background: #f8f9fa; }
+.clm-multiselect-actions a { font-size: 11px; color: #5b6470; cursor: pointer; font-weight: 600; }
+.clm-multiselect-actions a:hover { text-decoration: underline; }
+.clm-multiselect-search { width: 100%; height: 32px; padding: 0 10px; border: none; border-bottom: 1px solid #e3e6eb; font-size: 12px; outline: none; box-sizing: border-box; }
+.clm-multiselect-list { list-style: none; margin: 0; padding: 4px 0; overflow-y: auto; max-height: 180px; }
+.clm-multiselect-list li { display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer; color: #5b6470; }
+.clm-multiselect-list li:hover { background: #f0f4f9; }
+.clm-multiselect-list li.selected { background: #ebf5ff; }
+.clm-dropdown-empty { color: #a0aec0 !important; cursor: default !important; font-style: italic; padding: 8px 12px; font-size: 13px; }
+.clm-checkbox { width: 14px; height: 14px; border: 2px solid #cbd5e1; border-radius: 3px; display: inline-block; flex-shrink: 0; position: relative; }
+.clm-checkbox.checked { background: #1c4e9c; border-color: #1c4e9c; }
+.clm-checkbox.checked::after {
+  content: ''; position: absolute; left: 3px; top: 1px; width: 4px; height: 7px;
+  border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.clm-option-code { font-size: 13px; color: #5b6470; font-weight: 400 !important; margin-left: 4px; }
+</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>copy_clm_tsh_approval_request</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>copy_clm_tsh_approval_request</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+    var REQUEST_TABLE  = 'x_birl3_clm_clm_new_credit_request';
+    var CUSTOMER_TABLE = 'x_birl3_clm_clm_customer_master1';
+    var AGING_TABLE    = 'x_birl3_clm_clm_aging_snapshot';
+    var ROLE_MAP_TABLE = 'x_birl3_clm_role_user_mapping';
+
+    var F_STATE          = 'state';
+    var F_STAGE          = 'u_choice_1';
+    var F_CUSTOMER_NAME  = 'customer';        
+    var F_REQUESTED_AMT  = 'requested_limit';
+    var F_APPROVED_AMT   = 'approved_limit';
+    var F_SUBMITTED_BY   = 'sys_created_by';
+    var F_SUBMITTED_ON   = 'sys_created_on';
+    var F_REQ_NUMBER     = 'number';
+    var F_DEVIATION      = 'is_deviation';
+
+    var F_REQ_CURRENT_LIMIT   = 'current_credit_limit';
+    var F_REQ_OUTSTANDING_AMT = 'outstanding_amount';
+
+    var F_CUST_CODE      = 'customer_code_sap';
+    var F_CUST_NAME      = 'customer_name';
+    var F_CUST_SEGMENT   = 'segment';
+    var F_CUST_PREVLIMIT = 'current_credit_limit';
+    var F_CUST_PAN       = 'pan';
+    var F_CUST_REGION    = 'region'; 
+    var F_CUST_DEPOT     = 'depot';
+
+    var F_SNAP_MONTH     = 'snapshot_month';
+    var F_SNAP_OUTSTAND  = 'total_outstanding';
+    var F_SNAP_CUSTOMER  = 'customer';        
+
+    var ALLOWED_STATUS_KEYWORDS = ['approv', 'submit', 'return', 'reject'];
+    var monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    function norm(s) { return (s || '').toString().trim().toUpperCase().replace(/\s+/g, ' '); }
+    function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
+
+    var currentUserId   = gs.getUserID();
+    var currentUserName = gs.getUserName();
+
+    // =========================================================
+    // Role -> Segment mapping. A user can be mapped to more than one
+    // of these roles (e.g. TSH for Cement AND TSM for RMC) — in that
+    // case they see every segment they're mapped to, and the Depot
+    // list re-scopes to whichever segment is currently selected.
+    // =========================================================
+    var AUTHORIZED_ROLES = ['TSH', 'TSM', 'TSH_BPD'];
+    var ROLE_SEGMENT_LABEL = {
+        'TSH':     'Cement',
+        'TSM':     'RMC',
+        'TSH_BPD': 'BPD'
+    };
+
+    // =========================================================
+    // STEP 0: Identify roles, segments, and depots for this user.
+    // =========================================================
+    var isAuthorized = false;
+    var depotSetForUser = {};   // ALL depots across every matched role (fallback)
+    var segmentDepotMap = {};   // segmentLabel -> { depotCode: true, ... }
+    var userSegmentSet  = {};   // segmentLabel -> true
+
+    var grRole = new GlideRecord(ROLE_MAP_TABLE);
+    var qcRole = grRole.addQuery('u_user', currentUserId);
+    qcRole.addOrCondition('u_user', currentUserName);
+    grRole.addQuery('u_role', 'IN', AUTHORIZED_ROLES);
+    grRole.query();
+
+    while (grRole.next()) {
+        isAuthorized = true;
+
+        var roleVal  = grRole.getValue('u_role');
+        var segLabel = ROLE_SEGMENT_LABEL[roleVal];
+        var depotVal = grRole.getValue('u_depot');
+
+        if (depotVal) depotSetForUser[depotVal] = true;
+
+        if (segLabel) {
+            userSegmentSet[segLabel] = true;
+            if (depotVal) {
+                if (!segmentDepotMap[segLabel]) segmentDepotMap[segLabel] = {};
+                segmentDepotMap[segLabel][depotVal] = true;
+            }
+        }
+    }
+
+    data.isAuthorized = isAuthorized;
+
+    if (!isAuthorized) {
+        data.accessMessage = 'You are not mapped to the TSH, TSM, or TSH_BPD role. Contact your administrator if you believe this is incorrect.';
+        data.scorecards = { submitted: 0, approved: 0, sendback: 0, rejected: 0, deviated: 0 };
+        data.chart = { year: new Date().getFullYear(), months: [], series: {}, max: 1 };
+        data.requests = [];
+        data.filterOpts = { regions: [], depots: [], segments: [] };
+        data.statusOptions = [];
+        data.periodLabel = '';
+        return;
+    }
+
+    // =========================================================
+    // STEP 1: Resolve which segments this user can see, and pick the
+    // active one (from input, or default to the first one they have).
+    // =========================================================
+    var userSegmentList = Object.keys(userSegmentSet).sort();
+
+    data.filters = (input && input.filters) ? input.filters : (data.filters || {});
+
+    var selectedSegment = '';
+    if (data.filters.segment && userSegmentList.indexOf(data.filters.segment) > -1) {
+        selectedSegment = data.filters.segment;
+    } else if (userSegmentList.length > 0) {
+        selectedSegment = userSegmentList[0];
+    }
+    data.selectedSegment = selectedSegment;
+
+    // =========================================================
+    // STEP 2: Resolve the raw "segment" field value on the customer
+    // master table that corresponds to our label (Cement/RMC/BPD),
+    // since addQuery() filters on the raw stored value, not the
+    // display value.
+    // =========================================================
+    function buildSegmentValueMap() {
+        var map = {}; // lowercased display label -> raw stored value
+        var ga = new GlideAggregate(CUSTOMER_TABLE);
+        ga.addAggregate('COUNT', F_CUST_SEGMENT);
+        ga.groupBy(F_CUST_SEGMENT);
+        ga.query();
+        while (ga.next()) {
+            var rawVal = ga.getValue(F_CUST_SEGMENT);
+            if (!rawVal) continue;
+            var dispVal = ga.getDisplayValue(F_CUST_SEGMENT);
+            if (dispVal) {
+                map[String(dispVal).toLowerCase()] = rawVal;
+            }
+        }
+        return map;
+    }
+
+    var segmentValueMap = buildSegmentValueMap();
+    var selectedSegmentRawValue = selectedSegment
+        ? (segmentValueMap[selectedSegment.toLowerCase()] || selectedSegment)
+        : '';
+
+    // =========================================================
+    // STEP 3: Depot list scoped to the SELECTED segment (falls back to
+    // the full combined depot set if this segment has none recorded).
+    // =========================================================
+    var depotSetForSegment = segmentDepotMap[selectedSegment] || depotSetForUser;
+    var userDepotList = Object.keys(depotSetForSegment).sort();
+
+    // =========================================================
+    // Resolve depot_name(s) — same pattern as TSH Portfolio: query
+    // customer master for records whose "depot" matches, read
+    // depot_name off that match, only locking in a genuine non-empty
+    // name (never an empty/blank first match), with a full-table
+    // fallback scan for whitespace/case mismatches.
+    // =========================================================
+    var depotNameMap = {};
+
+    if (userDepotList.length > 0) {
+        var grDepotName = new GlideRecord(CUSTOMER_TABLE);
+        grDepotName.addQuery('depot', 'IN', userDepotList);
+        grDepotName.query();
+
+        while (grDepotName.next()) {
+            var dCode = grDepotName.getValue('depot');
+            if (!dCode) continue;
+            var trimmedCode = String(dCode).trim();
+
+            if (depotNameMap[trimmedCode]) continue;
+
+            var resolvedName = grDepotName.getValue('depot_name') || grDepotName.getDisplayValue('depot_name') || '';
+            resolvedName = String(resolvedName).trim();
+
+            if (resolvedName && resolvedName !== trimmedCode) {
+                depotNameMap[trimmedCode] = resolvedName;
+            }
+        }
+
+        var stillMissing = userDepotList.filter(function(d) { return !depotNameMap[String(d).trim()]; });
+        if (stillMissing.length > 0) {
+            var grAll = new GlideRecord(CUSTOMER_TABLE);
+            grAll.query();
+            var normalizedTargets = stillMissing.map(function(d) { return String(d).trim().toLowerCase(); });
+            while (grAll.next()) {
+                var candidate = String(grAll.getValue('depot') || '').trim();
+                var idx = normalizedTargets.indexOf(candidate.toLowerCase());
+                if (idx === -1) continue;
+
+                var origCode = stillMissing[idx];
+                if (depotNameMap[origCode]) continue;
+
+                var nm = grAll.getValue('depot_name') || grAll.getDisplayValue('depot_name') || '';
+                nm = String(nm).trim();
+                if (nm && nm !== candidate) {
+                    depotNameMap[origCode] = nm;
+                }
+            }
+        }
+
+        userDepotList.forEach(function(d) {
+            if (!depotNameMap[d]) depotNameMap[d] = d;
+        });
+    }
+
+    // =========================================================
+    // Depot filter options are {value, label} objects (multiselect).
+    // =========================================================
+    var depotFilterOpts = userDepotList.map(function(d) {
+        return { value: d, label: depotNameMap[d] || d };
+    });
+    depotFilterOpts.sort(function(a, b) { return String(a.label).localeCompare(String(b.label)); });
+
+    // =========================================================
+    // Regions option list (unused by current HTML — the Region
+    // filter is commented out — kept for parity, scoped to the full
+    // combined depot set across all of the user's roles).
+    // =========================================================
+    var fullDepotList = Object.keys(depotSetForUser).sort();
+    function getDistinctRegions() {
+        var arr = [];
+        var ga = new GlideAggregate(CUSTOMER_TABLE);
+        if (fullDepotList.length > 0) {
+            ga.addQuery('depot', 'IN', fullDepotList);
+        } else {
+            ga.addQuery('sys_id', 'IN', ['none']);
+        }
+        ga.addAggregate('GROUP_BY', F_CUST_REGION);
+        ga.query();
+        while (ga.next()) {
+            var val = ga.getValue(F_CUST_REGION);
+            if (val) arr.push(val);
+        }
+        return arr.sort();
+    }
+
+    data.filterOpts = {
+        regions: getDistinctRegions(),
+        depots: depotFilterOpts,
+        segments: userSegmentList
+    };
+
+    var regionFilter  = data.filters.region || '';
+    var statusFilter  = data.filters.status || '';
+
+    // =========================================================
+    // Depot filter is an ARRAY of raw depot codes (multiselect).
+    // Empty selection = All Depots.
+    // =========================================================
+    function normalizeArrayTSH(val) {
+        if (typeof val === 'string') {
+            try { val = JSON.parse(val); }
+            catch (e) { val = val ? [val] : []; }
+        }
+        if (!Array.isArray(val)) { val = val ? [val] : []; }
+        return val;
+    }
+    var depotFilterArr = normalizeArrayTSH(data.filters.depots);
+    var selectedDepotsForQuery;
+    if (depotFilterArr.length > 0) {
+        selectedDepotsForQuery = depotFilterArr.filter(function(d) { return userDepotList.indexOf(d) > -1; });
+        if (selectedDepotsForQuery.length === 0) selectedDepotsForQuery = userDepotList;
+    } else {
+        selectedDepotsForQuery = userDepotList;
+    }
+
+    // ===================================================================
+    // Period is ALWAYS a specific 'YYYY-MM' month (last 6 months window).
+    // CHANGED: fallback (when no period passed by client) now resolves to
+    // the CURRENT month instead of last month.
+    // ===================================================================
+    function buildPeriodRangeTSH(periodStr) {
+        var startGdt = new GlideDateTime();
+        var endGdt   = new GlideDateTime();
+
+        var periodMonthMatch = /^(\d{4})-(\d{2})$/.exec(periodStr || '');
+        var pYear, pMonth; // pMonth 0-indexed
+        if (periodMonthMatch) {
+            pYear = parseInt(periodMonthMatch[1], 10);
+            pMonth = parseInt(periodMonthMatch[2], 10) - 1;
+        } else {
+            // CHANGED: fallback is now the CURRENT month, not last month.
+            var now = new Date();
+            pYear = now.getFullYear();
+            pMonth = now.getMonth();
+        }
+
+        var dim = daysInMonth(pYear, pMonth + 1);
+        startGdt.setValue(pYear + '-' + pad(pMonth + 1) + '-01 00:00:00');
+        endGdt.setValue(pYear + '-' + pad(pMonth + 1) + '-' + pad(dim) + ' 23:59:59');
+
+        var label = monthNames[pMonth] + ' ' + pYear;
+        var value = pYear + '-' + pad(pMonth + 1);
+
+        return { start: startGdt, end: endGdt, label: label, value: value };
+    }
+
+    var period = data.filters.period || '';
+
+    // --- Helper: Apply UI and Security Filters ---
+    function applyAppFilters(gr) {
+        if (userDepotList.length > 0) {
+            gr.addQuery('customer.depot', 'IN', userDepotList);
+        } else {
+            gr.addQuery('customer.depot', 'IN', ['none']);
+        }
+
+        var qcInit = gr.addQuery('initiator', currentUserId);
+        qcInit.addOrCondition('initiator', currentUserName);
+
+        if (regionFilter) gr.addQuery('customer.region', regionFilter);
+
+        // Multiselect depot filter — only narrow the query when
+        // the user has selected a strict subset of their available depots.
+        if (selectedDepotsForQuery.length > 0 && selectedDepotsForQuery.length !== userDepotList.length) {
+            gr.addQuery('customer.depot', 'IN', selectedDepotsForQuery);
+        }
+
+        // Segment is always scoped to the user's selected/role segment —
+        // there's no "All Segments" option.
+        if (selectedSegmentRawValue) gr.addQuery('customer.segment', selectedSegmentRawValue);
+    }
+
+    // ===== APPROVAL CHAIN DEFINITIONS ===== (unchanged)
+    var CEMENT_CHAIN = [
+      { label: 'TSH',     field: 'u_approver_tsh'     },
+      { label: 'RHM',     field: 'u_approver_rhm'     },
+      { label: 'ZHM',     field: 'u_approver_zhm'     },
+      { label: 'ZCH',     field: 'u_approver_zch'     },
+      { label: 'HO',      field: 'u_approver_ho'      },
+      { label: 'NSH',     field: 'u_approver_nsh'     },
+      { label: 'NSH CCH', field: 'u_approver_nsh_cch' },
+      { label: 'CMO',     field: 'u_approver_cmo'     },
+      { label: 'CMO CFO', field: 'u_approver_cmo_cfo' },
+      { label: 'MD',      field: 'u_approver_md'      }
+    ];
+
+    var RMC_CHAIN = [
+      { label: 'TSM',          field: 'u_approver_tsm'          },
+      { label: 'RH CH RMC',    field: 'u_approver_rh_ch_rmc'      },
+      { label: 'ZH RMC',       field: 'u_approver_zh_rmc'         },
+      { label: 'ZCH',          field: 'u_approver_zch'            },
+      { label: 'HO',           field: 'u_approver_ho'             },
+      { label: 'HEAD RMC',     field: 'u_approver_head_rmc'       },
+      { label: 'HEAD KEY CH',  field: 'u_approver_head_key_ch_rmc' },
+      { label: 'HEAD KEY CCH', field: 'u_approver_head_key_cch'   },
+      { label: 'BH',           field: 'u_approver_bh'             },
+      { label: 'BH CFO',       field: 'u_approver_bh_cfo'         },
+      { label: 'MD',           field: 'u_approver_md'             }
+    ];
+
+    var BPD_CHAIN = [
+      { label: 'TSH BPD',  field: 'u_approver_tsh_bpd'  },
+      { label: 'ZH BPD',   field: 'u_approver_zh_bpd'   },
+      { label: 'HSBPD',    field: 'u_approver_hsbpd'    },
+      { label: 'ZCH',      field: 'u_approver_zch'      },
+      { label: 'HO',       field: 'u_approver_ho'       },
+      { label: 'HBPD',     field: 'u_approver_hbpd'     },
+      { label: 'CCH HBPD', field: 'u_approver_cch_hbpd' },
+      { label: 'BH',       field: 'u_approver_bh'       },
+      { label: 'CFO',      field: 'u_approver_cfo'      },
+      { label: 'MD',       field: 'u_approver_md'       }
+    ];
+
+    function getPendingAtStep(gr) {
+      var segmentRaw = (gr.getValue('segment') || '').toLowerCase().trim();
+      var segment = segmentRaw.split('|')[0].trim();
+      var chain = (segment === 'rmc') ? RMC_CHAIN : (segment === 'bpd') ? BPD_CHAIN : CEMENT_CHAIN;
+
+      var mapBySysId = {};
+      var lastSubmitted = gr.getValue('u_last_submitted_on');
+      
+      var saGR = new GlideRecord('sysapproval_approver');
+      var saQuery = saGR.addQuery('sysapproval', gr.sys_id);
+      saQuery.addOrCondition('document_id', gr.sys_id);
+      if (lastSubmitted) saGR.addQuery('sys_created_on', '>=', lastSubmitted);
+      saGR.orderByDesc('sys_updated_on');
+      saGR.query();
+
+      while (saGR.next()) {
+        var aSysId = saGR.getValue('approver') + '';
+        var aRaw   = (saGR.getValue('state') + '').toLowerCase().trim();
+        var aSt    = (aRaw === 'approved') ? 'approved' : (aRaw === 'rejected') ? 'rejected' : (aRaw === 'cancelled') ? 'returned' : 'pending';
+        if (typeof mapBySysId[aSysId] === 'undefined') mapBySysId[aSysId] = aSt;
+      }
+
+      for (var i = 0; i < chain.length; i++) {
+        var entry = chain[i];
+        var rawVal = (gr.getValue(entry.field) || '').trim();
+        if (!rawVal || rawVal === '' || rawVal === 'null' || rawVal === 'undefined') continue;
+        
+        var stepState = mapBySysId[rawVal] || 'pending';
+        if (stepState === 'pending') {
+          var approverName = '';
+          try { approverName = gr[entry.field].getDisplayValue() + ''; } catch(e) { approverName = entry.label; }
+          return approverName || entry.label;
+        }
+      }
+      return ''; 
+    }
+
+    function monthRangeQuery(gr, dateField, year, month) {
+      var startGdt = new GlideDateTime();
+      startGdt.setValue(year + '-' + pad(month) + '-01 00:00:00');
+      var endMonth = month + 1, endYear = year;
+      if (endMonth > 12) { endMonth = 1; endYear = year + 1; }
+      var endGdt = new GlideDateTime();
+      endGdt.setValue(endYear + '-' + pad(endMonth) + '-01 00:00:00');
+      gr.addQuery(dateField, '>=', startGdt);
+      gr.addQuery(dateField, '<', endGdt);
+    }
+
+    function getFilteredStatusOptions(table, field) {
+      var arr = [], seen = {};
+      var gr = new GlideRecord('sys_choice');
+      gr.addQuery('name', table);
+      gr.addQuery('element', field);
+      gr.addQuery('inactive', false);
+      gr.orderBy('sequence');
+      gr.query();
+      while (gr.next()) {
+        var v = gr.getValue('value');
+        var lbl = gr.getValue('label') || '';
+        if (!v || seen[v]) continue;
+        var lower = lbl.toLowerCase();
+        if (!ALLOWED_STATUS_KEYWORDS.some(function(kw) { return lower.indexOf(kw) > -1; })) continue;
+        seen[v] = true;
+        arr.push({ value: v, label: lbl });
+      }
+      return arr;
+    }
+
+    function formatAmt(v) {
+      if (v === undefined || v === null || v === '') return '';
+      var n = parseFloat(v);
+      if (isNaN(n)) return v;
+      return '\u20B9' + (n / 100000).toFixed(1) + 'L';
+    }
+
+    function buildCustomerMap() {
+      var map = {};
+      var gr = new GlideRecord(CUSTOMER_TABLE);
+      gr.query();
+      while (gr.next()) {
+        var sysId = gr.getUniqueValue();
+        var entry = {
+          sysId: sysId,
+          code: gr.getValue(F_CUST_CODE),
+          name: gr.getValue(F_CUST_NAME),
+          segment: gr.getDisplayValue(F_CUST_SEGMENT),
+          prevLimit: gr.getValue(F_CUST_PREVLIMIT),
+          pan: gr.getValue(F_CUST_PAN),
+          region: gr.getDisplayValue(F_CUST_REGION),
+          depot: gr.getDisplayValue(F_CUST_DEPOT)
+        };
+        map[sysId] = entry;
+        var key = norm(entry.name);
+        if (key) map[key] = entry;
+      }
+      return map;
+    }
+
+    function buildSnapshotMap() {
+      var map = {};
+      var gr = new GlideRecord(AGING_TABLE);
+      gr.query();
+      while (gr.next()) {
+        var custSysId = gr.getValue(F_SNAP_CUSTOMER);
+        if (!custSysId) continue;
+        var monthVal = gr.getValue(F_SNAP_MONTH) || '';
+        var outVal = gr.getValue(F_SNAP_OUTSTAND);
+        if (!map[custSysId] || monthVal > map[custSysId].month) {
+          map[custSysId] = { month: monthVal, outstanding: outVal };
+        }
+      }
+      return map;
+    }
+
+    function resolveCustomer(reqGr, custMap) {
+      var rawVal  = reqGr.getValue(F_CUSTOMER_NAME);
+      var dispVal = reqGr.getDisplayValue(F_CUSTOMER_NAME);
+      if (rawVal && custMap[rawVal]) return custMap[rawVal];
+      var key = norm(dispVal);
+      if (key && custMap[key]) return custMap[key];
+      if (key) {
+        for (var k in custMap) {
+          if (k.length === 32) continue;
+          if (k.indexOf(key) > -1 || key.indexOf(k) > -1) return custMap[k];
+        }
+      }
+      return null;
+    }
+
+    function resolveOutstanding(custEntry, snapMap) {
+      if (!custEntry || !custEntry.sysId) return '';
+      var hit = snapMap[custEntry.sysId];
+      return hit ? hit.outstanding : '';
+    }
+
+    function buildLatestRequestValuesMap(custMap) {
+        var map = {};
+        var gr = new GlideRecord(REQUEST_TABLE);
+        gr.orderByDesc(F_SUBMITTED_ON);
+        gr.query();
+        while (gr.next()) {
+            var cust = resolveCustomer(gr, custMap);
+            if (!cust || !cust.sysId) continue;
+            if (map[cust.sysId]) continue;
+            map[cust.sysId] = {
+                currentLimit: gr.getValue(F_REQ_CURRENT_LIMIT),
+                outstanding: gr.getValue(F_REQ_OUTSTANDING_AMT)
+            };
+        }
+        return map;
+    }
+
+    var range = buildPeriodRangeTSH(period);
+    data.periodLabel = range.label;
+    data.selectedPeriod = range.value;
+    data.statusOptions = getFilteredStatusOptions(REQUEST_TABLE, F_STATE);
+    data.scorecards = { submitted: 0, approved: 0, sendback: 0, rejected: 0, deviated: 0 };
+
+    // --- Scorecards Aggregate ---
+    var agg = new GlideAggregate(REQUEST_TABLE);
+    agg.addAggregate('COUNT', F_STATE);
+    agg.groupBy(F_STATE);
+    agg.addQuery(F_SUBMITTED_ON, '>=', range.start);
+    agg.addQuery(F_SUBMITTED_ON, '<=', range.end);
+    applyAppFilters(agg);
+    agg.query();
+    
+    while (agg.next()) {
+      var st = (agg.getValue(F_STATE) || '').toLowerCase();
+      var cnt = parseInt(agg.getAggregate('COUNT', F_STATE), 10) || 0;
+      if (st.indexOf('submit') > -1) data.scorecards.submitted += cnt;
+      else if (st.indexOf('approv') > -1) data.scorecards.approved += cnt;
+      else if (st.indexOf('reject') > -1) data.scorecards.rejected += cnt;
+    }
+
+    var aggSB = new GlideAggregate(REQUEST_TABLE);
+    aggSB.addAggregate('COUNT', F_STATE);
+    aggSB.groupBy(F_STATE);
+    applyAppFilters(aggSB);
+    aggSB.query();
+    
+    while (aggSB.next()) {
+      var st2 = (aggSB.getValue(F_STATE) || '').toLowerCase();
+      if (st2.indexOf('send') > -1 || st2.indexOf('return') > -1) {
+        data.scorecards.sendback += parseInt(aggSB.getAggregate('COUNT', F_STATE), 10) || 0;
+      }
+    }
+
+    var devGr = new GlideAggregate(REQUEST_TABLE);
+    devGr.addQuery(F_DEVIATION, true);
+    devGr.addQuery(F_SUBMITTED_ON, '>=', range.start);
+    devGr.addQuery(F_SUBMITTED_ON, '<=', range.end);
+    devGr.addAggregate('COUNT');
+    applyAppFilters(devGr);
+    devGr.query();
+    
+    if (devGr.next()) {
+      data.scorecards.deviated = parseInt(devGr.getAggregate('COUNT'), 10) || 0;
+    }
+
+    // --- Chart Aggregate --- (unchanged: fixed to the current calendar year)
+    var nowStr2 = new GlideDateTime().getValue();
+    var chartYear = parseInt(nowStr2.substr(0, 4), 10);
+    var monthKeys = [];
+    for (var mm = 1; mm <= 12; mm++) monthKeys.push(chartYear + '-' + pad(mm));
+
+    var series = { submitted: [], approved: [], pending: [], sendback: [], rejected: [] };
+    var maxVal = 1;
+
+    monthKeys.forEach(function(mKey) {
+      var parts = mKey.split('-');
+      var y = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+      var counts = { submitted: 0, approved: 0, pending: 0, sendback: 0, rejected: 0 };
+      
+      var ga = new GlideAggregate(REQUEST_TABLE);
+      ga.addAggregate('COUNT', F_STATE);
+      ga.groupBy(F_STATE);
+      monthRangeQuery(ga, F_SUBMITTED_ON, y, m);
+      applyAppFilters(ga);
+      ga.query();
+      
+      while (ga.next()) {
+        var s3 = (ga.getValue(F_STATE) || '').toLowerCase();
+        var c3 = parseInt(ga.getAggregate('COUNT', F_STATE), 10) || 0;
+        if (s3.indexOf('submit') > -1) counts.submitted += c3;
+        else if (s3.indexOf('approv') > -1) counts.approved += c3;
+        else if (s3.indexOf('pend') > -1) counts.pending += c3;
+        else if (s3.indexOf('send') > -1 || s3.indexOf('return') > -1) counts.sendback += c3;
+        else if (s3.indexOf('reject') > -1) counts.rejected += c3;
+      }
+      Object.keys(counts).forEach(function(k) {
+        series[k].push(counts[k]);
+        if (counts[k] > maxVal) maxVal = counts[k];
+      });
+    });
+
+    data.chart = {
+      year: chartYear,
+      months: monthKeys.map(function(mKey) { return monthNames[parseInt(mKey.split('-')[1], 10) - 1]; }),
+      series: series,
+      max: maxVal
+    };
+
+    // --- Main List Data ---
+    var custMap = buildCustomerMap();
+    var snapMap = buildSnapshotMap();
+    var latestReqMap = buildLatestRequestValuesMap(custMap);
+    data.requests = [];
+
+    var reqGr = new GlideRecord(REQUEST_TABLE);
+    if (statusFilter) reqGr.addQuery(F_STATE, statusFilter);
+    reqGr.addQuery(F_SUBMITTED_ON, '>=', range.start);
+    reqGr.addQuery(F_SUBMITTED_ON, '<=', range.end);
+    applyAppFilters(reqGr);
+    reqGr.orderByDesc(F_SUBMITTED_ON);
+    reqGr.setLimit(500);
+    reqGr.query();
+
+    while (reqGr.next()) {
+      var cust = resolveCustomer(reqGr, custMap);
+
+      var custCode = '', custName = reqGr.getDisplayValue(F_CUSTOMER_NAME), segment = '', pan = '', region = '';
+      if (cust) {
+        custCode  = cust.code;
+        custName  = cust.name || custName;
+        segment   = cust.segment;
+        pan       = cust.pan;
+        region    = cust.region;
+      }
+
+      var latestVals = (cust && cust.sysId) ? latestReqMap[cust.sysId] : null;
+      var prevLimit = latestVals ? latestVals.currentLimit : '';
+      var outstanding = latestVals ? latestVals.outstanding : '';
+
+      var reqNumber = reqGr.getDisplayValue(F_REQ_NUMBER);
+      var pendingAtStep = getPendingAtStep(reqGr);
+      var isDev = (reqGr.getValue(F_DEVIATION) == '1' || reqGr.getValue(F_DEVIATION) == 'true');
+      
+      var statVal = reqGr.getValue(F_STATE);
+      var statLabel = reqGr.getDisplayValue(F_STATE);
+      if ((statVal || '').toLowerCase().indexOf('submit') > -1) {
+          statLabel = 'Pending';
+      }
+
+      // depot on each row shown as name — resolve via depotNameMap when
+      // the raw customer.depot code is in our resolved map, else fall
+      // back to whatever the customer master's display value already was.
+      var rowDepot = cust ? cust.depot : '';
+      if (rowDepot && depotNameMap[rowDepot]) {
+          rowDepot = depotNameMap[rowDepot];
+      }
+
+      data.requests.push({
+        requestCode:  reqNumber || reqGr.getUniqueValue(),
+        customerCode: custCode,
+        customerName: custName,
+        pan:          pan,
+        segment:      segment,
+        region:       region,
+        depot:        rowDepot,
+        status:       statVal,
+        statusLabel:  statLabel,
+        isDeviation:  isDev,
+        stage:        pendingAtStep,
+        submittedBy:  reqGr.getDisplayValue(F_SUBMITTED_BY),
+        submittedOn:  reqGr.getDisplayValue(F_SUBMITTED_ON),
+        prevLimit:    formatAmt(prevLimit),
+        requested:    formatAmt(reqGr.getValue(F_REQUESTED_AMT)),
+        approved:     formatAmt(reqGr.getValue(F_APPROVED_AMT)),
+        outstanding:  formatAmt(outstanding)
+      });
+    }
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-15 16:56:23</sys_created_on>
+        <sys_id>f165bbda97c2c310be31fa17f053af45</sys_id>
+        <sys_mod_count>12</sys_mod_count>
+        <sys_name>copy_clm_tsh_approval_request</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_f165bbda97c2c310be31fa17f053af45</sys_update_name>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-08-13 08:41:54</sys_updated_on>
+        <template><![CDATA[<div class="clm-dash" ng-cloak>
+
+  <!-- ===================== Filters ===================== -->
+  <div class="clm-filter-card">
+    <div class="clm-filter-row">
+
+      <!-- REGION -->
+      <!----<label class="clm-filter-field clm-custom-dropdown" ng-class="{open: c.dropdownOpen.region}">
+        <span>Region</span>
+        <div class="clm-dropdown-wrapper">
+          <input type="text" class="form-control clm-dropdown-input" autocomplete="off"
+                 ng-model="c.filters.region"
+                 ng-focus="c.openDropdown('region')"
+                 ng-blur="c.closeDropdown('region')"
+                 ng-change="c.onFilterInput('region')"
+                 placeholder="Search Region...">
+          <i class="fa fa-times clm-dropdown-clear" ng-if="c.filters.region" ng-mousedown="c.clearFilter('region', $event)"></i>
+          <ul class="clm-dropdown-list" ng-if="c.dropdownOpen.region">
+            <li ng-repeat="r in c.getFilteredOptions('region')"
+                ng-mousedown="c.selectOption('region', r)"
+                ng-class="{active: c.filters.region === r}">{{r}}</li>
+            <li class="clm-dropdown-empty" ng-if="c.getFilteredOptions('region').length === 0">No matches</li>
+          </ul>
+        </div>
+      </label>---!>
+
+      <!-- DEPOT (MULTISELECT — same pattern as TSH Portfolio, with All Depots default) -->
+      <label class="clm-filter-field clm-multiselect-field">
+        <span>Depot</span>
+        <div class="clm-multiselect-container" id="clmApprovalDepotMultiselect" ng-class="{open: c.depotDropdownOpen}">
+          <div class="clm-multiselect-trigger" ng-click="$event.stopPropagation(); c.depotDropdownOpen ? c.closeDepotDropdown() : c.openDepotDropdown()">
+            <span class="clm-multiselect-text">{{c.getDepotDisplayText()}}</span>
+            <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+          </div>
+          <div class="clm-multiselect-dropdown" ng-if="c.depotDropdownOpen" ng-click="$event.stopPropagation()">
+            <div class="clm-multiselect-actions">
+              <a ng-click="c.selectAllDepots()">Select All</a>
+              <a ng-click="c.clearAllDepots()">Clear</a>
+            </div>
+            <input type="text" class="clm-multiselect-search" ng-model="c.depotSearch" placeholder="Search depots...">
+            <ul class="clm-multiselect-list">
+              <li ng-repeat="d in c.getFilteredDepots()"
+                  ng-click="c.toggleDepot(d)"
+                  ng-class="{selected: c.isDepotSelected(d)}">
+                <span class="clm-checkbox" ng-class="{checked: c.isDepotSelected(d)}"></span>
+                {{d.label}} <span class="clm-option-code" ng-if="d.label !== d.value">({{d.value}})</span>
+              </li>
+              <li class="clm-dropdown-empty" ng-if="c.getFilteredDepots().length === 0">No matches</li>
+            </ul>
+          </div>
+        </div>
+      </label>
+
+      <!-- SEGMENT (only the segments this user's roles map to — no "All Segments") -->
+      <label class="clm-filter-field">
+        <span>Segment</span>
+        <select class="form-control" ng-model="c.filters.segment" ng-change="c.applyFilters()">
+          <option ng-repeat="s in c.data.filterOpts.segments" value="{{s}}">{{s}}</option>
+        </select>
+      </label>
+
+      <!-- STATUS -->
+      <label class="clm-filter-field">
+        <span>Status</span>
+        <select class="form-control" ng-model="c.filters.status" ng-change="c.applyFilters()">
+          <option value="">All Statuses</option>
+          <option ng-repeat="s in data.statusOptions" value="{{s.value}}">{{s.label === 'Submitted' ? 'Pending' : s.label}}</option>
+        </select>
+      </label>
+
+      <!-- CHANGED: Period is now a dynamic "last 6 months" list, same
+           plain-select style/font as Segment/Status, defaulting to the
+           current month. "Custom Range" has been removed. -->
+      <label class="clm-filter-field" style="flex: 1; min-width: 160px;">
+        <span style="font-size: 13px; color: #1f2933; display: block; margin-bottom: 4px;">Period</span>
+        <select class="form-control" ng-model="c.filters.period" ng-change="c.applyFilters()">
+          <option ng-repeat="p in c.last6Months" value="{{p.value}}">{{p.label}}</option>
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <!-- ===================== Clickable Scorecards with Info Icons ===================== -->
+  <div class="clm-scorecards">
+    <div class="clm-card clm-card-blue" style="cursor: pointer;" ng-click="c.setKpiFilter('pending')" ng-style="c.kpiFilter === 'pending' ? {'box-shadow': '0 0 0 2px #1c4e9c', 'background-color': '#ebf8ff'} : {}">
+      <i class="fa fa-info-circle clm-kpi-info" title="Filter by Pending" ng-click="c.setKpiFilter('pending'); $event.stopPropagation();"></i>
+      <div class="clm-card-id">REQUESTS PENDING</div>
+      <div class="clm-card-value">{{data.scorecards.submitted}}</div>
+      <div class="clm-card-sub">New in {{data.periodLabel}}</div>
+    </div>
+    <div class="clm-card clm-card-green" style="cursor: pointer;" ng-click="c.setKpiFilter('approved')" ng-style="c.kpiFilter === 'approved' ? {'box-shadow': '0 0 0 2px #38a169', 'background-color': '#e3f4ea'} : {}">
+      <i class="fa fa-info-circle clm-kpi-info" title="Filter by Approved" ng-click="c.setKpiFilter('approved'); $event.stopPropagation();"></i>
+      <div class="clm-card-id">APPROVED</div>
+      <div class="clm-card-value">{{data.scorecards.approved}}</div>
+      <div class="clm-card-sub">Final approval received</div>
+    </div>
+    <div class="clm-card clm-card-purple" style="cursor: pointer;" ng-click="c.setKpiFilter('sendback')" ng-style="c.kpiFilter === 'sendback' ? {'box-shadow': '0 0 0 2px #7c5cf0', 'background-color': '#f0e6ff'} : {}">
+      <i class="fa fa-info-circle clm-kpi-info" title="Filter by Send-Back" ng-click="c.setKpiFilter('sendback'); $event.stopPropagation();"></i>
+      <div class="clm-card-id">SEND-BACK</div>
+      <div class="clm-card-value">{{data.scorecards.sendback}}</div>
+      <div class="clm-card-sub">Awaiting resubmission</div>
+    </div>
+    <div class="clm-card clm-card-red" style="cursor: pointer;" ng-click="c.setKpiFilter('rejected')" ng-style="c.kpiFilter === 'rejected' ? {'box-shadow': '0 0 0 2px #e53e3e', 'background-color': '#fdeaea'} : {}">
+      <i class="fa fa-info-circle clm-kpi-info" title="Filter by Rejected" ng-click="c.setKpiFilter('rejected'); $event.stopPropagation();"></i>
+      <div class="clm-card-id">REJECTED</div>
+      <div class="clm-card-value">{{data.scorecards.rejected}}</div>
+      <div class="clm-card-sub">Declined in {{data.periodLabel}}</div>
+    </div>
+    <div class="clm-card clm-card-orange" style="cursor: pointer;" ng-click="c.setKpiFilter('deviated')" ng-style="c.kpiFilter === 'deviated' ? {'box-shadow': '0 0 0 2px #dd6b20', 'background-color': '#fffdf0'} : {}">
+      <i class="fa fa-info-circle clm-kpi-info" title="Filter by Deviated" ng-click="c.setKpiFilter('deviated'); $event.stopPropagation();"></i>
+      <div class="clm-card-id">DEVIATED REQUESTS</div>
+      <div class="clm-card-value">{{data.scorecards.deviated}}</div>
+      <div class="clm-card-sub">Flagged in {{data.periodLabel}}</div>
+    </div>
+  </div>
+
+  <!-- ===================== Chart ===================== -->
+  <div class="clm-chart-panel">
+    <div class="clm-chart-header">
+      <span class="clm-chart-title">Approval Pipeline — State-wise ({{data.chart.year}})</span>
+      <span class="clm-chart-badge">Multi-Line</span>
+      <div class="clm-legend">
+        <span class="legend-item"><i class="dot blue"></i>Pending</span>
+        <span class="legend-item"><i class="dot green"></i>Approved</span>
+        <span class="legend-item"><i class="dot orange"></i>Stage Pending</span>
+        <span class="legend-item"><i class="dot purple"></i>Send-Back</span>
+        <span class="legend-item"><i class="dot red"></i>Rejected</span>
+      </div>
+    </div>
+    <div class="clm-chart-body" ng-mouseleave="c.onMouseLeaveChart()">
+      <svg viewBox="0 0 900 260" preserveAspectRatio="none" class="clm-svg" ng-if="data.chart.months.length">
+        <line ng-repeat="m in data.chart.months track by $index"
+              x1="{{c.chartX($index)}}" y1="0" x2="{{c.chartX($index)}}" y2="220"
+              class="grid-line"></line>
+
+        <g class="y-axis-labels">
+          <text ng-repeat="tick in c.yAxisTicks"
+                ng-attr-x="25"
+                ng-attr-y="{{tick.y + 4}}"
+                text-anchor="end"
+                fill="#718096"
+                style="font-size: 11px;">
+            {{tick.label}}
+          </text>
+        </g>
+
+        <polyline class="line-blue"    points="{{c.linePoints('submitted')}}"></polyline>
+        <polyline class="line-green"   points="{{c.linePoints('approved')}}"></polyline>
+        <polyline class="line-orange"  points="{{c.linePoints('pending')}}"></polyline>
+        <polyline class="line-purple"  points="{{c.linePoints('sendback')}}"></polyline>
+        <polyline class="line-red"     points="{{c.linePoints('rejected')}}"></polyline>
+
+        <rect ng-repeat="m in data.chart.months track by $index"
+              ng-attr-x="{{c.chartX($index) - (860 / (data.chart.months.length - 1 || 1)) / 2}}"
+              y="0"
+              ng-attr-width="{{860 / (data.chart.months.length - 1 || 1)}}"
+              height="220"
+              fill="transparent"
+              style="cursor: pointer;"
+              ng-mouseover="c.onMouseOverMonth($event, $index)">
+        </rect>
+
+        <g ng-repeat="m in data.chart.months track by $index">
+          <text x="{{c.chartX($index)}}" y="245" class="axis-label" text-anchor="middle">{{m}}</text>
+        </g>
+      </svg>
+
+      <div class="clm-chart-tooltip" ng-if="c.showTooltip" ng-style="{'left': c.tooltipLeft + 'px', 'top': c.tooltipTop + 'px'}">
+        <div class="tooltip-title">{{data.chart.months[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color blue"></span>Pending: {{data.chart.series.submitted[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color green"></span>Approved: {{data.chart.series.approved[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color orange"></span>Stage Pending: {{data.chart.series.pending[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color purple"></span>Send-Back: {{data.chart.series.sendback[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color red"></span>Rejected: {{data.chart.series.rejected[c.hoverIndex]}}</div>
+      </div>
+
+      <div ng-if="!data.chart.months.length" class="clm-no-data">No data available.</div>
+    </div>
+  </div>
+
+  <!-- ===================== Data Table ===================== -->
+  <div class="clm-table-panel" id="clmRequestsTableContainer">
+    <div class="clm-table-header">
+      <span class="clm-table-title">Approval Requests <span ng-if="c.kpiFilter" style="font-size: 13px; font-weight: normal; color: #718096; margin-left: 8px;">(Filtered by {{c.kpiFilter}})</span></span>
+    </div>
+
+    <div class="clm-table-wrapper">
+      <div class="clm-search-section">
+        <div class="clm-search-box">
+          <i class="fa fa-search"></i>
+          <input type="text" ng-model="c.filters.search" ng-change="c.runSearch()" placeholder="Search by Req ID, Name, PAN...">
+        </div>
+      </div>
+
+      <div class="clm-table-top-controls">
+        <span class="clm-records-label">Records: <strong>{{c.getVisibleRecordsCount()}}</strong></span>
+        <span class="clm-rows-label">Rows:
+          <select class="clm-rows-select"
+                  ng-model="c.pagination.rowsPerPage"
+                  ng-init="c.pagination.rowsPerPage = c.pagination.rowsPerPage || 10"
+                  ng-options="n for n in [10, 15, 20, 50, 100]"
+                  ng-change="c.onRowsPerPageChange()">
+          </select>
+        </span>
+      </div>
+    </div>
+
+    <div class="clm-table-scroll">
+      <table class="clm-table">
+        <thead>
+          <tr>
+            <th>Request ID</th>
+            <th class="col-customer">Customer</th>
+            <th>PAN</th>
+            <th>SEG</th>
+            <th class="col-region">REGION</th>
+            <th class="col-depot">DEPOT</th>
+            <th>Status</th>
+            <th>Prev Limit</th>
+            <th>Requested</th>
+            <th>Approved</th>
+            <th>Outstanding</th>
+            <th>Pending At</th>
+            <th class="col-submitted-by">Submitted By</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr ng-repeat="r in c.paginatedRequests">
+            <td><a href="javascript:void(0)" class="clm-link" ng-click="c.openRequestDetail(r)">{{r.requestCode}}</a></td>
+            <td class="col-customer">
+              <div class="clm-cust-name" ng-click="c.openRequestDetail(r)" style="cursor: pointer;">{{r.customerName}}</div>
+              <div class="clm-cust-code clm-link" ng-click="c.openRequestDetail(r)" style="cursor: pointer;">{{r.customerCode}}</div>
+            </td>
+            <td>{{r.pan}}</td>
+            <td><span class="badge seg-badge" ng-class="c.segClass(r.segment)">{{r.segment}}</span></td>
+            <td class="col-region">{{r.region}}</td>
+            <td class="col-depot">{{r.depot}}</td>
+            <td><span class="badge status-badge" ng-class="c.statusClass(r.status)">{{r.statusLabel}}</span></td>
+            <td>{{r.prevLimit}}</td>
+            <td>{{r.requested}}</td>
+            <td>{{r.approved || '—'}}</td>
+            <td>{{r.outstanding}}</td>
+            <td>
+              <span class="badge stage-badge" ng-if="r.stage">{{r.stage}}</span>
+              <span ng-if="!r.stage">—</span>
+            </td>
+            <td class="col-submitted-by">{{r.submittedBy}}</td>
+          </tr>
+          <tr ng-if="!c.paginatedRequests.length && c.getVisibleRecordsCount()">
+            <td colspan="13" class="clm-no-data">No records to display on this page.</td>
+          </tr>
+          <tr ng-if="c.getVisibleRecordsCount() === 0">
+            <td colspan="13" class="clm-no-data">No approval requests found for the selected filters.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="clm-pagination-bottom" ng-if="c.getVisibleRecordsCount() > 0">
+      <div class="clm-pagination-controls">
+        <button class="clm-page-btn" ng-click="c.previousPage()" ng-disabled="c.pagination.currentPage === 1">‹</button>
+        <button ng-repeat="page in c.getPageNumbers()"
+                class="clm-page-btn"
+                ng-class="{active: page === c.pagination.currentPage}"
+                ng-click="c.goToPage(page)">{{page}}</button>
+        <button class="clm-page-btn" ng-click="c.nextPage()" ng-disabled="c.pagination.currentPage >= c.getTotalPages()">›</button>
+      </div>
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>f165bbda97c2c310be31fa17f053af45</id>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-15 16:56:23</sys_created_on>
+        <sys_id>7165ffda97c2c310be31fa17f053af34</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-15 16:56:23</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

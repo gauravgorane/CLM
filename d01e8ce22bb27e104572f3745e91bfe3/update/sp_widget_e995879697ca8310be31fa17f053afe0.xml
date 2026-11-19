@@ -1,0 +1,1627 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[function widgetcontroller($scope, $timeout, $rootScope, $ocLazyLoad) {
+  var c = this;
+  c.loading = false;
+  c.tableSearch = '';
+  c.filteredList = [];
+
+  // Rows: now defaults to 10, list is 10/15/20/50/100
+  c.limit = 10;
+  c.page = 0;
+
+  c.filters = {
+      segment: '',
+      depots: [],
+      period: 'latest'
+  };
+
+  // ---- Depot multiselect ----
+  c.depotDropdownOpen = false;
+  c.depotSearch = '';
+  c.selectedDepotLabels = [];
+
+  c.openDepotDropdown = function() { c.depotDropdownOpen = true; };
+  c.closeDepotDropdown = function() { c.depotDropdownOpen = false; };
+
+  c.toggleDepot = function(d) {
+      var idx = c.filters.depots.indexOf(d.value);
+      if (idx === -1) {
+          c.filters.depots.push(d.value);
+          c.selectedDepotLabels.push(d.label);
+      } else {
+          c.filters.depots.splice(idx, 1);
+          c.selectedDepotLabels.splice(idx, 1);
+      }
+      c.depotSearch = '';
+      c.refresh();
+  };
+
+  c.selectAllDepots = function() {
+      var allDepots = (c.data && c.data.filterOpts && c.data.filterOpts.depots) || [];
+      c.filters.depots = allDepots.map(function(d) { return d.value; });
+      c.selectedDepotLabels = allDepots.map(function(d) { return d.label; });
+      c.depotSearch = '';
+      c.refresh();
+  };
+
+  c.clearAllDepots = function() {
+      c.filters.depots = [];
+      c.selectedDepotLabels = [];
+      c.depotSearch = '';
+      c.refresh();
+  };
+
+  c.isDepotSelected = function(d) { return c.filters.depots.indexOf(d.value) !== -1; };
+
+  c.getFilteredDepots = function() {
+      var all = (c.data && c.data.filterOpts && c.data.filterOpts.depots) || [];
+      var term = (c.depotSearch || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(d) {
+          return String(d.label || '').toLowerCase().indexOf(term) !== -1 ||
+                 String(d.value || '').toLowerCase().indexOf(term) !== -1;
+      });
+  };
+
+  c.getDepotDisplayText = function() {
+      if (!c.selectedDepotLabels || c.selectedDepotLabels.length === 0) return 'All Depots';
+      if (c.selectedDepotLabels.length === 1) return c.selectedDepotLabels[0];
+      return c.selectedDepotLabels.length + ' depots selected';
+  };
+
+  function outsideClickListener(event) {
+      if (c.depotDropdownOpen) {
+          var depotEl = document.getElementById('clmDepotMultiselect');
+          if (depotEl && !depotEl.contains(event.target)) {
+              c.depotDropdownOpen = false;
+              $scope.$applyAsync();
+          }
+      }
+  }
+  document.addEventListener('click', outsideClickListener);
+  $scope.$on('$destroy', function() {
+      document.removeEventListener('click', outsideClickListener);
+  });
+
+  c.onSegmentChange = function() {
+      c.filters.depots = [];
+      c.selectedDepotLabels = [];
+      c.depotSearch = '';
+      c.refresh();
+  };
+
+  c.quickFilter = 'all';
+  c.riskFilter = '';
+  c.kpiFilter = '';
+
+  c.setQuickFilter = function(f) { c.quickFilter = f; c.page = 0; };
+
+  c.setKpiFilter = function(filterName) {
+      if (c.kpiFilter === filterName) {
+          c.kpiFilter = '';
+      } else {
+          c.kpiFilter = filterName;
+          c.page = 0;
+          $timeout(function() {
+              var el = document.getElementById('clmTableContainer');
+              if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+          }, 100);
+      }
+  };
+
+  c.setRiskKpiFilter = function() {
+      if (c.riskFilter === 'High') {
+          c.riskFilter = '';
+      } else {
+          c.riskFilter = 'High';
+          c.page = 0;
+          $timeout(function() {
+              var el = document.getElementById('clmTableContainer');
+              if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+          }, 100);
+      }
+  };
+
+  c.isOverdue = function(row) {
+      var val = (row.overdueBalance !== undefined && row.overdueBalance !== null) ? row.overdueBalance : (row.overdue !== undefined ? row.overdue : row.od90);
+      return !!val && Number(val) > 0;
+  };
+
+  c.getReviewDays = function(row) {
+      if (row.reviewDays !== undefined && row.reviewDays !== null) return Number(row.reviewDays);
+      var parsed = parseInt(row.reviewIn, 10);
+      return isNaN(parsed) ? null : parsed;
+  };
+
+  c.isReviewWithin = function(row, days) {
+      var d = c.getReviewDays(row);
+      return d !== null && d >= 0 && d <= days;
+  };
+
+  c.countOverdue = function() { return ((c.data && c.data.tableData) || []).filter(c.isOverdue).length; };
+  c.countReview = function(days) { return ((c.data && c.data.tableData) || []).filter(function(row) { return c.isReviewWithin(row, days); }).length; };
+
+  c.quickFilterPredicate = function(row) {
+      if (c.kpiFilter) {
+          var statLower = (row.status || '').toLowerCase();
+          if (c.kpiFilter === 'Pending' && statLower.indexOf('pend') === -1) return false;
+          if (c.kpiFilter === 'Send-back' && statLower.indexOf('send') === -1 && statLower.indexOf('back') === -1) return false;
+          if (c.kpiFilter === 'Rejected' && statLower.indexOf('reject') === -1) return false;
+      }
+
+      if (c.riskFilter && row.risk !== c.riskFilter) {
+          return false;
+      }
+
+      switch (c.quickFilter) {
+          case 'overdue':   return c.isOverdue(row);
+          case 'review15':  return c.isReviewWithin(row, 15);
+          case 'review30':  return c.isReviewWithin(row, 30);
+          case 'all': default: return true;
+      }
+  };
+
+  c.trendChart = {
+      points: [], yTicks: [], linePoints: '', areaPath: '',
+      width: 760, height: 300, padLeft: 70, padRight: 30, padTop: 24, padBottom: 60,
+      xAxisLabelY: 0, xAxisTitle: { x: 0, y: 0 }, yAxisTitle: { x: 0, y: 0 }
+  };
+
+  c.buildTrendChart = function() {
+      var trend = (c.data && c.data.trend && c.data.trend.points) || [];
+
+      var width = 760, height = 300, padLeft = 70, padRight = 30, padTop = 24, padBottom = 60;
+
+      if (!trend.length) {
+          c.trendChart = {
+              points: [], yTicks: [], linePoints: '', areaPath: '',
+              width: width, height: height, padLeft: padLeft, padRight: padRight, padTop: padTop, padBottom: padBottom,
+              xAxisLabelY: 0, xAxisTitle: { x: 0, y: 0 }, yAxisTitle: { x: 0, y: 0 }
+          };
+          return;
+      }
+
+      var plotW = width - padLeft - padRight;
+      var plotH = height - padTop - padBottom;
+
+      var values = trend.map(function(p) { return p.value; });
+      var maxVal = Math.max.apply(null, values);
+      var minVal = Math.min.apply(null, values);
+
+      if (maxVal === minVal) { maxVal += 1; minVal = 0; }
+      maxVal = maxVal * 1.1;
+      if (minVal > 0) minVal = 0;
+
+      var n = trend.length;
+      var stepX = plotW / (n > 1 ? (n - 1) : 1);
+
+      var pts = trend.map(function(p, i) {
+          var x = padLeft + i * stepX;
+          var y = padTop + (1 - (p.value - minVal) / (maxVal - minVal)) * plotH;
+          return { x: x, y: y, label: p.label, value: p.value };
+      });
+
+      var yTicks = [];
+      var tickCount = 4;
+      for (var j = 0; j < tickCount; j++) {
+          var tickVal = minVal + (maxVal - minVal) * (j / (tickCount - 1));
+          var tickY = padTop + (1 - (tickVal - minVal) / (maxVal - minVal)) * plotH;
+          yTicks.push({ y: tickY, label: c.fmtCurrency(tickVal) });
+      }
+
+      var linePoints = pts.map(function(p) { return p.x + ',' + p.y; }).join(' ');
+      var baseline = padTop + plotH;
+      var areaPath = 'M ' + pts[0].x + ',' + baseline + ' ';
+      pts.forEach(function(p) { areaPath += 'L ' + p.x + ',' + p.y + ' '; });
+      areaPath += 'L ' + pts[n - 1].x + ',' + baseline + ' Z';
+
+      c.trendChart = {
+          points: pts,
+          yTicks: yTicks,
+          linePoints: linePoints,
+          areaPath: areaPath,
+          width: width,
+          height: height,
+          padLeft: padLeft,
+          padRight: padRight,
+          padTop: padTop,
+          padBottom: padBottom,
+          xAxisLabelY: baseline + 20,
+          xAxisTitle: { x: padLeft + plotW / 2, y: height - 12 },
+          yAxisTitle: { x: 16, y: padTop + plotH / 2 }
+      };
+  };
+
+  c._segmentInitialized = false;
+
+  c.refresh = function() {
+      c.loading = true;
+      c.page = 0;
+      var payload = { filters: c.filters };
+      if (c.data && c.data.filterOpts) {
+          payload.filterOpts = c.data.filterOpts;
+      }
+      c.server.get(payload).then(function(r) {
+          c.data = r.data;
+
+          if (c.data.selectedSegment && c.filters.segment !== c.data.selectedSegment) {
+              c.filters.segment = c.data.selectedSegment;
+          }
+          c._segmentInitialized = true;
+
+          c.buildTrendChart();
+          c.loading = false;
+      });
+  };
+
+  c.updatePagination = function() { c.page = 0; };
+
+  c.getPageArray = function() {
+      if (!c.filteredList) return [0];
+      var totalPages = Math.ceil(c.filteredList.length / c.limit);
+      if (totalPages === 0) return [0];
+
+      var maxPage = totalPages - 1;
+      var start = Math.max(0, c.page - 2);
+      var end = Math.min(maxPage, c.page + 2);
+
+      var arr = [];
+      for (var i = start; i <= end; i++) { arr.push(i); }
+      return arr;
+  };
+
+  c.fmtCurrency = function(value) {
+      if (value === undefined || value === null || isNaN(value)) return '—';
+      var abs = Math.abs(value);
+      var sign = value < 0 ? '-' : '';
+      if (abs === 0) return '₹0.0L';
+      if (abs >= 1e7) return sign + '₹' + (abs / 1e7).toFixed(1) + ' Cr';
+      return sign + '₹' + (abs / 1e5).toFixed(1) + 'L';
+  };
+
+  c.fmtDash = function(val) {
+      if (!val || isNaN(val) || val === 0) return '—';
+      return c.fmtCurrency(val);
+  };
+
+  c.capPct = function(pct) {
+      if (pct === undefined || pct === null || isNaN(pct)) return 0;
+      return Math.max(0, Math.min(100, pct));
+  };
+
+  c.getActiveFilterCount = function() {
+      var count = 0;
+      if (c.filters.depots && c.filters.depots.length > 0) count++;
+      if (c.filters.period && c.filters.period !== 'latest') count++;
+      if (c.riskFilter) count++;
+      if (c.kpiFilter) count++;
+      if (c.quickFilter !== 'all') count++;
+      return count;
+  };
+
+  c.filterWrapperClass = '';
+
+  c.clearAllFilters = function() {
+      c.filterWrapperClass = 'collapsing';
+      $timeout(function() {
+          c.filters.depots = [];
+          c.selectedDepotLabels = [];
+          c.depotSearch = '';
+          c.filters.period = 'latest';
+          c.riskFilter = '';
+          c.kpiFilter = '';
+          c.quickFilter = 'all';
+          c.tableSearch = '';
+          c.page = 0;
+          c.filterWrapperClass = '';
+          c.refresh();
+      }, 350);
+  };
+
+  c.selectCustomer = function(row) {
+      if (!row || !row.sysId) return;
+      $rootScope.clmPendingCustomerSysId = row.sysId;
+      $rootScope.clmPendingCustomerCode = row.code;
+      $rootScope.clmPendingRequestNumber = row.requestNumber;
+      $rootScope.$broadcast('clm.customer.selected', { sysId: row.sysId, code: row.code, requestNumber: row.requestNumber });
+      $rootScope.$broadcast('clm.switch.tab', 'customer360');
+  };
+
+  // ---- CSV export ----
+  function escapeCSV(val) {
+      if (val === null || val === undefined) return '""';
+      var str = String(val);
+      str = str.replace(/"/g, '""');
+      return '"' + str + '"';
+  }
+
+  c.exportToCSV = function() {
+      var dataToExport = c.filteredList;
+      if (!dataToExport || dataToExport.length === 0) return;
+
+      var csvContent = "data:text/csv;charset=utf-8,";
+      csvContent += "Customer Code,Name,PAN,Segment,Depot,Status,Outstanding,Limit,Available,Utilisation %,Overdue >90D,Risk,Review In\n";
+
+      dataToExport.forEach(function(row) {
+          var rowArray = [
+              escapeCSV(row.code),
+              escapeCSV(row.name),
+              escapeCSV(row.pan),
+              escapeCSV(row.segment),
+              escapeCSV(row.depot),
+              escapeCSV(row.status),
+              escapeCSV(row.outstanding),
+              escapeCSV(row.limit),
+              escapeCSV(row.available),
+              escapeCSV(row.util),
+              escapeCSV(row.od90),
+              escapeCSV(row.risk),
+              escapeCSV(row.reviewIn)
+          ];
+          csvContent += rowArray.join(",") + "\n";
+      });
+
+      var encodedUri = encodeURI(csvContent);
+      var link = document.createElement("a");
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", "TSH_Portfolio_Data_" + new Date().toISOString().slice(0, 10) + ".csv");
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+  };
+
+  // ---- Silent background PDF export ----
+  c.isExporting = false;
+
+  c.exportToPDF = function() {
+      c.isExporting = true;
+
+      $ocLazyLoad.load([
+          'https://cdnjs.cloudflare.com/ajax/libs/dom-to-image-more/3.10.0/dom-to-image-more.min.js',
+          'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'
+      ]).then(function() {
+
+          var libDomToImage = window.domtoimage;
+          var jsPDFConstructor = window.jspdf ? window.jspdf.jsPDF : window.jsPDF;
+
+          if (!libDomToImage || !jsPDFConstructor) {
+              alert("Could not load export libraries properly.");
+              $scope.$applyAsync(function() { c.isExporting = false; });
+              return;
+          }
+
+          var element = document.getElementById('tsh-dashboard-capture');
+          var dateStr = new Date().toISOString().slice(0, 10);
+          var fileName = 'TSH_Portfolio_Report_' + dateStr + '.pdf';
+
+          element.classList.add('pdf-export-mode');
+
+          $timeout(function() {
+              try {
+                  libDomToImage.toPng(element, {
+                      bgcolor: '#ffffff',
+                      width: 1920
+                  })
+                  .then(function (dataUrl) {
+                      var img = new Image();
+                      img.onload = function() {
+                          var pdf = new jsPDFConstructor('l', 'pt', [img.width, img.height + 60]);
+
+                          pdf.addImage(dataUrl, 'PNG', 0, 0, img.width, img.height);
+                          pdf.save(fileName);
+
+                          element.classList.remove('pdf-export-mode');
+                          $scope.$applyAsync(function() { c.isExporting = false; });
+                      };
+                      img.src = dataUrl;
+
+                  })
+                  .catch(function (error) {
+                      console.error('PDF Export failed:', error);
+                      alert("Failed to generate PDF. Check console for details.");
+                      element.classList.remove('pdf-export-mode');
+                      $scope.$applyAsync(function() { c.isExporting = false; });
+                  });
+              } catch (e) {
+                  console.error("Execution error during export:", e);
+                  element.classList.remove('pdf-export-mode');
+                  $scope.$applyAsync(function() { c.isExporting = false; });
+              }
+          }, 150);
+
+      }).catch(function(err) {
+          console.error("Failed to load PDF libraries from CDN", err);
+          alert("Could not load export libraries. Please check your internet connection or firewall.");
+          $scope.$applyAsync(function() { c.isExporting = false; });
+      });
+  };
+
+  c.refresh();
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.clm-portfolio-overview {
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  color: #1f2933;
+  padding-bottom: 24px;
+  box-sizing: border-box;
+}
+
+.clm-filter-chip{display: inline-flex; align-items: center; gap: 4px; background: #f8f9fa;
+  border: 1px solid #cbd5e1; border-radius: 14px; padding: 4px 12px;
+  font-size: 11px; font-weight: 600; color: #4a5568; cursor: pointer; transition: 0.15s;}
+.clm-filter-chip i.fa-times { font-size: 10px; margin-left: 4px; color: #a0aec0; transition: color 0.15s; }
+.clm-filter-chip:hover { background: #edf2f7; border-color: #a0aec0; }
+.clm-filter-chip:hover i.fa-times { color: #e53e3e; }
+
+/* ---------- Access Denied ---------- */
+.clm-access-denied {
+  background: #fff5f5;
+  border: 1px solid #feb2b2;
+  border-radius: 8px;
+  padding: 40px 20px;
+  text-align: center;
+  color: #c53030;
+  font-size: 14px;
+  margin: 20px 0;
+}
+.clm-access-denied i { font-size: 32px; margin-bottom: 12px; display: block; color: #e53e3e; }
+
+/* ---------- Filters (Forced One Line) ---------- */
+.clm-filter-card { margin: 0 0 16px 0; background: #fff; border: 1px solid #e3e6eb; border-radius: 8px; padding: 14px 18px; overflow: visible; }
+.clm-filter-row { display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; overflow-x: visible; white-space: nowrap; }
+.clm-filter-field { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #5b6470; margin-bottom: 0; font-weight: normal; flex: 1; position: relative; }
+.clm-filter-field select {
+  width: 100%; min-width: 160px; height: 34px; font-size: 13px; border-radius: 4px;
+  border: 1px solid #cbd5e1; background-color: #ffffff; padding: 0 10px; outline: none; cursor: pointer; transition: all 0.2s ease;
+}
+.clm-filter-field select:hover { border-color: #a0aec0; background-color: #f7fafc; }
+.clm-filter-divider { width: 1px; height: 24px; background: #e3e6eb; margin: 0 4px; }
+
+/* ---------- Depot Multiselect ---------- */
+.clm-multiselect-field { position: relative; }
+.clm-multiselect-container { position: relative; width: 100%; min-width: 160px; }
+.clm-multiselect-trigger {
+  display: flex; align-items: center; justify-content: space-between; width: 100%; height: 34px; padding: 0 10px;
+  font-size: 13px; border: 1px solid #cbd5e1; border-radius: 4px; background: #ffffff; cursor: pointer;
+  box-sizing: border-box; transition: border-color 0.2s;
+}
+.clm-multiselect-trigger:hover { border-color: #a0aec0; }
+.clm-multiselect-container.open .clm-multiselect-trigger { border-color: #1c4e9c; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.clm-multiselect-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #5b6470; flex: 1; }
+.clm-multiselect-arrow { color: #a0aec0; font-size: 10px; margin-left: 6px; }
+.clm-multiselect-dropdown {
+  position: absolute; top: 34px; left: 0; right: 0; z-index: 60; background: #fff; border: 1px solid #1c4e9c;
+  border-top: none; border-bottom-left-radius: 6px; border-bottom-right-radius: 6px; box-shadow: 0 6px 14px rgba(0,0,0,0.12);
+  max-height: 280px; display: flex; flex-direction: column; overflow: hidden;
+}
+.clm-multiselect-actions { display: flex; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid #e3e6eb; background: #f8f9fa; }
+.clm-multiselect-actions a { font-size: 11px; color: #5b6470; cursor: pointer; font-weight: 600; }
+.clm-multiselect-actions a:hover { text-decoration: underline; }
+.clm-multiselect-search { width: 100%; height: 32px; padding: 0 10px; border: none; border-bottom: 1px solid #e3e6eb; font-size: 12px; outline: none; box-sizing: border-box; }
+.clm-multiselect-list { list-style: none; margin: 0; padding: 4px 0; overflow-y: auto; max-height: 180px; }
+.clm-multiselect-list li { display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer; color: #5b6470; }
+.clm-multiselect-list li:hover { background: #f0f4f9; }
+.clm-multiselect-list li.selected { background: #ebf5ff; }
+.clm-dropdown-empty { color: #a0aec0 !important; cursor: default !important; font-style: italic; padding: 8px 12px; font-size: 13px; }
+.clm-checkbox { width: 14px; height: 14px; border: 2px solid #cbd5e1; border-radius: 3px; display: inline-block; flex-shrink: 0; position: relative; }
+.clm-checkbox.checked { background: #1c4e9c; border-color: #1c4e9c; }
+.clm-checkbox.checked::after {
+  content: ''; position: absolute; left: 3px; top: 1px; width: 4px; height: 7px;
+  border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.clm-option-code { font-size: 10px; color: #a0aec0; font-weight: 500; margin-left: 4px; }
+
+/* ---------- KPI cards: 4 per row, no leftover space ---------- */
+.clm-kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 16px 0; }
+.clm-kpi-card { position: relative; background: #fff; border: 1px solid #e3e6eb; border-left: 4px solid #c9ced6; border-radius: 6px; padding: 14px 16px; min-height: 100px; box-shadow: 0 1px 2px rgba(0,0,0,0.02); box-sizing: border-box; }
+.clm-kpi-card.border-blue   { border-left-color: #1c4e9c; }
+.clm-kpi-card.border-orange { border-left-color: #dd6b20; }
+.clm-kpi-card.border-green  { border-left-color: #38a169; }
+.clm-kpi-card.border-teal   { border-left-color: #319795; }
+.clm-kpi-card.border-red    { border-left-color: #e53e3e; }
+.clm-kpi-code { font-size: 10px; font-weight: 700; color: #718096; margin-bottom: 6px; }
+.clm-kpi-value { font-size: 24px; font-weight: 700; }
+.clm-kpi-value.large { font-size: 28px; }
+.clm-kpi-sub { font-size: 11px; color: #8a93a0; margin-top: 2px; }
+
+.clm-kpi-info {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  color: #2b6cb0;
+  font-size: 15px;
+  transition: all 0.2s ease;
+  cursor: pointer;
+  z-index: 5;
+}
+.clm-kpi-info:hover {
+color: #1c4e9c; transform: scale(1.15);
+}
+.text-blue   { color: #2b6cb0; }
+.text-orange { color: #dd6b20; }
+.text-green  { color: #38a169; }
+.text-teal   { color: #319795; }
+.text-red    { color: #e53e3e; }
+.clm-progress { height: 4px; border-radius: 2px; background: #edf2f7; margin-top: 10px; }
+.clm-progress-fill { height: 100%; border-radius: 2px; }
+.bg-blue { background: #2b6cb0; }
+.bg-teal { background: #319795; }
+
+/* ---------- Chart: Total Outstanding MoM Trend ---------- */
+.clm-chart-card { background: #fff; border: 1px solid #e3e6eb; border-radius: 8px; padding: 16px 20px; margin: 16px 0; box-sizing: border-box; }
+.clm-chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.clm-chart-title { font-size: 13px; font-weight: 700; color: #1f2933; }
+.clm-chart-badge { font-size: 11px; font-weight: 700; padding: 2px 10px; border-radius: 10px; }
+.clm-badge-line { background: #fff7e6; color: #b7791f; }
+
+.clm-trend-body { position: relative; height: 300px; width: 100%; }
+.clm-trend-svg { width: 100%; height: 300px; overflow: visible; display: block; }
+.clm-trend-area { fill: rgba(221, 107, 32, 0.1); }
+.clm-trend-line { fill: none; stroke: #dd6b20; stroke-width: 2px; }
+.clm-trend-dot { fill: #fff; stroke: #dd6b20; stroke-width: 2px; cursor: pointer; transition: r 0.2s; pointer-events: all; }
+.clm-trend-dot:hover { r: 6; fill: #dd6b20; }
+.clm-trend-dot.last { fill: #dd6b20; }
+.clm-trend-grid line { stroke: #e2e8f0; stroke-dasharray: 4; stroke-width: 1px; }
+.clm-trend-yaxis text { font-size: 11px; fill: #718096; font-family: "Helvetica Neue", Arial, sans-serif; }
+.clm-trend-xaxis text { font-size: 11px; fill: #718096;  font-family: "Helvetica Neue", Arial, sans-serif; }
+.clm-trend-axis-title { font-size: 12px; fill: #4a5568; font-weight: 600; font-family: "Helvetica Neue", Arial, sans-serif; }
+
+.clm-chart-empty { text-align: center; color: #a0aec0; padding: 20px; font-style: italic; }
+
+/* ---------- Table Layout ---------- */
+.clm-table-container { margin: 16px 0; background: #fff; border: 1px solid #e3e6eb; border-radius: 8px; overflow: hidden; position: relative; }
+
+.clm-chip-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 12px 16px; background: #fff; border-bottom: 1px solid #e3e6eb; }
+.clm-chip { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; font-size: 12px; font-weight: 600; color: #4a5568; background: #f8f9fa; border: 1px solid #e2e8f0; border-radius: 16px; cursor: pointer; transition: all 0.15s ease; }
+.clm-chip:hover { background: #eef2f7; border-color: #cbd5e1; }
+.clm-chip.active { background: #1c4e9c; border-color: #1c4e9c; color: #ffffff; }
+.clm-chip .clm-chip-count { background: rgba(0,0,0,0.08); color: inherit; border-radius: 10px; padding: 1px 7px; font-size: 11px; }
+.clm-chip.active .clm-chip-count { background: rgba(255,255,255,0.25); }
+.clm-chip-warn i   { color: #975a16; }
+.clm-chip-orange i { color: #dd6b20; }
+.clm-chip-blue i   { color: #1c4e9c; }
+.clm-chip-red i    { color: #e53e3e; }
+.clm-chip.active i { color: #ffffff; }
+
+/* Smooth Filter Transition Wrapper */
+.clm-filters-transition-wrapper {
+  max-height: 200px; overflow: hidden; transition: max-height 0.35s ease, opacity 0.35s ease, padding 0.35s ease;
+  opacity: 1; padding: 12px 16px; background: #fff; border-bottom: 1px solid #e3e6eb;
+}
+.clm-filters-transition-wrapper.collapsing { max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; border-bottom: none; }
+.clm-active-filters-inline { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1; }
+
+.clm-table-toolbar-top { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; background: #fff; border-bottom: 1px solid #e3e6eb; flex-wrap: wrap; gap: 8px; }
+.clm-search-box { position: relative; display: flex; align-items: center; flex: 1; max-width: 320px; }
+.clm-search-box i { position: absolute; left: 12px; color: #a0aec0; font-size: 13px; }
+.clm-search-box input { width: 100%; height: 34px; padding: 0 10px 0 32px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; outline: none; transition: border 0.2s; }
+.clm-search-box input:focus { border-color: #1c4e9c; }
+.clm-table-controls-right { display: flex; align-items: center; font-size: 12px; color: #4a5568; }
+.clm-table-controls-right select { border: 1px solid #cbd5e1; border-radius: 4px; padding: 4px; height: 32px; outline: none; background: #fff; cursor: pointer; margin-left: 8px; }
+.clm-record-count { font-weight: 600; }
+.clm-badge-blue { background: #ebf8ff; color: #1c4e9c; padding: 4px 8px; border-radius: 12px; font-size: 11px; margin-left: 4px;}
+
+.clm-table-wrapper { height: 450px; overflow-y: auto; overflow-x: hidden; }
+.clm-table { width: 100%; border-collapse: collapse; table-layout: auto; }
+
+.clm-table thead th { position: sticky; top: 0; z-index: 10; text-align: left; padding: 10px 10px; background: #f8f9fa; color: #718096; font-weight: 600; text-transform: uppercase; font-size: 10px; border-bottom: 2px solid #cbd5e1; box-shadow: 0 2px 2px -1px rgba(0,0,0,0.1); }
+.clm-table td { padding: 8px 10px; border-bottom: 1px solid #edf2f7; color: #1f2933; font-size: 12px; white-space: normal; word-break: break-word; }
+.clm-table tbody tr:hover { background-color: #f7fafc; }
+
+.clm-table-footer { display: flex; justify-content: flex-end; align-items: center; padding: 10px 16px; background: #f8f9fa; border-top: 1px solid #e3e6eb; position: sticky; bottom: 0; z-index: 10; }
+.clm-page-numbers { display: flex; gap: 4px; }
+.clm-page-btn { background: #fff; border: 1px solid #cbd5e1; border-radius: 4px; height: 32px; min-width: 32px; cursor: pointer; color: #4a5568; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+.clm-page-btn:hover:not(:disabled) { background: #eef2f7; }
+.clm-page-btn.active { background: #1c4e9c; color: #fff; border-color: #1c4e9c; }
+.clm-page-btn:disabled { color: #a0aec0; background: #f8f9fa; cursor: not-allowed; border-color: #e2e8f0; }
+
+.clm-nowrap { white-space: nowrap !important; }
+.clm-code { color: #2b6cb0; font-weight: 600; cursor: pointer; }
+.clm-sub-pan { display: block; font-size: 10px; color: #718096; margin-top: 2px; }
+
+.clm-pill-status { padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; display: inline-block; }
+.status-approved  { background: #e3f4ea; color: #1f7a4d; }
+.status-submitted { background: #fffdf0; color: #975a16; }
+.status-norequest { background: #f0f4f9; color: #1f2933; }
+
+.seg-cement  { background: #ede9fe; color: #5b21b6; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; display: inline-block;}
+.seg-bpd     { background: #fffdf0; color: #975a16; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; display: inline-block;}
+.seg-default { background: transparent; color: #1f2933; font-weight: 500; } /* RMC */
+
+.clm-strong { font-weight: 600; }
+.clm-text-red { color: #e53e3e !important; font-weight: 600; }
+.clm-text-orange { color: #dd6b20 !important; font-weight: 600; }
+.clm-text-green { color: #38a169 !important; font-weight: 600; }
+
+.clm-mini-progress { width: 32px; height: 4px; background: #edf2f7; border-radius: 2px; }
+.clm-mini-fill { height: 100%; border-radius: 2px; background: currentColor; }
+.clm-loading { text-align: center; padding: 20px; color: #8a93a0; font-size: 13px; }
+
+.clm-clear-all-inline {background: #fff5f5; color: #e53e3e; border: 1px solid #feb2b2; border-radius: 14px;
+  padding: 4px 14px; font-size: 11px; font-weight: 600; cursor: pointer;
+  transition: 0.15s; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;}
+
+.clm-clear-all-inline:hover { background: #e53e3e; color: #ffffff; border-color: #e53e3e; }
+
+/* ---------- Export Button ---------- */
+.clm-btn-export {
+  background: #2b6cb0;
+  color: #ffffff;
+  border: 1px solid #1c4e9c;
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+.clm-btn-export:hover:not(:disabled) {
+  background: #1c4e9c;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.clm-btn-export:disabled {
+  background: #cbd5e1;
+  border-color: #cbd5e1;
+  color: #f8f9fa;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* ---------- PDF export snapshot mode ---------- */
+.pdf-export-mode {
+    width: 1920px !important;
+    min-width: 1920px !important;
+    max-width: 1920px !important;
+    padding: 20px !important;
+    background: #ffffff !important;
+    box-sizing: border-box !important;
+}
+.pdf-export-mode .clm-filter-card,
+.pdf-export-mode .clm-chip-row,
+.pdf-export-mode .clm-filters-transition-wrapper,
+.pdf-export-mode .clm-table-toolbar-top,
+.pdf-export-mode .clm-table-footer,
+.pdf-export-mode .clm-table-container,
+.pdf-export-mode .clm-btn-export {
+    display: none !important;
+}
+.pdf-export-mode .clm-kpi-grid {
+    display: grid !important;
+    grid-template-columns: repeat(4, 1fr) !important;
+    gap: 20px !important;
+    width: 100% !important;
+    margin-bottom: 24px !important;
+    box-sizing: border-box !important;
+}
+.pdf-export-mode .clm-kpi-card {
+    width: 100% !important;
+    min-height: 100px !important;
+    box-sizing: border-box !important;
+}
+.pdf-export-mode .clm-chart-card {
+    width: 100% !important;
+    margin: 0 0 24px 0 !important;
+    padding: 20px 24px 50px 24px !important;
+    box-sizing: border-box !important;
+    overflow: visible !important;
+}
+.pdf-export-mode .clm-trend-body {
+    width: 100% !important;
+    height: 320px !important;
+    overflow: visible !important;
+}
+.pdf-export-mode .clm-trend-svg {
+    width: 100% !important;
+    height: 300px !important;
+    overflow: visible !important;
+    display: block !important;
+}
+
+/* ---------- PDF full-screen loading overlay ---------- */
+.pdf-loading-overlay {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    background: rgba(255, 255, 255, 0.95) !important;
+    z-index: 2147483647 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    color: #1c4e9c !important;
+    backdrop-filter: blur(4px);
+}
+.pdf-spinner-box { text-align: center; }
+.pdf-loading-text { font-size: 22px; font-weight: 700; margin-top: 20px; color: #1f2933; }
+.pdf-loading-sub { font-size: 14px; color: #718096; margin-top: 8px; }</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>copy_clm_tsh_portfolio</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>copy_clm_tsh_portfolio</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    var TABLES = {
+        master:   'x_birl3_clm_clm_customer_master1',
+        request:  'x_birl3_clm_clm_new_credit_request',
+        snapshot: 'x_birl3_clm_clm_aging_snapshot',
+        roleMap:  'x_birl3_clm_role_user_mapping'
+    };
+
+    var AUTHORIZED_ROLES = ['TSH', 'TSM', 'TSH_BPD'];
+    var ROLE_SEGMENT_LABEL = {
+        'TSH':     'Cement',
+        'TSM':     'RMC',
+        'TSH_BPD': 'BPD'
+    };
+
+    var inputFilters = (input && input.filters) ? input.filters : { segment: '', depots: [], period: 'latest' };
+    var gdtToday = new GlideDateTime();
+
+    var currentUserSysId = gs.getUserID();
+    var currentUserName  = gs.getUserName();
+
+    function normalizeArray(val) {
+        if (typeof val === 'string') {
+            try { val = JSON.parse(val); }
+            catch (e) { val = val ? [val] : []; }
+        }
+        if (!Array.isArray(val)) { val = val ? [val] : []; }
+        return val;
+    }
+    inputFilters.depots = normalizeArray(inputFilters.depots);
+
+    data.isAuthorized = false;
+
+    var depotSetForUser = {};
+    var segmentDepotMap = {};
+    var userSegmentSet  = {};
+
+    var grRole = new GlideRecord(TABLES.roleMap);
+    var qcRole = grRole.addQuery('u_user', currentUserSysId);
+    qcRole.addOrCondition('u_user', currentUserName);
+    grRole.addQuery('u_role', 'IN', AUTHORIZED_ROLES);
+    grRole.query();
+
+    while (grRole.next()) {
+        data.isAuthorized = true;
+
+        var roleVal   = grRole.getValue('u_role');
+        var segLabel  = ROLE_SEGMENT_LABEL[roleVal];
+        var depotVal  = grRole.getValue('u_depot');
+
+        if (depotVal) depotSetForUser[depotVal] = true;
+
+        if (segLabel) {
+            userSegmentSet[segLabel] = true;
+            if (depotVal) {
+                if (!segmentDepotMap[segLabel]) segmentDepotMap[segLabel] = {};
+                segmentDepotMap[segLabel][depotVal] = true;
+            }
+        }
+    }
+
+    if (!data.isAuthorized) {
+        data.accessDenied = true;
+        data.accessMessage = 'You are not mapped to the TSH, TSM, or TSH_BPD role. Contact your administrator if you believe this is incorrect.';
+        data.kpis = {};
+        data.tableData = [];
+        data.trend = { points: [] };
+        data.filterOpts = { segments: [], depots: [], periods: [] };
+        return;
+    }
+
+    var userSegmentList = Object.keys(userSegmentSet).sort();
+
+    var selectedSegment = '';
+    if (inputFilters.segment && userSegmentList.indexOf(inputFilters.segment) > -1) {
+        selectedSegment = inputFilters.segment;
+    } else if (userSegmentList.length > 0) {
+        selectedSegment = userSegmentList[0];
+    }
+    data.selectedSegment = selectedSegment;
+
+    function buildSegmentValueMap() {
+        var map = {};
+        var ga = new GlideAggregate(TABLES.master);
+        ga.addAggregate('COUNT', 'segment');
+        ga.groupBy('segment');
+        ga.query();
+        while (ga.next()) {
+            var rawVal = ga.getValue('segment');
+            if (!rawVal) continue;
+            var dispVal = ga.getDisplayValue('segment');
+            if (dispVal) {
+                map[String(dispVal).toLowerCase()] = rawVal;
+            }
+        }
+        return map;
+    }
+
+    var segmentValueMap = buildSegmentValueMap();
+    var selectedSegmentRawValue = selectedSegment
+        ? (segmentValueMap[selectedSegment.toLowerCase()] || selectedSegment)
+        : '';
+
+    var depotSetForSegment = segmentDepotMap[selectedSegment] || depotSetForUser;
+    var userDepotList = Object.keys(depotSetForSegment).sort();
+
+    var depotNameMap = {};
+
+    if (userDepotList.length > 0) {
+        var grDepotName = new GlideRecord(TABLES.master);
+        grDepotName.addQuery('depot', 'IN', userDepotList);
+        grDepotName.query();
+
+        while (grDepotName.next()) {
+            var dCode = grDepotName.getValue('depot');
+            if (!dCode) continue;
+            var trimmedCode = String(dCode).trim();
+
+            if (depotNameMap[trimmedCode]) continue;
+
+            var resolvedName = grDepotName.getValue('depot_name') || grDepotName.getDisplayValue('depot_name') || '';
+            resolvedName = String(resolvedName).trim();
+
+            if (resolvedName && resolvedName !== trimmedCode) {
+                depotNameMap[trimmedCode] = resolvedName;
+            }
+        }
+
+        var stillMissing = userDepotList.filter(function(d) { return !depotNameMap[String(d).trim()]; });
+        if (stillMissing.length > 0) {
+            var grAll = new GlideRecord(TABLES.master);
+            grAll.query();
+            var normalizedTargets = stillMissing.map(function(d) { return String(d).trim().toLowerCase(); });
+            while (grAll.next()) {
+                var candidate = String(grAll.getValue('depot') || '').trim();
+                var idx = normalizedTargets.indexOf(candidate.toLowerCase());
+                if (idx === -1) continue;
+
+                var origCode = stillMissing[idx];
+                if (depotNameMap[origCode]) continue;
+
+                var nm = grAll.getValue('depot_name') || grAll.getDisplayValue('depot_name') || '';
+                nm = String(nm).trim();
+                if (nm && nm !== candidate) {
+                    depotNameMap[origCode] = nm;
+                }
+            }
+        }
+
+        userDepotList.forEach(function(d) {
+            if (!depotNameMap[d]) depotNameMap[d] = d;
+        });
+    }
+
+    if (userDepotList.length === 1) {
+        data.userDepot = userDepotList[0];
+        data.userDepotName = depotNameMap[userDepotList[0]] || userDepotList[0];
+    } else if (userDepotList.length > 1) {
+        data.userDepot = userDepotList.join(', ');
+        var nameList = userDepotList.map(function(d) { return depotNameMap[d] || d; });
+        data.userDepotName = nameList.join(', ');
+    } else {
+        data.userDepot = '';
+        data.userDepotName = '';
+    }
+
+    var periodOpts = [
+        { label: 'All Time (Latest)', value: 'latest' },
+        { label: 'This Month', value: 'this_month' },
+        { label: 'Last Month', value: 'last_month' },
+        { label: 'This Year', value: 'this_year' },
+        { label: 'Last Year', value: 'last_year' }
+    ];
+
+    data.filterOpts = {
+        segments: userSegmentList,
+        depots: userDepotList.map(function(d) { return { value: d, label: depotNameMap[d] || d }; }),
+        periods: periodOpts
+    };
+
+    var period = inputFilters.period || 'latest';
+    var creationDateQuery = '';
+    if (period === 'this_month') {
+        creationDateQuery = 'sys_created_onONThis month@javascript:gs.beginningOfThisMonth()@javascript:gs.endOfThisMonth()';
+    } else if (period === 'last_month') {
+        creationDateQuery = 'sys_created_onONLast month@javascript:gs.beginningOfLastMonth()@javascript:gs.endOfLastMonth()';
+    } else if (period === 'this_year') {
+        creationDateQuery = 'sys_created_onONThis year@javascript:gs.beginningOfThisYear()@javascript:gs.endOfThisYear()';
+    } else if (period === 'last_year') {
+        creationDateQuery = 'sys_created_onONLast year@javascript:gs.beginningOfLastYear()@javascript:gs.endOfLastYear()';
+    }
+
+    var depotFilterArr = inputFilters.depots;
+    var selectedDepots;
+    if (depotFilterArr.length > 0) {
+        selectedDepots = depotFilterArr.filter(function(d) { return userDepotList.indexOf(d) > -1; });
+        if (selectedDepots.length === 0) selectedDepots = userDepotList;
+    } else {
+        selectedDepots = userDepotList;
+    }
+
+    var masterSysIds = [];
+    var masterCodes = [];
+    var masterMapBySysId = {};
+    var masterMapByCode = {};
+
+    if (selectedDepots.length > 0 && selectedSegmentRawValue) {
+        var grCust = new GlideRecord(TABLES.master);
+        grCust.addQuery('depot', 'IN', selectedDepots);
+        grCust.addQuery('segment', selectedSegmentRawValue);
+        grCust.query();
+        while (grCust.next()) {
+            var sysId = grCust.getUniqueValue();
+            var code  = grCust.getValue('customer_code_sap');
+            var rawDepotCode = grCust.getValue('depot');
+
+            var info = {
+                sysId: sysId,
+                code: code,
+                name: grCust.getValue('customer_name'),
+                pan: grCust.getValue('pan'),
+                segment: grCust.getDisplayValue('segment'),
+                depot: depotNameMap[rawDepotCode] || rawDepotCode
+            };
+            if (sysId) { masterSysIds.push(sysId); masterMapBySysId[sysId] = info; }
+            if (code)  { masterCodes.push(code);   masterMapByCode[code] = info; }
+        }
+    }
+
+    var allRequests = [];
+    var latestByCustomer = {};
+    var latestApprovedByCustomer = {};
+    var custKeysInvolved = {};
+
+    if (masterSysIds.length > 0 || masterCodes.length > 0) {
+        var grReq = new GlideRecord(TABLES.request);
+
+        var qcCust = null;
+        if (masterSysIds.length > 0) {
+            qcCust = grReq.addQuery('customer', 'IN', masterSysIds);
+        }
+        if (masterCodes.length > 0) {
+            if (qcCust) { qcCust.addOrCondition('customer', 'IN', masterCodes); }
+            else { qcCust = grReq.addQuery('customer', 'IN', masterCodes); }
+        }
+
+        var qcInit = grReq.addQuery('initiator', currentUserSysId);
+        qcInit.addOrCondition('initiator', currentUserName);
+
+        if (creationDateQuery) grReq.addEncodedQuery(creationDateQuery);
+        grReq.orderByDesc('sys_created_on');
+        grReq.query();
+
+        while (grReq.next()) {
+            var rawCustomer = grReq.getValue('customer');
+            if (!rawCustomer) continue;
+
+            var custInfo = masterMapBySysId[rawCustomer] || masterMapByCode[rawCustomer];
+            if (!custInfo) continue;
+
+            var limitVal   = parseFloat(grReq.getValue('current_credit_limit')) || 0;
+            var approvedLimitVal = parseFloat(grReq.getValue('approved_limit')) || 0;
+            var outstVal   = parseFloat(grReq.getValue('outstanding_amount')) || 0;
+            var grossExp   = parseFloat(grReq.getValue('net_exposure')) || 0;
+            var statusVal  = grReq.getDisplayValue('state') || 'Active';
+            var reviewDate = grReq.getValue('next_review_date');
+            var numberVal  = grReq.getValue('number');
+
+            var reqRow = {
+                number: numberVal,
+                custInfo: custInfo,
+                limit: limitVal,
+                approvedLimit: approvedLimitVal,
+                outstanding: outstVal,
+                grossExp: grossExp,
+                status: statusVal,
+                reviewDate: reviewDate
+            };
+
+            allRequests.push(reqRow);
+            custKeysInvolved[custInfo.code] = custInfo;
+
+            if (!latestByCustomer[custInfo.code]) {
+                latestByCustomer[custInfo.code] = reqRow;
+            }
+
+            var statLowerForApproval = (statusVal || '').toLowerCase();
+            if (statLowerForApproval.indexOf('approv') > -1 && !latestApprovedByCustomer[custInfo.code]) {
+                latestApprovedByCustomer[custInfo.code] = reqRow;
+            }
+        }
+    }
+
+    var snapMap = {};
+    var involvedCodes = Object.keys(custKeysInvolved);
+
+    if (involvedCodes.length > 0) {
+        var involvedSysIds = involvedCodes
+            .map(function(cd) { return custKeysInvolved[cd].sysId; })
+            .filter(function(v) { return !!v; });
+
+        var grSnap = new GlideRecord(TABLES.snapshot);
+        var qcSnap = grSnap.addQuery('customer', 'IN', involvedCodes);
+        if (involvedSysIds.length > 0) qcSnap.addOrCondition('customer', 'IN', involvedSysIds);
+        grSnap.orderByDesc('sys_created_on');
+        grSnap.query();
+
+        while (grSnap.next()) {
+            var scKeyRaw = grSnap.getValue('customer');
+            var canonicalCode = null;
+
+            if (custKeysInvolved[scKeyRaw]) {
+                canonicalCode = scKeyRaw;
+            } else {
+                for (var ck2 in custKeysInvolved) {
+                    if (custKeysInvolved[ck2].sysId === scKeyRaw) { canonicalCode = ck2; break; }
+                }
+            }
+            if (!canonicalCode) continue;
+
+            if (!snapMap[canonicalCode]) {
+                snapMap[canonicalCode] = {
+                    b0_21: parseFloat(grSnap.getValue('bucket_0_30_days')) || 0,
+                    b22_30: parseFloat(grSnap.getValue('bucket_22_30_days')) || 0,
+                    b31_45: parseFloat(grSnap.getValue('bucket_31_45_days')) || 0,
+                    b46_60: parseFloat(grSnap.getValue('bucket_46_60_days')) || 0,
+                    b61_75: parseFloat(grSnap.getValue('bucket_61_75_days')) || 0,
+                    b76_90: parseFloat(grSnap.getValue('bucket_76_90_days')) || 0,
+                    b91_120: parseFloat(grSnap.getValue('bucket_91_120_days')) || 0,
+                    b121_180: parseFloat(grSnap.getValue('bucket_121_180_days')) || 0,
+                    b181_365: parseFloat(grSnap.getValue('bucket_181_365_days')) || 0,
+                    b366_730: parseFloat(grSnap.getValue('bucket_366_730_days')) || 0,
+                    b730_above: parseFloat(grSnap.getValue('bucket_730_above')) || 0,
+                    bGt120: parseFloat(grSnap.getValue('bucket_gt120_days')) || 0
+                };
+            }
+        }
+    }
+
+    var tableData = [];
+    var pendingCount = 0, sendBackCount = 0, rejectedCount = 0;
+
+    for (var r = 0; r < allRequests.length; r++) {
+        var row = allRequests[r];
+        var custInfo = row.custInfo;
+        var snap = snapMap[custInfo.code] || { b0_21:0,b22_30:0,b31_45:0,b46_60:0,b61_75:0,b76_90:0,b91_120:0,b121_180:0,b181_365:0,b366_730:0,b730_above:0,bGt120:0 };
+
+        var overdue_lt_60 = snap.b0_21 + snap.b22_30 + snap.b31_45 + snap.b46_60;
+        var overdue_60_90 = snap.b61_75 + snap.b76_90;
+        var overdue_gt_90 = snap.b91_120 + snap.b121_180 + snap.b181_365 + snap.b366_730 + snap.b730_above + snap.bGt120;
+
+        var risk = 'No Overdue';
+        var riskClass = 'clm-text-green';
+        if (overdue_gt_90 > 0) {
+            risk = 'High'; riskClass = 'clm-text-red';
+        } else if (overdue_60_90 > 0) {
+            risk = 'Medium'; riskClass = 'clm-text-orange';
+        } else if (overdue_lt_60 > 0) {
+            risk = 'Low'; riskClass = 'clm-text-green';
+        }
+
+        var statLower = (row.status || '').toLowerCase();
+        if (statLower.indexOf('submit') > -1) pendingCount++;
+        if (statLower.indexOf('send') > -1 || statLower.indexOf('back') > -1) sendBackCount++;
+        if (statLower.indexOf('reject') > -1) rejectedCount++;
+
+        var displayStatus = row.status;
+        var cssClass = 'status-' + (row.status || '').toLowerCase().replace(/\s+/g, '-');
+        if (statLower.indexOf('submit') > -1) {
+            displayStatus = 'Pending';
+            cssClass = 'status-submitted';
+        }
+
+        var reviewDays = '--', reviewColor = '';
+        if (row.reviewDate) {
+            var diff = GlideDateTime.subtract(gdtToday, new GlideDateTime(row.reviewDate)).getRoundedDayPart();
+            reviewDays = diff + 'd';
+            if (diff <= 15) reviewColor = 'clm-text-red';
+            else if (diff <= 30) reviewColor = 'clm-text-orange';
+            else reviewColor = 'clm-text-green';
+        }
+
+        var util = row.limit > 0 ? Math.round((row.outstanding / row.limit) * 100) : 0;
+
+        tableData.push({
+            sysId: custInfo.sysId,
+            requestNumber: row.number,
+            code: custInfo.code || '—',
+            name: custInfo.name,
+            pan: custInfo.pan,
+            segment: custInfo.segment,
+            segmentClass: 'seg-' + (custInfo.segment || 'default').toLowerCase().replace(/\s+/g, '-'),
+            depot: custInfo.depot,
+            status: displayStatus,
+            statusClass: cssClass,
+            outstanding: row.outstanding,
+            limit: row.limit,
+            available: row.limit - row.outstanding,
+            util: util,
+            utilClass: util > 90 ? 'clm-text-red' : (util > 75 ? 'clm-text-orange' : 'clm-text-green'),
+            od90: overdue_gt_90,
+            risk: risk,
+            riskClass: riskClass,
+            reviewIn: reviewDays,
+            reviewColor: reviewColor
+        });
+    }
+
+    var totalCurrentLimit = 0, totalOutst = 0, totalOverdue = 0, totalOd90 = 0, totalGrossExp = 0, expiringCount = 0;
+    var highRiskCount = 0, custCountFiltered = 0;
+
+    for (var ck in latestByCustomer) {
+        custCountFiltered++;
+
+        var latestReq = latestByCustomer[ck];
+        var snap2 = snapMap[ck] || { b0_21:0,b22_30:0,b31_45:0,b46_60:0,b61_75:0,b76_90:0,b91_120:0,b121_180:0,b181_365:0,b366_730:0,b730_above:0,bGt120:0 };
+
+        var od_lt60  = snap2.b0_21 + snap2.b22_30 + snap2.b31_45 + snap2.b46_60;
+        var od_60_90 = snap2.b61_75 + snap2.b76_90;
+        var od_gt90  = snap2.b91_120 + snap2.b121_180 + snap2.b181_365 + snap2.b366_730 + snap2.b730_above + snap2.bGt120;
+        var rowOverdueTotal = od_lt60 + od_60_90 + od_gt90;
+
+        totalCurrentLimit += latestReq.limit;
+        totalOutst         += latestReq.outstanding;
+        totalOverdue        += rowOverdueTotal;
+        totalOd90            += od_gt90;
+        totalGrossExp        += latestReq.grossExp;
+
+        if (od_gt90 > 0) highRiskCount++;
+
+        if (latestReq.reviewDate) {
+            var diff2 = GlideDateTime.subtract(gdtToday, new GlideDateTime(latestReq.reviewDate)).getRoundedDayPart();
+            if (diff2 >= 0 && diff2 <= 15) expiringCount++;
+        }
+    }
+
+    var totalApprovedLimit = 0;
+    for (var cak in latestApprovedByCustomer) {
+        totalApprovedLimit += latestApprovedByCustomer[cak].approvedLimit;
+    }
+
+    data.kpis = {
+        customerCount: custCountFiltered,
+        limit: totalApprovedLimit,
+        outstanding: totalOutst,
+        available: totalCurrentLimit - totalOutst,
+        utilPct: totalCurrentLimit > 0 ? Math.round((totalOutst / totalCurrentLimit) * 100) : 0,
+        overdueExposure: totalOverdue,
+        od90: totalOd90,
+        grossExposure: totalGrossExp,
+        expiringCount: expiringCount,
+        pendingCount: pendingCount,
+        sendBackCount: sendBackCount,
+        rejectedCount: rejectedCount,
+        highRiskCount: highRiskCount
+    };
+    data.tableData = tableData;
+
+    var MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var TREND_YEAR = 2026;
+    function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+    function buildYearMonths(year) {
+        var out = [];
+        for (var m = 0; m < 12; m++) {
+            out.push({ year: year, month: m });
+        }
+        return out;
+    }
+
+    function monthBounds(year, month) {
+        var lastDay = new Date(year, month + 1, 0).getDate();
+        return {
+            startStr: year + '-' + pad2(month + 1) + '-01 00:00:00',
+            endStr: year + '-' + pad2(month + 1) + '-' + pad2(lastDay) + ' 23:59:59',
+            label: MONTH_NAMES[month] + ' ' + String(year).slice(-2)
+        };
+    }
+
+    var trendMonths = buildYearMonths(TREND_YEAR);
+    var trendPoints = [];
+
+    trendMonths.forEach(function(m) {
+        var bounds = monthBounds(m.year, m.month);
+
+        if (masterSysIds.length === 0 && masterCodes.length === 0) {
+            trendPoints.push({ label: bounds.label, value: 0 });
+            return;
+        }
+
+        var gaTrend = new GlideAggregate(TABLES.request);
+
+        var qcCustT = null;
+        if (masterSysIds.length > 0) {
+            qcCustT = gaTrend.addQuery('customer', 'IN', masterSysIds);
+        }
+        if (masterCodes.length > 0) {
+            if (qcCustT) { qcCustT.addOrCondition('customer', 'IN', masterCodes); }
+            else { qcCustT = gaTrend.addQuery('customer', 'IN', masterCodes); }
+        }
+
+        var qcInitT = gaTrend.addQuery('initiator', currentUserSysId);
+        qcInitT.addOrCondition('initiator', currentUserName);
+
+        gaTrend.addQuery('sys_created_on', '>=', bounds.startStr);
+        gaTrend.addQuery('sys_created_on', '<=', bounds.endStr);
+        gaTrend.addAggregate('COUNT');
+        gaTrend.addAggregate('SUM', 'outstanding_amount');
+        gaTrend.query();
+
+        var monthTotal = 0;
+        if (gaTrend.next()) {
+            var recordCount = parseInt(gaTrend.getAggregate('COUNT'), 10) || 0;
+
+            if (recordCount > 0) {
+                var sumVal = gaTrend.getAggregate('SUM', 'outstanding_amount');
+                monthTotal = (sumVal === null || sumVal === undefined || sumVal === '') ? 0 : (parseFloat(sumVal) || 0);
+            }
+        }
+
+        trendPoints.push({ label: bounds.label, value: monthTotal });
+    });
+
+    data.trend = {
+        metric: 'outstanding',
+        period: period,
+        year: TREND_YEAR,
+        points: trendPoints
+    };
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-15 13:27:28</sys_created_on>
+        <sys_id>e995879697ca8310be31fa17f053afe0</sys_id>
+        <sys_mod_count>30</sys_mod_count>
+        <sys_name>copy_clm_tsh_portfolio</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_e995879697ca8310be31fa17f053afe0</sys_update_name>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-08-03 09:22:50</sys_updated_on>
+        <template><![CDATA[<div class="clm-portfolio-overview" ng-cloak ng-if="c.data">
+
+  <div class="clm-access-denied" ng-if="!c.data.isAuthorized">
+    <i class="fa fa-lock"></i>
+    <div><strong>Access Restricted</strong></div>
+    <div style="margin-top:6px;">{{c.data.accessMessage || 'You are not mapped to the TSH, TSM, or TSH_BPD role.'}}</div>
+  </div>
+
+  <!-- PDF export loading overlay -->
+  <div class="pdf-loading-overlay" ng-if="c.isExporting">
+      <div class="pdf-spinner-box">
+          <i class="fa fa-spinner fa-spin fa-4x"></i>
+          <div class="pdf-loading-text">Generating PDF Report...</div>
+          <div class="pdf-loading-sub">Please do not close this window, formatting in progress.</div>
+      </div>
+  </div>
+
+  <div ng-if="c.data.isAuthorized" id="tsh-dashboard-capture">
+
+    <div class="clm-filter-card">
+      <div class="clm-filter-row">
+
+        <label class="clm-filter-field">
+          <span><b>Segment</b></span>
+          <select class="form-control" ng-model="c.filters.segment" ng-change="c.onSegmentChange()">
+            <option ng-repeat="s in c.data.filterOpts.segments" value="{{s}}">{{s}}</option>
+          </select>
+        </label>
+
+        <!-- Depot: real multiselect, no read-only box -->
+        <label class="clm-filter-field clm-multiselect-field">
+          <span><b>Depot</b></span>
+          <div class="clm-multiselect-container" id="clmDepotMultiselect" ng-class="{open: c.depotDropdownOpen}">
+            <div class="clm-multiselect-trigger" ng-click="$event.stopPropagation(); c.depotDropdownOpen ? c.closeDepotDropdown() : c.openDepotDropdown()">
+              <span class="clm-multiselect-text">{{c.getDepotDisplayText()}}</span>
+              <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+            </div>
+            <div class="clm-multiselect-dropdown" ng-if="c.depotDropdownOpen" ng-click="$event.stopPropagation()">
+              <div class="clm-multiselect-actions">
+                <a ng-click="c.selectAllDepots()">Select All</a>
+                <a ng-click="c.clearAllDepots()">Clear</a>
+              </div>
+              <input type="text" class="clm-multiselect-search" ng-model="c.depotSearch" placeholder="Search depots...">
+              <ul class="clm-multiselect-list">
+                <li ng-repeat="d in c.getFilteredDepots()"
+                    ng-click="c.toggleDepot(d)"
+                    ng-class="{selected: c.isDepotSelected(d)}">
+                  <span class="clm-checkbox" ng-class="{checked: c.isDepotSelected(d)}"></span>
+                  {{d.label}} <span class="clm-option-code" ng-if="d.label !== d.value">({{d.value}})</span>
+                </li>
+                <li class="clm-dropdown-empty" ng-if="c.getFilteredDepots().length === 0">No matches</li>
+              </ul>
+            </div>
+          </div>
+        </label>
+
+        <label class="clm-filter-field">
+          <span><b>Period</b></span>
+          <select class="form-control" ng-model="c.filters.period" ng-change="c.refresh()">
+            <option ng-repeat="p in c.data.filterOpts.periods" value="{{p.value}}">{{p.label}}</option>
+          </select>
+        </label>
+
+      </div>
+    </div>
+
+    <!-- KPI Row 1 (4 tiles) -->
+    <div class="clm-kpi-grid">
+       <div class="clm-kpi-card border-blue">
+         <div class="clm-kpi-code">TOTAL APPROVED LIMIT</div>
+         <div class="clm-kpi-value text-blue">{{c.fmtCurrency(c.data.kpis.limit)}}</div>
+         <div class="clm-kpi-sub">{{c.data.kpis.customerCount}} active codes</div>
+         <div class="clm-progress"><div class="clm-progress-fill bg-blue" style="width:{{c.capPct(c.data.kpis.utilPct)}}%"></div></div>
+       </div>
+       <div class="clm-kpi-card border-orange">
+         <div class="clm-kpi-code">TOTAL OUTSTANDING</div>
+         <div class="clm-kpi-value text-orange">{{c.fmtCurrency(c.data.kpis.outstanding)}}</div>
+         <div class="clm-kpi-sub">Latest per customer</div>
+       </div>
+       <div class="clm-kpi-card border-green">
+         <div class="clm-kpi-code">AVAILABLE LIMIT</div>
+         <div class="clm-kpi-value text-green">{{c.fmtCurrency(c.data.kpis.available)}}</div>
+         <div class="clm-kpi-sub">Current Credit Limit &ndash; Outstanding</div>
+       </div>
+       <div class="clm-kpi-card border-teal">
+         <div class="clm-kpi-code">UTILISATION %</div>
+         <div class="clm-kpi-value text-teal">{{c.data.kpis.utilPct}}%</div>
+         <div class="clm-kpi-sub">Your portfolio average</div>
+         <div class="clm-progress"><div class="clm-progress-fill bg-teal" style="width:{{c.capPct(c.data.kpis.utilPct)}}%"></div></div>
+       </div>
+    </div>
+
+    <!-- KPI Row 2 (4 tiles) -->
+    <div class="clm-kpi-grid">
+       <div class="clm-kpi-card border-red">
+         <div class="clm-kpi-code">OVERDUE EXPOSURE</div>
+         <div class="clm-kpi-value text-red">{{c.fmtCurrency(c.data.kpis.overdueExposure)}}</div>
+         <div class="clm-kpi-sub">All overdue buckets</div>
+       </div>
+      <div class="clm-kpi-card border-orange" style="cursor: pointer; transition: 0.2s;"
+           ng-click="c.setKpiFilter('Pending')" ng-style="c.kpiFilter === 'Pending' ? {'background-color': '#fffaf0', 'box-shadow': '0 0 0 2px #dd6b20'} : {}">
+        <i class="fa fa-info-circle clm-kpi-info" title="Click to drill down into Request Pending" ng-click="c.setKpiFilter('Pending'); $event.stopPropagation();"></i>
+        <div class="clm-kpi-code">REQUESTS PENDING</div>
+        <div class="clm-kpi-value text-orange large">{{c.data.kpis.pendingCount}}</div>
+        <div class="clm-kpi-sub">Awaiting approval</div>
+      </div>
+      <div class="clm-kpi-card border-red" style="cursor: pointer; transition: 0.2s;"
+           ng-click="c.setKpiFilter('Send-back')" ng-style="c.kpiFilter === 'Send-back' ? {'background-color': '#fff5f5', 'box-shadow': '0 0 0 2px #e53e3e'} : {}">
+        <i class="fa fa-info-circle clm-kpi-info" title="Click to drill down into Send-back" ng-click="c.setKpiFilter('Send-back'); $event.stopPropagation();"></i>
+        <div class="clm-kpi-code">SEND-BACK</div>
+        <div class="clm-kpi-value text-red large">{{c.data.kpis.sendBackCount}}</div>
+        <div class="clm-kpi-sub">Awaiting resubmission</div>
+      </div>
+      <div class="clm-kpi-card border-red" style="cursor: pointer; transition: 0.2s;"
+           ng-click="c.setKpiFilter('Rejected')" ng-style="c.kpiFilter === 'Rejected' ? {'background-color': '#fff5f5', 'box-shadow': '0 0 0 2px #e53e3e'} : {}">
+        <i class="fa fa-info-circle clm-kpi-info" title="Click to drill down into Rejected" ng-click="c.setKpiFilter('Rejected'); $event.stopPropagation();"></i>
+        <div class="clm-kpi-code">REJECTED</div>
+        <div class="clm-kpi-value text-red large">{{c.data.kpis.rejectedCount}}</div>
+        <div class="clm-kpi-sub">Credit requests denied</div>
+      </div>
+    </div>
+
+    <div class="clm-chart-card">
+      <div class="clm-chart-header">
+        <div class="clm-chart-title">Total Outstanding &middot; MoM Trend</div>
+        <span class="clm-chart-badge clm-badge-line">Line</span>
+      </div>
+      <div class="clm-trend-body" ng-if="c.trendChart.points.length > 0">
+
+        <svg class="clm-trend-svg" preserveAspectRatio="none" ng-attr-viewBox="0 0 {{c.trendChart.width}} {{c.trendChart.height}}">
+
+          <g class="clm-trend-grid">
+              <line ng-repeat="t in c.trendChart.yTicks"
+                    ng-attr-x1="{{c.trendChart.padLeft}}" ng-attr-y1="{{t.y}}"
+                    ng-attr-x2="{{c.trendChart.width - c.trendChart.padRight}}" ng-attr-y2="{{t.y}}"></line>
+          </g>
+
+          <g class="clm-trend-yaxis">
+              <text ng-repeat="t in c.trendChart.yTicks"
+                    ng-attr-x="{{c.trendChart.padLeft - 8}}" ng-attr-y="{{t.y + 4}}"
+                    text-anchor="end">{{t.label}}</text>
+          </g>
+
+          <path class="clm-trend-area" ng-attr-d="{{c.trendChart.areaPath}}"></path>
+          <polyline class="clm-trend-line" ng-attr-points="{{c.trendChart.linePoints}}"></polyline>
+
+          <circle class="clm-trend-dot" ng-class="{last: $last}"
+                  ng-repeat="p in c.trendChart.points"
+                  ng-attr-cx="{{p.x}}" ng-attr-cy="{{p.y}}" ng-attr-r="{{$last ? 5 : 4}}">
+              <title>{{p.label}}: {{c.fmtCurrency(p.value)}}</title>
+          </circle>
+
+          <g class="clm-trend-xaxis">
+              <text ng-repeat="p in c.trendChart.points"
+                    ng-attr-x="{{p.x}}" ng-attr-y="{{c.trendChart.xAxisLabelY}}"
+                    text-anchor="middle">{{p.label}}</text>
+          </g>
+
+          <text class="clm-trend-axis-title"
+                ng-attr-x="{{c.trendChart.xAxisTitle.x}}" ng-attr-y="{{c.trendChart.xAxisTitle.y}}"
+                text-anchor="middle">Month</text>
+
+          <text class="clm-trend-axis-title"
+                ng-attr-x="{{c.trendChart.yAxisTitle.x}}" ng-attr-y="{{c.trendChart.yAxisTitle.y}}"
+                text-anchor="middle"
+                ng-attr-transform="rotate(-90 {{c.trendChart.yAxisTitle.x}} {{c.trendChart.yAxisTitle.y}})">Outstanding Amount</text>
+
+        </svg>
+      </div>
+      <div class="clm-chart-empty" ng-if="c.trendChart.points.length === 0">No trend data available for the current filters.</div>
+    </div>
+
+    <div class="clm-table-container" id="clmTableContainer">
+
+      <div class="clm-chip-row">
+        <button type="button" class="clm-chip" ng-class="{active: c.quickFilter === 'all'}" ng-click="c.setQuickFilter('all')">
+          My Requests <span class="clm-chip-count">{{(c.data.tableData || []).length}}</span>
+        </button>
+        <button type="button" class="clm-chip clm-chip-warn" ng-class="{active: c.quickFilter === 'overdue'}" ng-click="c.setQuickFilter('overdue')">
+          <i class="fa fa-exclamation-triangle"></i> Overdue Balance <span class="clm-chip-count">{{c.countOverdue()}}</span>
+        </button>
+        <button type="button" class="clm-chip clm-chip-orange" ng-class="{active: c.quickFilter === 'review15'}" ng-click="c.setQuickFilter('review15')">
+          <i class="fa fa-clock-o"></i> Review &le;15D <span class="clm-chip-count">{{c.countReview(15)}}</span>
+        </button>
+        <button type="button" class="clm-chip clm-chip-blue" ng-class="{active: c.quickFilter === 'review30'}" ng-click="c.setQuickFilter('review30')">
+          <i class="fa fa-calendar"></i> Review &le;30D <span class="clm-chip-count">{{c.countReview(30)}}</span>
+        </button>
+
+        <select class="form-control" style="width: auto; display: inline-block; height: 32px; padding: 0 12px; font-size: 12px; font-weight: 600; color: #4a5568; background: #f8f9fa; border: 1px solid #e2e8f0; border-radius: 16px; outline: none; cursor: pointer;" ng-model="c.riskFilter" ng-change="c.page = 0">
+          <option value="">All Risk Levels</option>
+          <option value="High">High Risk</option>
+          <option value="Medium">Medium Risk</option>
+          <option value="Low">Low Risk</option>
+          <option value="No Overdue">No Overdue</option>
+        </select>
+      </div>
+
+      <div class="clm-filters-transition-wrapper" ng-class="c.filterWrapperClass" ng-if="c.getActiveFilterCount() > 0">
+        <div class="clm-active-filters-inline">
+          <span class="clm-filter-chip" ng-if="c.filters.depots.length > 0">
+            Depot: {{c.selectedDepotLabels.join(', ')}}
+            <i class="fa fa-times" ng-click="c.clearAllDepots()"></i>
+          </span>
+          <span class="clm-filter-chip" ng-if="c.filters.period && c.filters.period !== 'latest'">
+            Period: {{c.filters.period}}
+            <i class="fa fa-times" ng-click="c.filters.period='latest'; c.refresh()"></i>
+          </span>
+          <span class="clm-filter-chip" ng-if="c.riskFilter">
+            Risk: {{c.riskFilter}}
+            <i class="fa fa-times" ng-click="c.riskFilter=''; c.page=0"></i>
+          </span>
+          <span class="clm-filter-chip" ng-if="c.kpiFilter">
+            Status: {{c.kpiFilter}}
+            <i class="fa fa-times" ng-click="c.kpiFilter=''; c.page=0"></i>
+          </span>
+          <span class="clm-filter-chip" ng-if="c.quickFilter !== 'all'">
+            Quick: {{c.quickFilter}}
+            <i class="fa fa-times" ng-click="c.setQuickFilter('all')"></i>
+          </span>
+          <button class="clm-clear-all-inline" ng-click="c.clearAllFilters()">
+            <i class="fa fa-times-circle"></i> Clear All
+          </button>
+        </div>
+      </div>
+
+      <div class="clm-table-toolbar-top">
+        <div class="clm-search-box">
+          <i class="fa fa-search"></i>
+          <input type="text" ng-model="c.tableSearch" ng-change="c.updatePagination()" placeholder="Search by request no., code, name, PAN...">
+        </div>
+
+        <div class="clm-table-controls-right">
+          <button type="button" class="clm-btn-export" ng-click="c.exportToCSV()" style="margin-right: 8px; background: #38a169; border-color: #2f855a;">
+            <i class="fa fa-file-excel-o"></i> Export All (CSV)
+          </button>
+          <button type="button" class="clm-btn-export" ng-click="c.exportToPDF()" ng-disabled="c.isExporting" style="margin-right: 16px;">
+            <i class="fa" ng-class="c.isExporting ? 'fa-spinner fa-spin' : 'fa-file-pdf-o'"></i>
+            {{c.isExporting ? 'Generating PDF...' : 'Export PDF'}}
+          </button>
+          <span class="clm-record-count">Records: <span class="clm-badge clm-badge-blue">{{c.filteredList.length}}</span></span>
+          <span style="margin-left:16px;">Rows:</span>
+          <select ng-model="c.limit" ng-options="n for n in [10, 15, 20, 50, 100]" ng-change="c.updatePagination()"></select>
+        </div>
+      </div>
+
+      <div class="clm-table-wrapper">
+        <table class="clm-table">
+          <thead>
+            <tr>
+              <th>CUSTOMER CODE</th>
+              <th>NAME / PAN</th>
+              <th>SEG</th>
+              <th>DEPOT</th>
+              <th>STATUS</th>
+              <th>OUTSTANDING</th>
+              <th>CURRENT CREDIT LIMIT</th>
+              <th>AVAILABLE</th>
+              <th>UTILISATION</th>
+              <th>OS/SALES</th>
+              <th>OVERDUE &gt;90D</th>
+              <th>RISK</th>
+              <th>REVIEW IN</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr ng-repeat="row in (c.filteredList = (c.data.tableData | filter:c.tableSearch | filter:c.quickFilterPredicate)) | limitTo: c.limit : c.page * c.limit">
+
+              <td class="clm-code clm-nowrap" ng-click="c.selectCustomer(row)">{{row.code}}</td>
+              <td><strong>{{row.name}}</strong><span class="clm-sub-pan">{{row.pan}}</span></td>
+              <td><span class="clm-pill-status" ng-class="row.segmentClass">{{row.segment}}</span></td>
+              <td>{{row.depot}}</td>
+              <td><span class="clm-pill-status" ng-class="row.statusClass">{{row.status}}</span></td>
+              <td class="clm-strong clm-nowrap">{{c.fmtCurrency(row.outstanding)}}</td>
+              <td class="clm-nowrap">{{c.fmtCurrency(row.limit)}}</td>
+              <td class="clm-nowrap">{{c.fmtCurrency(row.available)}}</td>
+              <td class="clm-nowrap">
+                  <div style="display: flex; align-items: center; gap: 6px;">
+                      <div class="clm-mini-progress"><div class="clm-mini-fill" ng-class="row.utilClass" style="width: {{c.capPct(row.util)}}%"></div></div>
+                      <span ng-class="row.utilClass">{{row.util}}%</span>
+                  </div>
+              </td>
+              <td>&mdash;</td>
+              <td class="clm-text-red clm-nowrap">{{c.fmtDash(row.od90)}}</td>
+              <td class="clm-strong" ng-class="row.riskClass">{{row.risk}}</td>
+              <td class="clm-nowrap" ng-class="row.reviewColor">{{row.reviewIn}}</td>
+            </tr>
+            <tr ng-if="c.filteredList.length === 0">
+              <td colspan="13" style="text-align: center; padding: 30px; color: #718096; font-size: 13px;">No requests match your criteria.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="clm-table-footer">
+        <div class="clm-page-numbers">
+          <button class="clm-page-btn" ng-disabled="c.page == 0" ng-click="c.page = c.page - 1">&laquo;</button>
+          <button class="clm-page-btn"
+                  ng-repeat="p in c.getPageArray()"
+                  ng-class="{'active': c.page == p}"
+                  ng-click="c.page = p">{{p + 1}}</button>
+          <button class="clm-page-btn" ng-disabled="c.page >= (c.filteredList.length / c.limit) - 1" ng-click="c.page = c.page + 1">&raquo;</button>
+        </div>
+      </div>
+
+    </div>
+  </div><!-- /tsh-dashboard-capture -->
+
+  <div class="clm-loading" ng-if="c.loading">Loading Portfolio Data...</div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>e995879697ca8310be31fa17f053afe0</id>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-15 13:27:28</sys_created_on>
+        <sys_id>2195879697ca8310be31fa17f053afe7</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-15 13:27:28</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

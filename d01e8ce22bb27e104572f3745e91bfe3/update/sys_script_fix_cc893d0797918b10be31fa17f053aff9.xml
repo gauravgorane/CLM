@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_fix">
+    <sys_script_fix action="INSERT_OR_UPDATE">
+        <before>false</before>
+        <description/>
+        <name>populate donee and donor segment</name>
+        <record_for_rollback>true</record_for_rollback>
+        <script><![CDATA[var mapping = { 'utcl': 'cement', 'RMC': 'URMX', 'BPD': 'GIL' };
+
+var swapGR = new GlideRecord('x_birl3_clm_limit_swap');
+swapGR.query();
+
+while (swapGR.next()) {
+    
+    // Populate donee_segment
+    if (!swapGR.donee_site.nil()) {
+        var doneeGR = new GlideRecord('x_birl3_clm_customer');
+        if (doneeGR.get(swapGR.getValue('donee_site'))) {
+            var doneeCode = doneeGR.getValue('company_code');
+            swapGR.donee_segment = mapping[doneeCode] || doneeCode;
+        }
+    }
+
+    // Populate donor_segment
+    if (!swapGR.donor_site.nil()) {
+        var donorGR = new GlideRecord('x_birl3_clm_customer');
+        if (donorGR.get(swapGR.getValue('donor_site'))) {
+            var donorCode = donorGR.getValue('company_code');
+            swapGR.donor_segment = mapping[donorCode] || donorCode;
+        }
+    }
+
+    swapGR.autoSysFields(false); // prevents updated_on from changing
+    swapGR.setWorkflow(false);   // prevents BR/Flow from firing again
+    swapGR.update();
+}]]></script>
+        <sys_class_name>sys_script_fix</sys_class_name>
+        <sys_created_by>shobharani.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-10 09:03:43</sys_created_on>
+        <sys_id>cc893d0797918b10be31fa17f053aff9</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>populate donee and donor segment</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_fix_cc893d0797918b10be31fa17f053aff9</sys_update_name>
+        <sys_updated_by>shobharani.k@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-10 09:03:43</sys_updated_on>
+        <unloadable>false</unloadable>
+    </sys_script_fix>
+</record_update>

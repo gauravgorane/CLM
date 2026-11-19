@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sysauto_script">
+    <sysauto_script action="INSERT_OR_UPDATE">
+        <active>false</active>
+        <advanced>false</advanced>
+        <business_calendar/>
+        <can_iterate>false</can_iterate>
+        <condition/>
+        <conditional>false</conditional>
+        <entered_run_end/>
+        <entered_run_start/>
+        <entered_time>1970-01-01 00:00:00</entered_time>
+        <max_drift/>
+        <name>Auto approve tsh</name>
+        <offset/>
+        <offset_type>0</offset_type>
+        <repeat_every/>
+        <run_as display_value="Vedant Salunke">02be14ac9707fa50be31fa17f053af06</run_as>
+        <run_as_tz/>
+        <run_dayofmonth>1</run_dayofmonth>
+        <run_dayofweek>1</run_dayofweek>
+        <run_daysofweek/>
+        <run_end/>
+        <run_month>1</run_month>
+        <run_period>1970-01-01 00:00:30</run_period>
+        <run_start>2026-06-05 12:31:15</run_start>
+        <run_time>1969-12-31 18:30:00</run_time>
+        <run_type>periodically</run_type>
+        <run_weekinmonth>1</run_weekinmonth>
+        <script><![CDATA[var reqGr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+reqGr.addQuery('state', 'Submitted');
+reqGr.addQuery('customer_type', 'Trade');
+reqGr.query();
+
+while (reqGr.next()) {
+
+    var segment = reqGr.getValue('segment');
+    var initiator = reqGr.getValue('initiator');
+
+    var firstApprover = '';
+
+    switch (segment) {
+        case 'Cement':
+            firstApprover = reqGr.getValue('u_approver_tsh');
+            break;
+
+        case 'RMC':
+            firstApprover = reqGr.getValue('u_approver_tsm');
+            break;
+
+        case 'BPD':
+            firstApprover = reqGr.getValue('u_approver_tsh_bpd');
+            break;
+    }
+
+    // Auto approve only if Initiator = TSH/TSM/TSH_BPD
+    if (!firstApprover || firstApprover != initiator)
+        continue;
+
+    var appr = new GlideRecord('sysapproval_approver');
+    appr.addQuery('source_table', 'x_birl3_clm_clm_new_credit_request');
+    appr.addQuery('document_id', reqGr.getUniqueValue());
+    appr.addQuery('approver', firstApprover);
+    appr.addQuery('state', 'requested');
+    appr.query();
+
+    if (appr.next()) {
+
+        appr.setValue('state', 'approved');
+        appr.setValue(
+            'comments',
+            'Auto Approved - Initiator and First Approver are the same user'
+        );
+
+        appr.setWorkflow(false);
+        appr.update();
+
+        gs.info(
+            'CLM AutoApprove Scheduler: Auto approved first approval for request ' +
+            reqGr.getValue('request_number')
+        );
+    }
+}]]></script>
+        <source_filter/>
+        <source_table>cmdb_ci_appl_dot_net</source_table>
+        <sys_class_name>sysauto_script</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-05 12:33:25</sys_created_on>
+        <sys_id>c429f8a52b5987904572f3745e91bfdb</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>Auto approve tsh</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sysauto_script_c429f8a52b5987904572f3745e91bfdb</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-05 13:43:58</sys_updated_on>
+        <time_zone/>
+        <upgrade_safe>false</upgrade_safe>
+    </sysauto_script>
+</record_update>

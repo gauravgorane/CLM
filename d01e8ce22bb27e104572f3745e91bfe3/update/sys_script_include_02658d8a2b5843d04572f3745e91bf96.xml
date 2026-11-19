@@ -1,0 +1,1021 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLMSequentialApproval</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLMSequentialApproval</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[// var CLMSequentialApproval = Class.create();
+// CLMSequentialApproval.prototype = {
+
+//     initialize: function() {},
+
+//     getCurrentApprover: function(requestSysId) {
+//         var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+//         if (!gr.get(requestSysId)) return '';
+        
+//         var sequence = [];
+//         try {
+//             sequence = JSON.parse(gr.u_approver_sequence + '');
+//         } catch(e) {
+//             gs.error('CLMSequentialApproval: invalid JSON in u_approver_sequence');
+//             return '';
+//         }
+        
+//         var currentOrder = parseInt(gr.u_current_approver_order) || 1;
+        
+//         for (var i = 0; i < sequence.length; i++) {
+//             if (sequence[i].order === currentOrder) {
+//                 return sequence[i].user_sys_id;
+//             }
+//         }
+//         return '';
+//     },
+
+//     advanceToNextApprover: function(requestSysId) {
+//         var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+//         if (!gr.get(requestSysId)) return false;
+        
+//         var sequence = [];
+//         try {
+//             sequence = JSON.parse(gr.u_approver_sequence + '');
+//         } catch(e) { return false; }
+        
+//         var currentOrder = parseInt(gr.u_current_approver_order) || 1;
+//         var totalApprovers = sequence.length;
+        
+//         if (currentOrder >= totalApprovers) {
+//             // All approved — final approval
+//             gr.state = 'Approved';
+//             gr.u_current_approver_order = currentOrder; // stays at max
+//             gr.update();
+//             return 'done';
+//         } else {
+//             // Move to next
+//             gr.u_current_approver_order = currentOrder + 1;
+//             gr.update();
+//             return 'next';
+//         }
+//     },
+
+//     type: 'CLMSequentialApproval'
+// };
+
+
+
+
+
+
+
+
+
+/**
+ * ============================================================
+ *  CLM SEQUENTIAL APPROVAL — COMPLETE SOLUTION
+ *  Covers: Cement, RMC, BPD (Trade)
+ *
+ *  How it works:
+ *  1. Before Business Rule (on Insert/Update → Submitted):
+ *     - Runs CLMApprovalRouter to find TARGET approver role
+ *     - Builds full ordered sequence from Level-1 up to target
+ *     - Stores JSON sequence in u_approver_sequence
+ *     - Sets u_current_approver_order = 1
+ *
+ *  2. Approval Action / Flow (when an approver approves):
+ *     - CLMSequentialApproval.advanceToNextApprover() is called
+ *     - If more approvers remain → moves to next, sends notification
+ *     - If last approver approved → sets state = 'Approved'
+ *
+ *  3. Rejection at any level → sets state = 'Rejected' immediately
+ * ============================================================
+ */
+
+// ============================================================
+//  ROLE HIERARCHIES  (source of truth — edit here if SOP changes)
+// ============================================================
+
+var CLM_ROLE_HIERARCHIES = {
+
+    // Cement Trade — May 2023 SOP
+    // Net Exposure tiers (in ₹):
+    //   TSH   : ≤ 10L (SD×2 max)
+    //   RHM   : 10L – 30L
+    //   ZHM   : 30L – 50L
+    //   NSH   : 50L – 100L
+    //   NSH_CCH: 100L – 150L
+    //   CMO   : 150L – 250L
+    //   CMO_CFO: 250L – 500L
+    //   MD    : > 500L
+    'Cement_Trade': [
+        { role: 'TSH',      level: 1 },
+        { role: 'RHM',      level: 2 },
+        { role: 'ZHM',      level: 3 },
+        { role: 'NSH',      level: 4 },
+        { role: 'NSH_CCH',  level: 5 },
+        { role: 'CMO',      level: 6 },
+        { role: 'CMO_CFO',  level: 7 },
+        { role: 'MD',       level: 8 }
+    ],
+
+    // RMC Trade — SOP Annexure I (iii)
+    // SD Multiple × Net Exposure matrix
+        'RMC_Trade': [
+        { role: 'TSM',          level: 1 },
+        { role: 'RH_CH_RMC',    level: 2 },
+        { role: 'ZH_RMC',       level: 3 },
+        { role: 'CH_RMC',       level: 4 }, // ≤₹75L step 1
+        { role: 'HEAD_RMC',     level: 5 }, // ≤₹75L step 2 (target)
+        { role: 'HEAD_KEY_CCH', level: 6 },
+        { role: 'BH',           level: 7 },
+        { role: 'BH_CFO',       level: 8 },
+        { role: 'MD',           level: 9 }
+    ],
+
+    // BPD Trade — SOP Image 2
+    // SD Factor × Net Exposure matrix
+    'BPD_Trade': [
+        { role: 'TSH_BPD',   level: 1 },
+        { role: 'ZH_BPD',    level: 2 },
+        { role: 'HSBPD',     level: 3 },
+        { role: 'HBPD',      level: 4 },
+        { role: 'CCH_HBPD',  level: 5 },
+        { role: 'BH',        level: 6 },
+        { role: 'CFO',       level: 7 },
+        { role: 'MD',        level: 8 }
+    ],
+
+    // Cement + BPD Hybrid Trade
+    'CementBpd_Trade': [
+        { role: 'TSH_BPD',   level: 1 },
+        { role: 'ZH_BPD',    level: 2 },
+        { role: 'RHM',       level: 3 },
+        { role: 'ZHM',       level: 4 },
+        { role: 'NSH_CCH',   level: 5 },
+        { role: 'CMO',       level: 6 },
+        { role: 'CMO_CFO',   level: 7 },
+        { role: 'MD',        level: 8 }
+    ]
+};
+
+
+// ============================================================
+//  HELPER: Build sequence array from hierarchy up to targetRole
+// ============================================================
+
+
+//30 april 2026
+// function buildApproverSequence(hierarchy, targetRole, resolver, region, zone, segment) {
+//     var targetIndex = -1;
+//     for (var i = 0; i < hierarchy.length; i++) {
+//         if (hierarchy[i].role === targetRole) {
+//             targetIndex = i;
+//             break;
+//         }
+//     }
+//     // If target role not found, default to last (MD)
+//     if (targetIndex === -1) targetIndex = hierarchy.length - 1;
+
+//     var sequence = [];
+//     for (var j = 0; j <= targetIndex; j++) {
+//         var role = hierarchy[j].role;
+//         var userSysId = resolver.getUser(role, region, zone, segment);
+
+//         if (!userSysId || userSysId === '') {
+//             gs.warn('CLM SeqBuild: No user found for role=' + role +
+//                     ' region=' + region + ' zone=' + zone + ' segment=' + segment);
+//             // Still add to sequence with empty user so audit trail is complete
+//         }
+
+//         sequence.push({
+//             order:       j + 1,
+//             role:        role,
+//             user_sys_id: userSysId || '',
+//             status:      'pending'  // pending | approved | rejected | skipped
+//         });
+//     }
+//     return sequence;
+// }
+//end april 30 2026
+
+
+// function buildApproverSequence(hierarchy, targetRole, resolver, region, zone, segment, depot) {
+//     var router = new CLMApprovalRouter();
+//     var validationConfig = router.getCommercialValidationConfig(targetRole);
+
+
+
+//05-10-2026
+// function buildApproverSequence(hierarchy, targetRole, resolver, region, zone, segment, depot, isCementBpd) {
+
+//     // Cement+BPD only applies to BPD-code requests
+//     isCementBpd = (isCementBpd === true || isCementBpd === 'true') && segment === 'BPD';
+
+//     var router = new CLMApprovalRouter();
+//     var validationConfig = router.getCommercialValidationConfig(targetRole, segment, isCementBpd);
+
+//     var targetIndex = -1;
+//     for (var i = 0; i < hierarchy.length; i++) {
+//         if (hierarchy[i].role === targetRole) { targetIndex = i; break; }
+//     }
+//     if (targetIndex === -1) targetIndex = hierarchy.length - 1;
+
+//     var sequence  = [];
+//     var stepOrder = 1;
+
+//     // Resolve one role (Cement RHM/ZHM lookups are handled by the resolver when isCementBpd = true)
+//     function addStep(role, stepType) {
+//         var userSysId = resolver.getUser(role, region, zone, segment, depot, isCementBpd);
+
+//         if (!userSysId) {
+//             // BRD: Cement RHM/ZHM not mapped for the BPD code's region/zone -> skip that approver
+//             if (isCementBpd && (role === 'RHM' || role === 'ZHM')) {
+//                 gs.warn('CLM SeqBuild [CementBPD]: no ' + role + ' mapped for region=' + region +
+//                         ' zone=' + zone + ' - step skipped');
+//                 return;
+//             }
+//             gs.error('CLM SeqBuild: no user for role=' + role + ' region=' + region +
+//                      ' zone=' + zone + ' depot=' + depot + ' segment=' + segment);
+//         }
+
+//         sequence.push({
+//             order:       stepOrder++,
+//             role:        role,
+//             user_sys_id: userSysId || '',
+//             status:      'pending',
+//             step_type:   stepType
+//         });
+//     }
+
+//     // Sales step. For Cement+BPD, NSH_CCH means NSH first, then CCH (BRD).
+//     function addSalesStep(role) {
+//         if (isCementBpd && role === 'NSH_CCH') addStep('NSH', 'sales');
+//         addStep(role, 'sales');
+//     }
+
+//     // Cement+BPD flat band (up to 30L): TSH_BPD + ZH_BPD + RHM only, no ZCH/HO
+//     var flatBandRoles = ['TSH_BPD', 'ZH_BPD', 'RHM'];
+
+//     // ── RULE A: sales chain up to targetRole, then ZCH ────────
+//     if (validationConfig.rule === 'A') {
+//         for (var j = 0; j <= targetIndex; j++) {
+//             addSalesStep(hierarchy[j].role);
+//         }
+//         var skipZch = isCementBpd && flatBandRoles.indexOf(targetRole) !== -1;
+//         if (!skipZch) addStep('ZCH', 'commercial_validate');
+//     }
+
+//     // ── RULE B: sales chain up to ZHM, then ZCH + HO, then senior execs ──
+//     if (validationConfig.rule === 'B') {
+
+//         var zhmRoleMap = {
+//             'Cement':    'ZHM',
+//             'RMC':       'ZH_RMC',
+//             'BPD':       'ZH_BPD',
+//             'CementBPD': 'ZHM'
+//         };
+//         var zhmRole  = zhmRoleMap[isCementBpd ? 'CementBPD' : segment] || 'ZHM';
+//         var zhmIndex = -1;
+//         for (var k = 0; k < hierarchy.length; k++) {
+//             if (hierarchy[k].role === zhmRole) { zhmIndex = k; break; }
+//         }
+//         if (zhmIndex === -1) zhmIndex = Math.max(0, targetIndex - 1);
+
+//         for (var m = 0; m <= zhmIndex; m++) {
+//             addSalesStep(hierarchy[m].role);
+//         }
+
+//         addStep('ZCH', 'commercial_validate');
+//         addStep('HO',  'commercial_validate');
+
+//         for (var n = zhmIndex + 1; n <= targetIndex; n++) {
+//             addSalesStep(hierarchy[n].role);
+//         }
+//     }
+
+//     if (sequence.length === 0) {
+//         gs.error('CLM SeqBuild: EMPTY sequence for targetRole=' + targetRole + ' segment=' + segment);
+//     }
+//     return sequence;
+// }
+
+
+function buildApproverSequence(hierarchy, targetRole, resolver, region, zone, segment, depot, isCementBpd) {
+
+    isCementBpd = (isCementBpd === true || isCementBpd === 'true') && segment === 'BPD';
+
+    var router = new CLMApprovalRouter();
+    var validationConfig = router.getCommercialValidationConfig(targetRole, segment, isCementBpd);
+    var triggersCV = validationConfig.triggersCV;
+
+    var targetIndex = -1;
+    for (var i = 0; i < hierarchy.length; i++) {
+        if (hierarchy[i].role === targetRole) { targetIndex = i; break; }
+    }
+    if (targetIndex === -1) targetIndex = hierarchy.length - 1;
+
+    var sequence  = [];
+    var stepOrder = 1;
+
+    function addStep(role, stepType) {
+        var userSysId = resolver.getUser(role, region, zone, segment, depot, isCementBpd);
+
+        if (!userSysId) {
+            if (isCementBpd && (role === 'RHM' || role === 'ZHM')) {
+                gs.warn('CLM SeqBuild [CementBPD]: no ' + role + ' mapped for region=' + region + ' zone=' + zone + ' - step skipped');
+                return;
+            }
+            gs.error('CLM SeqBuild: no user for role=' + role + ' region=' + region + ' zone=' + zone + ' depot=' + depot + ' segment=' + segment);
+        }
+
+        sequence.push({
+            order:       stepOrder++,
+            role:        role,
+            user_sys_id: userSysId || '',
+            status:      'pending',
+            step_type:   stepType
+        });
+    }
+
+    function addSalesStep(role) {
+        if (isCementBpd && role === 'NSH_CCH') addStep('NSH', 'sales');
+        addStep(role, 'sales');
+    }
+
+    for (var j = 0; j <= targetIndex; j++) {
+        var currentRole = hierarchy[j].role;
+
+        // Commercial Validation Injection Logic
+        if (triggersCV) {
+ // 1. Inject ZCH before the specific tier mapped in FRS
+            if ((segment === 'Cement' && currentRole === 'ZHM') ||
+                (segment === 'RMC' && currentRole === 'ZH_RMC') ||
+                (segment === 'BPD' && !isCementBpd && currentRole === 'ZH_BPD') ||
+                (isCementBpd && segment === 'BPD' && currentRole === 'ZHM')) {     // <--- CORRECTED
+                addStep('ZCH', 'commercial_validate');
+            }
+
+            // 2. Inject HO before the specific tier mapped in FRS
+            if ((segment === 'Cement' && currentRole === 'NSH') ||
+                (segment === 'RMC' && currentRole === 'HEAD_KEY_CCH') ||
+                (segment === 'BPD' && !isCementBpd && currentRole === 'CCH_HBPD') ||
+                (isCementBpd && segment === 'BPD' && currentRole === 'NSH_CCH')) {
+                addStep('HO', 'commercial_validate');
+            }
+        }
+
+        addSalesStep(currentRole);
+    }
+
+    if (sequence.length === 0) {
+        gs.error('CLM SeqBuild: EMPTY sequence for targetRole=' + targetRole + ' segment=' + segment);
+    }
+    return sequence;
+}
+
+// ============================================================
+//  BEFORE BUSINESS RULE
+//  Table  : x_birl3_clm_clm_new_credit_request
+//  When   : Before Insert / Before Update (state changes to Submitted)
+//  Runs   : Server-side script
+// ============================================================
+
+/*
+(function executeRule(current, previous) {
+
+    if (current.customer_type + '' !== 'Trade') return;
+
+    // Only trigger on submission (or re-submission after Send Back)
+    var newState = current.state + '';
+    var oldState = previous ? previous.state + '' : '';
+    if (newState !== 'Submitted') return;
+
+    gs.info('CLM SeqBR [Before]: firing for ' + current.request_number);
+
+    try {
+        // ── 1. Pull key fields ────────────────────────────────
+        var custSysId   = current.customer + '';
+        var segment     = current.segment  + '';
+        var reqLimit    = parseFloat(current.requested_limit)    || 0;
+        var activeSD    = parseFloat(current.active_sd)          || 0;
+        var outstanding = parseFloat(current.outstanding_amount) || 0;
+        var salesLast   = parseFloat(current.sales_last_month)   || 0;
+        var salesPrev   = parseFloat(current.sales_prev_month)   || 0;
+        var avgSales    = parseFloat(current.avg_monthly_sales_mt) || 0;
+
+        // ── 2. Load customer master ───────────────────────────
+        var custGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        var cg2Code     = '';
+        var vintageDays = 0;
+
+        if (custGr.get(custSysId)) {
+            cg2Code            = custGr.cg2_code + '';
+            current.region     = custGr.region   + '';
+            current.zone       = custGr.zone     + '';
+            segment            = custGr.segment  + '';
+            current.segment    = segment;
+
+            var fos = custGr.first_order_date + '';
+            if (fos && fos !== '' && fos !== 'null') {
+                var fd = new GlideDate(); fd.setValue(fos);
+                var td = new GlideDate();
+                var dd = Math.floor(
+                    (td.getNumericValue() - fd.getNumericValue()) / 86400000
+                );
+                vintageDays = dd > 0 ? dd : 0;
+            }
+        }
+        current.customer_vintage_days = vintageDays;
+
+        // ── 3. Run existing trade formulas ────────────────────
+        var formulas  = new CLMTradeFormulas();
+        var avgSales2M = (salesLast + salesPrev) / 2;
+
+        var nod = formulas.calcNOD(
+            vintageDays, outstanding,
+            avgSales * (vintageDays <= 60 ? vintageDays : 60),
+            Math.min(vintageDays, 60),
+            avgSales2M
+        );
+
+        var multiplier    = formulas.getSystemMultiplier(vintageDays, cg2Code, avgSales, nod, segment);
+        var netExposure   = formulas.calcNetExposure(reqLimit, activeSD);
+        var maxAllowable  = formulas.calcMaxAllowable(activeSD, multiplier);
+        var impliedMult   = formulas.calcImpliedMultiplier(reqLimit, activeSD);
+        var isDeviation   = formulas.isDeviation(impliedMult, multiplier);
+
+        // Write calculated fields back
+        current.nod_days          = nod;
+        current.system_multiplier = multiplier;
+        current.net_exposure      = netExposure;
+        current.max_allowable_limit = maxAllowable;
+        current.implied_multiplier  = impliedMult;
+        current.is_deviation        = isDeviation;
+        current.initiator           = gs.getUserID();
+
+        // ── 4. Determine target approver role ─────────────────
+        var router   = new CLMApprovalRouter();
+        var approver = router.getApprover(
+            segment, 'Trade',
+            netExposure, nod, isDeviation,
+            impliedMult, vintageDays, multiplier
+        );
+        var targetRole = approver.role;
+        current.required_approver_level = targetRole;
+
+        // ── 5. Pick the right hierarchy ───────────────────────
+        var hierarchyKey = segment + '_Trade';
+        var hierarchy    = CLM_ROLE_HIERARCHIES[hierarchyKey]
+                           || CLM_ROLE_HIERARCHIES['Cement_Trade'];
+
+        // ── 6. Resolve users for every level up to target ─────
+        var resolver = new CLMUserResolver();
+        var sequence = buildApproverSequence(
+            hierarchy, targetRole,
+            resolver,
+            current.region + '',
+            current.zone   + '',
+            segment
+        );
+
+        // ── 7. Store sequence + reset order pointer ───────────
+        var seqJson = JSON.stringify(sequence);
+        current.u_approver_sequence      = seqJson;
+        current.u_current_approver_order = 1;
+
+        // Set the immediate (first) approver on the record
+        if (sequence.length > 0 && sequence[0].user_sys_id) {
+            current.u_approver = sequence[0].user_sys_id;
+        }
+
+        // Optional: write approver list (comma-separated) for visibility
+        var userIds = [];
+        for (var u = 0; u < sequence.length; u++) {
+            if (sequence[u].user_sys_id) userIds.push(sequence[u].user_sys_id);
+        }
+        current.u_approver_list = userIds.join(',');
+
+        // ── 8. Review date — end of this month + 12 months ───
+        var gdt = new GlideDateTime();
+        gdt.addMonthsUTC(1);
+        gdt.setDayOfMonthUTC(1);
+        gdt.addDaysUTC(-1);
+        gdt.addMonthsUTC(12);
+        // current.next_review_date = gdt.getDate();   // uncomment when field is ready
+
+        gs.info('CLM SeqBR [Before] DONE | ' + current.request_number +
+            ' | Segment: '    + segment +
+            ' | Hierarchy: '  + hierarchyKey +
+            ' | Target: '     + targetRole +
+            ' | Steps: '      + sequence.length +
+            ' | Deviation: '  + isDeviation);
+
+    } catch (e) {
+        gs.error('CLM SeqBR [Before] ERROR: ' + e.message + ' | ' + e.stack);
+    }
+
+})(current, previous);
+*/
+
+
+// ============================================================
+//  CLMSequentialApproval Script Include
+//  (replaces previous version — full rewrite)
+// ============================================================
+
+var CLMSequentialApproval = Class.create();
+CLMSequentialApproval.prototype = {
+
+    initialize: function() {},
+
+    // ----------------------------------------------------------
+    //  getCurrentApproverUserId
+    //  Returns sys_id of the user who should act RIGHT NOW
+    // ----------------------------------------------------------
+    getCurrentApproverUserId: function(requestSysId) {
+        var seq = this._getSequence(requestSysId);
+        if (!seq) return '';
+
+        var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        if (!gr.get(requestSysId)) return '';
+        var currentOrder = parseInt(gr.u_current_approver_order) || 1;
+
+        for (var i = 0; i < seq.length; i++) {
+            if (seq[i].order === currentOrder) return seq[i].user_sys_id;
+        }
+        return '';
+    },
+
+    // ----------------------------------------------------------
+    //  getCurrentApproverRole
+    //  Returns role label of the current pending approver
+    // ----------------------------------------------------------
+    getCurrentApproverRole: function(requestSysId) {
+        var seq = this._getSequence(requestSysId);
+        if (!seq) return '';
+
+        var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        if (!gr.get(requestSysId)) return '';
+        var currentOrder = parseInt(gr.u_current_approver_order) || 1;
+
+        for (var i = 0; i < seq.length; i++) {
+            if (seq[i].order === currentOrder) return seq[i].role;
+        }
+        return '';
+    },
+
+    // ----------------------------------------------------------
+    //  handleApproval
+    //  Call this when the CURRENT approver clicks "Approve"
+    //
+    //  Returns:
+    //    'next'   — moved to next approver (send notification)
+    //    'done'   — all approved, record set to Approved
+    //    'error'  — something went wrong
+    // ----------------------------------------------------------
+    handleApproval: function(requestSysId, approverUserId, comments) {
+        var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        if (!gr.get(requestSysId)) {
+            gs.error('CLMSeq.handleApproval: record not found ' + requestSysId);
+            return 'error';
+        }
+
+        var seq = this._parseSequence(gr.u_approver_sequence + '');
+        if (!seq) return 'error';
+
+        var currentOrder = parseInt(gr.u_current_approver_order) || 1;
+
+        // Guard: only the correct user may approve
+        var expectedUser = '';
+        for (var i = 0; i < seq.length; i++) {
+            if (seq[i].order === currentOrder) { expectedUser = seq[i].user_sys_id; break; }
+        }
+        if (approverUserId && expectedUser && approverUserId !== expectedUser) {
+            gs.warn('CLMSeq.handleApproval: wrong approver. Expected=' +
+                    expectedUser + ' Got=' + approverUserId);
+            // Allow in case of delegation — remove this guard if not needed
+        }
+
+        // Mark current step as approved
+        for (var j = 0; j < seq.length; j++) {
+            if (seq[j].order === currentOrder) {
+                seq[j].status           = 'approved';
+                seq[j].approved_by      = approverUserId || gs.getUserID();
+                seq[j].approved_on      = new GlideDateTime().toString();
+                seq[j].comments         = comments || '';
+                break;
+            }
+        }
+
+        var totalSteps = seq.length;
+        var result;
+
+        if (currentOrder >= totalSteps) {
+            // ── All levels approved ───────────────────────────
+            gr.setValue('u_approver_sequence',      JSON.stringify(seq));
+            gr.setValue('u_current_approver_order', currentOrder);
+            gr.setValue('state',                    'Approved');
+            gr.setValue('u_approver',               '');            // clear pending approver
+            gr.setWorkflow(false);
+            gr.autoSysFields(false);
+            gr.update();
+
+            this._triggerFinalApprovalActions(requestSysId);
+            result = 'done';
+
+        } else {
+            // ── Advance to next approver ──────────────────────
+            var nextOrder = currentOrder + 1;
+            var nextUser  = '';
+            var nextRole  = '';
+
+            for (var k = 0; k < seq.length; k++) {
+                if (seq[k].order === nextOrder) {
+                    nextUser = seq[k].user_sys_id;
+                    nextRole = seq[k].role;
+                    break;
+                }
+            }
+
+            gr.setValue('u_approver_sequence',      JSON.stringify(seq));
+            gr.setValue('u_current_approver_order', nextOrder);
+            gr.setValue('u_approver',               nextUser);
+            gr.setWorkflow(false);
+            gr.autoSysFields(false);
+            gr.update();
+
+            this._sendApprovalNotification(requestSysId, nextUser, nextRole);
+            result = 'next';
+
+            gs.info('CLMSeq: Moved to Step ' + nextOrder + ' | Role=' + nextRole +
+                    ' | User=' + nextUser + ' | Request=' + requestSysId);
+        }
+
+        return result;
+    },
+
+    // ----------------------------------------------------------
+    //  handleRejection
+    //  Call this when ANY approver rejects
+    //  Sets state = Rejected immediately (no further routing)
+    // ----------------------------------------------------------
+    handleRejection: function(requestSysId, approverUserId, rejectionReason) {
+        var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        if (!gr.get(requestSysId)) return 'error';
+
+        var seq = this._parseSequence(gr.u_approver_sequence + '');
+        var currentOrder = parseInt(gr.u_current_approver_order) || 1;
+
+        if (seq) {
+            for (var i = 0; i < seq.length; i++) {
+                if (seq[i].order === currentOrder) {
+                    seq[i].status      = 'rejected';
+                    seq[i].approved_by = approverUserId || gs.getUserID();
+                    seq[i].approved_on = new GlideDateTime().toString();
+                    seq[i].comments    = rejectionReason || '';
+                }
+                // Mark remaining as skipped
+                if (seq[i].order > currentOrder) {
+                    seq[i].status = 'skipped';
+                }
+            }
+            gr.setValue('u_approver_sequence', JSON.stringify(seq));
+        }
+
+        gr.setValue('state',        'Rejected');
+        gr.setValue('u_approver',   '');
+        gr.setValue('u_rejection_reason', rejectionReason || '');
+        gr.setWorkflow(false);
+        gr.autoSysFields(false);
+        gr.update();
+
+        this._notifyInitiatorRejection(requestSysId, rejectionReason);
+
+        gs.info('CLMSeq: Request REJECTED at Step ' + currentOrder +
+                ' by ' + (approverUserId || gs.getUserID()) +
+                ' | Request=' + requestSysId);
+        return 'rejected';
+    },
+
+    // ----------------------------------------------------------
+    //  handleSendBack
+    //  Approver sends back to initiator with comments
+    //  Resets sequence order to 1 so it restarts on re-submission
+    // ----------------------------------------------------------
+  // ----------------------------------------------------------
+    //  handleSendBack
+    //  Approver sends back to initiator with comments
+    //  Resets sequence order to 1 and WIPES old approver fields
+    // ----------------------------------------------------------
+   handleSendBack: function(requestSysId, approverUserId, sendBackComments) {
+        var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        if (!gr.get(requestSysId)) return 'error';
+
+        // 1. Reset the JSON sequence
+        var seq = this._parseSequence(gr.u_approver_sequence + '');
+        if (seq) {
+            for (var i = 0; i < seq.length; i++) {
+                seq[i].status      = 'pending';
+                seq[i].approved_by = '';
+                seq[i].approved_on = '';
+                seq[i].comments    = '';
+            }
+            gr.setValue('u_approver_sequence', JSON.stringify(seq));
+        }
+
+        // 2. WIPE all approver reference fields so the Flow/BR can re-populate them on Resubmit
+        var approverFields = [
+            'u_approver_tsh', 'u_approver_rhm', 'u_approver_zhm', 'u_approver_zch', 'u_approver_ho',
+            'u_approver_nsh', 'u_approver_nsh_cch', 'u_approver_cmo', 'u_approver_cmo_cfo', 'u_approver_md',
+            'u_approver_tsm', 'u_approver_rh_ch_rmc', 'u_approver_zh_rmc', 'u_approver_head_rmc', 
+            'u_approver_head_key_ch_rmc', 'u_approver_head_key_cch', 'u_approver_bh', 'u_approver_bh_cfo',
+            'u_approver_tsh_bpd', 'u_approver_zh_bpd', 'u_approver_hsbpd', 'u_approver_hbpd', 
+            'u_approver_cch_hbpd', 'u_approver_cfo', 'u_approver','u_approver_ch_rmc'
+        ];
+
+        for (var f = 0; f < approverFields.length; f++) {
+            gr.setValue(approverFields[f], ''); 
+        }
+
+        // 3. Update record status
+        gr.setValue('state', 'Returned');
+        gr.setValue('u_current_approver_order', 1);
+        gr.setValue('return_comments', sendBackComments || '');
+        gr.comments = "Returned via Approver Dashboard\nComments: " + (sendBackComments || 'None');
+        
+        // Return to initiator
+        gr.setValue('approver', gr.initiator + ''); 
+        
+        gr.setWorkflow(false);
+        gr.autoSysFields(false);
+        gr.update();
+
+        this._notifyInitiatorSendBack(requestSysId, sendBackComments);
+
+        gs.info('CLMSeq: Sent Back at Step. Fields wiped | Request=' + requestSysId);
+        return 'sent_back';
+    },
+    // ----------------------------------------------------------
+    //  getSequenceSummary
+    //  Returns human-readable summary for UI display
+    //  Format: [{order, role, user_name, status, approved_on}]
+    // ----------------------------------------------------------
+    getSequenceSummary: function(requestSysId) {
+        var seq = this._getSequence(requestSysId);
+        if (!seq) return [];
+
+        var summary = [];
+        for (var i = 0; i < seq.length; i++) {
+            var step     = seq[i];
+            var userName = '';
+
+            if (step.user_sys_id) {
+                var uGr = new GlideRecord('sys_user');
+                if (uGr.get(step.user_sys_id)) {
+                    userName = uGr.getDisplayValue('name');
+                }
+            }
+
+            summary.push({
+                order:       step.order,
+                role:        step.role,
+                user_sys_id: step.user_sys_id,
+                user_name:   userName,
+                status:      step.status,
+                approved_on: step.approved_on || '',
+                comments:    step.comments    || ''
+            });
+        }
+        return summary;
+    },
+
+    // ----------------------------------------------------------
+    //  isCurrentApprover
+    //  Returns true if the given userId is the active approver
+    // ----------------------------------------------------------
+    isCurrentApprover: function(requestSysId, userId) {
+        var current = this.getCurrentApproverUserId(requestSysId);
+        return current !== '' && current === userId;
+    },
+
+    // ── Private helpers ─────────────────────────────────────
+
+    _getSequence: function(requestSysId) {
+        var gr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        if (!gr.get(requestSysId)) return null;
+        return this._parseSequence(gr.u_approver_sequence + '');
+    },
+
+    _parseSequence: function(json) {
+        if (!json || json === '' || json === 'null') return null;
+        try {
+            return JSON.parse(json);
+        } catch (e) {
+            gs.error('CLMSeq._parseSequence: invalid JSON — ' + e.message);
+            return null;
+        }
+    },
+
+    // _triggerFinalApprovalActions: function(requestSysId) {
+    //     // TODO: trigger SAP write-back, send approval notification to initiator
+    //     // Placeholder — wire up your SAP integration here
+    //     gs.info('CLMSeq: Final approval actions triggered for ' + requestSysId);
+
+    //     // Example: fire a ServiceNow event
+    //     // GlideEvent.queue('x_birl3_clm.approved', requestSysId, '', '');
+    // },
+//30 april 2026
+
+_triggerFinalApprovalActions: function(requestSysId) {
+    var seq = this._getSequence(requestSysId);
+    if (seq && seq.length > 0) {
+        var lastStep = seq[seq.length - 1];
+        gs.info('CLMSeq: Final approver role=' + lastStep.role + 
+                ' type=' + lastStep.step_type);
+    }
+    // TODO: SAP write-back integration here
+    gs.info('CLMSeq: Final approval actions triggered for ' + requestSysId);
+},
+    _sendApprovalNotification: function(requestSysId, userSysId, role) {
+        // TODO: Send email/push to next approver
+        // Placeholder — wire up notification record here
+        gs.info('CLMSeq: Notification → ' + userSysId + ' (' + role + ')' +
+                ' for request ' + requestSysId);
+
+        // Example using GlideEmailOutbound or notification event:
+        // GlideEvent.queue('x_birl3_clm.pending_approval', requestSysId, userSysId, role);
+    },
+
+    _notifyInitiatorRejection: function(requestSysId, reason) {
+        gs.info('CLMSeq: Rejection notification for request ' + requestSysId);
+        // GlideEvent.queue('x_birl3_clm.rejected', requestSysId, '', reason);
+    },
+
+    _notifyInitiatorSendBack: function(requestSysId, comments) {
+        gs.info('CLMSeq: SendBack notification for request ' + requestSysId);
+        // GlideEvent.queue('x_birl3_clm.sent_back', requestSysId, '', comments);
+    },
+
+    type: 'CLMSequentialApproval'
+};
+
+
+// ============================================================
+//  AFTER BUSINESS RULE  (replaces previous After BR)
+//  Table  : x_birl3_clm_clm_new_credit_request
+//  When   : After Insert (state = Submitted)
+//  Purpose: Kick off first approval notification
+// ============================================================
+
+/*
+(function executeRule(current, previous) {
+
+    if (current.customer_type + '' !== 'Trade') return;
+    if (current.state + '' !== 'Submitted') return;
+
+    var seqJson = current.u_approver_sequence + '';
+    if (!seqJson || seqJson === '' || seqJson === 'null') return;
+
+    var seq;
+    try { seq = JSON.parse(seqJson); } catch(e) { return; }
+
+    // Send notification to Step 1 approver
+    if (seq.length > 0 && seq[0].user_sys_id) {
+        var seqHelper = new CLMSequentialApproval();
+        seqHelper._sendApprovalNotification(
+            current.sys_id + '',
+            seq[0].user_sys_id,
+            seq[0].role
+        );
+        gs.info('CLM AfterBR: Notified first approver ' + seq[0].role +
+                ' for ' + current.request_number);
+    }
+
+})(current, previous);
+*/
+
+
+// ============================================================
+//  UI ACTION — "Approve" button
+//  Table  : x_birl3_clm_clm_new_credit_request
+//  Client : false (Server-side)
+//  Condition: current.state == 'Submitted'
+// ============================================================
+
+/*
+(function() {
+
+    var seqHelper = new CLMSequentialApproval();
+    var result    = seqHelper.handleApproval(
+        current.sys_id + '',
+        gs.getUserID(),
+        action.getGlideFormAnswer()  // or a comments variable from UI
+    );
+
+    if (result === 'done') {
+        gs.addInfoMessage('Request fully approved. SAP update triggered.');
+    } else if (result === 'next') {
+        gs.addInfoMessage('Approved. Request forwarded to next approver.');
+    } else {
+        gs.addErrorMessage('Approval could not be processed. Check logs.');
+    }
+
+})();
+*/
+
+
+// ============================================================
+//  UI ACTION — "Reject" button
+// ============================================================
+
+/*
+(function() {
+
+    var reason    = request.getParameter('sysparm_rejection_reason') || '';
+    var seqHelper = new CLMSequentialApproval();
+    seqHelper.handleRejection(current.sys_id + '', gs.getUserID(), reason);
+    gs.addInfoMessage('Request rejected. Initiator has been notified.');
+
+})();
+*/
+
+
+// ============================================================
+//  UI ACTION — "Send Back" button
+// ============================================================
+
+/*
+(function() {
+
+    var comments  = request.getParameter('sysparm_send_back_comments') || '';
+    var seqHelper = new CLMSequentialApproval();
+    seqHelper.handleSendBack(current.sys_id + '', gs.getUserID(), comments);
+    gs.addInfoMessage('Request sent back to initiator with your comments.');
+
+})();
+*/
+
+
+// ============================================================
+//  USAGE EXAMPLES & TEST CASES
+// ============================================================
+
+/*
+------------------------------------------------------------------
+SCENARIO 1 — Cement Trade, Net Exposure ₹40L (→ ZHM is target)
+------------------------------------------------------------------
+Hierarchy : TSH → RHM → ZHM → NSH → NSH_CCH → CMO → CMO_CFO → MD
+Target    : ZHM (level 3)
+Sequence built: [TSH, RHM, ZHM]  (3 steps)
+
+Step 1: TSH approves → u_current_approver_order = 2, u_approver = RHM's user
+Step 2: RHM approves → u_current_approver_order = 3, u_approver = ZHM's user
+Step 3: ZHM approves → state = 'Approved', SAP write-back triggered
+
+------------------------------------------------------------------
+SCENARIO 2 — RMC Trade, Net Exposure ₹20L (→ ZH_RMC is target)
+------------------------------------------------------------------
+Hierarchy : TSM → RH_CH_RMC → ZH_RMC → HEAD_RMC → ...
+Target    : ZH_RMC (level 3)
+Sequence  : [TSM, RH_CH_RMC, ZH_RMC]  (3 steps)
+
+------------------------------------------------------------------
+SCENARIO 3 — BPD Trade, Net Exposure ₹60L, Deviation (→ HBPD+1 = CCH_HBPD)
+------------------------------------------------------------------
+Hierarchy : TSH_BPD → ZH_BPD → HSBPD → HBPD → CCH_HBPD → BH → CFO → MD
+Target    : CCH_HBPD (level 5, escalated from HBPD)
+Sequence  : [TSH_BPD, ZH_BPD, HSBPD, HBPD, CCH_HBPD]  (5 steps)
+
+------------------------------------------------------------------
+REJECTION MID-SEQUENCE — e.g., RHM rejects at step 2
+------------------------------------------------------------------
+- seq[1].status = 'rejected'
+- seq[2..].status = 'skipped'
+- state = 'Rejected'
+- Initiator notified immediately
+
+------------------------------------------------------------------
+SEND BACK at step 3
+------------------------------------------------------------------
+- All seq steps reset to 'pending'
+- u_current_approver_order = 1
+- state = 'Sent Back'
+- On re-submission, Before BR rebuilds/validates sequence & restarts from step 1
+*/]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-04-18 10:02:48</sys_created_on>
+        <sys_id>02658d8a2b5843d04572f3745e91bf96</sys_id>
+        <sys_mod_count>17</sys_mod_count>
+        <sys_name>CLMSequentialApproval</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_02658d8a2b5843d04572f3745e91bf96</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-21 13:40:01</sys_updated_on>
+    </sys_script_include>
+</record_update>

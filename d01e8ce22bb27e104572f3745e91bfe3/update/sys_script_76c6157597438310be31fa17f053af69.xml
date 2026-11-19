@@ -1,0 +1,258 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>false</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_nt_pan_request</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition table="x_birl3_clm_nt_pan_request">state=1^ORstateCHANGESTO2^EQ<item display_value="Open" endquery="false" field="state" goto="false" newquery="false" operator="=" or="false" value="1"/>
+            <item display_value="Work in Progress" endquery="false" field="state" goto="false" newquery="false" operator="CHANGESTO" or="true" value="2"/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>CLM: NT Matrix Mapping</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous /*null when async*/ ) {
+
+    var segment = current.getValue('segment').toLowerCase();
+
+    // Safely strip all currency prefixes and commas before parsing
+    var rawPanExp = current.getValue('total_net_exposure') || '0';
+    var panNetExposure = parseFloat(rawPanExp.toString().replace(/[^0-9.-]+/g, ""));
+
+    var isPanOverride = (panNetExposure > 15000000); // Trigger PAN roles if > 1.5 Cr
+    var isDeviation = (current.getValue('is_deviation') == '1' || current.getValue('is_deviation') == 'true');
+
+    // 1. Initialize Deduplication Arrays for every field
+    var fields = {
+        nt_cement_rhm: [],
+        nt_cement_zhm: [],
+        nt_cement_zch: [],
+        nt_cement_nsh: [],
+        nt_rmc_tsm: [],
+        nt_rmc_rh_ch: [],
+        nt_rmc_zh: [],
+        nt_rmc_zch: [],
+        nt_rmc_head_rmc: [],
+        nt_rmc_national_head_key: [],
+        nt_rmc_ch_rmc: [],
+        nt_bpd_tsh: [],
+        nt_bpd_zh_bpd: [],
+        nt_bpd_hs_bpd: [],
+        nt_bpd_zch: [],
+        nt_bpd_h_bpd: [],
+        pan_ho: [],
+        pan_cch: [],
+        pan_cmo_bh: [],
+        pan_cfo: [],
+        pan_md: []
+    };
+
+    // NEW: Global tracker to prevent a user from being asked twice across ANY tier
+    var globalApprovers = [];
+
+    function addUnique(arrayKey, userId) {
+        if (userId) {
+            var uid = userId.toString();
+            // If they aren't in this specific field YET, AND they haven't been added to any previous field
+            if (fields[arrayKey].indexOf(uid) === -1 && globalApprovers.indexOf(uid) === -1) {
+                fields[arrayKey].push(uid);
+                globalApprovers.push(uid); // Mark them as officially in the approval chain
+            }
+        }
+    }
+
+    // Helper function to keep mapping clean
+    function mapRole(role, approver, isPanIndia) {
+        switch (role) {
+            case 'NT CEMENT RHM':
+                addUnique('nt_cement_rhm', approver);
+                break;
+            case 'NT CEMENT ZHM':
+                addUnique('nt_cement_zhm', approver);
+                break;
+            case 'NT CEMENT ZCH':
+                addUnique('nt_cement_zch', approver);
+                break;
+            case 'NT CEMENT NSH':
+                addUnique('nt_cement_nsh', approver);
+                break;
+
+            case 'NT RMC TSM':
+                addUnique('nt_rmc_tsm', approver);
+                break;
+            case 'NT RMC RH CH':
+                addUnique('nt_rmc_rh_ch', approver);
+                break;
+            case 'NT RMC ZCH':
+                addUnique('nt_rmc_zch', approver);
+                break;
+            case 'NT RMC ZH':
+                addUnique('nt_rmc_zh', approver);
+                break;
+            case 'NT RMC HEAD RMC':
+                addUnique('nt_rmc_head_rmc', approver);
+                break;
+            case 'NT RMC NATIONAL HEAD KEY':
+                addUnique('nt_rmc_national_head_key', approver);
+                break;
+            case 'NT RMC CH RMC':
+                addUnique('nt_rmc_ch_rmc', approver);
+                break;
+
+            case 'NT BPD TSH':
+                addUnique('nt_bpd_tsh', approver);
+                break;
+            case 'NT BPD ZH BPD':
+                addUnique('nt_bpd_zh_bpd', approver);
+                break;
+            case 'NT BPD HS BPD':
+                addUnique('nt_bpd_hs_bpd', approver);
+                break;
+            case 'NT BPD ZCH':
+                addUnique('nt_bpd_zch', approver);
+                break;
+            case 'NT BPD HBPD':
+                addUnique('nt_bpd_h_bpd', approver);
+                break;
+
+                // PAN Roles
+            case 'HO':
+                addUnique('pan_ho', approver);
+                break;
+            case 'CCH':
+                addUnique('pan_cch', approver);
+                break;
+            case 'CMO BH':
+                addUnique('pan_cmo_bh', approver);
+                break;
+            case 'CFO':
+                addUnique('pan_cfo', approver);
+                break;
+            case 'MD':
+                addUnique('pan_md', approver);
+                break;
+        }
+    }
+
+    // 2. Loop through all associated Child Site Requests
+    var siteGr = new GlideRecord('x_birl3_clm_nt_site_request');
+    siteGr.addQuery('pan_request', current.getUniqueValue());
+    siteGr.query();
+
+    while (siteGr.next()) {
+
+        var rawSiteExp = current.getValue('segment_net_exposure') || '0';
+        var siteExposure = parseFloat(rawSiteExp.toString().replace(/[^0-9.-]+/g, ""));
+
+        // NEW: Fetch Requested Number of Days (NOD) from Site record[cite: 3]
+        var siteNod = parseInt(siteGr.getValue('nod')) || 0;
+
+        var zone = siteGr.customer_site_code.zone || '';
+        var region = siteGr.customer_site_code.region || '';
+        var depot = siteGr.customer_site_code.depot || '';
+
+        // Reset the +1 escalation flag for each site request
+        var requiresEscalation = isDeviation;
+
+        // 3. Query Master Matrix with Hierarchical Rollup Logic
+        var mxGr = new GlideRecord('x_birl3_clm_approval_matrix');
+        mxGr.addQuery('customer_type', 'non_trade');
+
+        var encodedQuery = 'segment=' + segment + '^ORsegmentISEMPTY';
+        encodedQuery += '^zone=' + zone + '^ORzoneISEMPTY';
+        encodedQuery += '^region=' + region + '^ORregionISEMPTY';
+        encodedQuery += '^depot=' + depot + '^ORdepotISEMPTY';
+
+        mxGr.addEncodedQuery(encodedQuery);
+        mxGr.orderBy('sequence_order'); // Crucial: Ensures lowest tier to highest tier
+        mxGr.query();
+
+        while (mxGr.next()) {
+            var role = mxGr.getValue('role_name');
+            var approver = mxGr.getValue('approver_user');
+            var minAmt = parseFloat(mxGr.getValue('min_amount')) || 0;
+
+            // NEW: Fetch Allowed Number of Days from Matrix
+            var matrixNod = parseInt(mxGr.getValue('number_of_days')) || 0;
+
+            var isPanIndia = (mxGr.getValue('pan_india') == '1' || mxGr.getValue('pan_india') == 'true');
+
+            if (!approver) continue;
+
+            // NEW: Calculate if Threshold is Breached (Amount OR NOD)
+            var amountBreached = (siteExposure > minAmt);
+            var nodBreached = (matrixNod > 0 && siteNod > matrixNod);
+            var thresholdMet = (amountBreached || nodBreached);
+
+            // 4. Matrix Threshold Check FOR SEGMENTS
+            if (thresholdMet && !isPanIndia) {
+                // Naturally triggered by exposure limit or NOD limit
+                mapRole(role, approver, isPanIndia);
+            }
+            // +1 DEVIATION ESCALATION CHECK
+            else if (requiresEscalation && !isPanIndia) {
+                // This is the first role that failed the threshold check. Push them into the array.
+                mapRole(role, approver, isPanIndia);
+                // Immediately disable the flag so it only escalates +1 level.
+                requiresEscalation = false;
+            }
+
+            // 5. PAN-Level Override Check
+            if (isPanOverride && isPanIndia && (panNetExposure > minAmt)) {
+                mapRole(role, approver, isPanIndia);
+            }
+            // Spillover +1 Escalation (If deviation pushes a top-tier segment directly into PAN level)
+            else if (requiresEscalation && isPanIndia) {
+                mapRole(role, approver, isPanIndia);
+                requiresEscalation = false;
+            }
+        }
+    }
+
+    // 6. Write Data back to the specific PAN Request Fields
+    for (var key in fields) {
+        if (current.isValidField(key)) {
+            current.setValue(key, fields[key].join(','));
+        }
+    }
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-01 10:14:48</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>76c6157597438310be31fa17f053af69</sys_id>
+        <sys_mod_count>38</sys_mod_count>
+        <sys_name>CLM: NT Matrix Mapping</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_76c6157597438310be31fa17f053af69</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-05 16:30:36</sys_updated_on>
+        <template/>
+        <when>before</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=76c6157597438310be31fa17f053af69"/>
+</record_update>

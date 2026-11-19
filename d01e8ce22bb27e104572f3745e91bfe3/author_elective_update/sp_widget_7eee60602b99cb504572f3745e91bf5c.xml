@@ -1,0 +1,480 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $window, $sce) {
+    var c = this;
+
+    // ── Segment & Card Definitions (Tailored for Limit Swap) ───────────
+    var SEGMENTS = {
+        swap: {
+            badge: 'LIMIT SWAP',
+            title: 'Limit Swap Management',
+            cards: {
+                new:      { label: 'New Credit Limit Request', desc: 'Raise a new Limit Swap request for a non-trade customer.', page: 'uclm_limit_swap_request' },
+                view:     { label: 'View Requests',            desc: 'Track and monitor the status of your submitted swap requests.', page: 'uclm_limit_swap_view_request' },
+                approval: { label: 'Pending Approvals',        desc: 'Review and act on pending limit swap authorization requests.',   page: 'uclm_limit_swap_approval' }
+            }
+        }
+    };
+
+    var ICONS = {
+        new:      '<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>',
+        view:     '<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+        approval: '<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>'
+    };
+
+    var ICON_BG = {
+        new:      'yellow',
+        view:     'blue',
+        approval: 'orange'
+    };
+
+    var cardKeys = ['new', 'view', 'approval'];
+
+    // ── Build Sections ─────────────────────────────────────────────────
+    c.sections = Object.keys(SEGMENTS).map(function(segKey) {
+        var seg = SEGMENTS[segKey];
+        var cards = cardKeys.map(function(k) {
+            var card = seg.cards[k];
+            return {
+                label:        card.label,
+                desc:         card.desc,
+                page:         card.page,
+                icon:         $sce.trustAsHtml(ICONS[k]),
+                iconBg:       ICON_BG[k],
+                pendingCount: (k === 'approval') ? (c.data.swapPendingCount || 0) : 0
+            };
+        });
+        
+        return {
+            badge: seg.badge,
+            title: seg.title,
+            cards: cards
+        };
+    });
+
+    // ── Navigate ───────────────────────────────────────────────────────
+    c.navigate = function(pageId) {
+        if (!pageId) return;
+        $window.location.href = '/uclm?id=' + pageId;
+    };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Wrapper ── */
+.db-wrap {
+  width: 100%;
+  min-height: 100vh;
+  background: #F9FAFB; /* ABG Premium Light Background */
+  font-family: 'Oxygen', "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  padding: clamp(16px, 3vw, 48px);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Section ── */
+.db-section             { margin-bottom: 32px; }
+.db-section-header      { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.db-section-badge       { height: 26px; padding: 0 12px; border-radius: 13px; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; background: #1a1a1a; color: #fff200; display: flex; align-items: center; white-space: nowrap; text-transform: uppercase; }
+.db-section-title       { font-size: 15px; font-weight: 700; color: #1a1a1a; white-space: nowrap; text-transform: uppercase; letter-spacing: 0.5px; }
+.db-section-line        { flex: 1; height: 1px; background: #e0e6ed; }
+
+/* ── Card grid ── */
+.db-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+
+/* ── Card ── */
+.db-card {
+  background: #ffffff;
+  border: 1px solid #e0e6ed;
+  border-radius: 8px;
+  padding: 20px 18px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: all 0.2s ease;
+}
+.db-card:hover  { 
+  border-color: #E87722; /* ABG Orange */
+  box-shadow: 0 6px 16px rgba(0,0,0,0.04); 
+  transform: translateY(-2px); 
+}
+.db-card:focus  { 
+  outline: none;
+  border-color: #AF272F; /* ABG Maroon */
+  box-shadow: 0 0 0 3px rgba(175, 39, 47, 0.15); 
+}
+
+/* ── Professional Pending Badge ── */
+.db-card-pending-count {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: #E23D28; /* Professional Red */
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 12px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* ── Card internals ── */
+.db-card-icon           { width: 40px; height: 40px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+
+/* Updated Icon Backgrounds to match premium muted tones */
+.db-card-icon.yellow   { background: #fffcf0; color: #E87722; border: 1px solid #f9e79f; } 
+.db-card-icon.blue     { background: #eaf4fb; color: #1a5276; border: 1px solid #aed6f1; }
+.db-card-icon.green    { background: #f4fbf6; color: #27ae60; border: 1px solid #a9dfbf; }
+.db-card-icon.orange   { background: #fdf2eb; color: #E87722; border: 1px solid #fadbd8; } 
+
+.db-card-label         { font-size: 14px; font-weight: 700; color: #1a1a1a; line-height: 1.4; }
+.db-card-desc          { font-size: 12px; color: #7f8c9a; line-height: 1.5; }
+.db-card-arrow         { font-size: 16px; color: #cdd4dc; margin-top: auto; transition: color 0.2s ease; }
+.db-card:hover .db-card-arrow { color: #E87722; /* ABG Orange */ }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .db-cards             { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+}
+
+@media (max-width: 480px) {
+  .db-cards             { gap: 12px; grid-template-columns: 1fr; }
+  .db-card              { padding: 16px 14px; gap: 10px; }
+  .db-card-label        { font-size: 13px; }
+  .db-card-desc         { display: none; }
+  .db-card-icon         { width: 32px; height: 32px; }
+  .db-section-badge     { padding: 0 10px; font-size: 10px; }
+  .db-section-title     { font-size: 13px; }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id/>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Limit Swap</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    var userId = gs.getUserID();
+
+    // Calculate Pending Count specifically for Limit Swap requests
+    var swapPendingCount = 0;
+    var grApp = new GlideRecord('sysapproval_approver');
+    grApp.addQuery('approver', userId);
+    grApp.addQuery('state', 'requested');
+    
+    grApp.addQuery('source_table', 'x_birl3_clm_nt_limit_swap_request'); 
+    
+    grApp.query();
+    while (grApp.next()) {
+        swapPendingCount++;
+    }
+    
+    data.swapPendingCount = swapPendingCount;
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>sounder.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-02 09:12:43</sys_created_on>
+        <sys_id>7eee60602b99cb504572f3745e91bf5c</sys_id>
+        <sys_mod_count>29</sys_mod_count>
+        <sys_name>UCLM Limit Swap</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_7eee60602b99cb504572f3745e91bf5c</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 06:28:33</sys_updated_on>
+        <template><![CDATA[<div class="db-wrap">
+  <div class="db-section" ng-repeat="section in c.sections">
+    <div class="db-section-header">
+      <span class="db-section-badge">{{section.badge}}</span>
+      <span class="db-section-title">{{section.title}}</span>
+      <div class="db-section-line"></div>
+    </div>
+    
+    <div class="db-cards">
+      <div class="db-card"
+           ng-repeat="card in section.cards"
+           ng-click="c.navigate(card.page)"
+           role="button"
+           tabindex="0"
+           style="position:relative;"> 
+
+        <div class="db-card-pending-count" ng-if="card.pendingCount > 0">
+          {{card.pendingCount}}
+        </div>
+
+        <div class="db-card-icon {{card.iconBg}}">
+          <span ng-bind-html="card.icon"></span>
+        </div>
+        
+        <div class="db-card-label">{{card.label}}</div>
+        <div class="db-card-desc">{{card.desc}}</div>
+        
+        <div class="db-card-arrow" ng-if="!card.pendingCount || card.pendingCount === 0">→</div>
+      </div>
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>7eee60602b99cb504572f3745e91bf5c</id>
+        <sys_created_by>sounder.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-02 09:12:43</sys_created_on>
+        <sys_id>beee60602b99cb504572f3745e91bf62</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>sounder.k@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-02 09:12:43</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_7eee60602b99cb504572f3745e91bf5c</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function($scope, $window, $sce) {
+    var c = this;
+
+    // ── Segment &amp; Card Definitions (Tailored for Limit Swap) ───────────
+    var SEGMENTS = {
+        swap: {
+            badge: 'LIMIT SWAP',
+            title: 'Limit Swap Management',
+            cards: {
+                new:      { label: 'New Credit Limit Request', desc: 'Raise a new Limit Swap request for a non-trade customer.', page: 'uclm_limit_swap_request' },
+                view:     { label: 'View Requests',            desc: 'Track and monitor the status of your submitted swap requests.', page: 'uclm_limit_swap_view_request' },
+                approval: { label: 'Pending Approvals',        desc: 'Review and act on pending limit swap authorization requests.',   page: 'uclm_limit_swap_approval' }
+            }
+        }
+    };
+
+    var ICONS = {
+        new:      '&lt;svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"&gt;&lt;circle cx="12" cy="12" r="10"/&gt;&lt;line x1="12" y1="8" x2="12" y2="16"/&gt;&lt;line x1="8" y1="12" x2="16" y2="12"/&gt;&lt;/svg&gt;',
+        view:     '&lt;svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"&gt;&lt;path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/&gt;&lt;polyline points="14 2 14 8 20 8"/&gt;&lt;line x1="16" y1="13" x2="8" y2="13"/&gt;&lt;line x1="16" y1="17" x2="8" y2="17"/&gt;&lt;/svg&gt;',
+        approval: '&lt;svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"&gt;&lt;path d="M22 11.08V12a10 10 0 11-5.93-9.14"/&gt;&lt;polyline points="22 4 12 14.01 9 11.01"/&gt;&lt;/svg&gt;'
+    };
+
+    var ICON_BG = {
+        new:      'yellow',
+        view:     'blue',
+        approval: 'orange'
+    };
+
+    var cardKeys = ['new', 'view', 'approval'];
+
+    // ── Build Sections ─────────────────────────────────────────────────
+    c.sections = Object.keys(SEGMENTS).map(function(segKey) {
+        var seg = SEGMENTS[segKey];
+        var cards = cardKeys.map(function(k) {
+            var card = seg.cards[k];
+            return {
+                label:        card.label,
+                desc:         card.desc,
+                page:         card.page,
+                icon:         $sce.trustAsHtml(ICONS[k]),
+                iconBg:       ICON_BG[k],
+                pendingCount: (k === 'approval') ? (c.data.swapPendingCount || 0) : 0
+            };
+        });
+        
+        return {
+            badge: seg.badge,
+            title: seg.title,
+            cards: cards
+        };
+    });
+
+    // ── Navigate ───────────────────────────────────────────────────────
+    c.navigate = function(pageId) {
+        if (!pageId) return;
+        $window.location.href = '/uclm?id=' + pageId;
+    };
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;amp;display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Wrapper ── */
+.db-wrap {
+  width: 100%;
+  min-height: 100vh;
+  background: #F9FAFB; /* ABG Premium Light Background */
+  font-family: 'Oxygen', "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  padding: clamp(16px, 3vw, 48px);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Section ── */
+.db-section             { margin-bottom: 32px; }
+.db-section-header      { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.db-section-badge       { height: 26px; padding: 0 12px; border-radius: 13px; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; background: #1a1a1a; color: #fff200; display: flex; align-items: center; white-space: nowrap; text-transform: uppercase; }
+.db-section-title       { font-size: 15px; font-weight: 700; color: #1a1a1a; white-space: nowrap; text-transform: uppercase; letter-spacing: 0.5px; }
+.db-section-line        { flex: 1; height: 1px; background: #e0e6ed; }
+
+/* ── Card grid ── */
+.db-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+
+/* ── Card ── */
+.db-card {
+  background: #ffffff;
+  border: 1px solid #e0e6ed;
+  border-radius: 8px;
+  padding: 20px 18px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: all 0.2s ease;
+}
+.db-card:hover  { 
+  border-color: #E87722; /* ABG Orange */
+  box-shadow: 0 6px 16px rgba(0,0,0,0.04); 
+  transform: translateY(-2px); 
+}
+.db-card:focus  { 
+  outline: none;
+  border-color: #AF272F; /* ABG Maroon */
+  box-shadow: 0 0 0 3px rgba(175, 39, 47, 0.15); 
+}
+
+/* ── Professional Pending Badge ── */
+.db-card-pending-count {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: #E23D28; /* Professional Red */
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 12px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* ── Card internals ── */
+.db-card-icon           { width: 40px; height: 40px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+
+/* Updated Icon Backgrounds to match premium muted tones */
+.db-card-icon.yellow   { background: #fffcf0; color: #E87722; border: 1px solid #f9e79f; } 
+.db-card-icon.blue     { background: #eaf4fb; color: #1a5276; border: 1px solid #aed6f1; }
+.db-card-icon.green    { background: #f4fbf6; color: #27ae60; border: 1px solid #a9dfbf; }
+.db-card-icon.orange   { background: #fdf2eb; color: #E87722; border: 1px solid #fadbd8; } 
+
+.db-card-label         { font-size: 14px; font-weight: 700; color: #1a1a1a; line-height: 1.4; }
+.db-card-desc          { font-size: 12px; color: #7f8c9a; line-height: 1.5; }
+.db-card-arrow         { font-size: 16px; color: #cdd4dc; margin-top: auto; transition: color 0.2s ease; }
+.db-card:hover .db-card-arrow { color: #E87722; /* ABG Orange */ }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .db-cards             { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+}
+
+@media (max-width: 480px) {
+  .db-cards             { gap: 12px; grid-template-columns: 1fr; }
+  .db-card              { padding: 16px 14px; gap: 10px; }
+  .db-card-label        { font-size: 13px; }
+  .db-card-desc         { display: none; }
+  .db-card-icon         { width: 32px; height: 32px; }
+  .db-section-badge     { padding: 0 10px; font-size: 10px; }
+  .db-section-title     { font-size: 13px; }
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id/&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;UCLM Limit Swap&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+    var userId = gs.getUserID();
+
+    // Calculate Pending Count specifically for Limit Swap requests
+    var swapPendingCount = 0;
+    var grApp = new GlideRecord('sysapproval_approver');
+    grApp.addQuery('approver', userId);
+    grApp.addQuery('state', 'requested');
+    
+    grApp.addQuery('source_table', 'x_birl3_clm_nt_limit_swap_request'); 
+    
+    grApp.query();
+    while (grApp.next()) {
+        swapPendingCount++;
+    }
+    
+    data.swapPendingCount = swapPendingCount;
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;sounder.k@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-06-02 09:12:43&lt;/sys_created_on&gt;&lt;sys_id&gt;7eee60602b99cb504572f3745e91bf5c&lt;/sys_id&gt;&lt;sys_mod_count&gt;29&lt;/sys_mod_count&gt;&lt;sys_name&gt;UCLM Limit Swap&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_7eee60602b99cb504572f3745e91bf5c&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-09-08 06:28:33&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="db-wrap"&gt;
+  &lt;div class="db-section" ng-repeat="section in c.sections"&gt;
+    &lt;div class="db-section-header"&gt;
+      &lt;span class="db-section-badge"&gt;{{section.badge}}&lt;/span&gt;
+      &lt;span class="db-section-title"&gt;{{section.title}}&lt;/span&gt;
+      &lt;div class="db-section-line"&gt;&lt;/div&gt;
+    &lt;/div&gt;
+    
+    &lt;div class="db-cards"&gt;
+      &lt;div class="db-card"
+           ng-repeat="card in section.cards"
+           ng-click="c.navigate(card.page)"
+           role="button"
+           tabindex="0"
+           style="position:relative;"&gt; 
+
+        &lt;div class="db-card-pending-count" ng-if="card.pendingCount &gt; 0"&gt;
+          {{card.pendingCount}}
+        &lt;/div&gt;
+
+        &lt;div class="db-card-icon {{card.iconBg}}"&gt;
+          &lt;span ng-bind-html="card.icon"&gt;&lt;/span&gt;
+        &lt;/div&gt;
+        
+        &lt;div class="db-card-label"&gt;{{card.label}}&lt;/div&gt;
+        &lt;div class="db-card-desc"&gt;{{card.desc}}&lt;/div&gt;
+        
+        &lt;div class="db-card-arrow" ng-if="!card.pendingCount || card.pendingCount === 0"&gt;→&lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;7eee60602b99cb504572f3745e91bf5c&lt;/id&gt;&lt;sys_created_by&gt;sounder.k@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-06-02 09:12:43&lt;/sys_created_on&gt;&lt;sys_id&gt;beee60602b99cb504572f3745e91bf62&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;sounder.k@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-06-02 09:12:43&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>1935904376</payload_hash>
+        <record_name>UCLM Limit Swap</record_name>
+        <reverted_from/>
+        <source>0d1e00262bb27e104572f3745e91bf51</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-08 06:28:33</sys_created_on>
+        <sys_id>d925f0cc97d74b10be31fa17f053af4b</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a07fb43b280000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 06:28:33</sys_updated_on>
+        <type>Widget</type>
+        <update_guid>1925f0ccaad74b1051e18cd4539f1d4a</update_guid>
+        <update_guid_history>1925f0ccaad74b1051e18cd4539f1d4a:1935904376,d80a50bc6c4687501513abfa960bdd71:191662068,9cbe15570f290710aab0c3b268a8db8f:2078862733,22a9ef3a18e103100ffeffbd6f0fa599:251261478,a4bd9b2140a143902fe12f40b9776a20:581185411,16bc536d2861439063184161066f3d5b:714288219,b84c972d7b614390b9ae24dae408bc02:17869783,cb8bd7690061439004e0742c405952b2:-156857734,eaca93e5ab6143906d9ea4367ff87175:-1309283626,a1b5d7e15f214390c3061f6df353a60b:471072510,22213f2370594350531a4376477e0a82:-2040173637,0a877df07b95cb50afd1afbf58e9702b:1489256830,865389e86c5dcb5054bc33d99eabb287:-897456092,f54309e8c45dcb5010972b9dda40568f:-1946773519,ce9281a8fa5dcb50ecfe6f8855d50abc:-257632371,068201a8465dcb50e718c283d5fc6c79:156308994,ca52c5e4d55dcb50eeb2301e05b946ab:-257632371,58520968145dcb50c1d61674fb231802:156308994,1a32c168a45dcb505ce379b5763c4e01:-257632371,cd328168b05dcb5055fdf268167dddca:1573296690,bcc978a0f51dcb503c41483fbe6e58ec:-257632371,1ae5382866d9cb50018f1b34e859071e:-659284465,34d5b42885d9cb505c6ffb392d603fc4:-240357933,44d5342870d9cb50a7bbda1e6351456e:-659284465,5ba5fce4aed9cb5045364e554256acbe:-1294986377,6f05b0a48fd9cb50f6fc770ab4b3ac02:1520057765,aed3b860f1d9cb507a6d1e7e049965a2:-311693222,166fa4a0bc99cb50f55d93660c254753:958163526,4f1f68602299cb5097bb312b130cec9c:-967381744,faee6060b799cb504104c033e060a360:283555220</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="">3c55f8cc97d74b10be31fa17f053afa7</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-08 06:29:20</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>a8ade0f166ff42828c094115c439b124</sys_id>
+        <sys_metadata>7eee60602b99cb504572f3745e91bf5c</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>UCLM Limit Swap</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_7eee60602b99cb504572f3745e91bf5c</sys_update_name>
+        <sys_update_version display_value="sp_widget_7eee60602b99cb504572f3745e91bf5c">d925f0cc97d74b10be31fa17f053af4b</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 06:29:20</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

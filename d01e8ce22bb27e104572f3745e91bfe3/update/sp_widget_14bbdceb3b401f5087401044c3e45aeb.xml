@@ -1,0 +1,1477 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $location, $sce, $interval, spUtil) {
+	var c = this;
+
+	c.MAX_FILES = 5;
+	var MAX_FILE_BYTES = 5 * 1024 * 1024;
+	var ALLOWED_EXT = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'png', 'jpg', 'jpeg', 'txt', 'msg', 'eml'];
+
+	c.rfis = c.data.rfis || [];
+	c.isAdmin = !!c.data.isAdmin;
+
+	c.approvalSrc = null;
+	c.iframeLoading = false;
+	var sizeTimer = null;
+	var frameObserver = null;
+
+	c.view = 'list';
+	c.tab = 'assigned';          // always open on "Assigned to me"
+	c.statusFilter = 'all';
+	c.segmentFilter = '';
+	c.segments = [];
+	c.searchQuery = '';
+	c.page = 1;
+	c.pageSize = 10;
+	c.lastRefreshed = new Date();
+
+	c.detail = null;
+	c.responseText = '';
+	c.showRequest = true;
+	c.isLoadingDetail = false;
+	c.isSubmitting = false;
+	c.isUploading = false;
+	c.isRefreshing = false;
+
+	// ---------- helpers ----------
+	c.min = function(a, b) { return Math.min(a, b); };
+
+	c.label = function(status) {
+		return status ? status.charAt(0).toUpperCase() + status.slice(1) : '';
+	};
+
+	c.statusClass = function(status) {
+		return status === 'answered' ? 'approved' : 'pending';
+	};
+
+	c.initials = function(name) {
+		var parts = (name || '').trim().split(/\s+/).filter(Boolean);
+		if (!parts.length) return '?';
+		if (parts.length === 1) return parts[0].charAt(0).toUpperCase();
+		return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
+	};
+
+	c.fileIcon = function(ext) {
+		ext = (ext || '').toLowerCase();
+		if (ext === 'pdf') return 'fa-file-pdf-o text-danger';
+		if (ext === 'xls' || ext === 'xlsx' || ext === 'csv') return 'fa-file-excel-o text-success';
+		if (ext === 'doc' || ext === 'docx') return 'fa-file-word-o text-primary';
+		if (ext === 'png' || ext === 'jpg' || ext === 'jpeg') return 'fa-file-image-o text-warning';
+		return 'fa-file-text-o text-muted';
+	};
+
+	c.buildSegments = function() {
+		var seen = {}, out = [];
+		c.rfis.forEach(function(r) {
+			if (r.segment && !seen[r.segment]) { seen[r.segment] = true; out.push(r.segment); }
+		});
+		out.sort();
+		c.segments = out;
+	};
+	c.buildSegments();
+
+	// ---------- list ----------
+	c.awaitingCount = function() {
+		return c.rfis.filter(function(r) { return r.isTarget && r.status === 'open'; }).length;
+	};
+
+	c.matchesTab = function(r, tab) {
+		if (tab === 'assigned') return r.isTarget;
+		if (tab === 'raised') return r.isRaiser;
+		return true;
+	};
+
+	c.countTab = function(tab) {
+		return c.rfis.filter(function(r) { return c.matchesTab(r, tab); }).length;
+	};
+
+	c.setTab = function(tab) {
+		c.tab = tab;
+		c.page = 1;
+	};
+
+	c.getFiltered = function() {
+		var s = (c.searchQuery || '').toLowerCase();
+		var arr = c.rfis.filter(function(r) {
+			if (!c.matchesTab(r, c.tab)) return false;
+			if (c.statusFilter !== 'all' && r.status !== c.statusFilter) return false;
+			if (c.segmentFilter && r.segment !== c.segmentFilter) return false;
+			if (s) {
+				var hay = [r.number, r.request_number, r.pan, r.question, r.raised_by, r.target_user].join(' ').toLowerCase();
+				if (hay.indexOf(s) === -1) return false;
+			}
+			return true;
+		});
+
+		// Order: 1) open & assigned to me  2) other open  3) answered
+		var mine = [], otherOpen = [], rest = [];
+		arr.forEach(function(r) {
+			if (r.status === 'open' && r.isTarget) mine.push(r);
+			else if (r.status === 'open') otherOpen.push(r);
+			else rest.push(r);
+		});
+		return mine.concat(otherOpen, rest);
+	};
+
+	c.getPaged = function() {
+		var start = (c.page - 1) * c.pageSize;
+		return c.getFiltered().slice(start, start + c.pageSize);
+	};
+
+	c.totalPages = function() {
+		return Math.ceil(c.getFiltered().length / c.pageSize) || 1;
+	};
+
+	// group headers inside the list
+	c.groupOf = function(r) {
+		return (r.status === 'open' && r.isTarget) ? 'await' : 'other';
+	};
+
+	c.groupStart = function(r, index) {
+		if (index === 0) return true;
+		var paged = c.getPaged();
+		return c.groupOf(paged[index - 1]) !== c.groupOf(r);
+	};
+
+	c.groupTitle = function(r) {
+		if (c.groupOf(r) === 'await') return 'Awaiting your response';
+		if (c.tab === 'assigned') return 'Answered by me';
+		if (c.tab === 'raised') return 'Raised by me';
+		return 'Other RFIs';
+	};
+
+	c.groupSub = function(r) {
+		if (c.groupOf(r) === 'await') return 'Open a request to review its details and reply';
+		return 'Open an RFI to view the full conversation';
+	};
+
+	c.cardClass = function(r) {
+		if (r.status === 'open' && r.isTarget) return 'needs-me';
+		if (r.status === 'answered') return 'is-done';
+		return '';
+	};
+
+	c.refreshList = function(silent) {
+		if (!silent) c.isRefreshing = true;
+		c.server.get({ action: 'list' }).then(function(r) {
+			c.rfis = (r.data && r.data.rfis) || [];
+			c.buildSegments();
+			c.lastRefreshed = new Date();
+			c.isRefreshing = false;
+		}).catch(function() {
+			c.isRefreshing = false;
+			if (!silent) spUtil.addErrorMessage('Failed to refresh the RFI list.');
+		});
+	};
+
+	// ---------- detail ----------
+	c.openRfi = function(row) {
+		c.loadDetail({ rfiSysId: row.sys_id });
+	};
+
+	c.loadDetail = function(params) {
+		c.view = 'detail';
+		c.detail = null;
+		c.responseText = '';
+		c.showRequest = true;
+		c.isLoadingDetail = true;
+		c.stopFrameSizing();
+		c.approvalSrc = null;
+		try { window.scrollTo(0, 0); } catch (e) {}
+
+		c.server.get(angular.extend({ action: 'get_rfi' }, params)).then(function(r) {
+			c.isLoadingDetail = false;
+			var d = r.data || {};
+			if (d.error || !d.rfi) {
+				spUtil.addErrorMessage(d.error || 'RFI not found or you do not have access.');
+				c.backToList();
+				return;
+			}
+			c.detail = d.rfi;
+			c.approvalSrc = d.rfi.approvalUrl ? $sce.trustAsResourceUrl(d.rfi.approvalUrl) : null;
+			c.iframeLoading = !!c.approvalSrc;
+			$location.search('number', d.rfi.number);
+		}).catch(function() {
+			c.isLoadingDetail = false;
+			spUtil.addErrorMessage('Failed to load the RFI.');
+			c.backToList();
+		});
+	};
+
+	c.backToList = function() {
+		c.view = 'list';
+		c.detail = null;
+		c.stopFrameSizing();
+		c.approvalSrc = null;
+		c.responseText = '';
+		$location.search('number', null);
+		$location.search('token', null);
+		c.refreshList(true);
+	};
+
+	// ---------- attachments ----------
+	c.onFilesChosen = function(el) {
+		var files = Array.prototype.slice.call(el.files || []);
+		el.value = '';
+		if (!files.length) return;
+		$scope.$applyAsync(function() { c.uploadQueue(files); });
+	};
+
+	c.uploadQueue = function(files) {
+		if (!files.length) {
+			c.isUploading = false;
+			return;
+		}
+		c.isUploading = true;
+		var file = files.shift();
+
+		var ext = (file.name.split('.').pop() || '').toLowerCase();
+		if (ALLOWED_EXT.indexOf(ext) === -1) {
+			spUtil.addErrorMessage(file.name + ': file type ".' + ext + '" is not allowed.');
+			return c.uploadQueue(files);
+		}
+		if (file.size > MAX_FILE_BYTES) {
+			spUtil.addErrorMessage(file.name + ': exceeds the 5 MB limit.');
+			return c.uploadQueue(files);
+		}
+		if (c.detail.attachments.length >= c.MAX_FILES) {
+			spUtil.addErrorMessage('Maximum of ' + c.MAX_FILES + ' files per RFI.');
+			c.isUploading = false;
+			return;
+		}
+
+		var reader = new FileReader();
+		reader.onload = function(e) {
+			var base64 = (e.target.result || '').split(',')[1];
+			c.server.get({
+				action: 'upload_attachment',
+				rfiSysId: c.detail.sys_id,
+				fileName: file.name,
+				fileType: file.type || 'application/octet-stream',
+				fileData: base64
+			}).then(function(r) {
+				var d = r.data || {};
+				if (d.error) spUtil.addErrorMessage(d.error);
+				else c.detail.attachments = d.attachments || [];
+				c.uploadQueue(files);
+			}).catch(function() {
+				spUtil.addErrorMessage('Failed to upload ' + file.name + '.');
+				c.uploadQueue(files);
+			});
+		};
+		reader.onerror = function() {
+			$scope.$applyAsync(function() {
+				spUtil.addErrorMessage('Could not read ' + file.name + '.');
+				c.uploadQueue(files);
+			});
+		};
+		reader.readAsDataURL(file);
+	};
+
+	c.deleteAttachment = function(att) {
+		if (!confirm('Remove "' + att.name + '"?')) return;
+		c.server.get({
+			action: 'delete_attachment',
+			rfiSysId: c.detail.sys_id,
+			attachmentId: att.sys_id
+		}).then(function(r) {
+			var d = r.data || {};
+			if (d.error) { spUtil.addErrorMessage(d.error); return; }
+			c.detail.attachments = d.attachments || [];
+		}).catch(function() {
+			spUtil.addErrorMessage('Failed to remove the attachment.');
+		});
+	};
+
+	// ---------- submit response ----------
+	c.submitResponse = function() {
+		var text = (c.responseText || '').trim();
+		if (!text) {
+			spUtil.addErrorMessage('Please enter your response.');
+			return;
+		}
+		if (c.isUploading) {
+			spUtil.addErrorMessage('Please wait for the file upload to finish.');
+			return;
+		}
+		if (!confirm('Submit your response to ' + c.detail.number + '?\nOnce submitted it cannot be edited.')) return;
+
+		c.isSubmitting = true;
+		var keepApprovalUrl = c.detail.approvalUrl;
+		c.server.get({
+			action: 'submit_response',
+			rfiSysId: c.detail.sys_id,
+			response: text
+		}).then(function(r) {
+			c.isSubmitting = false;
+			var d = r.data || {};
+			if (d.error || !d.rfi) {
+				spUtil.addErrorMessage(d.error || 'Failed to submit the response.');
+				return;
+			}
+			d.rfi.approvalUrl = keepApprovalUrl;   // keep the "open in new tab" link
+			c.detail = d.rfi;
+			c.responseText = '';
+			spUtil.addInfoMessage('Response submitted. ' + d.rfi.number + ' is now Answered.');
+			c.refreshList(true);
+		}).catch(function() {
+			c.isSubmitting = false;
+			spUtil.addErrorMessage('Failed to submit the response.');
+		});
+	};
+
+	// ---------- iframe: no inner scroll, grows/shrinks with its content ----------
+	c.onFrameLoad = function(frame) {
+		$scope.$applyAsync(function() { c.iframeLoading = false; });
+		c.stopFrameSizing();
+
+		try {
+			var win = frame.contentWindow;
+			var doc = frame.contentDocument || win.document;
+
+			// Hide portal chrome, remove inner height/scroll so page content defines the height
+			var st = doc.createElement('style');
+			st.innerHTML =
+				'header, footer, .navbar-fixed-top, .navbar-fixed-bottom, .sp-footer { display:none !important; }' +
+				'html, body { height:auto !important; min-height:0 !important; overflow:hidden !important; margin:0 !important; padding-top:0 !important; background:transparent !important; }' +
+				'.sp-page-root, .page.container-fluid, .body.padder { height:auto !important; min-height:0 !important; padding-top:0 !important; }' +
+				'.page.container-fluid { padding-left:0 !important; padding-right:0 !important; }' +
+				'.body.padder { padding:0 !important; }' +
+				'::-webkit-scrollbar { display:none !important; } * { scrollbar-width:none !important; }';
+			doc.head.appendChild(st);
+
+			var resize = function() {
+				try {
+					var d = frame.contentDocument || frame.contentWindow.document;
+					var h = Math.ceil(Math.max(d.body.scrollHeight, d.documentElement.offsetHeight));
+					if (h && Math.abs(frame.offsetHeight - h) > 2) frame.style.height = h + 'px';
+				} catch (e) {}
+			};
+			resize();
+
+			// react instantly when the embedded page changes size...
+			if (win.ResizeObserver) {
+				frameObserver = new win.ResizeObserver(resize);
+				frameObserver.observe(doc.body);
+				frameObserver.observe(doc.documentElement);
+			}
+			// ...and keep a light timer as backup (portal widgets render after load); no digest needed
+			sizeTimer = $interval(resize, 500, 0, false);
+		} catch (e) {
+			// cross-origin or blocked: iframe still shows, just not auto-sized
+		}
+	};
+
+	c.stopFrameSizing = function() {
+		if (sizeTimer) { $interval.cancel(sizeTimer); sizeTimer = null; }
+		if (frameObserver) { try { frameObserver.disconnect(); } catch (e) {} frameObserver = null; }
+	};
+
+	$scope.$on('$destroy', c.stopFrameSizing);
+
+	// ---------- init (supports ?token=<u_token> or ?number=RFI...) ----------
+	var deepToken = c.data.initialToken || $location.search().token;
+	var deepNumber = c.data.initialNumber || $location.search().number;
+	if (deepToken) {
+		c.loadDetail({ token: deepToken });
+	} else if (deepNumber && /^RFI/i.test(deepNumber)) {
+		c.loadDetail({ number: deepNumber });
+	}
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* ============================================================
+   CLM RFI PAGE — styled to match the Approver dashboard scale
+   (Oxygen, weights 400/700 only, compact sizes)
+   ============================================================ */
+@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+/* ---------- Page ---------- */
+.abg-widget-container.clm-rfi-page {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  width: 100%;
+  margin: 0;
+  padding: 24px 32px;
+  color: #1a1a1a;
+  background: white;
+  box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+.clm-rfi-page *, .clm-rfi-page *::before, .clm-rfi-page *::after { box-sizing: border-box; }
+.clm-rfi-page b { font-weight: 700; }
+.m-r-xs { margin-right: 5px; }
+.abg-text-red { color: #C8102E !important; }
+.slide-down { animation: rfiSlideDown .25s ease-out; }
+@keyframes rfiSlideDown { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ============================================================
+   HERO
+   ============================================================ */
+.rfi-hero {
+  position: relative; overflow: hidden;
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 20px 32px;
+  padding: 28px 32px; margin-bottom: 20px;
+  border-radius: 12px; color: #fff;
+  background: linear-gradient(135deg, #9b1111 0%, #b81e1e 45%, #e0301e 100%);
+  box-shadow: 0 10px 28px rgba(120, 20, 15, 0.28);
+}
+.rfi-hero::before, .rfi-hero::after { content: ""; position: absolute; border-radius: 50%; pointer-events: none; }
+.rfi-hero::before { width: 360px; height: 360px; right: -110px; top: -190px; background: rgba(244, 123, 48, 0.55); }
+.rfi-hero::after  { width: 260px; height: 260px; right: 160px; bottom: -200px; background: rgba(120, 15, 15, 0.45); }
+.rfi-hero-main, .rfi-hero-side { position: relative; z-index: 1; }
+.rfi-hero-main { flex: 1 1 380px; min-width: 0; }
+
+.rfi-crumbs { margin-bottom: 14px; font-size: 12px; font-weight: 700; color: #ffd9cf; }
+.rfi-crumbs a { color: #FFE600; text-decoration: none; }
+.rfi-crumbs a:hover { text-decoration: underline; }
+.rfi-crumbs .sep { margin: 0 8px; color: #ffb9a8; }
+.rfi-crumbs .cur { color: #ffeae4; }
+.rfi-accent { width: 44px; height: 6px; margin-bottom: 12px; border-radius: 3px; background: #FFE600; }
+.rfi-hero-title { margin: 0; font-size: 26px; font-weight: 700; line-height: 1.25; color: #fff; }
+.rfi-hero-title span { color: #FFE600; }
+.rfi-hero-sub { max-width: 720px; margin-top: 6px; font-size: 15px; font-weight: 400; line-height: 1.5; color: #ffeae4; }
+
+.rfi-hero-side { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+.rfi-hero-refresh { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.rfi-refresh-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 20px; background: #FFE600; color: #8f1d16;
+  border: none; border-radius: 8px;
+  font-size: 14px; font-weight: 700; white-space: nowrap; cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0,0,0,.18);
+  transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
+}
+.rfi-refresh-btn:hover:not(:disabled) { background: #fff04d; transform: translateY(-1px); box-shadow: 0 6px 16px rgba(0,0,0,.22); }
+.rfi-refresh-btn:disabled { opacity: .7; cursor: not-allowed; }
+.rfi-last-refreshed { font-size: 12px; font-weight: 400; color: #ffd9cf; white-space: nowrap; }
+.rfi-hero-stat { padding-left: 24px; border-left: 1px solid rgba(255,255,255,.3); text-align: right; }
+.rfi-hero-stat .v { font-size: 34px; font-weight: 700; line-height: 1.1; letter-spacing: 1px; color: #FFE600; white-space: nowrap; }
+.rfi-hero-stat .k { margin-top: 6px; font-size: 12px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: #ffd9cf; white-space: nowrap; }
+
+/* ============================================================
+   LIST — wrapper, tiles, blocks
+   ============================================================ */
+.rfi-mr-wrap { padding: 20px 28px 28px; background: #F9FAFB; border: 1px solid #e0e6ed; border-radius: 8px; }
+
+.rfi-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.rfi-tile {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  padding: 14px 16px; background: #fff;
+  border: 1px solid #dde3ea; border-top: 4px solid #cdd4dc; border-radius: 8px;
+  cursor: pointer; text-align: left;
+  transition: box-shadow .15s ease, transform .15s ease, background .15s ease;
+}
+.rfi-tile:hover { box-shadow: 0 4px 12px rgba(0,0,0,.06); transform: translateY(-1px); }
+.rfi-tile-k { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.rfi-tile-v { font-size: 26px; font-weight: 700; color: #1a1a1a; line-height: 1.1; }
+.rfi-tile.s-red  { border-top-color: #E23D28; }
+.rfi-tile.s-blue { border-top-color: #2e86c1; }
+.rfi-tile.s-dark { border-top-color: #1a1a1a; }
+.rfi-tile.s-red  .rfi-tile-v { color: #c0392b; }
+.rfi-tile.s-blue .rfi-tile-v { color: #1a5276; }
+.rfi-tile.is-active { background: #fffcf0; border-color: #F3D54E; box-shadow: 0 0 0 2px rgba(243,213,78,.35); }
+
+.rfi-block { margin-top: 16px; background: #fff; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden; }
+.rfi-block-head {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 12px 20px; padding: 14px 20px;
+  background: #fafbfc; border-bottom: 1px solid #dde3ea;
+}
+.rfi-block-heading { min-width: 0; }
+.rfi-block-title {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px; font-weight: 700; color: #1a1a1a;
+  text-transform: uppercase; letter-spacing: .8px;
+}
+.rfi-block-title::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: #F3D54E; flex-shrink: 0; }
+.rfi-block-sub { margin: 4px 0 0 14px; font-size: 12px; color: #5a6a7a; }
+.rfi-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; background: #fff; border: 1px solid #dde3ea; border-radius: 12px;
+  font-size: 12px; font-weight: 700; color: #1a1a1a; white-space: nowrap;
+}
+.rfi-chip-k { font-weight: 400; color: #5a6a7a; }
+
+.rfi-filters { display: grid; grid-template-columns: minmax(0,2fr) minmax(0,1fr) minmax(0,1fr); gap: 16px; padding: 16px 20px 18px; }
+.rfi-field label { display: block; margin-bottom: 6px; font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.rfi-field .form-control {
+  height: 40px; border: 1px solid #cdd4dc; border-radius: 6px; box-shadow: none;
+  font-size: 13px; font-weight: 400; color: #1a1a1a; background-color: #fff;
+}
+.rfi-field .form-control:focus { border-color: #E87722; box-shadow: 0 0 0 3px rgba(232,119,34,.15); }
+.rfi-search { position: relative; }
+.rfi-search i { position: absolute; left: 13px; top: 13px; font-size: 13px; color: #7f8c9a; z-index: 2; }
+.rfi-search .form-control { padding-left: 36px; }
+
+/* ============================================================
+   LIST — group heads + cards
+   ============================================================ */
+.rfi-list-block { background: #f4f5f7; }
+.rfi-row + .rfi-row .rfi-group-head { border-top: 1px solid #dde3ea; }
+.rfi-group-head { border-bottom: 1px solid #dde3ea; }
+.rfi-card-wrap { padding: 16px 16px 0; background: #f4f5f7; }
+.rfi-row:last-child .rfi-card-wrap { padding-bottom: 16px; }
+.rfi-empty { text-align: center; padding: 40px 20px; font-size: 14px; font-weight: 700; color: #5a6a7a; background: #fff; }
+.rfi-empty i { display: block; margin-bottom: 8px; font-size: 36px; color: #dcdfe4; }
+
+.rfi-card {
+  position: relative; overflow: hidden;
+  padding: 16px 20px 14px 24px;
+  background: #fff; border: 1px solid #dde3ea; border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  transition: box-shadow .15s ease, border-color .15s ease;
+}
+.rfi-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px; background: #2e86c1; }
+.rfi-card.needs-me::before { background: #E87722; }
+.rfi-card.is-done::before  { background: #27ae60; }
+.rfi-card:hover { border-color: #c3ccd6; box-shadow: 0 6px 16px rgba(0,0,0,.08); }
+.rfi-card:hover .rfi-card-btn { background: #1a1a1a; color: #F3D54E; border-color: #1a1a1a; }
+
+.rfi-card-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.rfi-card-ids { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rfi-card-reqno { font-size: 13px; font-weight: 700; color: #5a6a7a; letter-spacing: .3px; }
+.rfi-card-rfino { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; background: #fff3cd; color: #856404; }
+.rfi-card-tags { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; align-items: center; }
+.rfi-badge { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; background: #f0f4f8; color: #1a1a1a; border: 1px solid #cdd4dc; }
+.rfi-pill { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; letter-spacing: .5px; background: #F3D54E; color: #1a1a1a; }
+.status-pill { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; letter-spacing: .3px; white-space: nowrap; }
+.status-pending  { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+.status-approved { background: #eafaf1; color: #1e8449; border: 1px solid #a9dfbf; }
+
+.rfi-card-pan { margin: 6px 0 8px; font-size: 17px; font-weight: 700; color: #1a1a1a; }
+.rfi-card-q {
+  font-size: 14px; font-style: italic; font-weight: 400; line-height: 1.6; color: #1a1a1a; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.rfi-card-a {
+  margin-top: 10px; padding: 8px 12px; font-size: 12.5px; color: #1e8449;
+  background: #f4fbf6; border: 1px solid #cfead8; border-left: 3px solid #27ae60; border-radius: 6px; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.rfi-card-a i { margin-right: 4px; }
+.rfi-card-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  margin-top: 12px; padding-top: 10px; border-top: 1px dashed #e6eaef;
+}
+.rfi-card-meta { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 12.5px; color: #1a1a1a; }
+.rfi-card-meta .k { color: #7f8c9a; margin-right: 4px; }
+.rfi-card-btn {
+  padding: 6px 14px; background: #fff; border: 1px solid #cdd4dc; border-radius: 6px;
+  font-size: 12px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; letter-spacing: .5px;
+  white-space: nowrap; cursor: pointer; transition: all .15s ease;
+}
+
+.rfi-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+.rfi-pager-size { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #5a6a7a; }
+.rfi-pager-size .form-control { width: 76px; height: 32px; padding: 2px 8px; font-size: 13px; }
+.rfi-pager-info { font-size: 12.5px; color: #5a6a7a; }
+.rfi-pager-page { margin: 0 10px; font-size: 12.5px; font-weight: 700; }
+
+/* ============================================================
+   DETAIL
+   ============================================================ */
+.rfi-back-row { margin-bottom: 12px; }
+.rfi-back-btn {
+  padding: 8px 16px; background: #fff; border: 1px solid #cdd4dc; border-radius: 6px;
+  font-size: 13px; font-weight: 700; color: #1a1a1a; cursor: pointer; white-space: nowrap;
+  box-shadow: 0 2px 4px rgba(0,0,0,.02); transition: all .2s ease;
+}
+.rfi-back-btn:hover { background: #f0f4f8; border-color: #1a1a1a; }
+.rfi-loading { padding: 28px; text-align: center; color: #5a6a7a; font-weight: 700; background: #fff; border: 1px solid #e0e6ed; border-radius: 8px; }
+.rfi-loading p { margin: 8px 0 0; }
+
+.rfi-head-card {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 14px 20px; margin-bottom: 12px;
+  background: #fff; border: 1px solid #dde3ea; border-left: 5px solid #C8102E; border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04);
+}
+.rfi-head-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.rfi-head-name { font-size: 17px; font-weight: 700; color: #1a1a1a; margin-right: 4px; }
+.rfi-pill-plain, .rfi-pill-grey, .rfi-pill-yellow { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; letter-spacing: .3px; }
+.rfi-pill-plain { background: #fff; border: 1px solid #dde3ea; color: #1a1a1a; }
+.rfi-pill-grey { background: #eef1f5; color: #3a4451; }
+.rfi-pill-yellow { background: #fff3cd; color: #856404; }
+.rfi-head-sub { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 8px; font-size: 12.5px; color: #5a6a7a; }
+.rfi-head-sub b { color: #1a1a1a; }
+.rfi-dev { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; }
+.rfi-dev.is-dev { background: #E23D28; color: #fff; border: 1px solid #b82b1c; }
+.rfi-dev.is-std { background: #eafaf1; color: #1e8449; border: 1px solid #a9dfbf; }
+
+/* Information requested card */
+.rfi-info-card {
+  margin: 0 0 16px; overflow: hidden;
+  background: #fff; border: 1px solid #dde3ea; border-left: 5px solid #E87722; border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.04);
+}
+.rfi-info-card.is-answered { border-left-color: #27ae60; }
+.rfi-info-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 12px 20px; background: #fff8e1; border-bottom: 1px solid #f3e3a0;
+}
+.rfi-info-card.is-answered .rfi-info-head { background: #f4fbf6; border-bottom-color: #cfead8; }
+.rfi-info-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; color: #8a6100; }
+.rfi-info-card.is-answered .rfi-info-title { color: #1e8449; }
+.rfi-await-pill { font-size: 12px; font-weight: 700; color: #8a6100; background: #fff; border: 1px solid #F3D54E; border-radius: 12px; padding: 3px 10px; }
+.rfi-await-pill.is-done { color: #1e8449; border-color: #a9dfbf; }
+
+.rfi-msg { display: flex; gap: 14px; padding: 18px 20px 6px; }
+.rfi-msg.is-reply { padding-top: 10px; }
+.rfi-avatar {
+  flex: 0 0 38px; width: 38px; height: 38px; border-radius: 50%;
+  background: #1a1a1a; color: #F3D54E; font-size: 13px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.rfi-avatar.avatar-green { background: #1e8449; color: #fff; }
+.rfi-msg-main { min-width: 0; flex: 1; }
+.rfi-msg-meta { font-size: 12.5px; color: #5a6a7a; }
+.rfi-msg-meta b { color: #1a1a1a; }
+.rfi-msg-meta .dot { margin: 0 6px; }
+.rfi-msg-meta .to { margin-left: 10px; }
+.rfi-bubble {
+  margin-top: 8px; padding: 12px 16px;
+  background: #f4f6f9; border: 1px solid #e6eaef; border-radius: 4px 12px 12px 12px;
+  font-size: 15px; line-height: 1.6; color: #1a1a1a; white-space: pre-line; word-wrap: break-word;
+}
+.rfi-bubble.bubble-reply { background: #f4fbf6; border-color: #cfead8; font-size: 14px; }
+
+.rfi-compose { padding: 14px 20px 20px 72px; }
+.rfi-textarea {
+  display: block; width: 100%; min-height: 110px; resize: vertical;
+  padding: 12px 14px; background: #fff; border: 1px solid #cdd4dc; border-radius: 6px;
+  font-size: 14px; font-weight: 400; color: #1a1a1a; outline: none; transition: all .2s ease;
+}
+.rfi-textarea:focus { border-color: #AF272F; box-shadow: 0 0 0 3px rgba(175,39,47,.15); }
+.rfi-counter { margin-top: 4px; text-align: right; font-size: 11px; color: #7f8c9a; }
+.rfi-compose-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+.rfi-attach-btn {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 360px;
+  padding: 9px 14px; background: #fafbfc; border: 1px dashed #aab4be; border-radius: 6px;
+  font-size: 13px; font-weight: 700; color: #5a6a7a; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rfi-attach-btn:hover:not([disabled]) { background: #f0f4f8; border-color: #1782c5; color: #1782c5; }
+.rfi-attach-btn[disabled] { opacity: .6; cursor: default; }
+.rfi-attach-hint { margin-top: 4px; font-size: 11px; color: #7f8c9a; }
+.rfi-submit-btn {
+  min-width: 180px; height: 42px; padding: 0 20px;
+  background: #27ae60; color: #fff; border: none; border-radius: 4px;
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; cursor: pointer;
+  box-shadow: 0 2px 4px rgba(39,174,96,.2); transition: all .2s ease;
+}
+.rfi-submit-btn:hover:not([disabled]) { background: #219653; transform: translateY(-1px); }
+.rfi-submit-btn[disabled] { opacity: .6; cursor: not-allowed; }
+.rfi-submit-note { margin-top: 8px; text-align: right; font-size: 11px; color: #7f8c9a; }
+
+.rfi-waiting { display: flex; align-items: center; gap: 12px; font-size: 12.5px; color: #5a6a7a; }
+.rfi-waiting i { font-size: 18px; color: #E87722; }
+.rfi-waiting b { color: #1a1a1a; font-size: 13px; }
+
+.attachment-tags-container { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.attachment-chip { display: inline-flex; align-items: center; padding: 4px 10px; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 14px; font-size: 12px; }
+.attachment-chip a { color: #1a1a1a; text-decoration: none; }
+.attachment-chip a:hover { text-decoration: underline; color: #1782c5; }
+.rfi-chip-del { width: 18px; height: 18px; margin-left: 8px; padding: 0; border: 0; border-radius: 50%; background: #fdecea; color: #b3261e; font-size: 10px; line-height: 1; cursor: pointer; }
+.rfi-chip-del:hover { background: #b3261e; color: #fff; }
+
+/* Embedded approval page */
+.rfi-embed-section { margin-top: 4px; }
+.rfi-embed-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.rfi-embed-actions { display: flex; align-items: center; gap: 14px; font-size: 12.5px; }
+.rfi-toggle-btn {
+  padding: 6px 12px; background: #fff; border: 1px solid #cdd4dc; border-radius: 6px;
+  font-size: 12px; font-weight: 700; color: #1a1a1a; cursor: pointer;
+}
+.rfi-toggle-btn:hover { background: #f0f4f8; border-color: #1a1a1a; }
+.rfi-embed-wrap { border: 0; padding: 0; background: transparent; overflow: hidden; }
+.rfi-embed-loading { padding: 24px; text-align: center; color: #7f8c9a; font-size: 13px; }
+.rfi-embed-loading p { margin: 8px 0 0; }
+.rfi-embed-none { padding: 12px 16px; background: #fff8e1; border: 1px solid #f3e3a0; border-radius: 6px; color: #8a6100; font-size: 13px; font-weight: 700; }
+.rfi-approval-frame { display: block; width: 100%; height: 400px; border: 0; overflow: hidden; background: transparent; }
+
+/* ============================================================
+   RESPONSIVE
+   ============================================================ */
+@media (max-width: 1024px) {
+  .abg-widget-container.clm-rfi-page { padding: 20px 24px; }
+  .rfi-hero { padding: 24px 26px; }
+}
+@media (max-width: 768px) {
+  .abg-widget-container.clm-rfi-page { padding: 16px; }
+  .rfi-hero { padding: 22px 20px; margin-bottom: 16px; }
+  .rfi-hero::before { width: 260px; height: 260px; right: -110px; top: -150px; }
+  .rfi-hero::after { display: none; }
+  .rfi-hero-title { font-size: 22px; }
+  .rfi-hero-sub { font-size: 14px; }
+  .rfi-hero-stat .v { font-size: 28px; }
+  .rfi-mr-wrap { padding: 12px; }
+  .rfi-filters { grid-template-columns: 1fr; padding: 12px 14px 14px; }
+  .rfi-block-head { padding: 12px 14px; }
+  .rfi-block-sub { margin-left: 0; }
+  .rfi-card-wrap { padding: 10px 10px 0; }
+  .rfi-row:last-child .rfi-card-wrap { padding-bottom: 10px; }
+  .rfi-card { padding: 14px 14px 12px 18px; }
+  .rfi-card-tags { justify-content: flex-start; }
+  .rfi-card-foot { flex-direction: column; align-items: flex-start; }
+  .rfi-msg { padding: 14px 14px 4px; gap: 10px; }
+  .rfi-avatar { flex-basis: 32px; width: 32px; height: 32px; font-size: 12px; }
+  .rfi-compose { padding: 12px 14px 16px; }
+  .rfi-compose-foot { flex-direction: column; align-items: stretch; }
+  .rfi-attach-btn { max-width: none; justify-content: center; }
+  .rfi-submit-btn { width: 100%; }
+  .rfi-submit-note { text-align: left; }
+  .rfi-pager { justify-content: center; }
+}
+@media (max-width: 640px) {
+  .rfi-hero { flex-direction: column; align-items: stretch; gap: 16px; }
+  .rfi-hero-main { flex-basis: auto; width: 100%; }
+  .rfi-hero-title { font-size: 20px; }
+  .rfi-hero-side { width: 100%; justify-content: space-between; padding-top: 14px; border-top: 1px solid rgba(255,255,255,.22); }
+  .rfi-hero-refresh { align-items: flex-start; }
+  .rfi-hero-stat { padding-left: 0; border-left: 0; }
+  .rfi-hero-stat .v { font-size: 26px; }
+}
+@media (max-width: 480px) {
+  .abg-widget-container.clm-rfi-page { padding: 12px 10px; }
+  .rfi-hero { padding: 18px 16px; border-radius: 10px; }
+  .rfi-crumbs { font-size: 11px; }
+  .rfi-card-pan { font-size: 15px; }
+}
+
+/* ============================================================
+   ONE FONT FAMILY (keep LAST) — Font Awesome icons are excluded
+   ============================================================ */
+.clm-rfi-page,
+.clm-rfi-page *:not(.fa):not([class*="fa-"]) {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>uclm_non-trade_rfi</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Non-Trade RFI</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+	var T = {
+		RFI: 'x_birl3_clm_clm_rfi',
+		PAN: 'x_birl3_clm_nt_pan_request',
+		CUSTOMER: 'x_birl3_clm_clm_customer_master1'
+	};
+
+	// Approval page used inside the iframe:  /<suffix>?id=<page_id>&number=<PAN request no>
+	var APPROVAL_PORTAL_SUFFIX = 'uclm';
+	var APPROVAL_PAGE_ID = 'uclm_non_trade_approval';
+
+	var MAX_FILE_BYTES = 5 * 1024 * 1024;
+	var MAX_FILES = 5;
+	var MAX_RESPONSE_LEN = 4000;
+	var ALLOWED_EXT = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'png', 'jpg', 'jpeg', 'txt', 'msg', 'eml'];
+	var ALLOW_ADMIN_RESPOND = true;   // set false to make admins read-only
+
+	var ME = String(gs.getUserID());
+	var MY_USERNAME = String(gs.getUserName());
+	var isAdmin = gs.hasRole('x_birl3_clm.admin') || gs.hasRole('admin');
+	data.isAdmin = isAdmin;
+
+	// ---------------------------------------------------------------- helpers
+	function s(v) { return (v === null || v === undefined) ? '' : String(v); }
+
+	function fail(msg) { data.error = msg; }
+
+	function normStatus(v) {
+		var x = s(v).toLowerCase();
+		if (!x) return 'open';
+		if (x.indexOf('answer') > -1) return 'answered';
+		if (x.indexOf('open') > -1) return 'open';
+		return x;
+	}
+
+	function formatBytes(bytes) {
+		var b = parseInt(bytes, 10);
+		if (isNaN(b) || b <= 0) return '0 B';
+		var k = 1024, sizes = ['B', 'KB', 'MB', 'GB'];
+		var i = Math.floor(Math.log(b) / Math.log(k));
+		return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+	}
+
+	// Finds the stored choice value for a label/value such as "answered"
+	function getChoiceValue(table, element, wanted) {
+		var ch = new GlideRecord('sys_choice');
+		ch.addQuery('name', table);
+		ch.addQuery('element', element);
+		ch.addQuery('inactive', false);
+		ch.query();
+		while (ch.next()) {
+			if (s(ch.getValue('value')).toLowerCase() === wanted || s(ch.getValue('label')).toLowerCase() === wanted) {
+				return ch.getValue('value');
+			}
+		}
+		return wanted;
+	}
+
+	function isTarget(gr) { return s(gr.getValue('u_target_user')) === ME; }
+	function isRaiser(gr) { return s(gr.getValue('u_raised_by')) === ME; }
+	function canView(gr) { return isAdmin || isTarget(gr) || isRaiser(gr); }
+	function canRespondNow(gr) {
+		return normStatus(gr.getValue('u_status')) === 'open' &&
+			(isTarget(gr) || (isAdmin && ALLOW_ADMIN_RESPOND));
+	}
+
+	function rowFromGr(gr) {
+		return {
+			sys_id: gr.getUniqueValue(),
+			number: s(gr.getValue('number')),
+			request_id: s(gr.getValue('nt_request')),
+			request_number: gr.getDisplayValue('nt_request') || '',
+			pan: '',
+			segment: '',
+			question: s(gr.getValue('u_question')),
+			raised_by: gr.getDisplayValue('u_raised_by') || gr.getDisplayValue('sys_created_by') || 'N/A',
+			raised_by_role: s(gr.getValue('u_raised_by_role')),
+			target_user: gr.getDisplayValue('u_target_user') || 'N/A',
+			target_role: s(gr.getValue('u_target_role')),
+			status: normStatus(gr.getValue('u_status')),
+			response: s(gr.getValue('u_response')),
+			responded_on: gr.getDisplayValue('u_responded_on') || '',
+			created_on: gr.getDisplayValue('sys_created_on') || '',
+			isTarget: isTarget(gr),
+			isRaiser: isRaiser(gr),
+			attachmentCount: 0
+		};
+	}
+
+	// One query for the PAN info of every RFI in the list
+	function panInfoMap(ids) {
+		var map = {};
+		if (!ids.length) return map;
+		var p = new GlideRecord(T.PAN);
+		p.addQuery('sys_id', 'IN', ids.join(','));
+		p.query();
+		while (p.next()) {
+			map[p.getUniqueValue()] = {
+				number: s(p.getValue('number')),
+				pan: s(p.getValue('pan')),
+				segment: p.getDisplayValue('segment') || ''
+			};
+		}
+		return map;
+	}
+
+	// Only RFIs belonging to Non-Trade requests belong to this page
+	function listRfis() {
+		var rows = [], ids = [], reqIds = [], seenReq = {};
+		var gr = new GlideRecord(T.RFI);
+
+		// Non-Trade condition: customer_type is non_trade, or nt_request is not empty
+		if (gr.isValidField('customer_type')) {
+			var custQc = gr.addQuery('customer_type', 'non_trade');
+			custQc.addOrCondition('nt_request', '!=', '');
+		} else {
+			gr.addNotNullQuery('nt_request');
+		}
+
+		if (!isAdmin) {
+			var qc = gr.addQuery('u_target_user', ME);
+			qc.addOrCondition('u_raised_by', ME);
+		}
+		gr.orderByDesc('sys_created_on');
+		gr.setLimit(500);
+		gr.query();
+		while (gr.next()) {
+			var row = rowFromGr(gr);
+			rows.push(row);
+			ids.push(row.sys_id);
+			if (row.request_id && !seenReq[row.request_id]) {
+				seenReq[row.request_id] = true;
+				reqIds.push(row.request_id);
+			}
+		}
+
+		var panMap = panInfoMap(reqIds);
+		rows.forEach(function(r) {
+			var info = panMap[r.request_id];
+			if (info) {
+				r.pan = info.pan;
+				r.segment = info.segment;
+				if (info.number) r.request_number = info.number;
+			}
+		});
+
+		if (ids.length) {
+			var counts = {};
+			var ag = new GlideAggregate('sys_attachment');
+			ag.addQuery('table_name', T.RFI);
+			ag.addQuery('table_sys_id', 'IN', ids.join(','));
+			ag.addAggregate('COUNT');
+			ag.groupBy('table_sys_id');
+			ag.query();
+			while (ag.next()) {
+				counts[s(ag.getValue('table_sys_id'))] = parseInt(ag.getAggregate('COUNT'), 10) || 0;
+			}
+			rows.forEach(function(r) { r.attachmentCount = counts[r.sys_id] || 0; });
+		}
+		return rows;
+	}
+
+	function loadRfi(inp) {
+		var gr = new GlideRecord(T.RFI);
+		if (inp.rfiSysId) {
+			if (!gr.get(inp.rfiSysId)) return null;
+		} else if (inp.token) {
+			gr.addQuery('u_token', inp.token);
+			gr.setLimit(1);
+			gr.query();
+			if (!gr.next()) return null;
+		} else if (inp.number) {
+			gr.addQuery('number', inp.number);
+			gr.setLimit(1);
+			gr.query();
+			if (!gr.next()) return null;
+		} else {
+			return null;
+		}
+
+		// Validate that this record is Non-Trade
+		var cType = gr.isValidField('customer_type') ? s(gr.getValue('customer_type')).toLowerCase() : '';
+		var hasNtReq = !gr.nt_request.nil();
+		if (cType && cType !== 'non_trade') return null; // Reject trade/key records
+		if (!cType && !hasNtReq) return null;           // Legacy fallback check
+
+		if (!canView(gr)) return null;
+		return gr;
+	}
+
+	function getAttachments(rfiId, isOpen) {
+		var list = [];
+		var a = new GlideRecord('sys_attachment');
+		a.addQuery('table_name', T.RFI);
+		a.addQuery('table_sys_id', rfiId);
+		a.orderBy('sys_created_on');
+		a.query();
+		while (a.next()) {
+			var name = s(a.getValue('file_name'));
+			list.push({
+				sys_id: a.getUniqueValue(),
+				name: name,
+				ext: name.split('.').pop().toLowerCase(),
+				size: formatBytes(a.getValue('size_bytes')),
+				url: '/sys_attachment.do?sys_id=' + a.getUniqueValue(),
+				canDelete: isOpen && (isAdmin || s(a.getValue('sys_created_by')) === MY_USERNAME)
+			});
+		}
+		return list;
+	}
+
+	function getContext(gr) {
+		var pan = new GlideRecord(T.PAN);
+		if (!gr.getValue('nt_request') || !pan.get(gr.getValue('nt_request'))) return null;
+
+		var panStr = s(pan.getValue('pan'));
+		var custName = 'Corporate Group';
+		if (panStr) {
+			var cGr = new GlideRecord(T.CUSTOMER);
+			cGr.addQuery('pan', panStr);
+			cGr.setLimit(1);
+			cGr.query();
+			if (cGr.next()) {
+				custName = cGr.getValue('group_customer_name') || cGr.getValue('customer_name') || cGr.getValue('name') || custName;
+			}
+		}
+		return {
+			number: s(pan.getValue('number')),
+			pan: panStr,
+			customer_name: custName,
+			segment: pan.getDisplayValue('segment') || '',
+			company_type: s(pan.getValue('company_type')),
+			deviation: (pan.getValue('is_deviation') == 1 || pan.getValue('is_deviation') == 'true')
+		};
+	}
+
+	// withWidget = true only when the RFI is opened (not after submit), so the embedded widget is not reloaded
+	function buildDetail(gr, withWidget) {
+		var d = rowFromGr(gr);
+		var open = (d.status === 'open');
+		d.canRespond = canRespondNow(gr);
+		d.attachments = getAttachments(gr.getUniqueValue(), open && d.canRespond);
+		d.attachmentCount = d.attachments.length;
+		d.context = getContext(gr);
+		if (d.context) {
+			d.pan = d.context.pan;
+			d.segment = d.context.segment;
+			if (d.context.number) d.request_number = d.context.number;
+		}
+
+		if (withWidget) {
+			d.approvalUrl = d.request_number
+				? '/' + APPROVAL_PORTAL_SUFFIX + '?id=' + APPROVAL_PAGE_ID + '&number=' + encodeURIComponent(d.request_number)
+				: '';
+		}
+		return d;
+	}
+
+	// ---------------------------------------------------------------- initial load
+	if (!input || !input.action) {
+		data.rfis = listRfis();
+		data.initialToken = s($sp.getParameter('token'));
+		data.initialNumber = s($sp.getParameter('number'));
+		return;
+	}
+
+	// ---------------------------------------------------------------- list refresh
+	if (input.action === 'list') {
+		data.rfis = listRfis();
+		return;
+	}
+
+	// ---------------------------------------------------------------- get one RFI
+	if (input.action === 'get_rfi') {
+		var gOne = loadRfi(input);
+		if (!gOne) { fail('RFI not found or you do not have access.'); return; }
+		data.rfi = buildDetail(gOne, true);
+		return;
+	}
+
+	// ---------------------------------------------------------------- upload attachment
+	if (input.action === 'upload_attachment') {
+		var gUp = loadRfi(input);
+		if (!gUp) { fail('RFI not found or you do not have access.'); return; }
+		if (!canRespondNow(gUp)) { fail('Files can only be added by the assigned user while the RFI is open.'); return; }
+
+		var fName = s(input.fileName).replace(/[\\\/:*?"<>|]+/g, '_').trim();
+		var b64 = s(input.fileData);
+		if (!fName || !b64) { fail('No file received.'); return; }
+
+		var ext = fName.split('.').pop().toLowerCase();
+		if (ALLOWED_EXT.indexOf(ext) === -1) { fail('File type ".' + ext + '" is not allowed.'); return; }
+		if (Math.floor(b64.length * 3 / 4) > MAX_FILE_BYTES) { fail('File exceeds the 5 MB limit.'); return; }
+		if (getAttachments(gUp.getUniqueValue(), true).length >= MAX_FILES) { fail('Maximum of ' + MAX_FILES + ' files per RFI.'); return; }
+
+		new GlideSysAttachment().writeBase64(gUp, fName, s(input.fileType) || 'application/octet-stream', b64);
+		data.attachments = getAttachments(gUp.getUniqueValue(), true);
+		return;
+	}
+
+	// ---------------------------------------------------------------- delete attachment
+	if (input.action === 'delete_attachment') {
+		var gDel = loadRfi(input);
+		if (!gDel) { fail('RFI not found or you do not have access.'); return; }
+		if (!canRespondNow(gDel)) { fail('Files can only be removed while the RFI is open.'); return; }
+
+		var att = new GlideRecord('sys_attachment');
+		if (!att.get(s(input.attachmentId)) ||
+				s(att.getValue('table_name')) !== T.RFI ||
+				s(att.getValue('table_sys_id')) !== s(gDel.getUniqueValue())) {
+			fail('Attachment not found.');
+			return;
+		}
+		if (!isAdmin && s(att.getValue('sys_created_by')) !== MY_USERNAME) {
+			fail('You can only remove files you uploaded.');
+			return;
+		}
+		new GlideSysAttachment().deleteAttachment(s(input.attachmentId));
+		data.attachments = getAttachments(gDel.getUniqueValue(), true);
+		return;
+	}
+
+	// ---------------------------------------------------------------- submit response
+	if (input.action === 'submit_response') {
+		var gSub = loadRfi(input);
+		// null check FIRST (previously this ran after gSub.isValidField and could throw)
+		if (!gSub) { fail('RFI not found or you do not have access.'); return; }
+		if (gSub.isValidField('customer_type') && !gSub.getValue('customer_type')) {
+			gSub.setValue('customer_type', 'non_trade');
+		}
+		if (normStatus(gSub.getValue('u_status')) !== 'open') { fail('This RFI has already been answered.'); return; }
+		if (!canRespondNow(gSub)) { fail('Only the assigned user can respond to this RFI.'); return; }
+
+		var text = s(input.response).trim();
+		if (!text) { fail('Please enter your response.'); return; }
+		if (text.length > MAX_RESPONSE_LEN) { fail('Response is too long (max ' + MAX_RESPONSE_LEN + ' characters).'); return; }
+
+		gSub.setValue('u_response', text);
+		gSub.u_responded_on = new GlideDateTime();
+		gSub.setValue('u_status', getChoiceValue(T.RFI, 'u_status', 'answered'));
+		gSub.update();
+
+		// Copy all final attachments from the RFI to the parent PAN request
+		var panSysId = s(gSub.getValue('nt_request'));
+		if (panSysId) {
+			var gsa = new GlideSysAttachment();
+			gsa.copy(T.RFI, gSub.getUniqueValue(), T.PAN, panSysId);
+		}
+
+		// Leave a trace on the parent request (never blocks the response)
+		try {
+			var pan = new GlideRecord(T.PAN);
+			if (pan.get(panSysId)) {
+				pan.comments = 'RFI ' + gSub.getValue('number') + ' answered by ' + gs.getUserDisplayName() + ':\n' + text;
+				pan.update();
+			}
+		} catch (e) {
+			gs.warn('RFI widget: could not add PAN comment - ' + e);
+		}
+
+		data.rfi = buildDetail(gSub, false);
+		return;
+	}
+
+	fail('Unknown action.');
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-26 08:23:10</sys_created_on>
+        <sys_id>14bbdceb3b401f5087401044c3e45aeb</sys_id>
+        <sys_mod_count>16</sys_mod_count>
+        <sys_name>UCLM Non-Trade RFI</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_14bbdceb3b401f5087401044c3e45aeb</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-01 10:02:31</sys_updated_on>
+        <template><![CDATA[<div class="abg-widget-container clm-rfi-page">
+
+  <!-- =======================================================
+       VIEW 1: RFI LIST
+       ======================================================= -->
+  <div ng-if="c.view == 'list'">
+
+    <!-- HERO -->
+    <div class="rfi-hero">
+      <div class="rfi-hero-main">
+        <div class="rfi-crumbs"><a href="/uclm">Home</a><span class="sep">&rsaquo;</span><span class="cur">RFI</span></div>
+        <div class="rfi-accent"></div>
+        <div class="rfi-hero-title">Requests for <span>Information</span></div>
+        <div class="rfi-hero-sub">{{c.isAdmin ? 'Clarification requests raised on credit limit requests (admin view)' : (c.awaitingCount() ? 'Approvers are waiting on your input' : 'Nothing pending for you')}}</div>
+      </div>
+      <div class="rfi-hero-side">
+        <div class="rfi-hero-refresh">
+          <button class="rfi-refresh-btn" ng-click="c.refreshList()" ng-disabled="c.isRefreshing">
+            <i class="fa fa-refresh" ng-class="{'fa-spin': c.isRefreshing}"></i> Refresh
+          </button>
+          <div class="rfi-last-refreshed">Last refreshed {{c.lastRefreshed | date:'h:mm:ss a'}}</div>
+        </div>
+        <div class="rfi-hero-stat">
+          <div class="v">{{c.awaitingCount()}}</div>
+          <div class="k">Pending</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="rfi-mr-wrap">
+
+      <!-- TABS AS TILES -->
+      <div class="rfi-tiles">
+        <div class="rfi-tile s-red" ng-class="{'is-active': c.tab == 'assigned'}" ng-click="c.setTab('assigned')">
+          <div class="rfi-tile-k">Assigned to me</div>
+          <div class="rfi-tile-v">{{c.countTab('assigned')}}</div>
+        </div>
+        <div class="rfi-tile s-blue" ng-class="{'is-active': c.tab == 'raised'}" ng-click="c.setTab('raised')">
+          <div class="rfi-tile-k">Raised by me</div>
+          <div class="rfi-tile-v">{{c.countTab('raised')}}</div>
+        </div>
+        <div class="rfi-tile s-dark" ng-if="c.isAdmin" ng-class="{'is-active': c.tab == 'all'}" ng-click="c.setTab('all')">
+          <div class="rfi-tile-k">All RFIs</div>
+          <div class="rfi-tile-v">{{c.countTab('all')}}</div>
+        </div>
+      </div>
+
+      <!-- SEARCH & FILTER -->
+      <div class="rfi-block">
+        <div class="rfi-block-head">
+          <div class="rfi-block-heading">
+            <div class="rfi-block-title">Search &amp; Filter</div>
+            <div class="rfi-block-sub">Find an RFI by number, request, PAN or person, or narrow by segment and status</div>
+          </div>
+          <span class="rfi-chip"><span class="rfi-chip-k">Showing</span> {{c.getFiltered().length}} of {{c.countTab(c.tab)}}</span>
+        </div>
+        <div class="rfi-filters">
+          <div class="rfi-field rfi-field-wide">
+            <label>Search</label>
+            <div class="rfi-search">
+              <i class="fa fa-search"></i>
+              <input type="text" class="form-control" ng-model="c.searchQuery" ng-change="c.page = 1" placeholder="RFI no, request no, PAN, person or question">
+            </div>
+          </div>
+          <div class="rfi-field">
+            <label>Segment</label>
+            <select class="form-control" ng-model="c.segmentFilter" ng-change="c.page = 1" ng-options="s for s in c.segments">
+              <option value="">All Segments</option>
+            </select>
+          </div>
+          <div class="rfi-field">
+            <label>Status</label>
+            <select class="form-control" ng-model="c.statusFilter" ng-change="c.page = 1">
+              <option value="all">All Statuses</option>
+              <option value="open">Open</option>
+              <option value="answered">Answered</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- LIST -->
+      <div class="rfi-block rfi-list-block">
+        <div class="rfi-empty" ng-if="c.getFiltered().length == 0">
+          <i class="fa fa-comments-o"></i>
+          <div>No RFIs found in this view.</div>
+        </div>
+
+        <div class="rfi-row" ng-repeat="r in c.getPaged()">
+          <div class="rfi-block-head rfi-group-head" ng-if="c.groupStart(r, $index)">
+            <div class="rfi-block-heading">
+              <div class="rfi-block-title">{{c.groupTitle(r)}}</div>
+              <div class="rfi-block-sub">{{c.groupSub(r)}}</div>
+            </div>
+          </div>
+
+          <div class="rfi-card-wrap">
+            <div class="rfi-card" ng-class="c.cardClass(r)">
+              <div class="rfi-card-top">
+                <div class="rfi-card-ids">
+                  <span class="rfi-card-reqno">{{r.request_number}}</span>
+                  <span class="rfi-card-rfino"><i class="fa fa-ticket"></i> {{r.number}}</span>
+                </div>
+                <div class="rfi-card-tags">
+                  <span class="rfi-badge" ng-if="r.segment">{{r.segment}}</span>
+                  <span class="rfi-pill">Non-Trade</span>
+                  <span class="status-pill" ng-class="'status-' + c.statusClass(r.status)">{{c.label(r.status)}}</span>
+                </div>
+              </div>
+
+              <div class="rfi-card-pan">{{r.pan || r.request_number}}</div>
+
+              <div class="rfi-card-q">&ldquo;{{r.question}}&rdquo;</div>
+              <div class="rfi-card-a" ng-if="r.response"><i class="fa fa-check-circle"></i> {{r.response}}</div>
+
+              <div class="rfi-card-foot">
+                <div class="rfi-card-meta">
+                  <span><span class="k">Asked by</span> <b>{{r.raised_by}}</b></span>
+                  <span><span class="k">On</span> {{r.created_on}}</span>
+                  <span ng-if="!r.isTarget"><span class="k">Sent to</span> <b>{{r.target_user}}</b></span>
+                  <span ng-if="r.attachmentCount > 0"><i class="fa fa-paperclip"></i> {{r.attachmentCount}}</span>
+                </div>
+                <button class="rfi-card-btn" ng-click="c.openRfi(r)">
+                  {{(r.status == 'open' && r.isTarget) ? 'Review &amp; Respond' : 'View'}} &rarr;
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pagination -->
+      <div class="rfi-pager" ng-if="c.getFiltered().length > 0">
+        <div class="rfi-pager-size">
+          <span>Show</span>
+          <select class="form-control" ng-model="c.pageSize" ng-change="c.page = 1" ng-options="size for size in [5, 10, 25, 50]"></select>
+        </div>
+        <div class="rfi-pager-info hidden-xs">
+          Showing {{ (c.page - 1) * c.pageSize + 1 }} to {{ c.min(c.page * c.pageSize, c.getFiltered().length) }} of {{ c.getFiltered().length }}
+        </div>
+        <div class="rfi-pager-nav">
+          <button class="btn btn-default btn-sm" ng-click="c.page = c.page - 1" ng-disabled="c.page == 1"><i class="fa fa-chevron-left"></i> Prev</button>
+          <span class="rfi-pager-page">Page {{c.page}} / {{c.totalPages()}}</span>
+          <button class="btn btn-default btn-sm" ng-click="c.page = c.page + 1" ng-disabled="c.page == c.totalPages()">Next <i class="fa fa-chevron-right"></i></button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- =======================================================
+       VIEW 2: RFI DETAIL (+ EMBEDDED APPROVAL WIDGET)
+       ======================================================= -->
+  <div class="slide-down" ng-if="c.view == 'detail'">
+
+    <div class="rfi-back-row">
+      <button class="rfi-back-btn" ng-click="c.backToList()">&#8592; Back to RFIs</button>
+    </div>
+
+    <div class="rfi-loading" ng-if="c.isLoadingDetail">
+      <i class="fa fa-spinner fa-spin fa-2x abg-text-red"></i>
+      <p>Loading RFI...</p>
+    </div>
+
+    <div ng-if="!c.isLoadingDetail && c.detail">
+
+      <!-- Request header card -->
+      <div class="rfi-head-card">
+        <div class="rfi-head-left">
+          <div class="rfi-head-title-row">
+            <div class="rfi-head-name">{{c.detail.context.customer_name || c.detail.request_number}}</div>
+            <span class="rfi-pill-plain" ng-if="c.detail.context.pan">PAN: <b>{{c.detail.context.pan}}</b></span>
+            <span class="rfi-pill-grey">{{c.detail.request_number}}</span>
+            <span class="rfi-pill-yellow"><i class="fa fa-ticket"></i> {{c.detail.number}}</span>
+          </div>
+          <div class="rfi-head-sub" ng-if="c.detail.context">
+            <span>Segment: <span class="rfi-badge">{{c.detail.context.segment || 'General'}}</span></span>
+            <span>Entity: <b>{{c.detail.context.company_type || 'Unlisted'}} Entity</b></span>
+          </div>
+        </div>
+        <div class="rfi-head-right" ng-if="c.detail.context">
+          <span class="rfi-dev" ng-class="c.detail.context.deviation ? 'is-dev' : 'is-std'">
+            <i class="fa" ng-class="c.detail.context.deviation ? 'fa-exclamation-triangle' : 'fa-check-circle'"></i>
+            {{c.detail.context.deviation ? 'Deviation' : 'Standard'}}
+          </span>
+        </div>
+      </div>
+
+      <!-- INFORMATION REQUESTED CARD -->
+      <div class="rfi-info-card" ng-class="{'is-answered': c.detail.status == 'answered'}">
+        <div class="rfi-info-head">
+          <span class="rfi-info-title">Information Requested</span>
+          <span class="rfi-await-pill" ng-class="{'is-done': c.detail.status == 'answered'}">
+            <span ng-if="c.detail.status == 'answered'">&#10003; Answered</span>
+            <span ng-if="c.detail.status != 'answered' && c.detail.canRespond">&#9203; Awaiting your response</span>
+            <span ng-if="c.detail.status != 'answered' && !c.detail.canRespond">&#9203; Awaiting {{c.detail.target_user}}</span>
+          </span>
+        </div>
+
+        <!-- Question -->
+        <div class="rfi-msg">
+          <div class="rfi-avatar">{{c.initials(c.detail.raised_by)}}</div>
+          <div class="rfi-msg-main">
+            <div class="rfi-msg-meta">
+              <b>{{c.detail.raised_by}}</b>
+              <span ng-if="c.detail.raised_by_role">({{c.detail.raised_by_role}})</span>
+              <span class="dot">&middot;</span>{{c.detail.created_on}}
+              <span class="to" ng-if="c.detail.target_user">&rarr; {{c.detail.target_user}}<span ng-if="c.detail.target_role"> ({{c.detail.target_role}})</span></span>
+            </div>
+            <div class="rfi-bubble">{{c.detail.question}}</div>
+          </div>
+        </div>
+
+        <!-- Recorded response -->
+        <div class="rfi-msg is-reply" ng-if="c.detail.status == 'answered'">
+          <div class="rfi-avatar avatar-green">{{c.initials(c.detail.target_user)}}</div>
+          <div class="rfi-msg-main">
+            <div class="rfi-msg-meta">
+              <b>{{c.detail.target_user}}</b>
+              <span ng-if="c.detail.target_role">({{c.detail.target_role}})</span>
+              <span class="dot">&middot;</span>{{c.detail.responded_on || '—'}}
+            </div>
+            <div class="rfi-bubble bubble-reply">{{c.detail.response || 'No response text recorded.'}}</div>
+
+            <div class="attachment-tags-container" ng-if="c.detail.attachments.length > 0">
+              <span class="attachment-chip" ng-repeat="a in c.detail.attachments">
+                <i class="fa m-r-xs" ng-class="c.fileIcon(a.ext)"></i>
+                <a ng-href="{{a.url}}" target="_blank">{{a.name}} ({{a.size}})</a>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Compose (assigned user, open) -->
+        <div class="rfi-compose" ng-if="c.detail.canRespond">
+          <textarea class="rfi-textarea" rows="5" maxlength="4000"
+                    ng-model="c.responseText" ng-disabled="c.isSubmitting"
+                    placeholder="Type your response here..."></textarea>
+          <div class="rfi-counter">{{(c.responseText || '').length}} / 4000</div>
+
+          <div class="attachment-tags-container" ng-if="c.detail.attachments.length > 0">
+            <span class="attachment-chip" ng-repeat="a in c.detail.attachments">
+              <i class="fa m-r-xs" ng-class="c.fileIcon(a.ext)"></i>
+              <a ng-href="{{a.url}}" target="_blank">{{a.name}} ({{a.size}})</a>
+              <button type="button" class="rfi-chip-del" ng-if="a.canDelete" ng-click="c.deleteAttachment(a)" ng-disabled="c.isSubmitting" title="Remove">
+                <i class="fa fa-times"></i>
+              </button>
+            </span>
+          </div>
+
+          <div class="rfi-compose-foot">
+            <div class="rfi-attach-wrap">
+              <input type="file" id="rfiFileInput" multiple style="display:none;"
+                     accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.png,.jpg,.jpeg,.txt,.msg,.eml"
+                     onchange="angular.element(this).scope().c.onFilesChosen(this)">
+              <button type="button" class="rfi-attach-btn" onclick="document.getElementById('rfiFileInput').click()"
+                      ng-disabled="c.isUploading || c.isSubmitting || c.detail.attachments.length >= c.MAX_FILES">
+                <i class="fa" ng-class="c.isUploading ? 'fa-spinner fa-spin' : 'fa-paperclip'"></i>
+                {{c.isUploading ? 'Uploading...' : 'Attach a document (optional)'}}
+              </button>
+              <div class="rfi-attach-hint">Max {{c.MAX_FILES}} files, 5 MB each &middot; PDF, Word, Excel, CSV, image, text, email</div>
+            </div>
+
+            <button class="rfi-submit-btn" ng-click="c.submitResponse()"
+                    ng-disabled="c.isSubmitting || c.isUploading || !(c.responseText || '').trim()">
+              <span ng-if="!c.isSubmitting">Submit Response</span>
+              <span ng-if="c.isSubmitting">Submitting...</span>
+            </button>
+          </div>
+          <div class="rfi-submit-note">Once submitted, the response cannot be edited and the RFI is marked Answered.</div>
+        </div>
+
+        <!-- Waiting (open, viewer cannot respond) -->
+        <div class="rfi-compose rfi-waiting" ng-if="c.detail.status == 'open' && !c.detail.canRespond">
+          <i class="fa fa-hourglass-half"></i>
+          <div>
+            <b>Awaiting response</b>
+            <div>This RFI is waiting for {{c.detail.target_user}} to respond.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- =======================================================
+           EMBEDDED APPROVAL WIDGET (full request review)
+           ======================================================= -->
+      <div class="rfi-embed-section">
+        <div class="rfi-embed-head">
+          <div class="rfi-block-title">Request Review &mdash; {{c.detail.request_number}}</div>
+          <div class="rfi-embed-actions">
+            <a ng-href="{{c.detail.approvalUrl}}" target="_blank" ng-if="c.detail.approvalUrl">
+              <i class="fa fa-external-link"></i> Open in new tab
+            </a>
+            <button class="rfi-toggle-btn" ng-click="c.showRequest = !c.showRequest">
+              <i class="fa" ng-class="c.showRequest ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+              {{c.showRequest ? 'Hide' : 'Show'}} request details
+            </button>
+          </div>
+        </div>
+
+        <div class="rfi-embed-wrap" ng-show="c.showRequest">
+          <div class="rfi-embed-loading" ng-if="c.iframeLoading">
+            <i class="fa fa-spinner fa-spin fa-2x abg-text-red"></i>
+            <p>Loading request review...</p>
+          </div>
+
+          <iframe ng-if="c.approvalSrc"
+                  ng-src="{{c.approvalSrc}}"
+                  class="rfi-approval-frame"
+                  frameborder="0"
+                  scrolling="no"
+                  onload="angular.element(this).scope().c.onFrameLoad(this)"></iframe>
+
+          <div class="rfi-embed-none" ng-if="!c.approvalSrc && !c.iframeLoading">
+            <i class="fa fa-exclamation-triangle"></i> No request page is available for this RFI.
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>14bbdceb3b401f5087401044c3e45aeb</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-26 08:23:10</sys_created_on>
+        <sys_id>94bb542f3b401f5087401044c3e45a3b</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-26 08:23:10</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

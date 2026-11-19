@@ -1,0 +1,1204 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $interval, $timeout) {
+  var c = this;
+
+  // ── Initialize all state ──────────────────────────────────
+  c.data.fileReady  = false;
+  c.data.fileName   = '';
+  c.data.processing = false;
+  c.data.result     = null;
+  c.data.error      = null;
+  c.data.sysId      = null;
+  c.data.statusMsg  = '';
+  c.data.action     = null;
+  c.dragging        = false;
+  c.rawFile         = null;
+
+  var pollTimer = null;
+  var pollCount = 0;
+  var MAX_POLLS = 36;
+
+  // ── File selection via click ──────────────────────────────
+  c.triggerUpload = function() {
+    document.getElementById('ocrFileInput').click();
+  };
+
+  c.onFileSelect = function(event) {
+    var file = event.target.files[0];
+    if (!file) return;
+    if (file.type !== 'application/pdf') {
+      $timeout(function() {
+        c.data.error = 'Please select a valid PDF file.';
+      });
+      return;
+    }
+    c.readFile(file);
+  };
+	
+c.getRatioTable = function(ratios) {
+  if (!ratios) return [];
+
+  var rows = [];
+  var seen = {}; // ]]>🔥<![CDATA[ to remove duplicates
+
+  // Normalize
+  ratios = ratios.replace(/\n/g, '|');
+
+  var parts = ratios.split('|');
+
+  for (var i = 0; i < parts.length; i++) {
+
+    var key = parts[i].trim();
+    var value = '';
+
+    if (!key || key === '-' || key.length < 2) continue;
+
+    // Next item is value
+    if (i < parts.length - 1) {
+      value = parts[i + 1].trim();
+      i++;
+    }
+
+    // Clean invalid values
+    if (!value || value === '-') value = '-';
+
+    // ]]>🔥<![CDATA[ REMOVE DUPLICATES
+    if (!seen[key]) {
+      rows.push({
+        key: key,
+        value: value
+      });
+      seen[key] = true;
+    }
+  }
+
+  return rows;
+};
+
+  // ── Drag and drop ─────────────────────────────────────────
+  c.onDragOver = function(event) {
+    event.preventDefault();
+    c.dragging = true;
+  };
+
+  c.onDrop = function(event) {
+    event.preventDefault();
+    c.dragging = false;
+    var file = event.dataTransfer && event.dataTransfer.files[0];
+    if (!file) return;
+    if (file.type !== 'application/pdf') {
+      $timeout(function() {
+        c.data.error = 'Please drop a valid PDF file.';
+      });
+      return;
+    }
+    c.readFile(file);
+  };
+
+  // ── Store raw file — use $timeout to safely update scope ──
+  c.readFile = function(file) {
+    c.rawFile = file;
+    $timeout(function() {
+      c.data.error     = null;
+      c.data.fileName  = file.name;
+      c.data.fileReady = true;
+    });
+  };
+
+  // ── Phase 1: Create empty record ──────────────────────────
+  c.processDocument = function() {
+    if (!c.rawFile) return;
+    c.data.processing = true;
+    c.data.error      = null;
+    c.data.statusMsg  = 'Creating record...';
+    c.data.action     = 'create_record';
+
+    c.server.update().then(function() {
+      if (c.data.serverError) {
+        c.data.processing  = false;
+        c.data.error       = c.data.serverError;
+        c.data.serverError = null;
+        return;
+      }
+      c.data.statusMsg = 'Uploading PDF...';
+      c.uploadViaApi(c.rawFile, c.data.sysId);
+    });
+  };
+
+  // ── Upload PDF ────────────────────────────────────────────
+  c.uploadViaApi = function(file, sysId) {
+    var url = '/api/now/attachment/file'
+      + '?table_name=x_birl3_clm_corpository_ocr'
+      + '&table_sys_id=' + sysId
+      + '&file_name=' + encodeURIComponent(file.name);
+
+    var userToken = window.g_ck || '';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/pdf');
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.setRequestHeader('X-UserToken', userToken);
+
+    xhr.onload = function() {
+      if (xhr.status === 200 || xhr.status === 201) {
+        $timeout(function() {
+          c.data.statusMsg = 'OCR started...';
+          c.startPolling();
+        });
+      } else {
+        $timeout(function() {
+          c.data.processing = false;
+          c.data.error = 'Upload failed';
+        });
+      }
+    };
+
+    xhr.onerror = function() {
+      $timeout(function() {
+        c.data.processing = false;
+        c.data.error = 'Network error';
+      });
+    };
+
+    xhr.send(file);
+  };
+
+  // ── Polling ───────────────────────────────────────────────
+  c.startPolling = function() {
+    pollCount = 0;
+
+    pollTimer = $interval(function() {
+      pollCount++;
+
+      c.server.get({ action: 'poll', sysId: c.data.sysId })
+        .then(function(response) {
+
+          if (response.data.result) {
+            $interval.cancel(pollTimer);
+            c.data.processing = false;
+            c.data.result     = response.data.result;
+
+          } else if (pollCount >= MAX_POLLS) {
+            $interval.cancel(pollTimer);
+            c.data.processing = false;
+            c.data.error = 'Timeout after 6 minutes';
+
+          } else {
+            c.data.statusMsg = 'Processing... ' + (pollCount * 10) + 's';
+          }
+
+        });
+
+    }, 10000);
+  };
+
+  // ── Risk badge ────────────────────────────────────────────
+  c.getRiskClass = function(risk) {
+    if (!risk) return '';
+    var r = risk.toLowerCase();
+    if (r.includes('low')) return 'risk-low';
+    if (r.includes('high')) return 'risk-high';
+    return 'risk-medium';
+  };
+
+  // ── Summary points ────────────────────────────────────────
+  c.getSummaryPoints = function(summary) {
+    if (!summary) return [];
+    return summary.split(/,\s*-\s*/);
+  };
+
+  // ── Reset ─────────────────────────────────────────────────
+  c.reset = function() {
+    if (pollTimer) $interval.cancel(pollTimer);
+
+    c.rawFile = null;
+    c.data = {};
+  };
+
+  $scope.$on('$destroy', function() {
+    if (pollTimer) $interval.cancel(pollTimer);
+  });
+
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.upload-zone {
+  border: 2px dashed #c0cdd6;
+  padding: 40px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.upload-zone.drag-over {
+  border-color: #1782c5;
+  background: #eef6fb;
+}
+
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.result-card {
+  background: #f7f9fb;
+  padding: 12px;
+  border-radius: 8px;
+}
+
+.result-card.highlight {
+  background: #eef6fb;
+  border: 1px solid #1782c5;
+}
+
+.result-label {
+  font-size: 11px;
+  color: #7a8fa0;
+}
+
+.result-value {
+  font-size: 16px;
+  font-weight: bold;
+}
+
+.risk-low { background: #d4edda; }
+.risk-medium { background: #fff3cd; }
+.risk-high { background: #f8d7da; }
+.upload-zone {
+  border: 2px dashed #c0cdd6;
+  padding: 40px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.upload-zone.drag-over {
+  border-color: #1782c5;
+  background: #eef6fb;
+}
+
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.result-card {
+  background: #f7f9fb;
+  padding: 12px;
+  border-radius: 8px;
+}
+
+.result-card.highlight {
+  background: #eef6fb;
+  border: 1px solid #1782c5;
+}
+
+.result-label {
+  font-size: 11px;
+  color: #7a8fa0;
+}
+
+.result-value {
+  font-size: 16px;
+  font-weight: bold;
+}
+
+/* RATIOS TABLE */
+.ratios-table-box {
+  margin-top: 20px;
+  background: #f4f8fc;
+  padding: 15px;
+  border-radius: 8px;
+}
+
+.ratios-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ratios-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.ratio-key {
+  font-weight: 600;
+  color: #2d3f50;
+}
+
+.ratio-value {
+  text-align: right;
+  color: #1782c5;
+  font-weight: 600;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>corpository_ocr</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>Corpository OCR</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+  // ACTION: POLL
+  if (input && input.action === 'poll') {
+    if (!input.sysId) {
+      data.pollError = 'No sysId provided.';
+      return;
+    }
+
+    var rec = new GlideRecord('x_birl3_clm_corpository_ocr');
+
+    if (rec.get(input.sysId)) {
+
+      var nameVal = rec.getValue('company_name');
+
+      if (nameVal && nameVal.trim() !== '') {
+
+        data.result = {
+          number: rec.getValue('number'),
+          name_of_company: rec.getValue('company_name'),
+
+          rating: rec.getValue('rating'),
+          risk_index: rec.getValue('risk_index'),
+
+          credit_limit: rec.getValue('credit_limit'),
+
+          total_current_liabilities: rec.getValue('total_current_liabilities'),
+          total_non_current_liabilities: rec.getValue('total_non_current_liabilities'),
+
+          total_equity: rec.getValue('total_equity'),
+          total_equity_liabilities: rec.getValue('total_equity_liabilities'),
+
+          // ]]>🔥<![CDATA[ NEW FIELDS
+          total_assets: rec.getValue('total_assets'),
+          total_revenue: rec.getValue('total_revenue'),
+          total_non_current_assets: rec.getValue('total_non_current_assets'),
+          total_expenses: rec.getValue('total_expenses'),
+          total_current_assets: rec.getValue('total_current_assets'),
+          ebitda: rec.getValue('ebitda'),
+          networth: rec.getValue('networth'),
+          ratios: rec.getValue('ratios'),
+
+          ai_summary: rec.getValue('ai_summary')
+        };
+      }
+
+    } else {
+      data.pollError = 'Record not found: ' + input.sysId;
+    }
+
+    return;
+  }
+
+  // ACTION: CREATE_RECORD
+  if (input && input.action === 'create_record') {
+    try {
+      var ocr = new GlideRecord('x_birl3_clm_corpository_ocr');
+      ocr.initialize();
+
+      var sysId = ocr.insert();
+
+      if (!sysId) {
+        data.serverError = 'Failed to create OCR record.';
+        return;
+      }
+
+      data.sysId = sysId;
+
+    } catch (e) {
+      data.serverError = 'Error creating record: ' + e.message;
+    }
+
+    return;
+  }
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-17 09:48:40</sys_created_on>
+        <sys_id>2eb4547f2b673a504572f3745e91bf6b</sys_id>
+        <sys_mod_count>10</sys_mod_count>
+        <sys_name>Corpository OCR</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_2eb4547f2b673a504572f3745e91bf6b</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-03-17 11:07:26</sys_updated_on>
+        <template><![CDATA[<div class="ocr-widget">
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <h3 class="panel-title">
+        <span class="glyphicon glyphicon-file" style="margin-right:8px"></span>
+        Accumen OCR Extractor
+      </h3>
+    </div>
+    <div class="panel-body">
+
+      <!-- UPLOAD SECTION -->
+      <div ng-hide="c.data.processing || c.data.result">
+
+        <div class="form-group">
+          <label class="control-label">Upload PDF Document</label>
+          <div class="upload-zone"
+               ng-class="{'drag-over': c.dragging}"
+               ng-click="c.triggerUpload()"
+               ng-dragover="c.onDragOver($event)"
+               ng-dragleave="c.dragging=false"
+               ng-drop="c.onDrop($event)">
+            <div ng-hide="c.data.fileName">
+              <span class="glyphicon glyphicon-upload upload-icon"></span>
+              <p class="upload-text">Drag & drop a PDF here, or click to browse</p>
+              <small class="text-muted">PDF files only • Max 10MB</small>
+            </div>
+            <div ng-show="c.data.fileName">
+              <span class="glyphicon glyphicon-file upload-icon text-success"></span>
+              <p class="upload-text text-success">{{c.data.fileName}}</p>
+              <small class="text-muted">Ready to process</small>
+            </div>
+          </div>
+
+          <input type="file"
+                 id="ocrFileInput"
+                 accept=".pdf"
+                 style="display:none"
+                 onchange="angular.element(this).scope().c.onFileSelect(event)"/>
+        </div>
+
+        <div class="alert alert-danger" ng-show="c.data.error">
+          <span class="glyphicon glyphicon-exclamation-sign"></span>
+          {{c.data.error}}
+        </div>
+
+        <button class="btn btn-primary btn-block btn-lg"
+                ng-click="c.processDocument()"
+                ng-disabled="!c.data.fileName">
+          <span class="glyphicon glyphicon-cog"></span>
+          Process Document
+        </button>
+
+      </div>
+
+      <!-- PROCESSING -->
+      <div ng-show="c.data.processing" class="processing-state text-center">
+        <div class="ocr-spinner"><div class="spinner-ring"></div></div>
+        <h4>Processing your document...</h4>
+        <p class="text-muted">{{c.data.statusMsg}}</p>
+        <div class="progress">
+          <div class="progress-bar progress-bar-striped active" style="width:100%"></div>
+        </div>
+        <small class="text-muted">OCR extraction typically takes 2–3 minutes.</small>
+      </div>
+
+      <!-- RESULTS -->
+      <div ng-show="c.data.result">
+
+        <div class="alert alert-success">
+          <span class="glyphicon glyphicon-ok-circle"></span>
+          <strong>Extraction complete!</strong>
+          Record <strong>{{c.data.result.number}}</strong> saved.
+        </div>
+
+        <div class="result-grid">
+
+          <div class="result-card highlight">
+            <div class="result-label">Company Name</div>
+            <div class="result-value">{{c.data.result.name_of_company || '—'}}</div>
+          </div>
+
+          <!-- KEPT FIELDS -->
+
+          <div class="result-card">
+            <div class="result-label">Total Revenue</div>
+            <div class="result-value">{{c.data.result.total_revenue || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Total Expenses</div>
+            <div class="result-value">{{c.data.result.total_expenses || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">EBITDA</div>
+            <div class="result-value">{{c.data.result.ebitda || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Networth</div>
+            <div class="result-value">{{c.data.result.networth || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Total Current Assets</div>
+            <div class="result-value">{{c.data.result.total_current_assets || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Total Non-Current Assets</div>
+            <div class="result-value">{{c.data.result.total_non_current_assets || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Total Current Liabilities</div>
+            <div class="result-value">{{c.data.result.total_current_liabilities || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Total Non-Current Liabilities</div>
+            <div class="result-value">{{c.data.result.total_non_current_liabilities || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Total Equity & Liabilities</div>
+            <div class="result-value">{{c.data.result.total_equity_liabilities || '—'}}</div>
+          </div>
+
+        </div>
+
+        <!-- RATIOS TABLE -->
+        <div class="ratios-table-box" ng-if="c.data.result.ratios">
+          <div class="summary-label">Financial Ratios</div>
+
+          <table class="ratios-table">
+            <tr ng-repeat="row in c.getRatioTable(c.data.result.ratios)">
+              <td class="ratio-key">{{row.key}}</td>
+              <td class="ratio-value">{{row.value}}</td>
+            </tr>
+          </table>
+        </div>
+
+        <button class="btn btn-default btn-block"
+                ng-click="c.reset()"
+                style="margin-top:20px">
+          Process Another Document
+        </button>
+
+      </div>
+
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>2eb4547f2b673a504572f3745e91bf6b</id>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-17 09:48:40</sys_created_on>
+        <sys_id>a2b4947f2b673a504572f3745e91bf7a</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-03-17 09:48:40</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_2eb4547f2b673a504572f3745e91bf6b</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function($scope, $interval, $timeout) {
+  var c = this;
+
+  // ── Initialize all state ──────────────────────────────────
+  c.data.fileReady  = false;
+  c.data.fileName   = '';
+  c.data.processing = false;
+  c.data.result     = null;
+  c.data.error      = null;
+  c.data.sysId      = null;
+  c.data.statusMsg  = '';
+  c.data.action     = null;
+  c.dragging        = false;
+  c.rawFile         = null;
+
+  var pollTimer = null;
+  var pollCount = 0;
+  var MAX_POLLS = 36;
+
+  // ── File selection via click ──────────────────────────────
+  c.triggerUpload = function() {
+    document.getElementById('ocrFileInput').click();
+  };
+
+  c.onFileSelect = function(event) {
+    var file = event.target.files[0];
+    if (!file) return;
+    if (file.type !== 'application/pdf') {
+      $timeout(function() {
+        c.data.error = 'Please select a valid PDF file.';
+      });
+      return;
+    }
+    c.readFile(file);
+  };
+	
+c.getRatioTable = function(ratios) {
+  if (!ratios) return [];
+
+  var rows = [];
+  var seen = {}; // ]]&gt;🔥&lt;![CDATA[ to remove duplicates
+
+  // Normalize
+  ratios = ratios.replace(/\n/g, '|');
+
+  var parts = ratios.split('|');
+
+  for (var i = 0; i &lt; parts.length; i++) {
+
+    var key = parts[i].trim();
+    var value = '';
+
+    if (!key || key === '-' || key.length &lt; 2) continue;
+
+    // Next item is value
+    if (i &lt; parts.length - 1) {
+      value = parts[i + 1].trim();
+      i++;
+    }
+
+    // Clean invalid values
+    if (!value || value === '-') value = '-';
+
+    // ]]&gt;🔥&lt;![CDATA[ REMOVE DUPLICATES
+    if (!seen[key]) {
+      rows.push({
+        key: key,
+        value: value
+      });
+      seen[key] = true;
+    }
+  }
+
+  return rows;
+};
+
+  // ── Drag and drop ─────────────────────────────────────────
+  c.onDragOver = function(event) {
+    event.preventDefault();
+    c.dragging = true;
+  };
+
+  c.onDrop = function(event) {
+    event.preventDefault();
+    c.dragging = false;
+    var file = event.dataTransfer &amp;&amp; event.dataTransfer.files[0];
+    if (!file) return;
+    if (file.type !== 'application/pdf') {
+      $timeout(function() {
+        c.data.error = 'Please drop a valid PDF file.';
+      });
+      return;
+    }
+    c.readFile(file);
+  };
+
+  // ── Store raw file — use $timeout to safely update scope ──
+  c.readFile = function(file) {
+    c.rawFile = file;
+    $timeout(function() {
+      c.data.error     = null;
+      c.data.fileName  = file.name;
+      c.data.fileReady = true;
+    });
+  };
+
+  // ── Phase 1: Create empty record ──────────────────────────
+  c.processDocument = function() {
+    if (!c.rawFile) return;
+    c.data.processing = true;
+    c.data.error      = null;
+    c.data.statusMsg  = 'Creating record...';
+    c.data.action     = 'create_record';
+
+    c.server.update().then(function() {
+      if (c.data.serverError) {
+        c.data.processing  = false;
+        c.data.error       = c.data.serverError;
+        c.data.serverError = null;
+        return;
+      }
+      c.data.statusMsg = 'Uploading PDF...';
+      c.uploadViaApi(c.rawFile, c.data.sysId);
+    });
+  };
+
+  // ── Upload PDF ────────────────────────────────────────────
+  c.uploadViaApi = function(file, sysId) {
+    var url = '/api/now/attachment/file'
+      + '?table_name=x_birl3_clm_corpository_ocr'
+      + '&amp;table_sys_id=' + sysId
+      + '&amp;file_name=' + encodeURIComponent(file.name);
+
+    var userToken = window.g_ck || '';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/pdf');
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.setRequestHeader('X-UserToken', userToken);
+
+    xhr.onload = function() {
+      if (xhr.status === 200 || xhr.status === 201) {
+        $timeout(function() {
+          c.data.statusMsg = 'OCR started...';
+          c.startPolling();
+        });
+      } else {
+        $timeout(function() {
+          c.data.processing = false;
+          c.data.error = 'Upload failed';
+        });
+      }
+    };
+
+    xhr.onerror = function() {
+      $timeout(function() {
+        c.data.processing = false;
+        c.data.error = 'Network error';
+      });
+    };
+
+    xhr.send(file);
+  };
+
+  // ── Polling ───────────────────────────────────────────────
+  c.startPolling = function() {
+    pollCount = 0;
+
+    pollTimer = $interval(function() {
+      pollCount++;
+
+      c.server.get({ action: 'poll', sysId: c.data.sysId })
+        .then(function(response) {
+
+          if (response.data.result) {
+            $interval.cancel(pollTimer);
+            c.data.processing = false;
+            c.data.result     = response.data.result;
+
+          } else if (pollCount &gt;= MAX_POLLS) {
+            $interval.cancel(pollTimer);
+            c.data.processing = false;
+            c.data.error = 'Timeout after 6 minutes';
+
+          } else {
+            c.data.statusMsg = 'Processing... ' + (pollCount * 10) + 's';
+          }
+
+        });
+
+    }, 10000);
+  };
+
+  // ── Risk badge ────────────────────────────────────────────
+  c.getRiskClass = function(risk) {
+    if (!risk) return '';
+    var r = risk.toLowerCase();
+    if (r.includes('low')) return 'risk-low';
+    if (r.includes('high')) return 'risk-high';
+    return 'risk-medium';
+  };
+
+  // ── Summary points ────────────────────────────────────────
+  c.getSummaryPoints = function(summary) {
+    if (!summary) return [];
+    return summary.split(/,\s*-\s*/);
+  };
+
+  // ── Reset ─────────────────────────────────────────────────
+  c.reset = function() {
+    if (pollTimer) $interval.cancel(pollTimer);
+
+    c.rawFile = null;
+    c.data = {};
+  };
+
+  $scope.$on('$destroy', function() {
+    if (pollTimer) $interval.cancel(pollTimer);
+  });
+
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;.upload-zone {
+  border: 2px dashed #c0cdd6;
+  padding: 40px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.upload-zone.drag-over {
+  border-color: #1782c5;
+  background: #eef6fb;
+}
+
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.result-card {
+  background: #f7f9fb;
+  padding: 12px;
+  border-radius: 8px;
+}
+
+.result-card.highlight {
+  background: #eef6fb;
+  border: 1px solid #1782c5;
+}
+
+.result-label {
+  font-size: 11px;
+  color: #7a8fa0;
+}
+
+.result-value {
+  font-size: 16px;
+  font-weight: bold;
+}
+
+.risk-low { background: #d4edda; }
+.risk-medium { background: #fff3cd; }
+.risk-high { background: #f8d7da; }
+.upload-zone {
+  border: 2px dashed #c0cdd6;
+  padding: 40px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.upload-zone.drag-over {
+  border-color: #1782c5;
+  background: #eef6fb;
+}
+
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.result-card {
+  background: #f7f9fb;
+  padding: 12px;
+  border-radius: 8px;
+}
+
+.result-card.highlight {
+  background: #eef6fb;
+  border: 1px solid #1782c5;
+}
+
+.result-label {
+  font-size: 11px;
+  color: #7a8fa0;
+}
+
+.result-value {
+  font-size: 16px;
+  font-weight: bold;
+}
+
+/* RATIOS TABLE */
+.ratios-table-box {
+  margin-top: 20px;
+  background: #f4f8fc;
+  padding: 15px;
+  border-radius: 8px;
+}
+
+.ratios-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ratios-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.ratio-key {
+  font-weight: 600;
+  color: #2d3f50;
+}
+
+.ratio-value {
+  text-align: right;
+  color: #1782c5;
+  font-weight: 600;
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id&gt;corpository_ocr&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;Corpository OCR&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+
+  // ACTION: POLL
+  if (input &amp;&amp; input.action === 'poll') {
+    if (!input.sysId) {
+      data.pollError = 'No sysId provided.';
+      return;
+    }
+
+    var rec = new GlideRecord('x_birl3_clm_corpository_ocr');
+
+    if (rec.get(input.sysId)) {
+
+      var nameVal = rec.getValue('company_name');
+
+      if (nameVal &amp;&amp; nameVal.trim() !== '') {
+
+        data.result = {
+          number: rec.getValue('number'),
+          name_of_company: rec.getValue('company_name'),
+
+          rating: rec.getValue('rating'),
+          risk_index: rec.getValue('risk_index'),
+
+          credit_limit: rec.getValue('credit_limit'),
+
+          total_current_liabilities: rec.getValue('total_current_liabilities'),
+          total_non_current_liabilities: rec.getValue('total_non_current_liabilities'),
+
+          total_equity: rec.getValue('total_equity'),
+          total_equity_liabilities: rec.getValue('total_equity_liabilities'),
+
+          // ]]&gt;🔥&lt;![CDATA[ NEW FIELDS
+          total_assets: rec.getValue('total_assets'),
+          total_revenue: rec.getValue('total_revenue'),
+          total_non_current_assets: rec.getValue('total_non_current_assets'),
+          total_expenses: rec.getValue('total_expenses'),
+          total_current_assets: rec.getValue('total_current_assets'),
+          ebitda: rec.getValue('ebitda'),
+          networth: rec.getValue('networth'),
+          ratios: rec.getValue('ratios'),
+
+          ai_summary: rec.getValue('ai_summary')
+        };
+      }
+
+    } else {
+      data.pollError = 'Record not found: ' + input.sysId;
+    }
+
+    return;
+  }
+
+  // ACTION: CREATE_RECORD
+  if (input &amp;&amp; input.action === 'create_record') {
+    try {
+      var ocr = new GlideRecord('x_birl3_clm_corpository_ocr');
+      ocr.initialize();
+
+      var sysId = ocr.insert();
+
+      if (!sysId) {
+        data.serverError = 'Failed to create OCR record.';
+        return;
+      }
+
+      data.sysId = sysId;
+
+    } catch (e) {
+      data.serverError = 'Error creating record: ' + e.message;
+    }
+
+    return;
+  }
+
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;vedant.salunke@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-03-17 09:48:40&lt;/sys_created_on&gt;&lt;sys_id&gt;2eb4547f2b673a504572f3745e91bf6b&lt;/sys_id&gt;&lt;sys_mod_count&gt;10&lt;/sys_mod_count&gt;&lt;sys_name&gt;Corpository OCR&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_2eb4547f2b673a504572f3745e91bf6b&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;vedant.salunke@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-03-17 11:07:26&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="ocr-widget"&gt;
+  &lt;div class="panel panel-default"&gt;
+    &lt;div class="panel-heading"&gt;
+      &lt;h3 class="panel-title"&gt;
+        &lt;span class="glyphicon glyphicon-file" style="margin-right:8px"&gt;&lt;/span&gt;
+        Accumen OCR Extractor
+      &lt;/h3&gt;
+    &lt;/div&gt;
+    &lt;div class="panel-body"&gt;
+
+      &lt;!-- UPLOAD SECTION --&gt;
+      &lt;div ng-hide="c.data.processing || c.data.result"&gt;
+
+        &lt;div class="form-group"&gt;
+          &lt;label class="control-label"&gt;Upload PDF Document&lt;/label&gt;
+          &lt;div class="upload-zone"
+               ng-class="{'drag-over': c.dragging}"
+               ng-click="c.triggerUpload()"
+               ng-dragover="c.onDragOver($event)"
+               ng-dragleave="c.dragging=false"
+               ng-drop="c.onDrop($event)"&gt;
+            &lt;div ng-hide="c.data.fileName"&gt;
+              &lt;span class="glyphicon glyphicon-upload upload-icon"&gt;&lt;/span&gt;
+              &lt;p class="upload-text"&gt;Drag &amp; drop a PDF here, or click to browse&lt;/p&gt;
+              &lt;small class="text-muted"&gt;PDF files only • Max 10MB&lt;/small&gt;
+            &lt;/div&gt;
+            &lt;div ng-show="c.data.fileName"&gt;
+              &lt;span class="glyphicon glyphicon-file upload-icon text-success"&gt;&lt;/span&gt;
+              &lt;p class="upload-text text-success"&gt;{{c.data.fileName}}&lt;/p&gt;
+              &lt;small class="text-muted"&gt;Ready to process&lt;/small&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+
+          &lt;input type="file"
+                 id="ocrFileInput"
+                 accept=".pdf"
+                 style="display:none"
+                 onchange="angular.element(this).scope().c.onFileSelect(event)"/&gt;
+        &lt;/div&gt;
+
+        &lt;div class="alert alert-danger" ng-show="c.data.error"&gt;
+          &lt;span class="glyphicon glyphicon-exclamation-sign"&gt;&lt;/span&gt;
+          {{c.data.error}}
+        &lt;/div&gt;
+
+        &lt;button class="btn btn-primary btn-block btn-lg"
+                ng-click="c.processDocument()"
+                ng-disabled="!c.data.fileName"&gt;
+          &lt;span class="glyphicon glyphicon-cog"&gt;&lt;/span&gt;
+          Process Document
+        &lt;/button&gt;
+
+      &lt;/div&gt;
+
+      &lt;!-- PROCESSING --&gt;
+      &lt;div ng-show="c.data.processing" class="processing-state text-center"&gt;
+        &lt;div class="ocr-spinner"&gt;&lt;div class="spinner-ring"&gt;&lt;/div&gt;&lt;/div&gt;
+        &lt;h4&gt;Processing your document...&lt;/h4&gt;
+        &lt;p class="text-muted"&gt;{{c.data.statusMsg}}&lt;/p&gt;
+        &lt;div class="progress"&gt;
+          &lt;div class="progress-bar progress-bar-striped active" style="width:100%"&gt;&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;small class="text-muted"&gt;OCR extraction typically takes 2–3 minutes.&lt;/small&gt;
+      &lt;/div&gt;
+
+      &lt;!-- RESULTS --&gt;
+      &lt;div ng-show="c.data.result"&gt;
+
+        &lt;div class="alert alert-success"&gt;
+          &lt;span class="glyphicon glyphicon-ok-circle"&gt;&lt;/span&gt;
+          &lt;strong&gt;Extraction complete!&lt;/strong&gt;
+          Record &lt;strong&gt;{{c.data.result.number}}&lt;/strong&gt; saved.
+        &lt;/div&gt;
+
+        &lt;div class="result-grid"&gt;
+
+          &lt;div class="result-card highlight"&gt;
+            &lt;div class="result-label"&gt;Company Name&lt;/div&gt;
+            &lt;div class="result-value"&gt;{{c.data.result.name_of_company || '—'}}&lt;/div&gt;
+          &lt;/div&gt;
+
+          &lt;!-- KEPT FIELDS --&gt;
+
+          &lt;div class="result-card"&gt;
+            &lt;div class="result-label"&gt;Total Revenue&lt;/div&gt;
+            &lt;div class="result-value"&gt;{{c.data.result.total_revenue || '—'}}&lt;/div&gt;
+          &lt;/div&gt;
+
+          &lt;div class="result-card"&gt;
+            &lt;div class="result-label"&gt;Total Expenses&lt;/div&gt;
+            &lt;div class="result-value"&gt;{{c.data.result.total_expenses || '—'}}&lt;/div&gt;
+          &lt;/div&gt;
+
+          &lt;div class="result-card"&gt;
+            &lt;div class="result-label"&gt;EBITDA&lt;/div&gt;
+            &lt;div class="result-value"&gt;{{c.data.result.ebitda || '—'}}&lt;/div&gt;
+          &lt;/div&gt;
+
+          &lt;div class="result-card"&gt;
+            &lt;div class="result-label"&gt;Networth&lt;/div&gt;
+            &lt;div class="result-value"&gt;{{c.data.result.networth || '—'}}&lt;/div&gt;
+          &lt;/div&gt;
+
+          &lt;div class="result-card"&gt;
+            &lt;div class="result-label"&gt;Total Current Assets&lt;/div&gt;
+            &lt;div class="result-value"&gt;{{c.data.result.total_current_assets || '—'}}&lt;/div&gt;
+          &lt;/div&gt;
+
+          &lt;div class="result-card"&gt;
+            &lt;div class="result-label"&gt;Total Non-Current Assets&lt;/div&gt;
+            &lt;div class="result-value"&gt;{{c.data.result.total_non_current_assets || '—'}}&lt;/div&gt;
+          &lt;/div&gt;
+
+          &lt;div class="result-card"&gt;
+            &lt;div class="result-label"&gt;Total Current Liabilities&lt;/div&gt;
+            &lt;div class="result-value"&gt;{{c.data.result.total_current_liabilities || '—'}}&lt;/div&gt;
+          &lt;/div&gt;
+
+          &lt;div class="result-card"&gt;
+            &lt;div class="result-label"&gt;Total Non-Current Liabilities&lt;/div&gt;
+            &lt;div class="result-value"&gt;{{c.data.result.total_non_current_liabilities || '—'}}&lt;/div&gt;
+          &lt;/div&gt;
+
+          &lt;div class="result-card"&gt;
+            &lt;div class="result-label"&gt;Total Equity &amp; Liabilities&lt;/div&gt;
+            &lt;div class="result-value"&gt;{{c.data.result.total_equity_liabilities || '—'}}&lt;/div&gt;
+          &lt;/div&gt;
+
+        &lt;/div&gt;
+
+        &lt;!-- RATIOS TABLE --&gt;
+        &lt;div class="ratios-table-box" ng-if="c.data.result.ratios"&gt;
+          &lt;div class="summary-label"&gt;Financial Ratios&lt;/div&gt;
+
+          &lt;table class="ratios-table"&gt;
+            &lt;tr ng-repeat="row in c.getRatioTable(c.data.result.ratios)"&gt;
+              &lt;td class="ratio-key"&gt;{{row.key}}&lt;/td&gt;
+              &lt;td class="ratio-value"&gt;{{row.value}}&lt;/td&gt;
+            &lt;/tr&gt;
+          &lt;/table&gt;
+        &lt;/div&gt;
+
+        &lt;button class="btn btn-default btn-block"
+                ng-click="c.reset()"
+                style="margin-top:20px"&gt;
+          Process Another Document
+        &lt;/button&gt;
+
+      &lt;/div&gt;
+
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;2eb4547f2b673a504572f3745e91bf6b&lt;/id&gt;&lt;sys_created_by&gt;vedant.salunke@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-03-17 09:48:40&lt;/sys_created_on&gt;&lt;sys_id&gt;a2b4947f2b673a504572f3745e91bf7a&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;vedant.salunke@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-03-17 09:48:40&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>1089193076</payload_hash>
+        <record_name>Corpository OCR</record_name>
+        <reverted_from/>
+        <source>57b38f622b2303104572f3745e91bf2a</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by/>
+        <sys_created_on>2026-09-28 21:32:03</sys_created_on>
+        <sys_id>59e38c503b08531087401044c3e45a95</sys_id>
+        <sys_mod_count/>
+        <sys_recorded_at>1a0e9ee98380000000</sys_recorded_at>
+        <sys_updated_by/>
+        <sys_updated_on/>
+        <type>Widget</type>
+        <update_guid>19e38c502308531030f097b0159cb295</update_guid>
+        <update_guid_history>19e38c502308531030f097b0159cb295:1089193076</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="Corpository OCR">d5e38c503b08531087401044c3e45a96</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-16 04:18:57</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>012f9dd236b541c0801ae7094b4c1579</sys_id>
+        <sys_metadata>2eb4547f2b673a504572f3745e91bf6b</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>Corpository OCR</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_2eb4547f2b673a504572f3745e91bf6b</sys_update_name>
+        <sys_update_version display_value="sp_widget_2eb4547f2b673a504572f3745e91bf6b">59e38c503b08531087401044c3e45a95</sys_update_version>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-16 04:18:57</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

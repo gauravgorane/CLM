@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sysevent_in_email_action">
+    <sysevent_in_email_action action="DELETE">
+        <action>record_action</action>
+        <active>true</active>
+        <assignment_operator/>
+        <condition_script/>
+        <description/>
+        <event_name>email.read</event_name>
+        <filter_condition/>
+        <from/>
+        <name>TEST - NT PAN Email Approval</name>
+        <order>10</order>
+        <reply_email/>
+        <required_roles/>
+        <script><![CDATA[(function runAction(current, event, email, logger, classifier) {
+
+    var panId = (current.getValue('document_id') || current.getValue('sysapproval') || '') + '';
+    var panGr = new GlideRecord('x_birl3_clm_nt_pan_request');
+    if (!panId || !panGr.get(panId)) return;
+
+    // 1. Add comment to PAN Request table
+    panGr.comments = 'TEST Inbound Comment on PAN Request';
+    panGr.update();
+
+    // 2. Add comment to Approval table
+    current.comments = 'TEST Inbound Comment on Approval';
+    current.update();
+
+})(current, event, email, logger, classifier);]]></script>
+        <stop_processing>false</stop_processing>
+        <sys_class_name>sysevent_in_email_action</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-16 10:48:16</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>2246095e97689710be31fa17f053af5e</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>TEST - NT PAN Email Approval</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sysevent_in_email_action_2246095e97689710be31fa17f053af5e</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 10:48:16</sys_updated_on>
+        <table>sysapproval_approver</table>
+        <template/>
+        <type>reply</type>
+    </sysevent_in_email_action>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sysevent_in_email_action_2246095e97689710be31fa17f053af5e</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sysevent_in_email_action"&gt;&lt;sysevent_in_email_action action="INSERT_OR_UPDATE"&gt;&lt;action&gt;record_action&lt;/action&gt;&lt;active&gt;true&lt;/active&gt;&lt;assignment_operator/&gt;&lt;condition_script/&gt;&lt;description/&gt;&lt;event_name&gt;email.read&lt;/event_name&gt;&lt;filter_condition/&gt;&lt;from/&gt;&lt;name&gt;TEST - NT PAN Email Approval&lt;/name&gt;&lt;order&gt;10&lt;/order&gt;&lt;reply_email/&gt;&lt;required_roles/&gt;&lt;script&gt;&lt;![CDATA[(function runAction(current, event, email, logger, classifier) {
+
+    var panId = (current.getValue('document_id') || current.getValue('sysapproval') || '') + '';
+    var panGr = new GlideRecord('x_birl3_clm_nt_pan_request');
+    if (!panId || !panGr.get(panId)) return;
+
+    // 1. Add comment to PAN Request table
+    panGr.comments = 'TEST Inbound Comment on PAN Request';
+    panGr.update();
+
+    // 2. Add comment to Approval table
+    current.comments = 'TEST Inbound Comment on Approval';
+    current.update();
+
+})(current, event, email, logger, classifier);]]&gt;&lt;/script&gt;&lt;stop_processing&gt;false&lt;/stop_processing&gt;&lt;sys_class_name&gt;sysevent_in_email_action&lt;/sys_class_name&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-11-16 10:48:16&lt;/sys_created_on&gt;&lt;sys_domain&gt;cacbc7742bb676104572f3745e91bf5a&lt;/sys_domain&gt;&lt;sys_domain_path&gt;!!!/!!(/&lt;/sys_domain_path&gt;&lt;sys_id&gt;2246095e97689710be31fa17f053af5e&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_name&gt;TEST - NT PAN Email Approval&lt;/sys_name&gt;&lt;sys_overrides/&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sysevent_in_email_action_2246095e97689710be31fa17f053af5e&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-11-16 10:48:16&lt;/sys_updated_on&gt;&lt;table&gt;sysapproval_approver&lt;/table&gt;&lt;template/&gt;&lt;type&gt;reply&lt;/type&gt;&lt;/sysevent_in_email_action&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>1492511281</payload_hash>
+        <record_name>TEST - NT PAN Email Approval</record_name>
+        <reverted_from/>
+        <source>d386fafb973acb106bf93da0f053af20</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-16 10:48:16</sys_created_on>
+        <sys_id>aa46095e97689710be31fa17f053af63</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a1e3f8d1410000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 10:48:16</sys_updated_on>
+        <type>Inbound Email Actions</type>
+        <update_guid>6a46095e52689710565e13154405f162</update_guid>
+        <update_guid_history>6a46095e52689710565e13154405f162:1492511281</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-16 10:57:48</sys_created_on>
+        <sys_db_object display_value="" name="sysevent_in_email_action">sysevent_in_email_action</sys_db_object>
+        <sys_id>2d8de4a9a4db47eebc6c9605ace63b84</sys_id>
+        <sys_metadata>2246095e97689710be31fa17f053af5e</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>TEST - NT PAN Email Approval</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent display_value="Sysapproval Approver">ef475948876222103e5540460cbb351a</sys_parent>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sysevent_in_email_action_2246095e97689710be31fa17f053af5e</sys_update_name>
+        <sys_update_version display_value="sysevent_in_email_action_2246095e97689710be31fa17f053af5e">aa46095e97689710be31fa17f053af63</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 10:57:48</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

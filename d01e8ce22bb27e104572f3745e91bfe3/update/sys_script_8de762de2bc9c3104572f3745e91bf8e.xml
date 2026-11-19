@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_bs_ocr</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition/>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>Financial Data Aggregation</name>
+        <order>50</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[// ============================================================
+// BR1 — FINANCIAL AGGREGATION (fixed)
+// ============================================================
+(function executeRule(current, previous) {
+
+    gs.info('BR1: Starting aggregation for ' + current.getDisplayValue());
+
+    // Returns null if field missing/empty, number otherwise
+    function getNum(fieldName) {
+        var raw = current.getValue(fieldName);
+        if (raw === null || raw === '' || raw === undefined) return null;
+        var cleaned = raw.toString().replace(/,/g, '');
+        var parsed = parseFloat(cleaned);
+        return isNaN(parsed) ? null : parsed;
+    }
+
+    // Only sets field if value is a real non-null number
+    function setIfValid(field, value) {
+        if (value !== null && isFinite(value)) {
+            current.setValue(field, value);
+        }
+    }
+
+    try {
+        // ── 1. TOTAL SALES ──────────────────────────────────
+        var readymixSale    = getNum('u_readymix_sale')    || 0;
+        var concretePumping = getNum('u_concrete_pumping') || 0;
+        var tmTransport     = getNum('u_tm_transportation')|| 0;
+        var unbilled        = getNum('u_unbilled_revenue') || 0;
+        var totalSales      = readymixSale + concretePumping + tmTransport + unbilled;
+
+        if (totalSales > 0) {
+            setIfValid('u_sales', totalSales);
+            gs.info('BR1: Sales aggregated = ' + totalSales);
+        } else {
+            gs.warn('BR1: All sales components are zero or missing');
+        }
+
+        // ── 2. TOTAL INTEREST ────────────────────────────────
+        var intTds       = getNum('u_interest_tds')          || 0;
+        var intUnsecured = getNum('u_interest_unsecured')    || 0;
+        var intGeneral   = getNum('u_interest_paid_general') || 0;
+        var totalInterest = intTds + intUnsecured + intGeneral;
+
+        if (totalInterest > 0) {
+            setIfValid('u_interest_expense', totalInterest);
+        }
+
+        // ── 3. CURRENT ASSETS ────────────────────────────────
+        var invAsset = getNum('u_inventory')          || 0;
+        var ar       = getNum('u_accounts_receivable')|| 0;
+        var cash     = getNum('u_cash_and_bank')      || 0;
+        var loans    = getNum('u_loans_and_advances') || 0;
+        var totalCA  = invAsset + ar + cash + loans;
+
+        if (totalCA > 0) {
+            setIfValid('u_current_assets', totalCA);
+        }
+
+        // ── 4. INDIRECT EXPENSES — removed unreliable subtraction ──
+        // BR2 now uses addback formula (net profit + tax + interest + dep)
+        // so this field is no longer needed. Keeping block for reference only.
+        // If you still want it, extract indirect expenses directly via OCR
+        // as a dedicated field rather than deriving it here.
+
+        gs.info('BR1: Complete. Sales=' + totalSales + ' Assets=' + totalCA);
+
+    } catch(e) {
+        gs.error('BR1: Exception — ' + e.message);
+    }
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-05-26 18:14:56</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>8de762de2bc9c3104572f3745e91bf8e</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>Financial Data Aggregation</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_8de762de2bc9c3104572f3745e91bf8e</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-11 08:54:52</sys_updated_on>
+        <template/>
+        <when>before</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=8de762de2bc9c3104572f3745e91bf8e"/>
+</record_update>

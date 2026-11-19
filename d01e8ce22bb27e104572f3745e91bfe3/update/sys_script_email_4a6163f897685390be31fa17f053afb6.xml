@@ -1,0 +1,640 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_nt_sap_writeback_script</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm_nt_sap_writeback_script
+// Notification table: x_birl3_clm_clm_servicenow_to_sap_send_back
+// Handles Non-Trade CL (PAN Batch), Limit Swap (Donor/Donee), and BG Monitor SAP writeback notifications with unified CredX UI
+(function runMailScript(current, template, email, email_action, event) {
+    try {
+        // ── 1. Helpers & Parsers (Aligned with Trade CredX UI) ─────────────
+        function s(v) { return (v === null || v === undefined) ? '' : String(v).trim(); }
+
+        function parseNum(v) {
+            if (!v && v !== 0) return 0;
+            var strVal = String(v);
+            if (strVal.indexOf(';') > -1) strVal = strVal.split(';')[1];
+            var num = parseFloat(strVal);
+            return isNaN(num) ? 0 : num;
+        }
+
+        function inr(n) {
+            var str = Math.round(Math.abs(parseNum(n))).toString();
+            var last = str.slice(-3), rest = str.slice(0, -3);
+            if (rest) last = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last;
+            return last;
+        }
+
+        function rupee(n) {
+            var num = parseNum(n);
+            return (num < 0 ? '- &#8377; ' : '&#8377; ') + inr(num);
+        }
+
+        function esc(str) {
+            return GlideStringUtil.escapeHTML(s(str));
+        }
+
+        // ── Shared CredX UI Component Builders (Matches clm_sap_writeback_*) ──
+        var TD_K   = 'padding:8px 0; color:#5a6a7a; border-bottom:1px solid #eef1f5;';
+        var TD_V   = 'padding:8px 0; color:#1a1a1a; border-bottom:1px solid #eef1f5;';
+        var TILE   = 'border:1px solid #e0e6ed; border-radius:6px; padding:12px 14px; background-color:#fafbfc;';
+        var TILE_K = 'font-size:10px; text-transform:uppercase; letter-spacing:.8px; color:#5a6a7a; font-weight:700;';
+
+        function sec(t, top) {
+            return '<h3 style="margin:' + (top || 24) + 'px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">' + t + '</h3>';
+        }
+
+        function kv(label, value, last, bold) {
+            return '<tr><td width="38%" style="' + (last ? 'padding:8px 0; color:#5a6a7a;' : TD_K) + '">' + label + '</td>' +
+                   '<td style="' + (last ? 'padding:8px 0; color:#1a1a1a;' : TD_V) + (bold ? ' font-weight:700;' : '') + '">' + value + '</td></tr>';
+        }
+
+        function statusBanner(ok, title, subtitle) {
+            if (ok) {
+                return '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#eafaf1; border:1px solid #a9dfbf; border-left:5px solid #27ae60; border-radius:6px; margin-top:6px;"><tbody><tr>' +
+                       '<td width="52" align="center" valign="middle" style="padding:16px 0 16px 14px;"><div style="width:36px; height:36px; line-height:36px; border-radius:18px; background-color:#27ae60; color:#ffffff; font-size:20px; font-weight:700; text-align:center;">&#10004;</div></td>' +
+                       '<td style="padding:16px 16px 16px 12px;"><div style="font-size:20px; font-weight:700; color:#1e8449;">' + esc(title) + '</div>' +
+                       '<div style="font-size:13px; color:#3a4451; padding-top:2px;">' + subtitle + '</div></td>' +
+                       '</tr></tbody></table>';
+            }
+            return '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#fef5f4; border:1px solid #f5c2bc; border-left:5px solid #E23D28; border-radius:6px; margin-top:6px;"><tbody><tr>' +
+                   '<td width="52" align="center" valign="middle" style="padding:16px 0 16px 14px;"><div style="width:36px; height:36px; line-height:36px; border-radius:18px; background-color:#E23D28; color:#ffffff; font-size:20px; font-weight:700; text-align:center;">!</div></td>' +
+                   '<td style="padding:16px 16px 16px 12px;"><div style="font-size:20px; font-weight:700; color:#c0392b;">' + esc(title) + '</div>' +
+                   '<div style="font-size:13px; color:#3a4451; padding-top:2px;">' + subtitle + '</div></td>' +
+                   '</tr></tbody></table>';
+        }
+
+        function requestCard(eyebrow, mainRef, sublineHtml, ok, badgeText) {
+            var pill = ok
+                ? '<span style="display:inline-block; background-color:#eafaf1; color:#1e8449; border:1px solid #a9dfbf; border-radius:4px; padding:5px 12px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">' + esc(badgeText) + '</span>'
+                : '<span style="display:inline-block; background-color:#fef5f4; color:#c0392b; border:1px solid #f5c2bc; border-radius:4px; padding:5px 12px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">' + esc(badgeText) + '</span>';
+
+            return '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:16px; background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px;"><tbody><tr>' +
+                   '<td style="padding:12px 16px;">' +
+                   '<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#5a6a7a; font-weight:700;">' + esc(eyebrow) + '</div>' +
+                   '<div style="font-size:18px; font-weight:700; color:#1a1a1a;">' + esc(mainRef) + '</div>' +
+                   (sublineHtml ? '<div style="font-size:12px; color:#5a6a7a; padding-top:2px;">' + sublineHtml + '</div>' : '') +
+                   '</td>' +
+                   '<td align="right" valign="middle" style="padding:12px 16px;">' + pill + '</td>' +
+                   '</tr></tbody></table>';
+        }
+
+        function failureReasonBlock(headerLabel, errorText) {
+            return sec(headerLabel || 'Failure Reason', 24) +
+                   '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#fef5f4; border:1px solid #f5c2bc; border-left:5px solid #E23D28; border-radius:6px;"><tbody>' +
+                   '<tr><td style="padding:14px 18px;">' +
+                   '<div style="font-size:13.5px; line-height:1.6; color:#1a1a1a; white-space:pre-wrap; word-break:break-word; font-family:Consolas,Menlo,monospace;">' + esc(errorText) + '</div>' +
+                   '</td></tr></tbody></table>';
+        }
+
+        function nextStepsBlock(ok, initiatorText, supportText) {
+            return sec(ok ? 'What Happens Next' : 'What to Do Next') +
+                   '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f4f9fb; border-left:4px solid #3498db;"><tbody><tr><td style="padding:12px 16px; font-size:13px; line-height:1.6; color:#1a1a1a;">' +
+                   (ok
+                       ? '<strong>Initiator:</strong> ' + initiatorText + '<br><br><strong>Support team:</strong> ' + supportText
+                       : '<strong>Support team:</strong> ' + supportText + '<br><br><strong>Initiator:</strong> ' + initiatorText) +
+                   '</td></tr></tbody></table>';
+        }
+
+        function ctaBlock(url, label, footerNote) {
+            var out = '';
+            if (url) {
+                out += '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:28px;"><tbody><tr>';
+                out += '<td align="center" style="background-color:#1a1a1a; border-radius:6px; border-bottom:3px solid #F3D54E;">';
+                out += '<a href="' + url + '" target="_blank" style="display:inline-block; padding:12px 28px; font-size:13px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; color:#ffffff; text-decoration:none;">' + esc(label) + '</a>';
+                out += '</td></tr></tbody></table>';
+            }
+            out += '<p style="margin:14px 0 0 0; font-size:12px; color:#8a96a3;">' + esc(footerNote) + '</p>';
+            return out;
+        }
+
+        // Resolve Initiator Name & Email and add to TO list
+        function resolveAndAddRecipient(userSysId, userName) {
+            var uGr = new GlideRecord('sys_user');
+            if (userSysId && uGr.get(userSysId)) {
+                var em = s(uGr.getValue('email'));
+                var nm = s(uGr.getDisplayValue('name'));
+                if (em) email.addAddress('to', em, nm);
+                return nm || 'User';
+            }
+            if (userName) {
+                uGr.initialize();
+                uGr.addQuery('user_name', userName);
+                uGr.setLimit(1);
+                uGr.query();
+                if (uGr.next()) {
+                    var em2 = s(uGr.getValue('email'));
+                    var nm2 = s(uGr.getDisplayValue('name'));
+                    if (em2) email.addAddress('to', em2, nm2);
+                    return nm2 || userName;
+                }
+            }
+            return 'User';
+        }
+
+        // Lookup customer details from Customer Master by code or sys_id
+        function getCustomerInfo(codeOrId) {
+            var info = { code: s(codeOrId), name: 'Customer Site', pan: '—' };
+            if (!info.code) return info;
+
+            var cmGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+            if (info.code.length === 32 && cmGr.get(info.code)) {
+                info.code = s(cmGr.getValue('customer_code_sap')) || s(cmGr.getValue('customer_code')) || info.code;
+                info.name = s(cmGr.getValue('customer_name')) || s(cmGr.getValue('group_customer_name')) || info.name;
+                info.pan  = s(cmGr.getValue('pan')) || info.pan;
+                return info;
+            }
+
+            cmGr.initialize();
+            var qc = cmGr.addQuery('customer_code_sap', info.code);
+            qc.addOrCondition('customer_code', info.code);
+            cmGr.setLimit(1);
+            cmGr.query();
+            if (cmGr.next()) {
+                info.name = s(cmGr.getValue('customer_name')) || s(cmGr.getValue('group_customer_name')) || info.name;
+                info.pan  = s(cmGr.getValue('pan')) || info.pan;
+            }
+            return info;
+        }
+
+        function statusBadge(st) {
+            var low = s(st).toLowerCase();
+            if (low === 'success') {
+                return '<span style="display:inline-block; padding:2px 8px; font-size:10px; font-weight:700; border-radius:4px; text-transform:uppercase; letter-spacing:.4px; background-color:#eafaf1; color:#1e8449; border:1px solid #a9dfbf;">Success</span>';
+            }
+            if (low === 'failed') {
+                return '<span style="display:inline-block; padding:2px 8px; font-size:10px; font-weight:700; border-radius:4px; text-transform:uppercase; letter-spacing:.4px; background-color:#fef5f4; color:#c0392b; border:1px solid #f5c2bc;">Failed</span>';
+            }
+            return '<span style="display:inline-block; padding:2px 8px; font-size:10px; font-weight:700; border-radius:4px; text-transform:uppercase; letter-spacing:.4px; background-color:#fff3cd; color:#856404; border:1px solid #ffe69c;">' + esc(st || 'Pending') + '</span>';
+        }
+
+        // ── 2. Identify Request Category via customer_type ─────────────────
+        var custType = s(current.getValue('customer_type')).toLowerCase();
+        var isNtCl   = (custType === 'non_trade' || custType === 'non-trade');
+        var isNtSwap = (custType === 'non_trade_limit_swap' || custType === 'non-trade limit swap');
+        var isNtBg   = (custType === 'non_trade_bg' || custType === 'non-trade bg');
+
+        // Fallback detection only if customer_type is blank on legacy rows
+        if (!custType) {
+            if (s(current.getValue('nt_request'))) isNtCl = true;
+            else if (s(current.getValue('nt_ls_request'))) isNtSwap = true;
+            else if (s(current.getValue('bg_request'))) isNtBg = true;
+        }
+
+        var rawStatus      = s(current.getValue('u_status')).toLowerCase();
+        var isSuccess      = (rawStatus === 'success');
+        var failedSiteInfo = getCustomerInfo(current.getDisplayValue('u_customer_code') || current.getValue('u_customer_code'));
+        var fullErrorMsg   = s(current.getValue('u_last_error')) || 'SAP writeback failed without a specific return error description.';
+        var attemptCount   = parseInt(current.getValue('u_attempt_count'), 10) || 1;
+        var processedOn    = s(current.getDisplayValue('u_processed_on')) || s(current.getDisplayValue('sys_updated_on'));
+
+        var instanceUrl = s(gs.getProperty('glide.servlet.uri'));
+        if (instanceUrl && !instanceUrl.endsWith('/')) instanceUrl += '/';
+
+        var TH   = 'padding:9px 12px; background-color:#eef1f5; color:#2b3440; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; text-align:left; border-bottom:1px solid #dde3ea;';
+        var TH_R = 'padding:9px 12px; background-color:#eef1f5; color:#2b3440; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; text-align:right; border-bottom:1px solid #dde3ea;';
+        var TH_C = 'padding:9px 12px; background-color:#eef1f5; color:#2b3440; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; text-align:center; border-bottom:1px solid #dde3ea;';
+        var TD   = 'padding:10px 12px; font-size:13px; color:#1a1a1a; border-bottom:1px solid #eef1f5; vertical-align:top;';
+        var TD_R = 'padding:10px 12px; font-size:13px; color:#1a1a1a; border-bottom:1px solid #eef1f5; vertical-align:top; text-align:right; white-space:nowrap;';
+        var TD_C = 'padding:10px 12px; font-size:13px; color:#1a1a1a; border-bottom:1px solid #eef1f5; vertical-align:top; text-align:center; white-space:nowrap;';
+
+        var h = '';
+
+        // =====================================================================
+        // BRANCH A: NON-TRADE CREDIT LIMIT (customer_type = 'non_trade')
+        // =====================================================================
+        if (isNtCl) {
+            var panReqId = s(current.getValue('nt_request'));
+            var panGr    = new GlideRecord('x_birl3_clm_nt_pan_request');
+            if (panReqId) panGr.get(panReqId);
+
+            var reqNumber     = panGr.isValidRecord() ? s(panGr.getValue('number')) : '';
+            var panStr        = panGr.isValidRecord() ? s(panGr.getValue('pan')) : failedSiteInfo.pan;
+            var recipientName = panGr.isValidRecord()
+                ? resolveAndAddRecipient(panGr.getValue('opened_by'), panGr.getValue('sys_created_by'))
+                : resolveAndAddRecipient('', current.getValue('sys_created_by'));
+
+            var groupName = 'Corporate Group';
+            if (panStr) {
+                var grpGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+                grpGr.addQuery('pan', panStr);
+                grpGr.setLimit(1);
+                grpGr.query();
+                if (grpGr.next()) {
+                    groupName = s(grpGr.getValue('group_customer_name')) || s(grpGr.getValue('customer_name')) || groupName;
+                }
+            }
+
+            if (isSuccess) {
+                email.setSubject('[CredX] SAP Sync Successful (All Sites Completed) - ' + reqNumber + ' (' + groupName + ')');
+            } else {
+                email.setSubject('[CredX] SAP Sync Failed - ' + reqNumber + ' | Site ' + failedSiteInfo.code + ' (' + failedSiteInfo.name + ')');
+            }
+
+            var portalUrl = instanceUrl + 'uclm?id=uclm_non_trade_view_request&number=' + encodeURIComponent(reqNumber);
+
+            // Greeting + Top Status Banner
+            h += '<p style="margin:0 0 10px 0; font-size:14px; color:#5a6a7a;">Dear <strong style="color:#1a1a1a;">' + esc(recipientName) + '</strong>,</p>';
+            h += statusBanner(
+                isSuccess,
+                isSuccess ? 'Credit limits updated in SAP' : 'SAP credit limit update failed',
+                isSuccess
+                    ? 'All site limits are now live in SAP' + (processedOn ? ' &middot; ' + esc(processedOn) : '')
+                    : 'Manual review required &middot; Site ' + esc(failedSiteInfo.code) + ' &middot; ' + attemptCount + ' attempt' + (attemptCount === 1 ? '' : 's') + (processedOn ? ' &middot; ' + esc(processedOn) : '')
+            );
+
+            // Yellow Request Reference Card
+            h += requestCard(
+                'Non-Trade PAN Request',
+                reqNumber || 'N/A',
+                'Customer Group: <strong style="color:#1a1a1a;">' + esc(groupName) + '</strong>' + (panStr ? ' &middot; PAN: <span style="font-family:monospace; font-weight:700; color:#1a1a1a;">' + esc(panStr) + '</span>' : ''),
+                isSuccess,
+                isSuccess ? 'All Sites Synced' : 'Sync Failed'
+            );
+
+            // Full Error Log Callout (Failure State Only)
+            if (!isSuccess) {
+                h += failureReasonBlock(
+                    'Failure Reason &mdash; Site ' + esc(failedSiteInfo.code) + ' (Attempt #' + esc(String(attemptCount)) + ')',
+                    fullErrorMsg
+                );
+            }
+
+            // Query all sibling writeback rows for this PAN request
+            var batchGr = new GlideRecord('x_birl3_clm_clm_servicenow_to_sap_send_back');
+            if (panReqId) {
+                batchGr.addQuery('nt_request', panReqId);
+            } else {
+                batchGr.addQuery('sys_id', current.getUniqueValue());
+            }
+            batchGr.orderBy('u_customer_code');
+            batchGr.query();
+
+            var batchRows       = '';
+            var batchTotalCount = 0;
+            var syncedCount     = 0;
+            var totalBatchLimit = 0;
+
+            while (batchGr.next()) {
+                batchTotalCount++;
+                var cInfo    = getCustomerInfo(batchGr.getDisplayValue('u_customer_code') || batchGr.getValue('u_customer_code'));
+                var rowLimit = parseNum(batchGr.getValue('u_approved_code_limit'));
+                var rowSeg   = s(batchGr.getValue('u_credit_segment')) || '&mdash;';
+                var rowRev   = s(batchGr.getDisplayValue('u_next_review_date')) || '&mdash;';
+                var rowSt    = s(batchGr.getValue('u_status'));
+
+                if (rowSt.toLowerCase() === 'success') syncedCount++;
+                totalBatchLimit += rowLimit;
+
+                batchRows += '<tr>';
+                batchRows += '<td style="' + TD + ' font-family:monospace; font-weight:700; white-space:nowrap;">' + esc(cInfo.code) + '</td>';
+                batchRows += '<td style="' + TD + '">' + esc(cInfo.name) + '</td>';
+                batchRows += '<td style="' + TD + ' color:#5a6a7a;">' + esc(rowSeg) + '</td>';
+                batchRows += '<td style="' + TD_R + ' font-weight:700;">' + rupee(rowLimit) + '</td>';
+                batchRows += '<td style="' + TD + ' color:#5a6a7a; white-space:nowrap;">' + esc(rowRev) + '</td>';
+                batchRows += '<td style="' + TD_C + '">' + statusBadge(rowSt) + '</td>';
+                batchRows += '</tr>';
+            }
+
+            // 3-Tile KPI Strip
+            h += sec('Batch Overview', 24);
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+            h += '<td width="33%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Sites Synced</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + syncedCount + ' of ' + batchTotalCount + '</div></div></td>';
+            if (isSuccess) {
+                h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="background-color:#eafaf1; border:1px solid #27ae60; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + ' color:#1e8449;">Total Synced PAN Limit</div><div style="font-size:17px; font-weight:700; color:#1e8449; padding-top:3px;">' + rupee(totalBatchLimit) + '</div></div></td>';
+            } else {
+                h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="background-color:#fef5f4; border:1px solid #f5c2bc; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + ' color:#c0392b;">Failed Site Limit</div><div style="font-size:17px; font-weight:700; color:#c0392b; padding-top:3px;">' + rupee(current.getValue('u_approved_code_limit')) + '</div></div></td>';
+            }
+            h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Total Batch Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(totalBatchLimit) + '</div></div></td>';
+            h += '</tr></tbody></table>';
+
+            // Details Key-Value Table
+            h += sec('Details');
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+            h += kv('Customer Group', esc(groupName), false, true);
+            h += kv('Corporate PAN', '<span style="font-family:monospace; font-weight:700;">' + esc(panStr || '&mdash;') + '</span>');
+            if (!isSuccess) {
+                h += kv('Failed Site', '<span style="font-family:monospace; font-weight:700;">' + esc(failedSiteInfo.code) + '</span> &mdash; ' + esc(failedSiteInfo.name));
+                h += kv('Attempts', esc(String(attemptCount)));
+            }
+            h += kv(isSuccess ? 'Updated On' : 'Last Failed On', esc(processedOn || '&mdash;'), true);
+            h += '</tbody></table>';
+
+            // SAP Writeback Batch Summary Table
+            h += sec('SAP Writeback Batch Summary <span style="display:inline-block; background-color:#eef1f5; border:1px solid #dde3ea; border-radius:10px; padding:0 8px; font-size:11px; letter-spacing:0; color:#2b3440;">' + batchTotalCount + '</span>');
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #dde3ea; border-radius:6px;"><thead><tr>';
+            h += '<th style="' + TH + '">Site Code</th>';
+            h += '<th style="' + TH + '">Customer Name</th>';
+            h += '<th style="' + TH + '">Segment</th>';
+            h += '<th style="' + TH_R + '">Approved Limit</th>';
+            h += '<th style="' + TH + '">Review Date</th>';
+            h += '<th style="' + TH_C + '">SAP Status</th>';
+            h += '</tr></thead><tbody>' + batchRows + '</tbody></table>';
+
+            // What Happens Next / What to Do Next
+            h += nextStepsBlock(
+                isSuccess,
+                isSuccess
+                    ? 'all approved site credit limits for <strong>' + esc(groupName) + '</strong> are now live in SAP and the request is marked Closed Complete. No further action is required.'
+                    : 'no action needed from your side yet. Site <strong>' + esc(failedSiteInfo.code) + '</strong> has not been updated in SAP; the support team has been notified to retry the writeback.',
+                isSuccess
+                    ? 'this closes the SAP writeback batch for PAN request <strong>' + esc(reqNumber) + '</strong>. No action required unless a follow-up alert arrives.'
+                    : 'please review the SAP writeback record for site <strong>' + esc(failedSiteInfo.code) + '</strong> in ServiceNow, verify customer master status in SAP, and re-trigger the queue item.'
+            );
+
+            // CTA Button
+            h += ctaBlock(
+                portalUrl,
+                'View PAN Request in CredX',
+                isSuccess
+                    ? 'Automated notification from CredX.'
+                    : 'Automated alert from CredX. If this keeps failing, contact the CLM support team.'
+            );
+
+            template.print(h);
+            return;
+        }
+
+        // =====================================================================
+        // BRANCH B: NON-TRADE LIMIT SWAP (customer_type = 'non_trade_limit_swap')
+        // =====================================================================
+        if (isNtSwap) {
+            var swapReqId = s(current.getValue('nt_ls_request'));
+            var swapGr    = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+            if (swapReqId) swapGr.get(swapReqId);
+
+            var swapNumber    = swapGr.isValidRecord() ? s(swapGr.getValue('number')) : '';
+            var swapAmount    = swapGr.isValidRecord() ? parseNum(swapGr.getValue('requested_amount')) : 0;
+            var swapRecipient = swapGr.isValidRecord()
+                ? resolveAndAddRecipient(swapGr.getValue('opened_by'), swapGr.getValue('sys_created_by'))
+                : resolveAndAddRecipient('', current.getValue('sys_created_by'));
+
+            var donorCode = (swapGr.isValidRecord() && swapGr.donor) ? s(swapGr.donor.customer_code_sap) : '';
+            var doneeCode = (swapGr.isValidRecord() && swapGr.donee) ? s(swapGr.donee.customer_code_sap) : '';
+
+            if (isSuccess) {
+                email.setSubject('[CredX] Limit Swap SAP Sync Successful - ' + swapNumber + ' (' + donorCode + ' → ' + doneeCode + ')');
+            } else {
+                email.setSubject('[CredX] Limit Swap SAP Sync Failed - ' + swapNumber + ' | Site ' + failedSiteInfo.code);
+            }
+
+            var swapPortalUrl = instanceUrl + 'uclm?id=uclm_limit_swap_view_request&number=' + encodeURIComponent(swapNumber);
+
+            // Greeting + Top Status Banner
+            h += '<p style="margin:0 0 10px 0; font-size:14px; color:#5a6a7a;">Dear <strong style="color:#1a1a1a;">' + esc(swapRecipient) + '</strong>,</p>';
+            h += statusBanner(
+                isSuccess,
+                isSuccess ? 'Limit swap updated in SAP' : 'Limit swap SAP update failed',
+                isSuccess
+                    ? 'Both Donor and Donee limits are now live' + (processedOn ? ' &middot; ' + esc(processedOn) : '')
+                    : 'Manual review required &middot; Site ' + esc(failedSiteInfo.code) + ' &middot; ' + attemptCount + ' attempt' + (attemptCount === 1 ? '' : 's') + (processedOn ? ' &middot; ' + esc(processedOn) : '')
+            );
+
+            // Yellow Request Reference Card
+            h += requestCard(
+                'Limit Swap Request',
+                swapNumber || 'N/A',
+                'Transfer Route: <span style="font-family:monospace; font-weight:700; color:#1a1a1a;">' + esc(donorCode || '&mdash;') + '</span> &rarr; <span style="font-family:monospace; font-weight:700; color:#1a1a1a;">' + esc(doneeCode || '&mdash;') + '</span>',
+                isSuccess,
+                isSuccess ? 'Both Sites Synced' : 'Sync Failed'
+            );
+
+            // Full Error Log Callout (Failure State Only)
+            if (!isSuccess) {
+                h += failureReasonBlock(
+                    'Failure Reason &mdash; Site ' + esc(failedSiteInfo.code) + ' (Attempt #' + esc(String(attemptCount)) + ')',
+                    fullErrorMsg
+                );
+            }
+
+            // 3-Tile Reallocation Summary Strip
+            h += sec('Reallocation Summary', 24);
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+            h += '<td width="33%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Donor Site (&minus;)</div><div style="font-size:16px; font-family:monospace; font-weight:700; color:#E23D28; padding-top:4px;">' + esc(donorCode || '&mdash;') + '</div></div></td>';
+            h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Donee Site (+)</div><div style="font-size:16px; font-family:monospace; font-weight:700; color:#1e8449; padding-top:4px;">' + esc(doneeCode || '&mdash;') + '</div></div></td>';
+            if (isSuccess) {
+                h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#eafaf1; border:1px solid #27ae60; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + ' color:#1e8449;">Swapped Amount</div><div style="font-size:17px; font-weight:700; color:#1e8449; padding-top:3px;">' + rupee(swapAmount) + '</div></div></td>';
+            } else {
+                h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#fef5f4; border:1px solid #f5c2bc; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + ' color:#c0392b;">Swapped Amount</div><div style="font-size:17px; font-weight:700; color:#c0392b; padding-top:3px;">' + rupee(swapAmount) + '</div></div></td>';
+            }
+            h += '</tr></tbody></table>';
+
+            // Query both Donor and Donee writeback rows
+            var swapBatchGr = new GlideRecord('x_birl3_clm_clm_servicenow_to_sap_send_back');
+            if (swapReqId) {
+                swapBatchGr.addQuery('nt_ls_request', swapReqId);
+            } else {
+                swapBatchGr.addQuery('sys_id', current.getUniqueValue());
+            }
+            swapBatchGr.query();
+
+            var swapRows = '';
+            while (swapBatchGr.next()) {
+                var sInfo     = getCustomerInfo(swapBatchGr.getDisplayValue('u_customer_code') || swapBatchGr.getValue('u_customer_code'));
+                var isDonor   = (sInfo.code === donorCode);
+                var isDonee   = (sInfo.code === doneeCode);
+                var roleLabel = isDonor ? 'Donor (&minus;)' : (isDonee ? 'Donee (+)' : 'Party');
+                var roleColor = isDonor ? '#E23D28' : (isDonee ? '#1e8449' : '#2b3440');
+                var sLim      = parseNum(swapBatchGr.getValue('u_approved_code_limit'));
+                var sSt       = s(swapBatchGr.getValue('u_status'));
+
+                swapRows += '<tr>';
+                swapRows += '<td style="' + TD + ' font-weight:700; color:' + roleColor + '; white-space:nowrap;">' + roleLabel + '</td>';
+                swapRows += '<td style="' + TD + ' font-family:monospace; font-weight:700; white-space:nowrap;">' + esc(sInfo.code) + '</td>';
+                swapRows += '<td style="' + TD + '">' + esc(sInfo.name) + '</td>';
+                swapRows += '<td style="' + TD_R + ' font-weight:700;">' + rupee(sLim) + '</td>';
+                swapRows += '<td style="' + TD_C + '">' + statusBadge(sSt) + '</td>';
+                swapRows += '</tr>';
+            }
+
+            // Donor & Donee SAP Sync Table
+            h += sec('Donor &amp; Donee SAP Sync Summary');
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #dde3ea; border-radius:6px;"><thead><tr>';
+            h += '<th style="' + TH + '">Role</th>';
+            h += '<th style="' + TH + '">Site Code</th>';
+            h += '<th style="' + TH + '">Customer Name</th>';
+            h += '<th style="' + TH_R + '">Updated SAP Limit</th>';
+            h += '<th style="' + TH_C + '">SAP Status</th>';
+            h += '</tr></thead><tbody>' + swapRows + '</tbody></table>';
+
+            // What Happens Next / What to Do Next
+            h += nextStepsBlock(
+                isSuccess,
+                isSuccess
+                    ? 'both Donor and Donee credit limits are now updated in SAP. No further action is required from your side.'
+                    : 'no action needed from your side yet. The support team has been notified to resolve the SAP writeback error and complete the reallocation.',
+                isSuccess
+                    ? 'this closes the SAP writeback for Limit Swap <strong>' + esc(swapNumber) + '</strong>. No action required unless a follow-up alert arrives.'
+                    : 'please review the failed SAP writeback row for site <strong>' + esc(failedSiteInfo.code) + '</strong> in ServiceNow and re-trigger once SAP validation passes.'
+            );
+
+            // CTA Button
+            h += ctaBlock(
+                swapPortalUrl,
+                'View Limit Swap in CredX',
+                isSuccess
+                    ? 'Automated notification from CredX.'
+                    : 'Automated alert from CredX. If this keeps failing, contact the CLM support team.'
+            );
+
+            template.print(h);
+            return;
+        }
+
+        // =====================================================================
+        // BRANCH C: BANK GUARANTEE MONITOR (customer_type = 'non_trade_bg' / 'Non-Trade BG')
+        // =====================================================================
+        if (isNtBg) {
+            var bgReqId     = s(current.getValue('bg_request'));
+            var bgNumber    = s(current.getDisplayValue('bg_request'));
+            var oldLimit    = 0;
+            var newLimit    = parseNum(current.getValue('u_approved_code_limit'));
+            var nextRev     = s(current.getDisplayValue('u_next_review_date')) || '&mdash;';
+            var credSeg     = s(current.getValue('u_credit_segment')) || '&mdash;';
+            var bgRecipient = resolveAndAddRecipient('', current.getValue('sys_created_by'));
+
+            if (bgReqId) {
+                var bgGr = new GlideRecord('x_birl3_clm_bank_guarantee_monitor');
+                if (bgGr.get(bgReqId)) {
+                    bgNumber    = s(bgGr.getValue('number')) || bgNumber;
+                    oldLimit    = parseNum(bgGr.getValue('old_credit_limit'));
+                    newLimit    = parseNum(bgGr.getValue('credit_limit')) || newLimit;
+                    bgRecipient = resolveAndAddRecipient('', bgGr.getValue('sys_created_by'));
+                }
+            }
+
+            var bgRefTag = bgNumber ? ' [' + bgNumber + ']' : '';
+            if (isSuccess) {
+                email.setSubject('[CredX] BG Limit SAP Sync Successful' + bgRefTag + ' - Site ' + failedSiteInfo.code + ' (' + failedSiteInfo.name + ')');
+            } else {
+                email.setSubject('[CredX] BG Limit SAP Sync Failed' + bgRefTag + ' - Site ' + failedSiteInfo.code + ' (' + failedSiteInfo.name + ')');
+            }
+
+            var bgPortalUrl = instanceUrl + 'uclm?id=uclm_nt_bank_guarantee_monitor';
+            var bgDiff      = newLimit - oldLimit;
+            var bgSigned    = (bgDiff > 0 ? '+' : (bgDiff < 0 ? '-' : '')) + rupee(bgDiff);
+
+            // Greeting + Top Status Banner
+            h += '<p style="margin:0 0 10px 0; font-size:14px; color:#5a6a7a;">Dear <strong style="color:#1a1a1a;">' + esc(bgRecipient) + '</strong>,</p>';
+            h += statusBanner(
+                isSuccess,
+                isSuccess ? 'Credit limit updated in SAP' : 'SAP credit limit update failed',
+                isSuccess
+                    ? 'The BG-adjusted limit is now live' + (processedOn ? ' &middot; ' + esc(processedOn) : '')
+                    : 'Manual review required &middot; ' + attemptCount + ' attempt' + (attemptCount === 1 ? '' : 's') + (processedOn ? ' &middot; ' + esc(processedOn) : '')
+            );
+
+            // Yellow Request Reference Card
+            h += requestCard(
+                'Bank Guarantee Monitor',
+                bgNumber || failedSiteInfo.code,
+                'Segment: ' + esc(credSeg),
+                isSuccess,
+                isSuccess ? 'SAP Updated' : 'SAP Failed'
+            );
+
+            // Full Error Log Callout (Failure State Only)
+            if (!isSuccess) {
+                h += failureReasonBlock(
+                    'Failure Reason (Attempt #' + esc(String(attemptCount)) + ')',
+                    fullErrorMsg
+                );
+            }
+
+            // KPI Limit Tiles (Matches clm_sap_writeback_success & clm_sap_writeback_failed)
+            if (isSuccess) {
+                h += sec('Credit Limit', 24);
+                h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+                h += '<td width="34%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Previous Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(oldLimit) + '</div></div></td>';
+                h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="background-color:#eafaf1; border:1px solid #27ae60; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + ' color:#1e8449;">Updated Limit</div><div style="font-size:19px; font-weight:700; color:#1e8449; padding-top:3px;">' + rupee(newLimit) + '</div></div></td>';
+                h += '<td width="32%" valign="top" style="padding-left:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Change</div><div style="font-size:17px; font-weight:700; padding-top:3px; color:' + (bgDiff < 0 ? '#E23D28' : '#1e8449') + ';">' + bgSigned + '</div></div></td>';
+                h += '</tr></tbody></table>';
+            } else {
+                h += sec('Attempted Limit', 24);
+                h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+                h += '<td valign="top"><div style="' + TILE + '"><div style="' + TILE_K + '">Target Code-Level Limit</div><div style="font-size:19px; font-weight:700; padding-top:3px;">' + rupee(newLimit) + '</div></div></td>';
+                h += '</tr></tbody></table>';
+            }
+
+            // Details Key-Value Table (38% / 62%)
+            h += sec('Details');
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+            h += kv('Customer Name', esc(failedSiteInfo.name || '&mdash;'), false, true);
+            h += kv('Customer Site Code', '<span style="font-family:monospace; font-weight:700;">' + esc(failedSiteInfo.code || '&mdash;') + '</span>');
+            if (failedSiteInfo.pan && failedSiteInfo.pan !== '—') {
+                h += kv('Corporate PAN', '<span style="font-family:monospace; font-weight:700;">' + esc(failedSiteInfo.pan) + '</span>');
+            }
+            h += kv('Credit Segment', esc(credSeg));
+            if (bgNumber) {
+                h += kv('BG Reference #', esc(bgNumber));
+            }
+            h += kv('Next Review Date', esc(nextRev));
+            h += kv('Attempts', esc(String(attemptCount)));
+            h += kv(isSuccess ? 'Updated On' : 'Last Failed On', esc(processedOn || '&mdash;'), true);
+            h += '</tbody></table>';
+
+            // What Happens Next / What to Do Next
+            h += nextStepsBlock(
+                isSuccess,
+                'the customer&rsquo;s BG-adjusted credit limit is now live in SAP. No further action is required from your side.',
+                isSuccess
+                    ? 'this closes the SAP writeback for this BG adjustment. No action required unless you see a follow-up alert for the same customer.'
+                    : 'please review the SAP writeback record for site <strong>' + esc(failedSiteInfo.code) + '</strong> in ServiceNow and verify the customer&rsquo;s current status and limits directly in SAP.'
+            );
+
+            // CTA Button
+            h += ctaBlock(
+                bgPortalUrl,
+                isSuccess ? 'Open BG Monitor in CredX' : 'Open BG Monitor to Retry',
+                isSuccess
+                    ? 'Automated notification from CredX.'
+                    : 'Automated alert from CredX. If this keeps failing, contact the CLM support team.'
+            );
+
+            template.print(h);
+            return;
+        }
+
+        // ── Generic Fallback (If customer_type & parent refs are blank) ─────
+        var genRecipient = resolveAndAddRecipient('', current.getValue('sys_created_by'));
+        var genLimit     = parseNum(current.getValue('u_approved_code_limit'));
+        email.setSubject('[CredX] SAP Sync ' + (isSuccess ? 'Successful' : 'Failed') + ' - Site ' + failedSiteInfo.code);
+
+        h += '<p style="margin:0 0 10px 0; font-size:14px; color:#5a6a7a;">Dear <strong style="color:#1a1a1a;">' + esc(genRecipient) + '</strong>,</p>';
+        h += statusBanner(
+            isSuccess,
+            isSuccess ? 'Credit limit updated in SAP' : 'SAP credit limit update failed',
+            (processedOn ? esc(processedOn) : 'CredX SAP Writeback')
+        );
+        if (!isSuccess) {
+            h += failureReasonBlock('Failure Reason (Attempt #' + esc(String(attemptCount)) + ')', fullErrorMsg);
+        }
+        h += sec('Details');
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+        h += kv('Customer Name', esc(failedSiteInfo.name || '&mdash;'), false, true);
+        h += kv('Customer Code', esc(failedSiteInfo.code || '&mdash;'));
+        h += kv('Target Limit', rupee(genLimit), true, true);
+        h += '</tbody></table>';
+        h += ctaBlock(instanceUrl + 'uclm', 'Open CredX Portal', 'Automated notification from CredX.');
+
+        template.print(h);
+
+    } catch (ex) {
+        gs.error('CLM MailScript clm_nt_sap_writeback_script error: ' + ex.message);
+        template.print('<div style="font-family: Arial, sans-serif; color: #d9534f;">Error rendering SAP writeback notification details.</div>');
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-12 06:19:27</sys_created_on>
+        <sys_id>4a6163f897685390be31fa17f053afb6</sys_id>
+        <sys_mod_count>6</sys_mod_count>
+        <sys_name>clm_nt_sap_writeback_script</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_4a6163f897685390be31fa17f053afb6</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-17 07:29:26</sys_updated_on>
+    </sys_script_email>
+</record_update>

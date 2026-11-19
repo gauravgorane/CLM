@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>false</action_update>
+        <active>false</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>sys_di_task_definition</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition table="sys_di_task_definition">capability=doc_data_extractor^EQ<item display_value="Document Data Extraction" endquery="false" field="capability" goto="false" newquery="false" operator="=" or="false" value="doc_data_extractor"/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>Deactivate old solution def creation BR</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous /*null when async*/ ) {
+
+    // deactivate the BR: "DocIntel Create Solution Definitions" if at all activated due to 3.1.1 overwriting with an active version of it
+    // and let 3.1.1 use the new version of it named: "DocDataExtractor Create Solution Defs"
+    var gr = new GlideRecord("sys_script");
+    if (gr.get("36f0ba55eb331110f2549bf12a52281a") && gr.getValue("active") === "1") {
+        gr.setValue("active", false);
+        if (gr.update()) {
+            gs.info(sn_i18n.Message.getMessage("platform-ml-di-deactivate-old-sol-defs", "Successfully deactivated the old BR: 'DocIntel Create Solution Definitions'"));
+        } else {
+            gs.info(sn_i18n.Message.getMessage("platform-ml-di-deactivate-old-sol-defs", "Failed to deactivate the old BR: 'DocIntel Create Solution Definitions'"));
+        }
+    }
+    // deactivate the current BR as well as it is required to run only once.
+    var sysScriptGr = new GlideRecord("sys_script");
+    if (sysScriptGr.get("80473d55a3f23110f621495716fcdad6")) {
+        sysScriptGr.setValue("active", false);
+        if (sysScriptGr.update()) {
+            gs.info(sn_i18n.Message.getMessage("platform-ml-di-deactivate-old-sol-defs", "Successfully deactivated the BR: 'Deactivate old solution def creation BR'"));
+        } else {
+            gs.info(sn_i18n.Message.getMessage("platform-ml-di-deactivate-old-sol-defs", "Failed to deactivate the BR: 'Deactivate old solution def creation BR'"));
+        }
+    }
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-12 05:18:51</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>9107ed8e2be7fa104572f3745e91bf36</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>Deactivate old solution def creation BR</sys_name>
+        <sys_overrides display_value="Deactivate old solution def creation BR">80473d55a3f23110f621495716fcdad6</sys_overrides>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_9107ed8e2be7fa104572f3745e91bf36</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-03-12 05:18:51</sys_updated_on>
+        <template/>
+        <when>before</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=9107ed8e2be7fa104572f3745e91bf36"/>
+</record_update>

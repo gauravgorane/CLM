@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?><database>
+    <element attributes="enforce_dot_walk_cross_scope_access=true" audit="true" db_object_id="9d20aa802b3bc7104572f3745e91bf31" label="CLM Review Date Update" max_length="40" name="x_birl3_clm_clm_review_date_update_queue" type="collection">
+        <element default="cacbc7742bb676104572f3745e91bf5a" label="Domain" max_length="32" name="sys_domain" type="domain_id"/>
+        <element label="PAN" max_length="40" name="pan" type="string"/>
+        <element label="Verified On" max_length="40" name="verified_on" type="glide_date_time"/>
+        <element default="gs.nowDateTime()" label="Requested On" max_length="40" name="requested_on" type="glide_date_time"/>
+        <element label="Zone" max_length="40" name="zone" type="string"/>
+        <element label="SAP Response" max_length="2000" name="sap_response" type="string"/>
+        <element choice="3" label="Customer Type" max_length="40" name="customer_type" type="choice">
+            <choice>
+                <element inactive_on_update="false" label="Non-Trade" sequence="1" value="non_trade"/>
+                <element inactive_on_update="false" label="Key" sequence="2" value="key"/>
+                <element inactive_on_update="false" label="Trade" sequence="0" value="trade"/>
+            </choice>
+        </element>
+        <element label="Requested By" max_length="32" name="requested_by" reference="sys_user" type="reference"/>
+        <element choice="1" label="Status" max_length="40" name="status" type="choice">
+            <choice>
+                <element inactive_on_update="false" label="Failed" sequence="300" value="Failed"/>
+                <element inactive_on_update="false" label="Pending" sequence="100" value="Pending"/>
+                <element inactive_on_update="false" label="Success" sequence="200" value="Success"/>
+            </choice>
+        </element>
+        <element label="Customer Code" max_length="32" name="customer_code" reference="x_birl3_clm_clm_customer_master1" type="reference"/>
+        <element label="Connection Retry Count" max_length="40" name="connection_retry_count" type="integer"/>
+        <element default="0" label="Attempted Count" max_length="40" name="u_attempt_count" type="integer"/>
+        <element default="0" label="Connection Retry Count" max_length="40" name="u_connection_retry_count" type="integer"/>
+        <element default="!!!/!!(/" label="Domain Path" max_length="255" name="sys_domain_path" type="domain_path"/>
+        <element label="Last Error" max_length="4000" name="last_error" type="string"/>
+        <element label="New Review Date" max_length="40" name="new_review_date" type="glide_date"/>
+        <element label="Old Review Date" max_length="40" name="old_review_date" type="glide_date"/>
+        <element attributes="ignore_filter_on_new=true" default="javascript:global.getNextObjNumberPadded();" label="Number" max_length="40" name="number" type="string"/>
+        <element choice="1" label="Segment" max_length="40" name="segment" type="choice">
+            <choice>
+                <element inactive_on_update="false" label="BPD" sequence="300" value="BPD"/>
+                <element inactive_on_update="false" label="RMC" sequence="200" value="RMC"/>
+                <element inactive_on_update="false" label="Cement" sequence="100" value="Cement"/>
+            </choice>
+        </element>
+        <element label="Processed On" max_length="40" name="processed_on" type="glide_date_time"/>
+        <index name="index">
+            <element name="sys_domain_path"/>
+        </index>
+        <index name="index2">
+            <element name="customer_code"/>
+        </index>
+        <index name="index3">
+            <element name="sys_domain"/>
+        </index>
+        <index name="index4">
+            <element name="requested_by"/>
+        </index>
+    </element>
+</database>

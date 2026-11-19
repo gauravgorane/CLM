@@ -1,0 +1,2232 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[// NOTE: Added $rootScope to the first line
+function CLMCustomer360Controller($scope, $http, $timeout, $rootScope) {
+    var c = this;
+
+    c.searchTerm = '';
+    c.loading = true;
+    c.charts = {};
+
+    c.suggestions    = [];
+    c.suggestLoading = false;
+    var _suggestTimer = null;
+
+    var CHART_JS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.4/Chart.min.js';
+
+    function ensureChartJs(cb) {
+        if (typeof Chart !== 'undefined') { cb(); return; }
+
+        if (!window.__clmChartJsPromise) {
+            window.__clmChartJsPromise = new Promise(function(resolve, reject) {
+                var existing = document.querySelector('script[data-clm-chartjs]');
+                if (existing) {
+                    existing.addEventListener('load', resolve);
+                    existing.addEventListener('error', reject);
+                    return;
+                }
+                var script = document.createElement('script');
+                script.src = CHART_JS_URL;
+                script.setAttribute('data-clm-chartjs', 'true');
+                script.onload = resolve;
+                script.onerror = reject;
+                document.head.appendChild(script);
+            });
+        }
+
+        window.__clmChartJsPromise.then(function() {
+            $timeout(cb);
+        }).catch(function(err) {
+            console.error('CLM Widget: failed to load Chart.js from CDN', err);
+        });
+    }
+
+    ensureChartJs(function() {});
+
+    c.fmtLakh = function(val) {
+        if (val === null || val === undefined || isNaN(val)) return '—';
+        var lakh = val / 100000;
+        return '₹' + (Math.round(lakh * 10) / 10).toFixed(1) + 'L';
+    };
+
+    c.fmtK = function(val) {
+        if (val === null || val === undefined || isNaN(val)) return '—';
+        if (val === 0) return '—';
+        if (val >= 100000) return c.fmtLakh(val);
+        return '₹' + Math.round(val / 1000) + 'K';
+    };
+
+    c.fmtDash = function(val) {
+        return (!val || val === 0) ? '—' : c.fmtK(val);
+    };
+
+    var parseSafeNumber = function(val) {
+        if (val === null || val === undefined) return 0;
+        if (typeof val === 'number') return isNaN(val) ? 0 : val;
+        var str = String(val).replace(/[₹\s,]/g, '').trim();
+        var multiplier = 1;
+        if (str.toUpperCase().endsWith('L')) { multiplier = 100000; str = str.slice(0, -1); }
+        else if (str.toUpperCase().endsWith('K')) { multiplier = 1000; str = str.slice(0, -1); }
+        var num = parseFloat(str);
+        return isNaN(num) ? 0 : num * multiplier;
+    };
+
+    c.onTyping = function($event) {
+        if ($event.keyCode === 13) {
+            c.suggestions = [];
+            c.doSearch();
+            return;
+        }
+        if ($event.keyCode === 27) {
+            c.suggestions = [];
+            return;
+        }
+
+        var term = (c.searchTerm || '').trim();
+
+        if (term.length < 2) {
+            c.suggestions = [];
+            c.suggestLoading = false;
+            if (_suggestTimer) { $timeout.cancel(_suggestTimer); }
+            return;
+        }
+
+        if (_suggestTimer) { $timeout.cancel(_suggestTimer); }
+        _suggestTimer = $timeout(function() {
+            c.suggestLoading = true;
+            c.server.get({ action: 'suggest', term: term }).then(function(r) {
+                c.suggestions    = r.data.suggestions || [];
+                c.suggestLoading = false;
+            }, function() {
+                c.suggestions    = [];
+                c.suggestLoading = false;
+            });
+        }, 250);
+    };
+
+    c.selectSuggestion = function(s) {
+        c.searchTerm  = s.name;
+        c.suggestions = [];
+        // Suggestions now carry sysId too, so this drill-down is unambiguous
+        // even if this customer's code is duplicated on another record.
+        if (s.sysId) {
+            c.load({ sysId: s.sysId, code: s.code });
+        } else {
+            c.load(s.code);
+        }
+    };
+
+    // Accepts either:
+    //   c.load('some text')            -> text search (code/PAN/name)
+    //   c.load({ sysId: '...', code: '...' }) -> exact record lookup
+    c.load = function(param) {
+        c.loading = true;
+        c.suggestions = [];
+
+        var payload;
+        if (param && typeof param === 'object' && param.sysId) {
+            payload = { sysId: param.sysId };
+            c.searchTerm = param.code || c.searchTerm;
+        } else {
+            payload = { search: param || '' };
+            c.searchTerm = param || c.searchTerm;
+        }
+
+        c.server.get(payload).then(function(r) {
+            c.data = r.data;
+            c.loading = false;
+            $timeout(function() {
+                c.drawSalesChart();
+                c.drawAgingChart();
+            }, 300);
+        });
+    };
+
+    c.doSearch = function() {
+        if (c.searchTerm && c.searchTerm.trim() !== '') {
+            c.load(c.searchTerm.trim());
+        }
+    };
+
+    c.drawSalesChart = function() {
+        if (!c.data || !c.data.monthly || !c.data.monthly.length) return;
+
+        ensureChartJs(function() {
+            var canvas = document.getElementById('c360SalesChart');
+            if (!canvas) return;
+
+            if (c.charts.sales) c.charts.sales.destroy();
+            var rows = c.data.monthly.slice(-6);
+
+            var chartLabels = rows.map(function(r) { return r.month || ''; });
+            var volumeData  = rows.map(function(r) { return parseSafeNumber(r.salesVolume); });
+            var valueData   = rows.map(function(r) { return parseSafeNumber(r.salesValue); });
+
+            c.charts.sales = new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: chartLabels,
+                    datasets: [
+                        {
+                            label: 'Sales Volume (MT)',
+                            data: volumeData,
+                            borderColor: '#1f7a4d',
+                            backgroundColor: '#1f7a4d',
+                            fill: false,
+                            yAxisID: 'y-axis-1',
+                            tension: 0.2
+                        },
+                        {
+                            label: 'Sales Value',
+                            data: valueData,
+                            borderColor: '#1c4e9c',
+                            backgroundColor: '#1c4e9c',
+                            fill: false,
+                            yAxisID: 'y-axis-2',
+                            tension: 0.2
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    legend: { display: true, position: 'bottom' },
+                    tooltips: { mode: 'index', intersect: false },
+                    scales: {
+                        xAxes: [{ gridLines: { color: '#e2e8f0' } }],
+                        yAxes: [
+                            {
+                                id: 'y-axis-1', type: 'linear', position: 'left',
+                                gridLines: { color: '#e2e8f0' },
+                                scaleLabel: { display: true, labelString: 'Sales Volume (MT)' }
+                            },
+                            {
+                                id: 'y-axis-2', type: 'linear', position: 'right',
+                                gridLines: { drawOnChartArea: false },
+                                scaleLabel: { display: true, labelString: 'Sales Value (₹)' }
+                            }
+                        ]
+                    }
+                }
+            });
+        });
+    };
+
+    c.drawAgingChart = function() {
+        if (!c.data || !c.data.monthly || !c.data.monthly.length) return;
+
+        ensureChartJs(function() {
+            var canvas = document.getElementById('c360AgingChart');
+            if (!canvas) return;
+
+            if (c.charts.aging) c.charts.aging.destroy();
+            var rows = c.data.monthly.slice(-6);
+
+            var chartLabels = rows.map(function(r) { return r.month || ''; });
+            var b0_30_Data  = rows.map(function(r) { return parseSafeNumber(r.b0_30); });
+            var b31_45_Data = rows.map(function(r) { return parseSafeNumber(r.b31_45 || r.b31_60); });
+            var b46_60_Data = rows.map(function(r) { return parseSafeNumber(r.b46_60 || r.b61_90); });
+            var b91_p_Data  = rows.map(function(r) { return parseSafeNumber(r.b91_p); });
+
+            c.charts.aging = new Chart(canvas.getContext('2d'), {
+                type: 'bar',
+                data: {
+                    labels: chartLabels,
+                    datasets: [
+                        { label: '0-30D',  data: b0_30_Data,  backgroundColor: '#449e62' },
+                        { label: '31-45D', data: b31_45_Data, backgroundColor: '#e29b45' },
+                        { label: '46-60D', data: b46_60_Data, backgroundColor: '#d16b34' },
+                        { label: '>90D',   data: b91_p_Data,  backgroundColor: '#c23737' }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    legend: { display: true, position: 'bottom' },
+                    tooltips: { mode: 'index', intersect: false },
+                    scales: {
+                        xAxes: [{ stacked: true, gridLines: { display: false } }],
+                        yAxes: [{
+                            stacked: true, gridLines: { color: '#e2e8f0' },
+                            scaleLabel: { display: true, labelString: 'Outstanding Amount (₹)' }
+                        }]
+                    }
+                }
+            });
+        });
+    };
+
+    // Listens for the live broadcast (works while this widget instance is
+    // alive). Payload now carries { sysId, code } instead of a bare code
+    // string, so the lookup is exact even when customer_code_sap is
+    // duplicated across master records.
+    $rootScope.$on('clm.customer.selected', function(event, payload) {
+        if (payload && typeof payload === 'object' && payload.sysId) {
+            c.load({ sysId: payload.sysId, code: payload.code });
+        } else {
+            // backward-compatible: a bare code string was broadcast
+            c.load(payload);
+        }
+    });
+
+    // ========================================================
+    // Pending-value pickup: if the Portfolio tab is ng-if'd (rather than
+    // ng-show'd) in clm_dashboard, this widget gets destroyed/recreated
+    // on every tab switch, so it may not have existed yet — and therefore
+    // had no listener — at the moment clm.customer.selected was broadcast.
+    // $rootScope.clmPendingCustomerSysId is the fallback for that case.
+    // ========================================================
+    if ($rootScope.clmPendingCustomerSysId) {
+        var pendingSysId = $rootScope.clmPendingCustomerSysId;
+        var pendingCode  = $rootScope.clmPendingCustomerCode;
+        delete $rootScope.clmPendingCustomerSysId;
+        delete $rootScope.clmPendingCustomerCode;
+        c.load({ sysId: pendingSysId, code: pendingCode });
+    } else {
+        c.load();
+    }
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* =========================================
+   CLM C360 Base Styles
+   ========================================= */
+.clm-c360 {
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    color: #1a1a1a;
+    background: #f4f5f7;
+    padding: 20px;
+}
+
+.clm-card {
+    background: #ffffff;
+    border: 1px solid #cbd5e1; /* Updated to match screenshot border */
+    border-radius: 4px; /* More squared off like screenshot */
+    margin-bottom: 16px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+
+.clm-error {
+    padding: 16px;
+    color: #b3261e;
+    font-weight: 600;
+    border-left: 4px solid #b3261e;
+}
+
+/* =========================================
+   Search Bar &amp; Customer Header
+   ========================================= */
+.clm-searchbar { padding: 12px 16px; }
+.clm-search-wrapper { display: flex; align-items: center; gap: 12px; }
+.clm-search-icon { font-size: 16px; }
+.clm-search-label { font-weight: 700; font-size: 12px; color: #4a5568; letter-spacing: 0.5px; }
+
+.clm-search-input {
+    flex: 0 1 300px;
+    height: 36px;
+    padding: 6px 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    font-size: 13px;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.clm-search-input:focus {
+    border-color: #1c4e9c;
+    box-shadow: 0 0 0 3px rgba(28, 78, 156, 0.12);
+}
+
+.clm-btn-primary {
+    background: #1c4e9c;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 0 16px;
+    height: 36px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease;
+    white-space: nowrap;
+}
+.clm-btn-primary:hover { background: #163d7a; }
+
+.clm-search-helper { font-size: 12px; color: #718096; margin-left: 10px; }
+
+.clm-customer-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px;
+}
+.clm-customer-left { display: flex; align-items: center; gap: 10px; }
+.clm-viewing { font-size: 13px; color: #718096; }
+.clm-customer-name { font-size: 18px; font-weight: 700; color: #1a1a1a; }
+.clm-badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.clm-badge-blue { background: #ebf8ff; color: #2b6cb0; }
+.clm-badge-yellow { background: #fefcbf; color: #975a16; }
+
+.clm-customer-right { display: flex; align-items: center; gap: 16px; }
+.clm-header-meta { font-size: 13px; color: #4a5568; }
+
+/* =========================================
+   KPI Tiles
+   ========================================= */
+.clm-tiles {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.clm-tile {
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-top: 4px solid #cbd5e0;
+    border-radius: 4px;
+    padding: 12px 16px;
+}
+
+.clm-tile-blue { border-top-color: #1c4e9c; }
+.clm-tile-orange { border-top-color: #e08a1e; }
+.clm-tile-green { border-top-color: #1f9d55; }
+.clm-tile-green-light { border-top-color: #3bb273; }
+.clm-tile-teal { border-top-color: #0f9d8e; }
+
+.clm-tile-label { font-size: 10px; font-weight: 700; color: #475569; margin-bottom: 8px; letter-spacing: 0.3px; }
+.clm-tile-value { font-size: 24px; font-weight: 700; }
+
+.clm-text-blue { color: #2b6cb0; }
+.clm-text-orange { color: #dd6b20; }
+.clm-text-orange-dark { color: #c05621; }
+.clm-text-green { color: #38a169; }
+.clm-text-teal { color: #319795; }
+.clm-text-red { color: #e53e3e; }
+
+/* =========================================
+   Charts Section
+   ========================================= */
+.clm-chart-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.clm-chart-card {
+    padding: 0; /* Removing padding to match flush image */
+}
+
+.clm-chart-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #1a1a1a;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.clm-chart-tag {
+    font-size: 11px;
+    color: #805ad5; /* Purple tone from mockup */
+    font-weight: 600;
+}
+
+.clm-chart-wrapper {
+    padding: 10px 16px 16px;
+}
+
+.clm-svg { width: 100%; height: 240px; }
+.clm-line-blue { fill: none; stroke: #3182ce; stroke-width: 2; }
+.clm-line-green { fill: none; stroke: #38a169; stroke-width: 2; }
+.clm-axis-label { font-size: 10px; fill: #718096; font-weight: 500;}
+.clm-grid-line { stroke: #e2e8f0; stroke-width: 1; }
+
+/* =========================================
+   Data Table
+   ========================================= */
+.clm-table-card {
+    padding: 0;
+}
+
+.clm-table-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid #cbd5e1;
+}
+
+.clm-table-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #1a1a1a;
+}
+
+.clm-table-tag {
+    font-size: 11px;
+    color: #718096;
+    border: 1px solid #e2e8f0;
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.clm-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.clm-table th {
+    text-align: left;
+    padding: 12px 16px;
+    border-bottom: 1px solid #cbd5e1;
+    color: #718096;
+    font-weight: 700;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+.clm-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid #e2e8f0;
+    color: #4a5568;
+}
+
+.clm-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.clm-table tbody tr:hover {
+    background-color: #f7fafc;
+}
+
+.clm-row-strong {
+    font-weight: 600;
+    color: #2d3748;
+}
+.clm-chart-wrapper {
+    position: relative;
+    height: 240px; 
+    width: 100%;
+}
+
+.clm-chart-wrapper canvas {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+/* =========================================
+   Typeahead / Autocomplete  ← APPENDED
+   ========================================= */
+.clm-typeahead-wrapper {
+    position: relative;
+    flex: 0 1 300px;
+}
+
+.clm-typeahead-wrapper .clm-search-input {
+    flex: none;
+    width: 100%;
+}
+
+.clm-suggestions {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    background: #ffffff;
+    border: 1px solid #c3cfe0;
+    border-radius: 4px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.10);
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+    z-index: 9999;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+/* subtle top accent line so dropdown feels connected to the input */
+.clm-suggestions::before {
+    content: '';
+    display: block;
+    height: 2px;
+    background: #1c4e9c;
+    border-radius: 4px 4px 0 0;
+    margin-bottom: 2px;
+}
+
+.clm-suggestions li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 12.5px;
+    gap: 12px;
+    border-bottom: 1px solid #f1f4f8;
+}
+
+.clm-suggestions li:last-child {
+    border-bottom: none;
+}
+
+.clm-suggestions li:hover {
+    background: #eef4ff;
+}
+
+.clm-sug-name {
+    font-weight: 600;
+    color: #1a1a1a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+}
+
+.clm-sug-meta {
+    font-size: 11px;
+    color: #718096;
+    white-space: nowrap;
+    flex-shrink: 0;
+    background: #f4f5f7;
+    padding: 2px 6px;
+    border-radius: 3px;
+    letter-spacing: 0.2px;
+}
+
+.clm-suggestions-loading {
+    pointer-events: none;
+}
+
+.clm-suggestions-loading li {
+    color: #a0aec0;
+    font-style: italic;
+    font-size: 12px;
+    padding: 10px 12px;
+    border-bottom: none;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>copy_clm_tsh_customer_360</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>copy_clm_tsh_customer_360</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    /* ============================================================
+       TSH CUSTOMER 360 WIDGET — SERVER SCRIPT
+       Outstanding/Credit Limit sourced LIVE from SAP via the
+       x_birl3_clm.CLM_NEW_WSDL1 script include (SOAP: ZFSD_SNOW_CREDIT_LIMIT).
+       Sales Org field CONFIRMED as "salesorg" on x_birl3_clm_clm_customer_master1.
+
+       Sales Volume sourced from x_birl3_clm_clm_sales_data and
+       Sales Value sourced from x_birl3_clm_clm_cement_rmc_bpd_values,
+       both mapped via "u_customer". Each table stores one row per
+       customer with a column per calendar month (u_jun_25, u_jul_25,
+       ... u_may_26, and so on — these columns auto-populate as new
+       months pass). For each historical month shown, we translate
+       that month into its "u_mon_yy" field name and read it off the
+       matching table. If the field doesn't exist yet or is blank,
+       we return null so the UI shows a dash.
+       ============================================================ */
+    var TABLES = {
+        master:      'x_birl3_clm_clm_customer_master1',
+        request:     'x_birl3_clm_clm_new_credit_request',
+        aging:       'x_birl3_clm_clm_aging_snapshot',
+        salesVolume: 'x_birl3_clm_clm_sales_data',
+        salesValue:  'x_birl3_clm_clm_cement_rmc_bpd_values'
+    };
+
+    var FIELDS = {
+        custCode:    'customer_code_sap',
+        custName:    'customer_name',
+        custPan:     'pan',
+        custRegion:  'region',
+        custZone:    'zone',
+        custSegment: 'segment',
+        custSalesOrg: 'salesorg',   // CONFIRMED from Customer Master form
+        systemMultiplier: 'system_multiplier',
+
+        agingCustomer:    'customer',
+        snapshotMonth:    'snapshot_month',
+        totalOutstanding: 'total_outstanding',
+        bucket0_30:       'bucket_0_30_days',
+        bucket31_45:      'bucket_31_45_days',
+        bucket46_60:      'bucket_46_60_days',
+        bucket61_75:      'bucket_61_75_days',
+        bucket76_90:      'bucket_76_90_days',
+        bucket91_120:     'bucket_91_120_days',
+        bucketGt120:      'bucket_gt120_days',
+
+        salesRecordCustomer: 'u_customer' // same field name on both sales tables
+    };
+
+    var MONTH_ABBR = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+
+    // ------------------------------------------------------------------
+    // Helper: call the live SAP credit API via the script include.
+    // Returns { creditLimit, outstandingAmount, availableCredit,
+    // asdAmount, state, raw, success } — zeros/false on failure.
+    // Logs enough detail (raw response, blank-field detection, thrown
+    // errors) that a failure shows up clearly in System Logs instead
+    // of silently returning zeros.
+    // ------------------------------------------------------------------
+    function getLiveCreditData(customerCode, salesOrg) {
+        var out = {
+            creditLimit: 0,
+            outstandingAmount: 0,
+            availableCredit: 0,
+            asdAmount: 0,
+            state: '',
+            raw: null,
+            success: false
+        };
+
+        if (!customerCode) {
+            gs.error('[TSH Customer 360] getLiveCreditData called with no customer code — cannot call CLM_NEW_WSDL1.');
+            return out;
+        }
+        if (!salesOrg) {
+            gs.warn('[TSH Customer 360] Customer ' + customerCode + ' has no salesorg value on the master record — calling API with an empty SalesOrg, which SAP may reject.');
+        }
+
+        try {
+            var apiCall = new x_birl3_clm.CLM_NEW_WSDL1();
+            var rawResult = apiCall.getCreditDetails(customerCode, salesOrg || '');
+
+            gs.info('[TSH Customer 360] CLM_NEW_WSDL1 raw response for ' + customerCode + '/' + salesOrg + ': ' + rawResult);
+
+            if (!rawResult) {
+                gs.error('[TSH Customer 360] CLM_NEW_WSDL1 returned an empty string for ' + customerCode + '/' + salesOrg + ' — the script include\'s own catch block likely fired. Check System Logs for a "CLM_NEW_WSDL Error :" entry, and confirm the MID Server (ABGDEV MID Server1) is Up.');
+                return out;
+            }
+
+            var parsed = JSON.parse(rawResult);
+
+            out.creditLimit       = parseFloat(parsed.creditLimit) || 0;
+            out.outstandingAmount = parseFloat(parsed.outstandingAmount) || 0;
+            out.availableCredit   = parseFloat(parsed.availableCredit) || 0;
+            out.asdAmount         = parseFloat(parsed.ASDAmount) || 0;
+            out.state             = parsed.state || '';
+            out.raw = parsed;
+
+            var allBlank = true;
+            for (var k in parsed) {
+                if (parsed[k]) { allBlank = false; break; }
+            }
+            if (allBlank) {
+                gs.error('[TSH Customer 360] CLM_NEW_WSDL1 returned a JSON object but every field is blank for ' + customerCode + '/' + salesOrg + '. This means the SOAP call itself likely failed (MID Server down, auth rejected, or a SAP fault) rather than SAP genuinely having no data. Check the "SOAP Request:"/"SOAP Response:"/"HTTP Status" log lines the script include writes, and check the ecc_queue table for this transaction.');
+            } else {
+                out.success = true;
+            }
+
+        } catch (e) {
+            gs.error('[TSH Customer 360] CLM_NEW_WSDL1 call threw an exception for ' + customerCode + '/' + salesOrg + ': ' + e.message);
+        }
+
+        return out;
+    }
+
+    // ------------------------------------------------------------------
+    // Helper: turn an aging-snapshot month (e.g. "2026-07-01") into the
+    // matching "mon_yy" suffix used by the sales-data field names
+    // (e.g. "jul_26" -> field "u_jul_26").
+    // ------------------------------------------------------------------
+    function getMonthFieldSuffix(dateVal) {
+        if (!dateVal) return null;
+        var datePart = String(dateVal).split(' ')[0]; // strip time portion if present
+        var pieces = datePart.split('-');
+        if (pieces.length < 2) return null;
+
+        var year  = parseInt(pieces[0], 10);
+        var month = parseInt(pieces[1], 10);
+        if (isNaN(year) || isNaN(month) || month < 1 || month > 12) return null;
+
+        return MONTH_ABBR[month - 1] + '_' + String(year).slice(-2);
+    }
+
+    // ------------------------------------------------------------------
+    // Helper: read a monthly value off a sales-data/sales-value record.
+    // Returns null (-> dash in the UI) if the field doesn't exist yet
+    // (future month) or is blank.
+    // ------------------------------------------------------------------
+    function getMonthlyFieldValue(gr, monthSuffix) {
+        if (!gr || !monthSuffix) return null;
+        var fieldName = 'u_' + monthSuffix;
+        if (!gr.isValidField(fieldName)) return null;
+
+        var raw = gr.getValue(fieldName);
+        if (raw === null || raw === undefined || raw === '') return null;
+
+        var num = parseFloat(raw);
+        return isNaN(num) ? null : num;
+    }
+
+    // ------------------------------------------------------------------
+    // TYPEAHEAD branch: lightweight suggest query, no API call needed
+    // ------------------------------------------------------------------
+    if (input && input.action === 'suggest') {
+        var term = (input.term || '').trim();
+        data.suggestions = [];
+
+        if (term.length < 2) { return; }
+
+        var grSug = new GlideRecord(TABLES.master);
+        var qSug = grSug.addQuery(FIELDS.custName, 'STARTSWITH', term);
+        qSug.addOrCondition(FIELDS.custName, 'CONTAINS', term);
+        qSug.addOrCondition(FIELDS.custCode, 'STARTSWITH', term);
+        qSug.addOrCondition(FIELDS.custPan,  'STARTSWITH', term);
+        grSug.orderBy(FIELDS.custName);
+        grSug.setLimit(8);
+        grSug.query();
+
+        var seen = {};
+        while (grSug.next()) {
+            var code = grSug.getValue(FIELDS.custCode);
+            if (seen[code]) { continue; }
+            seen[code] = true;
+            data.suggestions.push({
+                sysId: grSug.getUniqueValue(),
+                name: grSug.getValue(FIELDS.custName),
+                code: code,
+                pan:  grSug.getValue(FIELDS.custPan)
+            });
+        }
+        return;
+    }
+
+    // ------------------------------------------------------------------
+    // FULL LOAD branch
+    // ------------------------------------------------------------------
+    data.error = null;
+    data.initialLoad = false;
+    data.customer = null;
+    data.liveApiOk = false; // surfaced to the client so it can show a soft warning if the live call failed
+
+    var directSysId = (input && input.sysId) ? input.sysId : '';
+    var rawSearch = (input && input.search) ? input.search : (options.search || options.customer_code || $sp.getParameter('search') || '');
+    var searchTerm = rawSearch.trim();
+
+    if (!directSysId && !searchTerm) {
+        data.initialLoad = true;
+        return;
+    }
+
+    // 1. Resolve Customer
+    var grCust = new GlideRecord(TABLES.master);
+
+    if (directSysId) {
+        if (!grCust.get(directSysId)) {
+            data.error = 'Customer record not found.';
+            return;
+        }
+    } else {
+        var qc = grCust.addQuery(FIELDS.custCode, searchTerm);
+        qc.addOrCondition(FIELDS.custPan, searchTerm);
+        qc.addOrCondition(FIELDS.custName, 'CONTAINS', searchTerm);
+        grCust.orderByDesc('sys_created_on');
+        grCust.setLimit(1);
+        grCust.query();
+
+        if (!grCust.next()) {
+            data.error = 'No customer found matching "' + searchTerm + '".';
+            return;
+        }
+    }
+
+    var custSysId    = grCust.getUniqueValue();
+    var custCode     = grCust.getValue(FIELDS.custCode);
+    var custSalesOrg = grCust.getValue(FIELDS.custSalesOrg);
+
+    data.customer = {
+        name:    grCust.getValue(FIELDS.custName),
+        code:    custCode,
+        pan:     grCust.getValue(FIELDS.custPan),
+        region:  grCust.getDisplayValue(FIELDS.custRegion),
+        zone:    grCust.getDisplayValue(FIELDS.custZone),
+        segment: grCust.getDisplayValue(FIELDS.custSegment)
+    };
+
+    // 2. LIVE credit data from SAP (replaces current_credit_limit / outstanding_amount)
+    var live = getLiveCreditData(custCode, custSalesOrg);
+    var currentLimit       = live.creditLimit;
+    var currentOutstanding = live.outstandingAmount;
+    data.liveApiOk = live.success;
+
+    // 3. Get Multiplier (still from the request table — API doesn't provide this)
+    var sdMultiplier = 0;
+    var grReq = new GlideRecord(TABLES.request);
+    grReq.addQuery('customer', custSysId);
+    grReq.orderByDesc('sys_created_on');
+    grReq.setLimit(1);
+    grReq.query();
+    if (grReq.next()) {
+        sdMultiplier = parseFloat(grReq.getValue(FIELDS.systemMultiplier)) || 0;
+    }
+
+    // 3b. Look up this customer's row (one row per customer) on each
+    //     monthly sales table, once, so the loop below can just read
+    //     the relevant "u_mon_yy" field off each per iteration.
+    var grSalesVol = new GlideRecord(TABLES.salesVolume);
+    grSalesVol.addQuery(FIELDS.salesRecordCustomer, custSysId);
+    grSalesVol.setLimit(1);
+    grSalesVol.query();
+    var salesVolGr = grSalesVol.next() ? grSalesVol : null;
+
+    var grSalesVal = new GlideRecord(TABLES.salesValue);
+    grSalesVal.addQuery(FIELDS.salesRecordCustomer, custSysId);
+    grSalesVal.setLimit(1);
+    grSalesVal.query();
+    var salesValGr = grSalesVal.next() ? grSalesVal : null;
+
+    // 4. 6-Month Historical Data from Aging Snapshot.
+    //    The live API only returns a *current* point-in-time figure, not
+    //    history, so month-by-month "outstanding" in this table still
+    //    comes from the aging snapshot table. "limit" now reflects the
+    //    live SAP credit limit for every row. Sales Volume and Sales
+    //    Value are pulled per-month from the two dedicated monthly
+    //    sales tables (null -> dash in the UI if that month's field
+    //    doesn't exist yet or is blank).
+    var rows = [];
+    var grAge = new GlideRecord(TABLES.aging);
+    grAge.addQuery(FIELDS.agingCustomer, custSysId);
+    grAge.orderByDesc(FIELDS.snapshotMonth);
+    grAge.setLimit(6);
+    grAge.query();
+
+    while (grAge.next()) {
+        var b0   = parseFloat(grAge.getValue(FIELDS.bucket0_30))   || 0;
+        var b31  = parseFloat(grAge.getValue(FIELDS.bucket31_45))  || 0;
+        var b46  = parseFloat(grAge.getValue(FIELDS.bucket46_60))  || 0;
+        var b61  = parseFloat(grAge.getValue(FIELDS.bucket61_75))  || 0;
+        var b76  = parseFloat(grAge.getValue(FIELDS.bucket76_90))  || 0;
+        var b91  = parseFloat(grAge.getValue(FIELDS.bucket91_120)) || 0;
+        var b120 = parseFloat(grAge.getValue(FIELDS.bucketGt120))  || 0;
+
+        var snapOutst = parseFloat(grAge.getValue(FIELDS.totalOutstanding));
+        if (isNaN(snapOutst)) { snapOutst = b0 + b31 + b46 + b61 + b76 + b91 + b120; }
+
+        var monthSuffix   = getMonthFieldSuffix(grAge.getValue(FIELDS.snapshotMonth));
+        var salesVolumeVal = getMonthlyFieldValue(salesVolGr, monthSuffix);
+        var salesValueVal  = getMonthlyFieldValue(salesValGr, monthSuffix);
+
+        rows.push({
+            month:       grAge.getDisplayValue(FIELDS.snapshotMonth),
+            limit:       currentLimit,
+            outstanding: snapOutst,
+            salesVolume: salesVolumeVal, // null -> dash when that month has no data yet
+            salesValue:  salesValueVal,  // null -> dash when that month has no data yet
+            b0_30:       b0,
+            b31_45:      b31,
+            b46_60:      b46,
+            b61_90:      b61 + b76,
+            b91_p:       b91 + b120,
+            util:        currentLimit > 0 ? Math.round((snapOutst / currentLimit) * 100) : 0
+        });
+    }
+
+    data.monthly = rows.reverse();
+
+    // 5. KPI Indicators — LIVE from SAP
+    var latest = data.monthly.length > 0 ? data.monthly[data.monthly.length - 1] : null;
+
+    data.indicators = {
+        limit:        currentLimit,
+        outstanding:  currentOutstanding,
+        available:    currentLimit - currentOutstanding,
+        utilisation:  currentLimit > 0 ? Math.round((currentOutstanding / currentLimit) * 100) : 0,
+        sdMultiplier: sdMultiplier,
+        od90:         latest ? latest.b91_p : 0,
+        od90Clean:    (latest ? latest.b91_p : 0) <= 0
+    };
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-16 11:55:16</sys_created_on>
+        <sys_id>b01af7222b8e47104572f3745e91bf8b</sys_id>
+        <sys_mod_count>6</sys_mod_count>
+        <sys_name>copy_clm_tsh_customer_360</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_b01af7222b8e47104572f3745e91bf8b</sys_update_name>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-17 09:02:15</sys_updated_on>
+        <template><![CDATA[<div class="clm-c360">
+
+    <div class="clm-card clm-searchbar">
+        <div class="clm-search-wrapper">
+            <span class="clm-search-icon">&#128269;</span>
+            <span class="clm-search-label">CUSTOMER SEARCH</span>
+            <div class="clm-typeahead-wrapper">
+                <input type="text"
+                       class="clm-search-input"
+                       placeholder="e.g. PAN, Customer Code, or Name"
+                       ng-model="c.searchTerm"
+                       ng-keyup="c.onTyping($event)"
+                       autocomplete="off">
+                <ul class="clm-suggestions" ng-if="c.suggestions.length > 0">
+                    <li ng-repeat="s in c.suggestions"
+                        ng-mousedown="c.selectSuggestion(s)">
+                        <span class="clm-sug-name">{{s.name}}</span>
+                        <span class="clm-sug-meta">{{s.code}} &middot; {{s.pan}}</span>
+                    </li>
+                </ul>
+                <div class="clm-suggestions clm-suggestions-loading" ng-if="c.suggestLoading">
+                    <li>Searching&hellip;</li>
+                </div>
+            </div>
+            <button class="clm-btn-primary" ng-click="c.doSearch()">Search</button>
+            <span class="clm-search-helper">or click any customer in Portfolio Overview tab</span>
+        </div>
+    </div>
+
+    <div ng-if="c.data.error" class="clm-card clm-error">
+        {{c.data.error}}
+    </div>
+
+    <div ng-if="!c.data.error">
+
+        <div class="clm-card clm-customer-header">
+            <div class="clm-customer-left">
+                <span class="clm-viewing">Viewing</span>
+                <strong class="clm-customer-name">{{c.data.customer.name}}</strong>
+                <span class="clm-badge clm-badge-blue">{{c.data.customer.code}}</span>
+                <span class="clm-badge clm-badge-yellow">{{c.data.customer.segment}}</span>
+            </div>
+            <div class="clm-customer-right">
+                <span class="clm-header-meta">{{c.data.customer.pan}} &middot; {{c.data.customer.zone}} &middot; {{c.data.customer.region}}</span>
+            </div>
+        </div>
+
+        <div class="clm-tiles">
+            <div class="clm-tile clm-tile-blue">
+                <div class="clm-tile-label">LIMIT</div>
+                <div class="clm-tile-value clm-text-blue">{{c.fmtLakh(c.data.indicators.limit)}}</div>
+            </div>
+            <div class="clm-tile clm-tile-orange">
+                <div class="clm-tile-label">OUTSTANDING</div>
+                <div class="clm-tile-value clm-text-orange">{{c.fmtLakh(c.data.indicators.outstanding)}}</div>
+            </div>
+            <div class="clm-tile clm-tile-green">
+                <div class="clm-tile-label">AVAILABLE</div>
+                <div class="clm-tile-value clm-text-green">{{c.fmtLakh(c.data.indicators.available)}}</div>
+            </div>
+            <div class="clm-tile clm-tile-green-light">
+                <div class="clm-tile-label">UTILISATION</div>
+                <div class="clm-tile-value clm-text-green">{{c.data.indicators.utilisation}}%</div>
+            </div>
+            <div class="clm-tile clm-tile-teal">
+                <div class="clm-tile-label">SD MULTIPLIER</div>
+                <div class="clm-tile-value clm-text-teal">{{c.data.indicators.sdMultiplier}}x</div>
+            </div>
+            <div class="clm-tile clm-tile-red">
+                <div class="clm-tile-label">OD &gt;90D</div>
+                <div class="clm-tile-value clm-text-red">{{c.data.indicators.od90Clean ? 'Clean' : c.fmtLakh(c.data.indicators.od90)}}</div>
+            </div>
+        </div>
+
+        <div class="clm-chart-row">
+            <div class="clm-card clm-chart-card">
+                <div class="clm-chart-title">
+                    IND-012/013 &middot; Sales Volume &amp; Value (6M)
+                    <span class="clm-chart-tag">Dual-Axis Line</span>
+                </div>
+                <div class="clm-chart-wrapper" style="position: relative; height: 240px; width: 100%; padding: 10px 16px;">
+                    <canvas id="c360SalesChart"></canvas>
+                </div>
+            </div>
+
+            <div class="clm-card clm-chart-card">
+                <div class="clm-chart-title">
+                    IND-005 &middot; Aging Breakdown (6M)
+                    <span class="clm-chart-tag-green" style="font-size: 11px; color: #1f7a4d; background: #e3f4ea; padding: 2px 8px; border-radius: 12px; font-weight: 600;">Stacked Bar</span>
+                </div>
+                <div class="clm-chart-wrapper" style="position: relative; height: 240px; width: 100%; padding: 10px 16px;">
+                    <canvas id="c360AgingChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="clm-card clm-table-card">
+            <div class="clm-table-header">
+                <div class="clm-table-title">6-Month Detail Table</div>
+                <span class="clm-table-tag">Last 6 months</span>
+            </div>
+            <table class="clm-table">
+                <thead>
+                    <tr>
+                        <th>MONTH</th>
+                        <th>LIMIT</th>
+                        <th>UTIL %</th>
+                        <th>SALES VOL (MT)</th>
+                        <th>SALES VALUE</th>
+                        <th>OUTSTANDING</th>
+                        <th class="clm-text-red">OD &gt;90D</th>
+                        <th class="clm-text-orange-dark">46-60D</th>
+                        <th class="clm-text-orange">31-45D</th>
+                        <th>0-30D</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr ng-repeat="row in c.data.monthly">
+                        <td class="clm-row-strong">{{row.month}}</td>
+                        <td class="clm-text-blue">{{c.fmtLakh(row.limit)}}</td>
+                        <td class="clm-text-green">{{row.util}}%</td>
+                        <td>{{row.salesVolume ? row.salesVolume + ' MT' : '—'}}</td>
+                        <td>{{c.fmtDash(row.salesValue)}}</td>
+                        <td>{{c.fmtLakh(row.outstanding)}}</td>
+                        <td class="clm-text-red">{{c.fmtDash(row.b91_p)}}</td>
+                        <td class="clm-text-orange-dark">{{c.fmtDash(row.b46_60)}}</td>
+                        <td class="clm-text-orange">{{c.fmtDash(row.b31_45)}}</td>
+                        <td>{{c.fmtK(row.b0_30)}}</td>
+                    </tr>
+                    <tr ng-if="c.data.monthly.length === 0">
+                        <td colspan="10" style="text-align: center; padding: 20px;">No historical data available for this customer.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+    </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>b01af7222b8e47104572f3745e91bf8b</id>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-16 11:55:17</sys_created_on>
+        <sys_id>3c1af7222b8e47104572f3745e91bf9c</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-16 11:55:17</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_b01af7222b8e47104572f3745e91bf8b</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[// NOTE: Added $rootScope to the first line
+function CLMCustomer360Controller($scope, $http, $timeout, $rootScope) {
+    var c = this;
+
+    c.searchTerm = '';
+    c.loading = true;
+    c.charts = {};
+
+    c.suggestions    = [];
+    c.suggestLoading = false;
+    var _suggestTimer = null;
+
+    var CHART_JS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.4/Chart.min.js';
+
+    function ensureChartJs(cb) {
+        if (typeof Chart !== 'undefined') { cb(); return; }
+
+        if (!window.__clmChartJsPromise) {
+            window.__clmChartJsPromise = new Promise(function(resolve, reject) {
+                var existing = document.querySelector('script[data-clm-chartjs]');
+                if (existing) {
+                    existing.addEventListener('load', resolve);
+                    existing.addEventListener('error', reject);
+                    return;
+                }
+                var script = document.createElement('script');
+                script.src = CHART_JS_URL;
+                script.setAttribute('data-clm-chartjs', 'true');
+                script.onload = resolve;
+                script.onerror = reject;
+                document.head.appendChild(script);
+            });
+        }
+
+        window.__clmChartJsPromise.then(function() {
+            $timeout(cb);
+        }).catch(function(err) {
+            console.error('CLM Widget: failed to load Chart.js from CDN', err);
+        });
+    }
+
+    ensureChartJs(function() {});
+
+    c.fmtLakh = function(val) {
+        if (val === null || val === undefined || isNaN(val)) return '—';
+        var lakh = val / 100000;
+        return '₹' + (Math.round(lakh * 10) / 10).toFixed(1) + 'L';
+    };
+
+    c.fmtK = function(val) {
+        if (val === null || val === undefined || isNaN(val)) return '—';
+        if (val === 0) return '—';
+        if (val &gt;= 100000) return c.fmtLakh(val);
+        return '₹' + Math.round(val / 1000) + 'K';
+    };
+
+    c.fmtDash = function(val) {
+        return (!val || val === 0) ? '—' : c.fmtK(val);
+    };
+
+    var parseSafeNumber = function(val) {
+        if (val === null || val === undefined) return 0;
+        if (typeof val === 'number') return isNaN(val) ? 0 : val;
+        var str = String(val).replace(/[₹\s,]/g, '').trim();
+        var multiplier = 1;
+        if (str.toUpperCase().endsWith('L')) { multiplier = 100000; str = str.slice(0, -1); }
+        else if (str.toUpperCase().endsWith('K')) { multiplier = 1000; str = str.slice(0, -1); }
+        var num = parseFloat(str);
+        return isNaN(num) ? 0 : num * multiplier;
+    };
+
+    c.onTyping = function($event) {
+        if ($event.keyCode === 13) {
+            c.suggestions = [];
+            c.doSearch();
+            return;
+        }
+        if ($event.keyCode === 27) {
+            c.suggestions = [];
+            return;
+        }
+
+        var term = (c.searchTerm || '').trim();
+
+        if (term.length &lt; 2) {
+            c.suggestions = [];
+            c.suggestLoading = false;
+            if (_suggestTimer) { $timeout.cancel(_suggestTimer); }
+            return;
+        }
+
+        if (_suggestTimer) { $timeout.cancel(_suggestTimer); }
+        _suggestTimer = $timeout(function() {
+            c.suggestLoading = true;
+            c.server.get({ action: 'suggest', term: term }).then(function(r) {
+                c.suggestions    = r.data.suggestions || [];
+                c.suggestLoading = false;
+            }, function() {
+                c.suggestions    = [];
+                c.suggestLoading = false;
+            });
+        }, 250);
+    };
+
+    c.selectSuggestion = function(s) {
+        c.searchTerm  = s.name;
+        c.suggestions = [];
+        // Suggestions now carry sysId too, so this drill-down is unambiguous
+        // even if this customer's code is duplicated on another record.
+        if (s.sysId) {
+            c.load({ sysId: s.sysId, code: s.code });
+        } else {
+            c.load(s.code);
+        }
+    };
+
+    // Accepts either:
+    //   c.load('some text')            -&gt; text search (code/PAN/name)
+    //   c.load({ sysId: '...', code: '...' }) -&gt; exact record lookup
+    c.load = function(param) {
+        c.loading = true;
+        c.suggestions = [];
+
+        var payload;
+        if (param &amp;&amp; typeof param === 'object' &amp;&amp; param.sysId) {
+            payload = { sysId: param.sysId };
+            c.searchTerm = param.code || c.searchTerm;
+        } else {
+            payload = { search: param || '' };
+            c.searchTerm = param || c.searchTerm;
+        }
+
+        c.server.get(payload).then(function(r) {
+            c.data = r.data;
+            c.loading = false;
+            $timeout(function() {
+                c.drawSalesChart();
+                c.drawAgingChart();
+            }, 300);
+        });
+    };
+
+    c.doSearch = function() {
+        if (c.searchTerm &amp;&amp; c.searchTerm.trim() !== '') {
+            c.load(c.searchTerm.trim());
+        }
+    };
+
+    c.drawSalesChart = function() {
+        if (!c.data || !c.data.monthly || !c.data.monthly.length) return;
+
+        ensureChartJs(function() {
+            var canvas = document.getElementById('c360SalesChart');
+            if (!canvas) return;
+
+            if (c.charts.sales) c.charts.sales.destroy();
+            var rows = c.data.monthly.slice(-6);
+
+            var chartLabels = rows.map(function(r) { return r.month || ''; });
+            var volumeData  = rows.map(function(r) { return parseSafeNumber(r.salesVolume); });
+            var valueData   = rows.map(function(r) { return parseSafeNumber(r.salesValue); });
+
+            c.charts.sales = new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: chartLabels,
+                    datasets: [
+                        {
+                            label: 'Sales Volume (MT)',
+                            data: volumeData,
+                            borderColor: '#1f7a4d',
+                            backgroundColor: '#1f7a4d',
+                            fill: false,
+                            yAxisID: 'y-axis-1',
+                            tension: 0.2
+                        },
+                        {
+                            label: 'Sales Value',
+                            data: valueData,
+                            borderColor: '#1c4e9c',
+                            backgroundColor: '#1c4e9c',
+                            fill: false,
+                            yAxisID: 'y-axis-2',
+                            tension: 0.2
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    legend: { display: true, position: 'bottom' },
+                    tooltips: { mode: 'index', intersect: false },
+                    scales: {
+                        xAxes: [{ gridLines: { color: '#e2e8f0' } }],
+                        yAxes: [
+                            {
+                                id: 'y-axis-1', type: 'linear', position: 'left',
+                                gridLines: { color: '#e2e8f0' },
+                                scaleLabel: { display: true, labelString: 'Sales Volume (MT)' }
+                            },
+                            {
+                                id: 'y-axis-2', type: 'linear', position: 'right',
+                                gridLines: { drawOnChartArea: false },
+                                scaleLabel: { display: true, labelString: 'Sales Value (₹)' }
+                            }
+                        ]
+                    }
+                }
+            });
+        });
+    };
+
+    c.drawAgingChart = function() {
+        if (!c.data || !c.data.monthly || !c.data.monthly.length) return;
+
+        ensureChartJs(function() {
+            var canvas = document.getElementById('c360AgingChart');
+            if (!canvas) return;
+
+            if (c.charts.aging) c.charts.aging.destroy();
+            var rows = c.data.monthly.slice(-6);
+
+            var chartLabels = rows.map(function(r) { return r.month || ''; });
+            var b0_30_Data  = rows.map(function(r) { return parseSafeNumber(r.b0_30); });
+            var b31_45_Data = rows.map(function(r) { return parseSafeNumber(r.b31_45 || r.b31_60); });
+            var b46_60_Data = rows.map(function(r) { return parseSafeNumber(r.b46_60 || r.b61_90); });
+            var b91_p_Data  = rows.map(function(r) { return parseSafeNumber(r.b91_p); });
+
+            c.charts.aging = new Chart(canvas.getContext('2d'), {
+                type: 'bar',
+                data: {
+                    labels: chartLabels,
+                    datasets: [
+                        { label: '0-30D',  data: b0_30_Data,  backgroundColor: '#449e62' },
+                        { label: '31-45D', data: b31_45_Data, backgroundColor: '#e29b45' },
+                        { label: '46-60D', data: b46_60_Data, backgroundColor: '#d16b34' },
+                        { label: '&gt;90D',   data: b91_p_Data,  backgroundColor: '#c23737' }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    legend: { display: true, position: 'bottom' },
+                    tooltips: { mode: 'index', intersect: false },
+                    scales: {
+                        xAxes: [{ stacked: true, gridLines: { display: false } }],
+                        yAxes: [{
+                            stacked: true, gridLines: { color: '#e2e8f0' },
+                            scaleLabel: { display: true, labelString: 'Outstanding Amount (₹)' }
+                        }]
+                    }
+                }
+            });
+        });
+    };
+
+    // Listens for the live broadcast (works while this widget instance is
+    // alive). Payload now carries { sysId, code } instead of a bare code
+    // string, so the lookup is exact even when customer_code_sap is
+    // duplicated across master records.
+    $rootScope.$on('clm.customer.selected', function(event, payload) {
+        if (payload &amp;&amp; typeof payload === 'object' &amp;&amp; payload.sysId) {
+            c.load({ sysId: payload.sysId, code: payload.code });
+        } else {
+            // backward-compatible: a bare code string was broadcast
+            c.load(payload);
+        }
+    });
+
+    // ========================================================
+    // Pending-value pickup: if the Portfolio tab is ng-if'd (rather than
+    // ng-show'd) in clm_dashboard, this widget gets destroyed/recreated
+    // on every tab switch, so it may not have existed yet — and therefore
+    // had no listener — at the moment clm.customer.selected was broadcast.
+    // $rootScope.clmPendingCustomerSysId is the fallback for that case.
+    // ========================================================
+    if ($rootScope.clmPendingCustomerSysId) {
+        var pendingSysId = $rootScope.clmPendingCustomerSysId;
+        var pendingCode  = $rootScope.clmPendingCustomerCode;
+        delete $rootScope.clmPendingCustomerSysId;
+        delete $rootScope.clmPendingCustomerCode;
+        c.load({ sysId: pendingSysId, code: pendingCode });
+    } else {
+        c.load();
+    }
+}]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;/* =========================================
+   CLM C360 Base Styles
+   ========================================= */
+.clm-c360 {
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    color: #1a1a1a;
+    background: #f4f5f7;
+    padding: 20px;
+}
+
+.clm-card {
+    background: #ffffff;
+    border: 1px solid #cbd5e1; /* Updated to match screenshot border */
+    border-radius: 4px; /* More squared off like screenshot */
+    margin-bottom: 16px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+
+.clm-error {
+    padding: 16px;
+    color: #b3261e;
+    font-weight: 600;
+    border-left: 4px solid #b3261e;
+}
+
+/* =========================================
+   Search Bar &amp;amp; Customer Header
+   ========================================= */
+.clm-searchbar { padding: 12px 16px; }
+.clm-search-wrapper { display: flex; align-items: center; gap: 12px; }
+.clm-search-icon { font-size: 16px; }
+.clm-search-label { font-weight: 700; font-size: 12px; color: #4a5568; letter-spacing: 0.5px; }
+
+.clm-search-input {
+    flex: 0 1 300px;
+    height: 36px;
+    padding: 6px 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    font-size: 13px;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.clm-search-input:focus {
+    border-color: #1c4e9c;
+    box-shadow: 0 0 0 3px rgba(28, 78, 156, 0.12);
+}
+
+.clm-btn-primary {
+    background: #1c4e9c;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 0 16px;
+    height: 36px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease;
+    white-space: nowrap;
+}
+.clm-btn-primary:hover { background: #163d7a; }
+
+.clm-search-helper { font-size: 12px; color: #718096; margin-left: 10px; }
+
+.clm-customer-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px;
+}
+.clm-customer-left { display: flex; align-items: center; gap: 10px; }
+.clm-viewing { font-size: 13px; color: #718096; }
+.clm-customer-name { font-size: 18px; font-weight: 700; color: #1a1a1a; }
+.clm-badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.clm-badge-blue { background: #ebf8ff; color: #2b6cb0; }
+.clm-badge-yellow { background: #fefcbf; color: #975a16; }
+
+.clm-customer-right { display: flex; align-items: center; gap: 16px; }
+.clm-header-meta { font-size: 13px; color: #4a5568; }
+
+/* =========================================
+   KPI Tiles
+   ========================================= */
+.clm-tiles {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.clm-tile {
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-top: 4px solid #cbd5e0;
+    border-radius: 4px;
+    padding: 12px 16px;
+}
+
+.clm-tile-blue { border-top-color: #1c4e9c; }
+.clm-tile-orange { border-top-color: #e08a1e; }
+.clm-tile-green { border-top-color: #1f9d55; }
+.clm-tile-green-light { border-top-color: #3bb273; }
+.clm-tile-teal { border-top-color: #0f9d8e; }
+
+.clm-tile-label { font-size: 10px; font-weight: 700; color: #475569; margin-bottom: 8px; letter-spacing: 0.3px; }
+.clm-tile-value { font-size: 24px; font-weight: 700; }
+
+.clm-text-blue { color: #2b6cb0; }
+.clm-text-orange { color: #dd6b20; }
+.clm-text-orange-dark { color: #c05621; }
+.clm-text-green { color: #38a169; }
+.clm-text-teal { color: #319795; }
+.clm-text-red { color: #e53e3e; }
+
+/* =========================================
+   Charts Section
+   ========================================= */
+.clm-chart-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.clm-chart-card {
+    padding: 0; /* Removing padding to match flush image */
+}
+
+.clm-chart-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #1a1a1a;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.clm-chart-tag {
+    font-size: 11px;
+    color: #805ad5; /* Purple tone from mockup */
+    font-weight: 600;
+}
+
+.clm-chart-wrapper {
+    padding: 10px 16px 16px;
+}
+
+.clm-svg { width: 100%; height: 240px; }
+.clm-line-blue { fill: none; stroke: #3182ce; stroke-width: 2; }
+.clm-line-green { fill: none; stroke: #38a169; stroke-width: 2; }
+.clm-axis-label { font-size: 10px; fill: #718096; font-weight: 500;}
+.clm-grid-line { stroke: #e2e8f0; stroke-width: 1; }
+
+/* =========================================
+   Data Table
+   ========================================= */
+.clm-table-card {
+    padding: 0;
+}
+
+.clm-table-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid #cbd5e1;
+}
+
+.clm-table-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #1a1a1a;
+}
+
+.clm-table-tag {
+    font-size: 11px;
+    color: #718096;
+    border: 1px solid #e2e8f0;
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.clm-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.clm-table th {
+    text-align: left;
+    padding: 12px 16px;
+    border-bottom: 1px solid #cbd5e1;
+    color: #718096;
+    font-weight: 700;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+.clm-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid #e2e8f0;
+    color: #4a5568;
+}
+
+.clm-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.clm-table tbody tr:hover {
+    background-color: #f7fafc;
+}
+
+.clm-row-strong {
+    font-weight: 600;
+    color: #2d3748;
+}
+.clm-chart-wrapper {
+    position: relative;
+    height: 240px; 
+    width: 100%;
+}
+
+.clm-chart-wrapper canvas {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+/* =========================================
+   Typeahead / Autocomplete  ← APPENDED
+   ========================================= */
+.clm-typeahead-wrapper {
+    position: relative;
+    flex: 0 1 300px;
+}
+
+.clm-typeahead-wrapper .clm-search-input {
+    flex: none;
+    width: 100%;
+}
+
+.clm-suggestions {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    background: #ffffff;
+    border: 1px solid #c3cfe0;
+    border-radius: 4px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.10);
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+    z-index: 9999;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+/* subtle top accent line so dropdown feels connected to the input */
+.clm-suggestions::before {
+    content: '';
+    display: block;
+    height: 2px;
+    background: #1c4e9c;
+    border-radius: 4px 4px 0 0;
+    margin-bottom: 2px;
+}
+
+.clm-suggestions li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 12.5px;
+    gap: 12px;
+    border-bottom: 1px solid #f1f4f8;
+}
+
+.clm-suggestions li:last-child {
+    border-bottom: none;
+}
+
+.clm-suggestions li:hover {
+    background: #eef4ff;
+}
+
+.clm-sug-name {
+    font-weight: 600;
+    color: #1a1a1a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+}
+
+.clm-sug-meta {
+    font-size: 11px;
+    color: #718096;
+    white-space: nowrap;
+    flex-shrink: 0;
+    background: #f4f5f7;
+    padding: 2px 6px;
+    border-radius: 3px;
+    letter-spacing: 0.2px;
+}
+
+.clm-suggestions-loading {
+    pointer-events: none;
+}
+
+.clm-suggestions-loading li {
+    color: #a0aec0;
+    font-style: italic;
+    font-size: 12px;
+    padding: 10px 12px;
+    border-bottom: none;
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id&gt;copy_clm_tsh_customer_360&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;copy_clm_tsh_customer_360&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+    /* ============================================================
+       TSH CUSTOMER 360 WIDGET — SERVER SCRIPT
+       Outstanding/Credit Limit sourced LIVE from SAP via the
+       x_birl3_clm.CLM_NEW_WSDL1 script include (SOAP: ZFSD_SNOW_CREDIT_LIMIT).
+       Sales Org field CONFIRMED as "salesorg" on x_birl3_clm_clm_customer_master1.
+
+       Sales Volume sourced from x_birl3_clm_clm_sales_data and
+       Sales Value sourced from x_birl3_clm_clm_cement_rmc_bpd_values,
+       both mapped via "u_customer". Each table stores one row per
+       customer with a column per calendar month (u_jun_25, u_jul_25,
+       ... u_may_26, and so on — these columns auto-populate as new
+       months pass). For each historical month shown, we translate
+       that month into its "u_mon_yy" field name and read it off the
+       matching table. If the field doesn't exist yet or is blank,
+       we return null so the UI shows a dash.
+       ============================================================ */
+    var TABLES = {
+        master:      'x_birl3_clm_clm_customer_master1',
+        request:     'x_birl3_clm_clm_new_credit_request',
+        aging:       'x_birl3_clm_clm_aging_snapshot',
+        salesVolume: 'x_birl3_clm_clm_sales_data',
+        salesValue:  'x_birl3_clm_clm_cement_rmc_bpd_values'
+    };
+
+    var FIELDS = {
+        custCode:    'customer_code_sap',
+        custName:    'customer_name',
+        custPan:     'pan',
+        custRegion:  'region',
+        custZone:    'zone',
+        custSegment: 'segment',
+        custSalesOrg: 'salesorg',   // CONFIRMED from Customer Master form
+        systemMultiplier: 'system_multiplier',
+
+        agingCustomer:    'customer',
+        snapshotMonth:    'snapshot_month',
+        totalOutstanding: 'total_outstanding',
+        bucket0_30:       'bucket_0_30_days',
+        bucket31_45:      'bucket_31_45_days',
+        bucket46_60:      'bucket_46_60_days',
+        bucket61_75:      'bucket_61_75_days',
+        bucket76_90:      'bucket_76_90_days',
+        bucket91_120:     'bucket_91_120_days',
+        bucketGt120:      'bucket_gt120_days',
+
+        salesRecordCustomer: 'u_customer' // same field name on both sales tables
+    };
+
+    var MONTH_ABBR = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+
+    // ------------------------------------------------------------------
+    // Helper: call the live SAP credit API via the script include.
+    // Returns { creditLimit, outstandingAmount, availableCredit,
+    // asdAmount, state, raw, success } — zeros/false on failure.
+    // Logs enough detail (raw response, blank-field detection, thrown
+    // errors) that a failure shows up clearly in System Logs instead
+    // of silently returning zeros.
+    // ------------------------------------------------------------------
+    function getLiveCreditData(customerCode, salesOrg) {
+        var out = {
+            creditLimit: 0,
+            outstandingAmount: 0,
+            availableCredit: 0,
+            asdAmount: 0,
+            state: '',
+            raw: null,
+            success: false
+        };
+
+        if (!customerCode) {
+            gs.error('[TSH Customer 360] getLiveCreditData called with no customer code — cannot call CLM_NEW_WSDL1.');
+            return out;
+        }
+        if (!salesOrg) {
+            gs.warn('[TSH Customer 360] Customer ' + customerCode + ' has no salesorg value on the master record — calling API with an empty SalesOrg, which SAP may reject.');
+        }
+
+        try {
+            var apiCall = new x_birl3_clm.CLM_NEW_WSDL1();
+            var rawResult = apiCall.getCreditDetails(customerCode, salesOrg || '');
+
+            gs.info('[TSH Customer 360] CLM_NEW_WSDL1 raw response for ' + customerCode + '/' + salesOrg + ': ' + rawResult);
+
+            if (!rawResult) {
+                gs.error('[TSH Customer 360] CLM_NEW_WSDL1 returned an empty string for ' + customerCode + '/' + salesOrg + ' — the script include\'s own catch block likely fired. Check System Logs for a "CLM_NEW_WSDL Error :" entry, and confirm the MID Server (ABGDEV MID Server1) is Up.');
+                return out;
+            }
+
+            var parsed = JSON.parse(rawResult);
+
+            out.creditLimit       = parseFloat(parsed.creditLimit) || 0;
+            out.outstandingAmount = parseFloat(parsed.outstandingAmount) || 0;
+            out.availableCredit   = parseFloat(parsed.availableCredit) || 0;
+            out.asdAmount         = parseFloat(parsed.ASDAmount) || 0;
+            out.state             = parsed.state || '';
+            out.raw = parsed;
+
+            var allBlank = true;
+            for (var k in parsed) {
+                if (parsed[k]) { allBlank = false; break; }
+            }
+            if (allBlank) {
+                gs.error('[TSH Customer 360] CLM_NEW_WSDL1 returned a JSON object but every field is blank for ' + customerCode + '/' + salesOrg + '. This means the SOAP call itself likely failed (MID Server down, auth rejected, or a SAP fault) rather than SAP genuinely having no data. Check the "SOAP Request:"/"SOAP Response:"/"HTTP Status" log lines the script include writes, and check the ecc_queue table for this transaction.');
+            } else {
+                out.success = true;
+            }
+
+        } catch (e) {
+            gs.error('[TSH Customer 360] CLM_NEW_WSDL1 call threw an exception for ' + customerCode + '/' + salesOrg + ': ' + e.message);
+        }
+
+        return out;
+    }
+
+    // ------------------------------------------------------------------
+    // Helper: turn an aging-snapshot month (e.g. "2026-07-01") into the
+    // matching "mon_yy" suffix used by the sales-data field names
+    // (e.g. "jul_26" -&gt; field "u_jul_26").
+    // ------------------------------------------------------------------
+    function getMonthFieldSuffix(dateVal) {
+        if (!dateVal) return null;
+        var datePart = String(dateVal).split(' ')[0]; // strip time portion if present
+        var pieces = datePart.split('-');
+        if (pieces.length &lt; 2) return null;
+
+        var year  = parseInt(pieces[0], 10);
+        var month = parseInt(pieces[1], 10);
+        if (isNaN(year) || isNaN(month) || month &lt; 1 || month &gt; 12) return null;
+
+        return MONTH_ABBR[month - 1] + '_' + String(year).slice(-2);
+    }
+
+    // ------------------------------------------------------------------
+    // Helper: read a monthly value off a sales-data/sales-value record.
+    // Returns null (-&gt; dash in the UI) if the field doesn't exist yet
+    // (future month) or is blank.
+    // ------------------------------------------------------------------
+    function getMonthlyFieldValue(gr, monthSuffix) {
+        if (!gr || !monthSuffix) return null;
+        var fieldName = 'u_' + monthSuffix;
+        if (!gr.isValidField(fieldName)) return null;
+
+        var raw = gr.getValue(fieldName);
+        if (raw === null || raw === undefined || raw === '') return null;
+
+        var num = parseFloat(raw);
+        return isNaN(num) ? null : num;
+    }
+
+    // ------------------------------------------------------------------
+    // TYPEAHEAD branch: lightweight suggest query, no API call needed
+    // ------------------------------------------------------------------
+    if (input &amp;&amp; input.action === 'suggest') {
+        var term = (input.term || '').trim();
+        data.suggestions = [];
+
+        if (term.length &lt; 2) { return; }
+
+        var grSug = new GlideRecord(TABLES.master);
+        var qSug = grSug.addQuery(FIELDS.custName, 'STARTSWITH', term);
+        qSug.addOrCondition(FIELDS.custName, 'CONTAINS', term);
+        qSug.addOrCondition(FIELDS.custCode, 'STARTSWITH', term);
+        qSug.addOrCondition(FIELDS.custPan,  'STARTSWITH', term);
+        grSug.orderBy(FIELDS.custName);
+        grSug.setLimit(8);
+        grSug.query();
+
+        var seen = {};
+        while (grSug.next()) {
+            var code = grSug.getValue(FIELDS.custCode);
+            if (seen[code]) { continue; }
+            seen[code] = true;
+            data.suggestions.push({
+                sysId: grSug.getUniqueValue(),
+                name: grSug.getValue(FIELDS.custName),
+                code: code,
+                pan:  grSug.getValue(FIELDS.custPan)
+            });
+        }
+        return;
+    }
+
+    // ------------------------------------------------------------------
+    // FULL LOAD branch
+    // ------------------------------------------------------------------
+    data.error = null;
+    data.initialLoad = false;
+    data.customer = null;
+    data.liveApiOk = false; // surfaced to the client so it can show a soft warning if the live call failed
+
+    var directSysId = (input &amp;&amp; input.sysId) ? input.sysId : '';
+    var rawSearch = (input &amp;&amp; input.search) ? input.search : (options.search || options.customer_code || $sp.getParameter('search') || '');
+    var searchTerm = rawSearch.trim();
+
+    if (!directSysId &amp;&amp; !searchTerm) {
+        data.initialLoad = true;
+        return;
+    }
+
+    // 1. Resolve Customer
+    var grCust = new GlideRecord(TABLES.master);
+
+    if (directSysId) {
+        if (!grCust.get(directSysId)) {
+            data.error = 'Customer record not found.';
+            return;
+        }
+    } else {
+        var qc = grCust.addQuery(FIELDS.custCode, searchTerm);
+        qc.addOrCondition(FIELDS.custPan, searchTerm);
+        qc.addOrCondition(FIELDS.custName, 'CONTAINS', searchTerm);
+        grCust.orderByDesc('sys_created_on');
+        grCust.setLimit(1);
+        grCust.query();
+
+        if (!grCust.next()) {
+            data.error = 'No customer found matching "' + searchTerm + '".';
+            return;
+        }
+    }
+
+    var custSysId    = grCust.getUniqueValue();
+    var custCode     = grCust.getValue(FIELDS.custCode);
+    var custSalesOrg = grCust.getValue(FIELDS.custSalesOrg);
+
+    data.customer = {
+        name:    grCust.getValue(FIELDS.custName),
+        code:    custCode,
+        pan:     grCust.getValue(FIELDS.custPan),
+        region:  grCust.getDisplayValue(FIELDS.custRegion),
+        zone:    grCust.getDisplayValue(FIELDS.custZone),
+        segment: grCust.getDisplayValue(FIELDS.custSegment)
+    };
+
+    // 2. LIVE credit data from SAP (replaces current_credit_limit / outstanding_amount)
+    var live = getLiveCreditData(custCode, custSalesOrg);
+    var currentLimit       = live.creditLimit;
+    var currentOutstanding = live.outstandingAmount;
+    data.liveApiOk = live.success;
+
+    // 3. Get Multiplier (still from the request table — API doesn't provide this)
+    var sdMultiplier = 0;
+    var grReq = new GlideRecord(TABLES.request);
+    grReq.addQuery('customer', custSysId);
+    grReq.orderByDesc('sys_created_on');
+    grReq.setLimit(1);
+    grReq.query();
+    if (grReq.next()) {
+        sdMultiplier = parseFloat(grReq.getValue(FIELDS.systemMultiplier)) || 0;
+    }
+
+    // 3b. Look up this customer's row (one row per customer) on each
+    //     monthly sales table, once, so the loop below can just read
+    //     the relevant "u_mon_yy" field off each per iteration.
+    var grSalesVol = new GlideRecord(TABLES.salesVolume);
+    grSalesVol.addQuery(FIELDS.salesRecordCustomer, custSysId);
+    grSalesVol.setLimit(1);
+    grSalesVol.query();
+    var salesVolGr = grSalesVol.next() ? grSalesVol : null;
+
+    var grSalesVal = new GlideRecord(TABLES.salesValue);
+    grSalesVal.addQuery(FIELDS.salesRecordCustomer, custSysId);
+    grSalesVal.setLimit(1);
+    grSalesVal.query();
+    var salesValGr = grSalesVal.next() ? grSalesVal : null;
+
+    // 4. 6-Month Historical Data from Aging Snapshot.
+    //    The live API only returns a *current* point-in-time figure, not
+    //    history, so month-by-month "outstanding" in this table still
+    //    comes from the aging snapshot table. "limit" now reflects the
+    //    live SAP credit limit for every row. Sales Volume and Sales
+    //    Value are pulled per-month from the two dedicated monthly
+    //    sales tables (null -&gt; dash in the UI if that month's field
+    //    doesn't exist yet or is blank).
+    var rows = [];
+    var grAge = new GlideRecord(TABLES.aging);
+    grAge.addQuery(FIELDS.agingCustomer, custSysId);
+    grAge.orderByDesc(FIELDS.snapshotMonth);
+    grAge.setLimit(6);
+    grAge.query();
+
+    while (grAge.next()) {
+        var b0   = parseFloat(grAge.getValue(FIELDS.bucket0_30))   || 0;
+        var b31  = parseFloat(grAge.getValue(FIELDS.bucket31_45))  || 0;
+        var b46  = parseFloat(grAge.getValue(FIELDS.bucket46_60))  || 0;
+        var b61  = parseFloat(grAge.getValue(FIELDS.bucket61_75))  || 0;
+        var b76  = parseFloat(grAge.getValue(FIELDS.bucket76_90))  || 0;
+        var b91  = parseFloat(grAge.getValue(FIELDS.bucket91_120)) || 0;
+        var b120 = parseFloat(grAge.getValue(FIELDS.bucketGt120))  || 0;
+
+        var snapOutst = parseFloat(grAge.getValue(FIELDS.totalOutstanding));
+        if (isNaN(snapOutst)) { snapOutst = b0 + b31 + b46 + b61 + b76 + b91 + b120; }
+
+        var monthSuffix   = getMonthFieldSuffix(grAge.getValue(FIELDS.snapshotMonth));
+        var salesVolumeVal = getMonthlyFieldValue(salesVolGr, monthSuffix);
+        var salesValueVal  = getMonthlyFieldValue(salesValGr, monthSuffix);
+
+        rows.push({
+            month:       grAge.getDisplayValue(FIELDS.snapshotMonth),
+            limit:       currentLimit,
+            outstanding: snapOutst,
+            salesVolume: salesVolumeVal, // null -&gt; dash when that month has no data yet
+            salesValue:  salesValueVal,  // null -&gt; dash when that month has no data yet
+            b0_30:       b0,
+            b31_45:      b31,
+            b46_60:      b46,
+            b61_90:      b61 + b76,
+            b91_p:       b91 + b120,
+            util:        currentLimit &gt; 0 ? Math.round((snapOutst / currentLimit) * 100) : 0
+        });
+    }
+
+    data.monthly = rows.reverse();
+
+    // 5. KPI Indicators — LIVE from SAP
+    var latest = data.monthly.length &gt; 0 ? data.monthly[data.monthly.length - 1] : null;
+
+    data.indicators = {
+        limit:        currentLimit,
+        outstanding:  currentOutstanding,
+        available:    currentLimit - currentOutstanding,
+        utilisation:  currentLimit &gt; 0 ? Math.round((currentOutstanding / currentLimit) * 100) : 0,
+        sdMultiplier: sdMultiplier,
+        od90:         latest ? latest.b91_p : 0,
+        od90Clean:    (latest ? latest.b91_p : 0) &lt;= 0
+    };
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;vedant.salunke@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-07-16 11:55:16&lt;/sys_created_on&gt;&lt;sys_id&gt;b01af7222b8e47104572f3745e91bf8b&lt;/sys_id&gt;&lt;sys_mod_count&gt;6&lt;/sys_mod_count&gt;&lt;sys_name&gt;copy_clm_tsh_customer_360&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_b01af7222b8e47104572f3745e91bf8b&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;devendra.pandey@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-07-17 09:02:15&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="clm-c360"&gt;
+
+    &lt;div class="clm-card clm-searchbar"&gt;
+        &lt;div class="clm-search-wrapper"&gt;
+            &lt;span class="clm-search-icon"&gt;&amp;#128269;&lt;/span&gt;
+            &lt;span class="clm-search-label"&gt;CUSTOMER SEARCH&lt;/span&gt;
+            &lt;div class="clm-typeahead-wrapper"&gt;
+                &lt;input type="text"
+                       class="clm-search-input"
+                       placeholder="e.g. PAN, Customer Code, or Name"
+                       ng-model="c.searchTerm"
+                       ng-keyup="c.onTyping($event)"
+                       autocomplete="off"&gt;
+                &lt;ul class="clm-suggestions" ng-if="c.suggestions.length &gt; 0"&gt;
+                    &lt;li ng-repeat="s in c.suggestions"
+                        ng-mousedown="c.selectSuggestion(s)"&gt;
+                        &lt;span class="clm-sug-name"&gt;{{s.name}}&lt;/span&gt;
+                        &lt;span class="clm-sug-meta"&gt;{{s.code}} &amp;middot; {{s.pan}}&lt;/span&gt;
+                    &lt;/li&gt;
+                &lt;/ul&gt;
+                &lt;div class="clm-suggestions clm-suggestions-loading" ng-if="c.suggestLoading"&gt;
+                    &lt;li&gt;Searching&amp;hellip;&lt;/li&gt;
+                &lt;/div&gt;
+            &lt;/div&gt;
+            &lt;button class="clm-btn-primary" ng-click="c.doSearch()"&gt;Search&lt;/button&gt;
+            &lt;span class="clm-search-helper"&gt;or click any customer in Portfolio Overview tab&lt;/span&gt;
+        &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div ng-if="c.data.error" class="clm-card clm-error"&gt;
+        {{c.data.error}}
+    &lt;/div&gt;
+
+    &lt;div ng-if="!c.data.error"&gt;
+
+        &lt;div class="clm-card clm-customer-header"&gt;
+            &lt;div class="clm-customer-left"&gt;
+                &lt;span class="clm-viewing"&gt;Viewing&lt;/span&gt;
+                &lt;strong class="clm-customer-name"&gt;{{c.data.customer.name}}&lt;/strong&gt;
+                &lt;span class="clm-badge clm-badge-blue"&gt;{{c.data.customer.code}}&lt;/span&gt;
+                &lt;span class="clm-badge clm-badge-yellow"&gt;{{c.data.customer.segment}}&lt;/span&gt;
+            &lt;/div&gt;
+            &lt;div class="clm-customer-right"&gt;
+                &lt;span class="clm-header-meta"&gt;{{c.data.customer.pan}} &amp;middot; {{c.data.customer.zone}} &amp;middot; {{c.data.customer.region}}&lt;/span&gt;
+            &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-tiles"&gt;
+            &lt;div class="clm-tile clm-tile-blue"&gt;
+                &lt;div class="clm-tile-label"&gt;LIMIT&lt;/div&gt;
+                &lt;div class="clm-tile-value clm-text-blue"&gt;{{c.fmtLakh(c.data.indicators.limit)}}&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class="clm-tile clm-tile-orange"&gt;
+                &lt;div class="clm-tile-label"&gt;OUTSTANDING&lt;/div&gt;
+                &lt;div class="clm-tile-value clm-text-orange"&gt;{{c.fmtLakh(c.data.indicators.outstanding)}}&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class="clm-tile clm-tile-green"&gt;
+                &lt;div class="clm-tile-label"&gt;AVAILABLE&lt;/div&gt;
+                &lt;div class="clm-tile-value clm-text-green"&gt;{{c.fmtLakh(c.data.indicators.available)}}&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class="clm-tile clm-tile-green-light"&gt;
+                &lt;div class="clm-tile-label"&gt;UTILISATION&lt;/div&gt;
+                &lt;div class="clm-tile-value clm-text-green"&gt;{{c.data.indicators.utilisation}}%&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class="clm-tile clm-tile-teal"&gt;
+                &lt;div class="clm-tile-label"&gt;SD MULTIPLIER&lt;/div&gt;
+                &lt;div class="clm-tile-value clm-text-teal"&gt;{{c.data.indicators.sdMultiplier}}x&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class="clm-tile clm-tile-red"&gt;
+                &lt;div class="clm-tile-label"&gt;OD &amp;gt;90D&lt;/div&gt;
+                &lt;div class="clm-tile-value clm-text-red"&gt;{{c.data.indicators.od90Clean ? 'Clean' : c.fmtLakh(c.data.indicators.od90)}}&lt;/div&gt;
+            &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-chart-row"&gt;
+            &lt;div class="clm-card clm-chart-card"&gt;
+                &lt;div class="clm-chart-title"&gt;
+                    IND-012/013 &amp;middot; Sales Volume &amp;amp; Value (6M)
+                    &lt;span class="clm-chart-tag"&gt;Dual-Axis Line&lt;/span&gt;
+                &lt;/div&gt;
+                &lt;div class="clm-chart-wrapper" style="position: relative; height: 240px; width: 100%; padding: 10px 16px;"&gt;
+                    &lt;canvas id="c360SalesChart"&gt;&lt;/canvas&gt;
+                &lt;/div&gt;
+            &lt;/div&gt;
+
+            &lt;div class="clm-card clm-chart-card"&gt;
+                &lt;div class="clm-chart-title"&gt;
+                    IND-005 &amp;middot; Aging Breakdown (6M)
+                    &lt;span class="clm-chart-tag-green" style="font-size: 11px; color: #1f7a4d; background: #e3f4ea; padding: 2px 8px; border-radius: 12px; font-weight: 600;"&gt;Stacked Bar&lt;/span&gt;
+                &lt;/div&gt;
+                &lt;div class="clm-chart-wrapper" style="position: relative; height: 240px; width: 100%; padding: 10px 16px;"&gt;
+                    &lt;canvas id="c360AgingChart"&gt;&lt;/canvas&gt;
+                &lt;/div&gt;
+            &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-card clm-table-card"&gt;
+            &lt;div class="clm-table-header"&gt;
+                &lt;div class="clm-table-title"&gt;6-Month Detail Table&lt;/div&gt;
+                &lt;span class="clm-table-tag"&gt;Last 6 months&lt;/span&gt;
+            &lt;/div&gt;
+            &lt;table class="clm-table"&gt;
+                &lt;thead&gt;
+                    &lt;tr&gt;
+                        &lt;th&gt;MONTH&lt;/th&gt;
+                        &lt;th&gt;LIMIT&lt;/th&gt;
+                        &lt;th&gt;UTIL %&lt;/th&gt;
+                        &lt;th&gt;SALES VOL (MT)&lt;/th&gt;
+                        &lt;th&gt;SALES VALUE&lt;/th&gt;
+                        &lt;th&gt;OUTSTANDING&lt;/th&gt;
+                        &lt;th class="clm-text-red"&gt;OD &amp;gt;90D&lt;/th&gt;
+                        &lt;th class="clm-text-orange-dark"&gt;46-60D&lt;/th&gt;
+                        &lt;th class="clm-text-orange"&gt;31-45D&lt;/th&gt;
+                        &lt;th&gt;0-30D&lt;/th&gt;
+                    &lt;/tr&gt;
+                &lt;/thead&gt;
+                &lt;tbody&gt;
+                    &lt;tr ng-repeat="row in c.data.monthly"&gt;
+                        &lt;td class="clm-row-strong"&gt;{{row.month}}&lt;/td&gt;
+                        &lt;td class="clm-text-blue"&gt;{{c.fmtLakh(row.limit)}}&lt;/td&gt;
+                        &lt;td class="clm-text-green"&gt;{{row.util}}%&lt;/td&gt;
+                        &lt;td&gt;{{row.salesVolume ? row.salesVolume + ' MT' : '—'}}&lt;/td&gt;
+                        &lt;td&gt;{{c.fmtDash(row.salesValue)}}&lt;/td&gt;
+                        &lt;td&gt;{{c.fmtLakh(row.outstanding)}}&lt;/td&gt;
+                        &lt;td class="clm-text-red"&gt;{{c.fmtDash(row.b91_p)}}&lt;/td&gt;
+                        &lt;td class="clm-text-orange-dark"&gt;{{c.fmtDash(row.b46_60)}}&lt;/td&gt;
+                        &lt;td class="clm-text-orange"&gt;{{c.fmtDash(row.b31_45)}}&lt;/td&gt;
+                        &lt;td&gt;{{c.fmtK(row.b0_30)}}&lt;/td&gt;
+                    &lt;/tr&gt;
+                    &lt;tr ng-if="c.data.monthly.length === 0"&gt;
+                        &lt;td colspan="10" style="text-align: center; padding: 20px;"&gt;No historical data available for this customer.&lt;/td&gt;
+                    &lt;/tr&gt;
+                &lt;/tbody&gt;
+            &lt;/table&gt;
+        &lt;/div&gt;
+
+    &lt;/div&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;b01af7222b8e47104572f3745e91bf8b&lt;/id&gt;&lt;sys_created_by&gt;vedant.salunke@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-07-16 11:55:17&lt;/sys_created_on&gt;&lt;sys_id&gt;3c1af7222b8e47104572f3745e91bf9c&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;vedant.salunke@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-07-16 11:55:17&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>349965141</payload_hash>
+        <record_name>copy_clm_tsh_customer_360</record_name>
+        <reverted_from/>
+        <source>57b38f622b2303104572f3745e91bf2a</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by/>
+        <sys_created_on>2026-09-28 21:32:03</sys_created_on>
+        <sys_id>f2e300903b08531087401044c3e45a0e</sys_id>
+        <sys_mod_count/>
+        <sys_recorded_at>1a0e9ee98380000000</sys_recorded_at>
+        <sys_updated_by/>
+        <sys_updated_on/>
+        <type>Widget</type>
+        <update_guid>b2e30090c80853109a6c0f98d7099a0e</update_guid>
+        <update_guid_history>b2e30090c80853109a6c0f98d7099a0e:349965141</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="copy_clm_tsh_customer_360">72e300903b08531087401044c3e45a0f</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-16 04:19:03</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>2213810ce101461aa33c7355f1858b44</sys_id>
+        <sys_metadata>b01af7222b8e47104572f3745e91bf8b</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>copy_clm_tsh_customer_360</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_b01af7222b8e47104572f3745e91bf8b</sys_update_name>
+        <sys_update_version display_value="sp_widget_b01af7222b8e47104572f3745e91bf8b">f2e300903b08531087401044c3e45a0e</sys_update_version>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-16 04:19:03</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

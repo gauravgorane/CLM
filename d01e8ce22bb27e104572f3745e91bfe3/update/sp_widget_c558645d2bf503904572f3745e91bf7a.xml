@@ -1,0 +1,790 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[function widgetcontroller($scope, $timeout, $rootScope) {
+  var c = this;
+  
+  // Set default tab on load
+  c.activeTab = 'overview';
+
+  // ---- ADDED: Listen for the global broadcast to switch tabs ----
+  $rootScope.$on('clm.switch.tab', function(event, tabName) {
+      c.activeTab = tabName;
+      // Use $timeout to safely trigger a digest cycle and update the UI instantly
+      $timeout(function() {}); 
+  });
+  // --------------------------------------------------------------
+  
+  c.loading = false;
+  c.charts = {};
+
+  /* ---------------- Filter change handlers ---------------- */
+  c.onFilterChange = function() {
+    c.refresh();
+  };
+
+  c.setPeriod = function(periodValue) {
+    if (c.data.filters.period === periodValue) {
+      return;
+    }
+    c.data.filters.period = periodValue;
+    c.refresh();
+  };
+
+  c.refresh = function() {
+    c.loading = true;
+    c.server.update().then(function() {
+      c.loading = false;
+      $timeout(function() {
+        // Only render charts if the overview tab is active
+        if(c.activeTab === 'overview') {
+            c.renderAllCharts();
+        }
+      }, 0);
+    });
+  };
+
+  /* ---------------- Display helpers ---------------- */
+  c.fmtCurrency = function(value) {
+    if (value === undefined || value === null || isNaN(value)) {
+      return '—';
+    }
+    var abs = Math.abs(value);
+    if (abs >= 1e7) { 
+      return '₹' + (value / 1e7).toFixed(1) + ' Cr';
+    }
+    return '₹' + (value / 1e5).toFixed(1) + 'L';
+  };
+
+  c.capPct = function(pct) {
+    if (pct === undefined || pct === null || isNaN(pct)) { return 0; }
+    return Math.max(0, Math.min(100, pct));
+  };
+
+  c.filterSummaryText = function() {
+    var f = c.data.filters;
+    var parts = [
+      f.district ? f.district : 'All Districts',
+      f.depot ? f.depot : 'All Depots',
+      f.segment ? f.segment : 'All Segments'
+    ];
+    return parts.join(' / ');
+  };
+
+  /* ---------------- Chart.js rendering ---------------- */
+  function destroyChart(key) {
+    if (c.charts[key]) {
+      c.charts[key].destroy();
+      c.charts[key] = null;
+    }
+  }
+
+  c.renderAllCharts = function() {
+    if (typeof Chart === 'undefined' || !c.data.charts) {
+      return; 
+    }
+    var ch = c.data.charts;
+
+    destroyChart('salesVolume');
+    var elVol = document.getElementById('clmChartSalesVolume');
+    if (elVol) {
+      c.charts.salesVolume = new Chart(elVol.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels: ch.labels,
+          datasets: [{
+            data: ch.salesVolumeMT,
+            backgroundColor: ch.labels.map(function(l, i) {
+              return i === ch.labels.length - 1 ? '#0f9d8e' : '#a9d6cf';
+            }),
+            borderRadius: 3
+          }]
+        },
+        options: baseBarOptions()
+      });
+    }
+
+    destroyChart('salesValue');
+    var elVal = document.getElementById('clmChartSalesValue');
+    if (elVal) {
+      c.charts.salesValue = new Chart(elVal.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels: ch.labels,
+          datasets: [{
+            data: ch.salesValueCr,
+            backgroundColor: ch.labels.map(function(l, i) {
+              return i === ch.labels.length - 1 ? '#1c4e9c' : '#b9c9e6';
+            }),
+            borderRadius: 3
+          }]
+        },
+        options: baseBarOptions()
+      });
+    }
+
+    destroyChart('outstanding');
+    var elOut = document.getElementById('clmChartOutstanding');
+    if (elOut) {
+      c.charts.outstanding = new Chart(elOut.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: ch.labels,
+          datasets: [{
+            data: ch.outstandingBalanceCr,
+            borderColor: '#e08a1e',
+            backgroundColor: 'rgba(224,138,30,0.15)',
+            fill: true,
+            tension: 0.3,
+            pointBackgroundColor: '#e08a1e',
+            pointRadius: 4
+          }]
+        },
+        options: baseBarOptions()
+      });
+    }
+
+    destroyChart('aging');
+    var elAge = document.getElementById('clmChartAging');
+    if (elAge) {
+      c.charts.aging = new Chart(elAge.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels: ch.labels,
+          datasets: [
+            { label: 'Not Due', data: ch.aging.notDue,  backgroundColor: '#1f9d55' },
+            { label: '0-30D',   data: ch.aging.d0_30,   backgroundColor: '#e08a1e' },
+            { label: '31-60D',  data: ch.aging.d31_60,  backgroundColor: '#2563eb' },
+            { label: '61-90D',  data: ch.aging.d61_90,  backgroundColor: '#b3261e' },
+            { label: '>90D',    data: ch.aging.d90plus, backgroundColor: '#14141a' }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { stacked: true, grid: { display: false } },
+            y: { stacked: true, grid: { color: '#eef0f3' } }
+          }
+        }
+      });
+    }
+  };
+
+  function baseBarOptions() {
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false } },
+        y: { grid: { color: '#eef0f3' }, beginAtZero: true }
+      }
+    };
+  }
+
+  $timeout(function() {
+    if(c.activeTab === 'overview') {
+        c.renderAllCharts();
+    }
+  }, 0);
+  
+  // Re-render charts safely if a user clicks back to the overview tab
+  $scope.$watch('c.activeTab', function(newVal, oldVal) {
+      if(newVal === 'overview' && oldVal !== 'overview') {
+          $timeout(function() {
+              c.renderAllCharts();
+          }, 50);
+      }
+  });
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* =============================================================================
+   CLM PORTFOLIO OVERVIEW — Widget CSS / SCSS field
+   Paste into the widget's "CSS" field (SCSS is fine; no nesting features used,
+   so this also works verbatim as plain CSS).
+   ============================================================================= */
+
+.clm-dash {
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  color: #1f2933;
+  background: #f4f5f7;
+  padding-bottom: 24px;
+}
+
+/* ---------- Top bar ---------- */
+.clm-topbar {
+  display: flex;
+  align-items: center;
+  background: #14141a;
+  border-bottom: 3px solid #f5c500;
+  padding: 10px 20px;
+  color: #fff;
+  flex-wrap: wrap;
+}
+.clm-brand { display: flex; flex-direction: column; line-height: 1.1; margin-right: 24px; }
+.clm-brand-name { font-weight: 700; font-size: 15px; color: #f5c500; }
+.clm-brand-sub { font-size: 9px; letter-spacing: 1px; color: #cfcfcf; }
+.clm-topbar-title { flex: 1; font-size: 15px; }
+.clm-topbar-app { font-weight: 700; }
+.clm-topbar-sep { margin: 0 6px; color: #888; }
+.clm-topbar-view { color: #c9c9c9; font-weight: 400; }
+.clm-topbar-right { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #cfcfcf; }
+.clm-live-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: #3bb273; display: inline-block;
+  box-shadow: 0 0 0 0 rgba(59,178,115,.6); animation: clmPulse 1.6s infinite;
+}
+@keyframes clmPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(59,178,115,.6); }
+  70%  { box-shadow: 0 0 0 6px rgba(59,178,115,0); }
+  100% { box-shadow: 0 0 0 0 rgba(59,178,115,0); }
+}
+.clm-avatar {
+  width: 28px; height: 28px; border-radius: 50%; background: #f5c500; color: #14141a;
+  font-weight: 700; font-size: 12px; display: flex; align-items: center; justify-content: center;
+}
+.clm-user-name { font-weight: 600; color: #fff; }
+
+/* ---------- Breadcrumb / tabs ---------- */
+.clm-breadcrumb {
+  padding: 10px 20px; font-size: 13px; color: #5b6470; background: #fff;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.clm-crumb-sep { color: #9aa3ad; }
+.clm-pill {
+  font-size: 11px; padding: 2px 8px; border-radius: 12px; background: #eef2f7; color: #3a6fb0;
+  border: 1px solid #d8e3f0;
+}
+.clm-tabs { display: flex; gap: 28px; padding: 0 20px; background: #fff; border-bottom: 1px solid #e3e6eb; }
+.clm-tab { padding: 12px 2px; color: #6b7280; font-weight: 600; font-size: 14px; cursor: pointer; border-bottom: 3px solid transparent; }
+.clm-tab.active { color: #14141a; border-bottom-color: #f5c500; }
+
+/* ---------- Filters ---------- */
+.clm-filter-card {
+  margin: 16px 20px 0; background: #fff; border: 1px solid #e3e6eb; border-radius: 10px; padding: 14px 18px;
+}
+.clm-filter-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.clm-filter-label { font-weight: 700; font-size: 12px; letter-spacing: .5px; color: #1f2933; margin-right: 6px; }
+.clm-filter-field { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #5b6470; }
+.clm-filter-field select { min-width: 150px; height: 34px; font-size: 13px; border-radius: 6px; }
+.clm-filter-divider { width: 1px; height: 24px; background: #e3e6eb; margin: 0 4px; }
+.clm-filter-field-label { font-size: 13px; color: #5b6470; }
+.clm-period-btn {
+  border: 1px solid #d8dde3; background: #fff; padding: 7px 14px; border-radius: 6px; font-size: 13px;
+  font-weight: 600; color: #374151; cursor: pointer;
+}
+.clm-period-btn.active { background: #1c4e9c; border-color: #1c4e9c; color: #fff; }
+.clm-filter-summary { margin-top: 10px; font-size: 13px; color: #6b7280; }
+
+/* ---------- KPI cards ---------- */
+.clm-kpi-grid {
+  display: grid; grid-template-columns: repeat(5, minmax(180px, 1fr)); gap: 14px;
+  margin: 16px 20px 0;
+}
+@media (max-width: 1200px) { .clm-kpi-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 760px)  { .clm-kpi-grid { grid-template-columns: repeat(2, 1fr); } }
+
+.clm-kpi-card {
+  background: #fff; border: 1px solid #e3e6eb; border-left: 4px solid #c9ced6;
+  border-radius: 8px; padding: 14px 16px; min-height: 118px;
+}
+.clm-kpi-card.border-blue   { border-left-color: #1c4e9c; }
+.clm-kpi-card.border-orange { border-left-color: #b5651d; }
+.clm-kpi-card.border-green  { border-left-color: #1f7a4d; }
+.clm-kpi-card.border-teal   { border-left-color: #0f9d8e; }
+.clm-kpi-card.border-red    { border-left-color: #b3261e; }
+
+.clm-kpi-code { font-size: 11px; font-weight: 700; letter-spacing: .3px; color: #6b7280; margin-bottom: 6px; }
+.clm-kpi-value { font-size: 26px; font-weight: 700; line-height: 1.1; }
+.clm-kpi-value.large { font-size: 30px; }
+.clm-kpi-sub { font-size: 12px; color: #8a93a0; margin-top: 4px; }
+
+.text-blue   { color: #1c4e9c; }
+.text-orange { color: #b5651d; }
+.text-green  { color: #1f7a4d; }
+.text-teal   { color: #0f9d8e; }
+.text-red    { color: #b3261e; }
+
+.clm-x { font-size: 16px; font-weight: 500; margin-left: 2px; }
+
+.clm-kpi-trend { font-size: 12px; font-weight: 600; margin-top: 6px; }
+.clm-kpi-trend.trend-up   { color: #b3261e; }
+.clm-kpi-trend.trend-down { color: #1f7a4d; }
+
+.clm-progress { height: 5px; border-radius: 4px; background: #eceff3; margin-top: 10px; overflow: hidden; }
+.clm-progress-fill { height: 100%; border-radius: 4px; }
+.bg-blue { background: #1c4e9c; }
+.bg-teal { background: #0f9d8e; }
+
+/* ---------- Charts ---------- */
+.clm-chart-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 18px 20px 0;
+}
+@media (max-width: 1024px) { .clm-chart-grid { grid-template-columns: 1fr; } }
+
+.clm-chart-card {
+  background: #fff; border: 1px solid #e3e6eb; border-radius: 8px; padding: 14px 16px;
+}
+.clm-chart-card.full-width { margin: 14px 20px 0; }
+.clm-chart-header {
+  font-size: 13px; font-weight: 700; color: #1f2933; margin-bottom: 10px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.clm-tag {
+  font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 10px;
+}
+.tag-blue  { background: #e7eef9; color: #1c4e9c; }
+.tag-amber { background: #fdf1d6; color: #9a6b00; }
+.tag-green { background: #e3f4ea; color: #1f7a4d; }
+
+.clm-legend { margin-left: auto; display: flex; gap: 12px; font-size: 11px; font-weight: 500; color: #5b6470; }
+.clm-legend-item { display: flex; align-items: center; gap: 4px; }
+.clm-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dot-notdue { background: #1f9d55; }
+.dot-0-30   { background: #e08a1e; }
+.dot-31-60  { background: #2563eb; }
+.dot-61-90  { background: #b3261e; }
+.dot-90plus { background: #14141a; }
+
+.clm-loading { text-align: center; padding: 20px; color: #8a93a0; font-size: 13px; }</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clm_dashboard</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>CLM Dashboard</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+  var CONFIG = {
+    masterTable: 'x_birl3_clm_clm_customer_master1',
+    roleTable: 'x_birl3_clm_role_user_mapping',
+    f: {
+      customerCode: 'u_customer_code',
+      district: 'u_district',
+      depot: 'u_depot',
+      segment: 'u_segment',
+      period: 'u_period',
+      approvedLimit: 'u_approved_limit',
+      grossExposure: 'u_gross_exposure',
+      overdueExposure: 'u_overdue_exposure',
+      overdue90d: 'u_overdue_90d',
+      salesValueMTD: 'u_sales_value_mtd',
+      salesVolumeMT: 'u_sales_volume_mt',
+      riskClass: 'u_risk_classification',
+      sapStatus: 'u_sap_status',
+      nextReviewDate: 'u_next_review_date',
+      agingNotDue: 'u_aging_not_due',
+      aging0_30: 'u_aging_0_30',
+      aging31_60: 'u_aging_31_60',
+      aging61_90: 'u_aging_61_90',
+      agingAbove90: 'u_aging_above_90'
+    },
+    roleF: {
+      user: 'u_user',
+      role: 'u_role',
+      district: 'u_district',
+      depot: 'u_depot',
+      segment: 'u_segment'
+    },
+    trendMonths: 6
+  };
+
+  var MONTH_LABELS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  function getRoleScope() {
+    var scope = {
+      role: 'TSH',
+      viewLabel: 'TSH',
+      userName: gs.getUserDisplayName(),
+      initials: getInitials(gs.getUserDisplayName()),
+      lockDistrict: false,
+      lockDepot: false,
+      lockSegment: false,
+      district: '',
+      depot: '',
+      segment: ''
+    };
+
+    var gr = new GlideRecord(CONFIG.roleTable);
+    gr.addQuery(CONFIG.roleF.user, gs.getUserID());
+    gr.query();
+    if (gr.next()) {
+      scope.role = gr.getValue(CONFIG.roleF.role) || 'TSH';
+      scope.viewLabel = scope.role;
+      scope.district = gr.getValue(CONFIG.roleF.district) || '';
+      scope.depot = gr.getValue(CONFIG.roleF.depot) || '';
+      scope.segment = gr.getValue(CONFIG.roleF.segment) || '';
+      scope.lockDistrict = !!scope.district;
+      scope.lockDepot = !!scope.depot;
+      scope.lockSegment = !!scope.segment;
+    }
+    return scope;
+  }
+
+  function getInitials(name) {
+    if (!name) { return '??'; }
+    var parts = name.trim().split(' ');
+    var initials = parts[0].charAt(0) + (parts.length > 1 ? parts[parts.length - 1].charAt(0) : '');
+    return initials.toUpperCase();
+  }
+
+  var role = getRoleScope();
+
+  var filters = (input && input.filters) ? input.filters : {};
+  filters.district = role.lockDistrict ? role.district : (filters.district || '');
+  filters.depot = role.lockDepot ? role.depot : (filters.depot || '');
+  filters.segment = role.lockSegment ? role.segment : (filters.segment || '');
+  filters.period = filters.period || getLatestPeriod();
+
+  function shiftPeriod(periodStr, n) {
+    var y = parseInt(periodStr.split('-')[0], 10);
+    var m = parseInt(periodStr.split('-')[1], 10) - 1; 
+    var total = y * 12 + m + n;
+    var newY = Math.floor(total / 12);
+    var newM = total % 12;
+    if (newM < 0) { newM += 12; newY -= 1; }
+    return newY + '-' + (newM + 1 < 10 ? '0' : '') + (newM + 1);
+  }
+
+  function monthLabel(periodStr) {
+    var m = parseInt(periodStr.split('-')[1], 10) - 1;
+    return MONTH_LABELS[m];
+  }
+
+  function getLatestPeriod() {
+    var ga = new GlideAggregate(CONFIG.masterTable);
+    ga.addAggregate('MAX', CONFIG.f.period);
+    ga.query();
+    if (ga.next()) {
+      var max = ga.getAggregate('MAX', CONFIG.f.period);
+      if (max) { return max; }
+    }
+    var gdt = new GlideDateTime();
+    return gdt.getValue().substring(0, 7);
+  }
+
+  function applyCommonFilters(gr) {
+    if (filters.district) { gr.addQuery(CONFIG.f.district, filters.district); }
+    if (filters.depot) { gr.addQuery(CONFIG.f.depot, filters.depot); }
+    if (filters.segment) { gr.addQuery(CONFIG.f.segment, filters.segment); }
+  }
+
+  function buildKpis() {
+    var ga = new GlideAggregate(CONFIG.masterTable);
+    applyCommonFilters(ga);
+    ga.addQuery(CONFIG.f.period, filters.period);
+    ga.addAggregate('SUM', CONFIG.f.approvedLimit);
+    ga.addAggregate('SUM', CONFIG.f.grossExposure);
+    ga.addAggregate('SUM', CONFIG.f.overdueExposure);
+    ga.addAggregate('SUM', CONFIG.f.overdue90d);
+    ga.addAggregate('SUM', CONFIG.f.salesValueMTD);
+    ga.addAggregate('COUNT');
+    ga.query();
+
+    var approvedLimit = 0, grossExposure = 0, overdueExposure = 0, overdue90d = 0, salesValueMTD = 0, activeCodeCount = 0;
+    if (ga.next()) {
+      approvedLimit = parseFloat(ga.getAggregate('SUM', CONFIG.f.approvedLimit)) || 0;
+      grossExposure = parseFloat(ga.getAggregate('SUM', CONFIG.f.grossExposure)) || 0;
+      overdueExposure = parseFloat(ga.getAggregate('SUM', CONFIG.f.overdueExposure)) || 0;
+      overdue90d = parseFloat(ga.getAggregate('SUM', CONFIG.f.overdue90d)) || 0;
+      salesValueMTD = parseFloat(ga.getAggregate('SUM', CONFIG.f.salesValueMTD)) || 0;
+      activeCodeCount = parseInt(ga.getAggregate('COUNT'), 10) || 0;
+    }
+
+    var priorPeriod = shiftPeriod(filters.period, -1);
+    var gaPrior = new GlideAggregate(CONFIG.masterTable);
+    applyCommonFilters(gaPrior);
+    gaPrior.addQuery(CONFIG.f.period, priorPeriod);
+    gaPrior.addAggregate('SUM', CONFIG.f.grossExposure);
+    gaPrior.query();
+    var priorGrossExposure = 0;
+    if (gaPrior.next()) {
+      priorGrossExposure = parseFloat(gaPrior.getAggregate('SUM', CONFIG.f.grossExposure)) || 0;
+    }
+    var grossExposureMoMPct = priorGrossExposure > 0
+      ? round1(((grossExposure - priorGrossExposure) / priorGrossExposure) * 100)
+      : 0;
+
+    var highRiskCount = countWhere(CONFIG.f.riskClass, 'High');
+    var blockedCount = countWhere(CONFIG.f.sapStatus, 'Blocked');
+    var expiringSoonCount = countExpiringSoon(15);
+
+    var availableLimit = approvedLimit - grossExposure;
+    var creditUtilizationPct = approvedLimit > 0 ? round1((grossExposure / approvedLimit) * 100) : 0;
+    var overduePctOfOS = grossExposure > 0 ? round1((overdueExposure / grossExposure) * 100) : 0;
+    var osSalesRatio = salesValueMTD > 0 ? round2(grossExposure / salesValueMTD) : 0;
+    var limitUtilPct = creditUtilizationPct; 
+
+    return {
+      totalApprovedLimit: approvedLimit,
+      activeCodeCount: activeCodeCount,
+      activeCustomerCount: activeCodeCount,
+      limitUtilPct: limitUtilPct,
+      grossExposure: grossExposure,
+      grossExposureMoMPct: grossExposureMoMPct,
+      availableLimit: availableLimit,
+      creditUtilizationPct: creditUtilizationPct,
+      overdueExposure: overdueExposure,
+      overduePctOfOS: overduePctOfOS,
+      overdue90d: overdue90d,
+      osSalesRatio: osSalesRatio,
+      highRiskCount: highRiskCount,
+      blockedCount: blockedCount,
+      expiringSoonCount: expiringSoonCount
+    };
+  }
+
+  function countWhere(field, value) {
+    var ga = new GlideAggregate(CONFIG.masterTable);
+    applyCommonFilters(ga);
+    ga.addQuery(CONFIG.f.period, filters.period);
+    ga.addQuery(field, value);
+    ga.addAggregate('COUNT');
+    ga.query();
+    if (ga.next()) {
+      return parseInt(ga.getAggregate('COUNT'), 10) || 0;
+    }
+    return 0;
+  }
+
+  function countExpiringSoon(days) {
+    var today = new GlideDateTime();
+    var future = new GlideDateTime();
+    future.addDaysUTC(days);
+
+    var ga = new GlideAggregate(CONFIG.masterTable);
+    applyCommonFilters(ga);
+    ga.addQuery(CONFIG.f.period, filters.period);
+    ga.addQuery(CONFIG.f.nextReviewDate, '>=', today.getDate());
+    ga.addQuery(CONFIG.f.nextReviewDate, '<=', future.getDate());
+    ga.addAggregate('COUNT');
+    ga.query();
+    if (ga.next()) {
+      return parseInt(ga.getAggregate('COUNT'), 10) || 0;
+    }
+    return 0;
+  }
+
+  function round1(n) { return Math.round(n * 10) / 10; }
+  function round2(n) { return Math.round(n * 100) / 100; }
+
+  function buildCharts() {
+    var labels = [];
+    var salesVolumeMT = [];
+    var salesValueCr = [];
+    var outstandingBalanceCr = [];
+    var aging = { notDue: [], d0_30: [], d31_60: [], d61_90: [], d90plus: [] };
+
+    for (var i = CONFIG.trendMonths - 1; i >= 0; i--) {
+      var p = shiftPeriod(filters.period, -i);
+      labels.push(monthLabel(p));
+
+      var ga = new GlideAggregate(CONFIG.masterTable);
+      applyCommonFilters(ga);
+      ga.addQuery(CONFIG.f.period, p);
+      ga.addAggregate('SUM', CONFIG.f.salesVolumeMT);
+      ga.addAggregate('SUM', CONFIG.f.salesValueMTD);
+      ga.addAggregate('SUM', CONFIG.f.grossExposure);
+      ga.addAggregate('SUM', CONFIG.f.agingNotDue);
+      ga.addAggregate('SUM', CONFIG.f.aging0_30);
+      ga.addAggregate('SUM', CONFIG.f.aging31_60);
+      ga.addAggregate('SUM', CONFIG.f.aging61_90);
+      ga.addAggregate('SUM', CONFIG.f.agingAbove90);
+      ga.query();
+
+      if (ga.next()) {
+        salesVolumeMT.push(round0(ga.getAggregate('SUM', CONFIG.f.salesVolumeMT)));
+        salesValueCr.push(round1(toCr(ga.getAggregate('SUM', CONFIG.f.salesValueMTD))));
+        outstandingBalanceCr.push(round1(toCr(ga.getAggregate('SUM', CONFIG.f.grossExposure))));
+        aging.notDue.push(round1(toCr(ga.getAggregate('SUM', CONFIG.f.agingNotDue))));
+        aging.d0_30.push(round1(toCr(ga.getAggregate('SUM', CONFIG.f.aging0_30))));
+        aging.d31_60.push(round1(toCr(ga.getAggregate('SUM', CONFIG.f.aging31_60))));
+        aging.d61_90.push(round1(toCr(ga.getAggregate('SUM', CONFIG.f.aging61_90))));
+        aging.d90plus.push(round1(toCr(ga.getAggregate('SUM', CONFIG.f.agingAbove90))));
+      } else {
+        salesVolumeMT.push(0); salesValueCr.push(0); outstandingBalanceCr.push(0);
+        aging.notDue.push(0); aging.d0_30.push(0); aging.d31_60.push(0); aging.d61_90.push(0); aging.d90plus.push(0);
+      }
+    }
+
+    return {
+      labels: labels,
+      salesVolumeMT: salesVolumeMT,
+      salesValueCr: salesValueCr,
+      outstandingBalanceCr: outstandingBalanceCr,
+      aging: aging
+    };
+  }
+
+  function toCr(val) { return (parseFloat(val) || 0) / 1e7; }
+  function round0(val) { return Math.round(parseFloat(val) || 0); }
+
+  function distinctValues(field, lockValue) {
+    if (lockValue) { return [lockValue]; }
+    var seen = {};
+    var out = [];
+    var gr = new GlideRecord(CONFIG.masterTable);
+    gr.query();
+    while (gr.next()) {
+      var v = gr.getValue(field);
+      if (v && !seen[v]) {
+        seen[v] = true;
+        out.push(v);
+      }
+    }
+    out.sort();
+    return out;
+  }
+
+  function buildPeriodButtons() {
+    var latest = getLatestPeriod();
+    var buttons = [];
+    for (var i = 0; i < 3; i++) {
+      var p = shiftPeriod(latest, -i);
+      buttons.push({ value: p, label: monthLabel(p) + ' ' + p.split('-')[0] });
+    }
+    return buttons; 
+  }
+
+  // --- Dynamic Live Date UI ---
+  var gdt = new GlideDateTime();
+  var liveMonthIndex = gdt.getMonthLocalTime() - 1; 
+  var liveYear = gdt.getYearLocalTime();
+  data.liveDateText = MONTH_LABELS[liveMonthIndex] + ' ' + liveYear;
+
+  // --- Final Data Construction ---
+  data.role = role;
+  data.filters = filters;
+  data.filterOptions = {
+    districts: distinctValues(CONFIG.f.district, role.lockDistrict ? role.district : null),
+    depots: distinctValues(CONFIG.f.depot, role.lockDepot ? role.depot : null),
+    segments: distinctValues(CONFIG.f.segment, role.lockSegment ? role.segment : null),
+    periods: buildPeriodButtons()
+  };
+  
+  data.kpis = buildKpis();
+  data.charts = buildCharts();
+  
+  // Pass current filters to the embedded widgets
+  
+  // Portfolio Overview Widget
+  data.portfolioWidget = $sp.getWidget('clm_tsh_portfolio', {
+      sysparm_district: data.filters.district,
+      sysparm_depot: data.filters.depot,
+      sysparm_segment: data.filters.segment,
+      sysparm_period: data.filters.period
+  });
+
+  // Request Detail Widget
+  data.requestDetailWidget = $sp.getWidget('clm_tsh_request_detail', {
+      sysparm_district: data.filters.district,
+      sysparm_depot: data.filters.depot
+  });
+  
+  // Approval Requests Widget
+  data.approvalRequestsWidget = $sp.getWidget('clm_approval_requests', {
+      sysparm_district: data.filters.district,
+      sysparm_depot: data.filters.depot,
+      sysparm_segment: data.filters.segment,
+      sysparm_period: data.filters.period
+  });
+  
+  // Customer 360 Widget
+  data.customer360Widget = $sp.getWidget('clm_customer_360', {
+      search: $sp.getParameter('search') || $sp.getParameter('customer_code') || ''
+  });
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-29 13:10:46</sys_created_on>
+        <sys_id>c558645d2bf503904572f3745e91bf7a</sys_id>
+        <sys_mod_count>12</sys_mod_count>
+        <sys_name>CLM Dashboard</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_c558645d2bf503904572f3745e91bf7a</sys_update_name>
+        <sys_updated_by>jatin.sharma@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-08 06:30:12</sys_updated_on>
+        <template><![CDATA[<div class="clm-dash" ng-cloak ng-if="c.data">
+
+  <div class="clm-breadcrumb">
+    <strong>Dashboard - CLM</strong>
+  </div>
+
+  <div class="clm-tabs">
+
+    <a class="clm-tab"
+       ng-class="{active: c.activeTab === 'overview'}"
+       ng-click="c.activeTab = 'overview'">
+      Portfolio Overview
+    </a>
+
+    <a class="clm-tab"
+       ng-class="{active: c.activeTab === 'approval_requests'}"
+       ng-click="c.activeTab = 'approval_requests'">
+      Approval Requests
+    </a>
+
+    <a class="clm-tab"
+       ng-class="{active: c.activeTab === 'customer360'}"
+       ng-click="c.activeTab = 'customer360'">
+      Customer 360
+    </a>
+
+    <a class="clm-tab"
+       ng-class="{active: c.activeTab === 'request_detail'}"
+       ng-click="c.activeTab = 'request_detail'">
+      Request Detail
+    </a>
+
+  </div>
+
+  <!-- Portfolio Overview -->
+  <div ng-if="c.activeTab === 'overview'">
+    <sp-widget widget="c.data.portfolioWidget"></sp-widget>
+  </div>
+
+  <!-- Approval Requests -->
+  <div ng-if="c.activeTab === 'approval_requests'">
+    <sp-widget widget="c.data.approvalRequestsWidget"></sp-widget>
+  </div>
+
+  <!-- Customer 360 -->
+  <div ng-if="c.activeTab === 'customer360'">
+    <sp-widget widget="c.data.customer360Widget"></sp-widget>
+  </div>
+
+  <!-- Request Detail -->
+  <div ng-if="c.activeTab === 'request_detail'">
+    <sp-widget widget="c.data.requestDetailWidget"></sp-widget>
+  </div>
+
+  <div class="clm-loading" ng-if="c.loading">
+    Loading CLM data&hellip;
+  </div>
+
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>c558645d2bf503904572f3745e91bf7a</id>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-29 13:10:46</sys_created_on>
+        <sys_id>c158645d2bf503904572f3745e91bf81</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-29 13:10:46</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

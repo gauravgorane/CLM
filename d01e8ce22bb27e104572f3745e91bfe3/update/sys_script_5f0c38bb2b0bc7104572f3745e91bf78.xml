@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>false</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>sysapproval_approver</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition table="sysapproval_approver">source_table=x_birl3_clm_key_group_code_request^stateCHANGESTOapproved^EQ<item endquery="false" field="source_table" goto="false" newquery="false" operator="=" or="false" value="x_birl3_clm_key_group_code_request"/>
+            <item display_value="Approved" endquery="false" field="state" goto="false" newquery="false" operator="CHANGESTO" or="false" value="approved"/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>CLM Key Approval Engine</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous /*null when async*/) {
+    var reqSysId = current.getValue('document_id') || current.getValue('sysapproval');
+    if (!reqSysId) return;
+
+    // Check if any approval is still pending for this request
+    var pendingApprovals = new GlideRecord('sysapproval_approver');
+    pendingApprovals.addQuery('document_id', reqSysId);
+    pendingApprovals.addQuery('state', 'IN', 'requested,not_yet_requested');
+    pendingApprovals.query();
+
+    if (pendingApprovals.hasNext()) {
+        // Earlier level approved, but higher tier is still pending
+        return;
+    }
+
+    // ── ALL APPROVALS COMPLETE: FINALIZE RECORD ──
+    var reqGr = new GlideRecord('x_birl3_clm_key_group_code_request');
+    if (!reqGr.get(reqSysId)) return;
+
+    var gCode = reqGr.getValue('group_code');
+    var gpCode = reqGr.getValue('grandparent_code');
+    var requestedLimit = parseFloat(reqGr.getValue('total_requested_limit')) || 0;
+
+    // 1. Mark request approved and set approved limit
+    reqGr.setValue('state', 'Approved');
+    reqGr.setValue('approved_limit', requestedLimit);
+
+    // 2. Cascade approved limits to Site Master records
+    var draftGr = new GlideRecord('x_birl3_clm_p1_crm_site_draft');
+    draftGr.addQuery('target_request', reqSysId);
+    draftGr.addQuery('justification', 'Central SPOC Finalized Values');
+    draftGr.query();
+
+    while (draftGr.next()) {
+        var siteCode = draftGr.getValue('site_code');
+        var approvedSiteLimit = parseFloat(draftGr.getValue('desired_limit')) || 0;
+        var siteTenor = parseInt(draftGr.getValue('credit_tenor'), 10) || 45;
+        var orderRate = parseFloat(draftGr.getValue('order_rate')) || 0;
+        var sobQty = parseFloat(draftGr.getValue('expected_sob_qty')) || 0;
+
+        var siteMaster = new GlideRecord('x_birl3_clm_key_customer');
+        siteMaster.addQuery('site_code', siteCode);
+        siteMaster.query();
+        if (siteMaster.next()) {
+            siteMaster.setValue('credit_limit', approvedSiteLimit);
+            siteMaster.setValue('credit_tenor', siteTenor);
+            siteMaster.setValue('order_rate', orderRate);
+            siteMaster.setValue('expected_sob_qty', sobQty);
+            siteMaster.update();
+        }
+    }
+
+    // 3. Recalculate exposures from updated site limits and active BG
+    var totalGrpLimit = 0;
+    var totalGrpBg = 0;
+    var grpSites = new GlideRecord('x_birl3_clm_key_customer');
+    grpSites.addQuery('group_code', gCode);
+    grpSites.query();
+    while (grpSites.next()) {
+        totalGrpLimit += (parseFloat(grpSites.getValue('credit_limit')) || 0);
+        totalGrpBg += (parseFloat(grpSites.getValue('active_bg')) || 0);
+    }
+    var finalGroupNetExposure = totalGrpLimit - totalGrpBg;
+
+    var totalGpLimit = 0;
+    var totalGpBg = 0;
+    var gpSites = new GlideRecord('x_birl3_clm_key_customer');
+    gpSites.addQuery('grandparent_code', gpCode);
+    gpSites.query();
+    while (gpSites.next()) {
+        totalGpLimit += (parseFloat(gpSites.getValue('credit_limit')) || 0);
+        totalGpBg += (parseFloat(gpSites.getValue('active_bg')) || 0);
+    }
+    var finalGpNetExposure = totalGpLimit - totalGpBg;
+
+    reqGr.setValue('group_net_exposure', finalGroupNetExposure);
+    reqGr.setValue('grandparent_net_exposure', finalGpNetExposure);
+    reqGr.update();
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-07 12:22:10</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>5f0c38bb2b0bc7104572f3745e91bf78</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>CLM Key Approval Engine</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_5f0c38bb2b0bc7104572f3745e91bf78</sys_update_name>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 10:20:32</sys_updated_on>
+        <template/>
+        <when>after</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=5f0c38bb2b0bc7104572f3745e91bf78"/>
+</record_update>

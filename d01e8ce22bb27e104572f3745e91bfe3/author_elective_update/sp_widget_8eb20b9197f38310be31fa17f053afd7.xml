@@ -1,0 +1,1555 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[function loginCtrl($scope, $http, $window, $location, spUtil) {
+  var c = this;
+  c.loading = false;
+  c.message = '';
+
+  c.focusPassword = function() {
+    var el = document.getElementById('password');
+    if (el) el.focus();
+  };
+
+  c.login = function(username, password) {
+    if (!username || !password) {
+      c.message = 'Please enter your username and password.';
+      return;
+    }
+
+    c.loading = true;
+    c.message = '';
+    var url = spUtil.getURL({ sysparm_type: 'view_form.login' });
+
+    return $http({
+      method: 'post',
+      url: url,
+      data: $.param({
+        'sysparm_type': 'login',
+        'user_name': username,
+        'user_password': password,
+        'remember_me': false,
+        'get_redirect_url': true,
+        'is_direct_redirect': true
+      }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    }).then(function(response) {
+      c.loading = false;
+      if (!response.data) {
+        c.message = 'There was an error processing your request.';
+        return;
+      }
+      if (response.data.status === 'success') {
+        $window.location = response.data.redirect_url;
+      } else if (response.data.status === 'mfa_code_required') {
+        $window.location = '/validate_multifactor_auth_code.do';
+      } else {
+        c.message = response.data.message || 'Invalid username or password.';
+        c.password = '';
+        c.username = '';
+        var el = document.getElementById('username');
+        if (el) el.focus();
+      }
+    }, function() {
+      c.loading = false;
+      c.message = 'There was an error processing your request.';
+    });
+  };
+
+  c.externalLogin = function() {
+    $window.location = '/login_with_sso.do';
+  };
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>* {
+  box-sizing: border-box;
+}
+
+.clm-login-viewport {
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
+  margin: 0;
+  padding: 40px 60px;
+  background-color: #f7f9fa;
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Background Artwork */
+.clm-bg-art {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.clm-bg-art svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Container: reduced gap between left info and right card */
+.clm-login-container {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  max-width: 1180px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 36px; /* Reduced gap between columns */
+}
+
+/* ================= LEFT COLUMN ================= */
+.clm-info-section {
+  flex: 1.15;
+  max-width: 580px;
+  display: flex;
+  flex-direction: column;
+}
+
+.clm-brand-header {
+  margin-bottom: 20px; /* Reduced spacing */
+}
+
+/* Logo Integration */
+.clm-logo-wrap {
+  display: inline-block;
+  background: transparent !important;
+}
+
+.clm-brand-logo {
+  max-width: 220px;
+  height: auto;
+  display: block;
+  background: transparent !important;
+  mix-blend-mode: multiply;
+}
+
+.clm-brand-divider {
+  width: 44px;
+  height: 4px;
+  background-color: #ffd800;
+  border-radius: 2px;
+  margin-bottom: 16px; /* Reduced spacing */
+}
+
+/* Strict Hierarchy:
+   1. "Enable" (clm-headline) -&gt; Boldest (900)
+   2. "Credit Limit" (clm-kicker) -&gt; Lower boldness (700)
+   3. "Streamline" (clm-subtext) -&gt; Lower boldness (500)
+*/
+.clm-headline {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 40px;
+  font-weight: 900 !important; /* Boldest */
+  line-height: 1.18;
+  color: #000000 !important;
+  margin: 0 0 12px; /* Reduced spacing */
+  letter-spacing: -0.02em;
+}
+
+.clm-kicker {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13px;
+  font-weight: 700; /* Lower than headline */
+  color: #334155;
+  letter-spacing: 0.05em;
+  word-spacing: 0.15em;
+  margin-bottom: 8px; /* Reduced spacing */
+  text-transform: uppercase;
+}
+
+.clm-subtext {
+  font-family: 'Inter', sans-serif;
+  font-size: 15.5px;
+  font-weight: 500; /* Lower than kicker */
+  line-height: 1.55;
+  color: #556274;
+  max-width: 480px;
+  margin: 0 0 28px; /* Reduced spacing */
+  letter-spacing: 0.005em;
+}
+
+/* Feature Columns */
+.clm-features-row {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 32px; /* Reduced spacing */
+}
+
+.clm-feature-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0 22px;
+}
+
+.clm-feature-col:first-child {
+  padding-left: 0;
+}
+
+.clm-feature-col:last-child {
+  padding-right: 0;
+}
+
+/* Increased SVG Icon Size */
+.clm-feature-icon {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #0f172a;
+  margin-bottom: 8px;
+}
+
+.clm-feature-icon svg {
+  width: 42px !important;
+  height: 42px !important;
+  display: block;
+}
+
+.clm-feature-label {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: 0.01em;
+}
+
+.clm-feature-sep {
+  width: 1px;
+  height: 42px;
+  background-color: #cbd5e1;
+}
+
+/* Copyright text */
+.clm-copyright-desktop {
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  font-weight: 400;
+  color: #94a3b8;
+}
+
+.clm-copyright-mobile {
+  display: none;
+}
+
+/* ================= RIGHT CARD ================= */
+.clm-card-section {
+  flex: 0.85;
+  display: flex;
+  flex-direction: column;
+  align-self: center !important; /* Self-align center */
+  align-items: center;
+}
+
+.clm-card {
+  width: 100%;
+  max-width: 390px;
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 32px 28px; /* Reduced internal padding */
+  box-shadow: 0 12px 35px rgba(0, 0, 0, 0.06);
+}
+
+.clm-card-header {
+  margin-bottom: 18px; /* Reduced spacing */
+}
+
+.clm-card-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 24px;
+  font-weight: 800;
+  color: #0f172a;
+  margin: 0 0 4px;
+  letter-spacing: -0.01em;
+}
+
+.clm-card-subtitle {
+  font-family: 'Inter', sans-serif;
+  font-size: 13px;
+  font-weight: 400;
+  color: #64748b;
+  margin: 0;
+}
+
+/* Error Banner */
+.clm-err {
+  background: #fef2f2;
+  border: 1px solid #f87171;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #b91c1c;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Inputs */
+.clm-field {
+  margin-bottom: 12px; /* Reduced spacing between inputs */
+}
+
+.clm-inp-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.clm-inp-icon {
+  position: absolute;
+  left: 14px;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+}
+
+.clm-inp {
+  width: 100%;
+  height: 44px;
+  background: #f1f5f9;
+  border: 1.5px solid transparent;
+  border-radius: 8px;
+  padding: 0 16px;
+  font-size: 13.5px;
+  font-weight: 400;
+  color: #0f172a;
+  outline: none;
+  font-family: 'Inter', sans-serif;
+  transition: all 0.16s ease;
+}
+
+.clm-inp-has-icon {
+  padding-left: 44px;
+}
+
+.clm-inp:focus {
+  background: #ffffff;
+  border-color: #ffd800;
+  box-shadow: 0 0 0 3px rgba(254, 216, 0, 0.28);
+}
+
+.clm-inp::placeholder {
+  color: #94a3b8;
+  font-weight: 400;
+}
+
+/* Action Button */
+.clm-btn {
+  width: 100%;
+  height: 44px;
+  background: #fedb00;
+  border: none;
+  border-radius: 8px;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  margin-top: 8px; /* Reduced spacing */
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.clm-btn:hover {
+  background: #f2cb00;
+  transform: translateY(-1px);
+}
+
+.clm-btn:active {
+  transform: translateY(0);
+}
+
+.clm-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Divider */
+.clm-separator {
+  position: relative;
+  text-align: center;
+  margin: 14px 0; /* Reduced spacing */
+}
+
+.clm-separator::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: #e2e8f0;
+}
+
+.clm-separator span {
+  position: relative;
+  background: #ffffff;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #94a3b8;
+  letter-spacing: 0.05em;
+}
+
+/* SSO Button */
+.clm-sso-btn {
+  width: 100%;
+  height: 44px;
+  background: #ffffff;
+  border: 1.5px solid #0f172a;
+  border-radius: 8px;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #0f172a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.clm-sso-btn:hover {
+  background: #f8fafc;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+/* Support Help */
+.clm-help-link {
+  margin-top: 16px; /* Reduced spacing */
+  text-align: center;
+  font-size: 12px;
+  font-weight: 400;
+  color: #64748b;
+}
+
+.clm-help-link a {
+  color: #0265c2;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.clm-help-link a:hover {
+  text-decoration: underline;
+}
+
+/* ================= RESPONSIVE ================= */
+@media (max-width: 992px) {
+  .clm-login-viewport {
+    padding: 28px 20px;
+  }
+  
+  .clm-login-container {
+    flex-direction: column;
+    align-items: center;
+    gap: 28px;
+  }
+
+  .clm-info-section {
+    max-width: 100%;
+    text-align: center;
+    align-items: center;
+  }
+
+  .clm-headline {
+    font-size: 32px;
+  }
+
+  .clm-brand-divider {
+    margin: 0 auto 12px auto;
+  }
+
+  .clm-features-row {
+    justify-content: center;
+  }
+
+  .clm-card-section {
+    align-items: center;
+    width: 100%;
+  }
+
+  .clm-copyright-desktop {
+    display: none;
+  }
+
+  .clm-copyright-mobile {
+    display: block;
+    font-size: 11px;
+    font-weight: 400;
+    color: #94a3b8;
+    margin-top: 18px;
+    text-align: center;
+  }
+}
+
+@media (max-width: 520px) {
+  .clm-features-row {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+  }
+
+  .clm-feature-sep {
+    display: none;
+  }
+
+  .clm-feature-col {
+    padding: 0;
+  }
+
+  .clm-card {
+    padding: 22px 16px;
+  }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clone_uclm_login</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>Clone UCLM Login</name>
+        <option_schema/>
+        <public>true</public>
+        <roles/>
+        <script><![CDATA[(function() {
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-07 10:30:54</sys_created_on>
+        <sys_id>8eb20b9197f38310be31fa17f053afd7</sys_id>
+        <sys_mod_count>19</sys_mod_count>
+        <sys_name>Clone UCLM Login</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_8eb20b9197f38310be31fa17f053afd7</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-07 12:16:45</sys_updated_on>
+        <template><![CDATA[<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700;800;900&display=swap" rel="stylesheet">
+<div class="clm-login-viewport">
+  <!-- Dynamic Crisp Geometric Angle & Sheen Background -->
+  <div class="clm-bg-art" aria-hidden="true">
+    <svg viewBox="0 0 1440 900" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <!-- Soft White Sheen Overlay -->
+        <linearGradient id="shineGlow" x1="0%" y1="100%" x2="100%" y2="0%">
+          <stop offset="0%" stop-color="#ffffff" stop-opacity="0" />
+          <stop offset="60%" stop-color="#ffffff" stop-opacity="0.9" />
+          <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+        </linearGradient>
+        <!-- Solid Yellow Corner -->
+        <linearGradient id="yellowPrimary" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#ffe600" />
+          <stop offset="100%" stop-color="#f5d000" />
+        </linearGradient>
+        <!-- Pale Accent Stripe -->
+        <linearGradient id="yellowAccent" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#fff76a" stop-opacity="0.6" />
+          <stop offset="100%" stop-color="#ffe600" stop-opacity="0.4" />
+        </linearGradient>
+      </defs>
+
+      <!-- Background Accent Band -->
+      <polygon points="980,900 1140,900 1440,360 1440,240" fill="url(#yellowAccent)" />
+
+      <!-- White Dynamic Sheen / Gloss Streak -->
+      <polygon points="1070,900 1130,900 1440,400 1440,300" fill="url(#shineGlow)" />
+
+      <!-- Sharp Corner Polygon -->
+      <polygon points="1090,900 1440,900 1440,490" fill="url(#yellowPrimary)" />
+    </svg>
+  </div>
+
+  <div class="clm-login-container">
+    
+    <!-- LEFT COLUMN: Brand, Typography & Core Capabilities -->
+    <div class="clm-info-section">
+      <div class="clm-brand-header">
+        <div class="clm-logo-wrap">
+          <img src="https://abgdev.service-now.com/x_birl3_clm.UltraTech.png" alt="UltraTech Cement" class="clm-brand-logo" />
+        </div>
+      </div>
+
+      <div class="clm-hero-block">
+        <div class="clm-brand-divider"></div>
+        <div class="clm-kicker">CREDIT LIMIT MANAGEMENT</div>
+        <h1 class="clm-headline">Enable Better Decisions.</h1>
+        <p class="clm-subtext">
+          Streamlined credit limit processes for stronger partnerships and sustainable growth.
+        </p>
+      </div>
+
+      <!-- Feature Grid with Custom Provided SVGs -->
+      <div class="clm-features-row">
+        
+        <!-- Control -->
+        <div class="clm-feature-col">
+          <div class="clm-feature-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24">
+              <path d="M0 0h24v24H0z" fill="none" />
+              <path fill="currentColor" fill-rule="evenodd" d="M4 2h9.56L20 8.44V22H4zm13.44 6L14 4.56V8zM5.5 3.5v17h13v-11h-4.75c-.69 0-1.25-.56-1.25-1.25V3.5zm3.78 10.72l1.47 1.47l3.97-3.97l1.06 1.06l-4.145 4.145a1.25 1.25 0 0 1-.885.365c-.32 0-.64-.12-.885-.365L8.22 15.28z" clip-rule="evenodd" />
+            </svg>
+          </div>
+          <span class="clm-feature-label">Control</span>
+        </div>
+
+        <div class="clm-feature-sep"></div>
+
+        <!-- Analyse -->
+        <div class="clm-feature-col">
+          <div class="clm-feature-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24">
+              <path d="M0 0h24v24H0z" fill="none" />
+              <path fill="currentColor" d="M13 6h2v11h-2zm4-3h2v14h-2zM9 9h2v8H9zM4 19h16v2H4zm1-7h2v5H5z" />
+            </svg>
+          </div>
+          <span class="clm-feature-label">Analyse</span>
+        </div>
+
+        <div class="clm-feature-sep"></div>
+
+        <!-- Safe / Secure -->
+        <div class="clm-feature-col">
+          <div class="clm-feature-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24">
+              <path d="M0 0h24v24H0z" fill="none" />
+              <path fill="currentColor" d="m13.896 9.946l-3.046 3.047l-1.247-1.247a.5.5 0 0 0-.707.707l1.6 1.6a.5.5 0 0 0 .707 0l3.408-3.407a.5.5 0 0 0-.715-.7m6.093-6.193a.5.5 0 0 0-.592-.387a9.1 9.1 0 0 1-7.11-1.454a.5.5 0 0 0-.574 0a9.1 9.1 0 0 1-7.11 1.454a.498.498 0 0 0-.603.49v8.018a9.13 9.13 0 0 0 3.799 7.407l3.91 2.804a.5.5 0 0 0 .582 0l3.91-2.804A9.13 9.13 0 0 0 20 11.874V3.855a.5.5 0 0 0-.01-.102M19 11.874a8.13 8.13 0 0 1-3.38 6.595L12 21.063L8.38 18.47A8.13 8.13 0 0 1 5 11.874v-7.42a10.08 10.08 0 0 0 7-1.53a10.1 10.1 0 0 0 7 1.53z" />
+            </svg>
+          </div>
+          <span class="clm-feature-label">Secure</span>
+        </div>
+
+        <div class="clm-feature-sep"></div>
+
+        <!-- Integrate -->
+        <div class="clm-feature-col">
+          <div class="clm-feature-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 20 20">
+              <path d="M0 0h20v20H0z" fill="none" />
+              <path fill="currentColor" d="M5.879 6.586a2.5 2.5 0 1 1 .707-.707L8.62 7.914A2.5 2.5 0 0 1 9.999 7.5c.51 0 .983.152 1.379.414l2.035-2.035a2.5 2.5 0 1 1 .707.707L12.086 8.62c.262.396.414.87.414 1.379c0 .51-.152.983-.414 1.379l2.035 2.035a2.5 2.5 0 1 1-.707.707l-2.035-2.035a2.5 2.5 0 0 1-1.379.414c-.51 0-.983-.152-1.379-.414L6.586 14.12a2.5 2.5 0 1 1-.707-.707l2.035-2.035A2.5 2.5 0 0 1 7.5 10c0-.51.152-.983.414-1.379zM6 4.5a1.5 1.5 0 1 0-3 0a1.5 1.5 0 0 0 3 0m11 0a1.5 1.5 0 1 0-3 0a1.5 1.5 0 0 0 3 0M4.5 17a1.5 1.5 0 1 0 0-3a1.5 1.5 0 0 0 0 3M17 15.5a1.5 1.5 0 1 0-3 0a1.5 1.5 0 0 0 3 0M11.5 10a1.5 1.5 0 1 0-3 0a1.5 1.5 0 0 0 3 0" />
+            </svg>
+          </div>
+          <span class="clm-feature-label">Integrate</span>
+        </div>
+
+      </div>
+
+      <div class="clm-copyright-desktop">
+        © 2026 UltraTech Cement Limited. All rights reserved.
+      </div>
+    </div>
+
+    <!-- RIGHT COLUMN: Sign In Card -->
+    <div class="clm-card-section">
+      <div class="clm-card">
+        <div class="clm-card-header">
+          <h2 class="clm-card-title">Sign In</h2>
+          <p class="clm-card-subtitle">Access Credit Limit Management</p>
+        </div>
+
+        <!-- Alert Notification -->
+        <div class="clm-err" ng-show="c.message" role="alert" aria-live="assertive">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          <span>{{c.message}}</span>
+        </div>
+
+        <!-- Username Input -->
+        <div class="clm-field">
+          <div class="clm-inp-wrap">
+            <span class="clm-inp-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                <circle cx="12" cy="7" r="4" />
+              </svg>
+            </span>
+            <input class="clm-inp clm-inp-has-icon"
+              id="username"
+              type="text"
+              placeholder="Username or email"
+              ng-model="c.username"
+              autocomplete="username"
+              autofocus
+              aria-required="true"
+              ng-keydown="$event.key === 'Enter' && c.focusPassword()" />
+          </div>
+        </div>
+
+        <!-- Password Input -->
+        <div class="clm-field">
+          <div class="clm-inp-wrap">
+            <span class="clm-inp-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+            </span>
+            <input class="clm-inp clm-inp-has-icon"
+              id="password"
+              type="password"
+              placeholder="Password"
+              ng-model="c.password"
+              autocomplete="current-password"
+              aria-required="true"
+              ng-keydown="$event.key === 'Enter' && c.login(c.username, c.password)" />
+          </div>
+        </div>
+
+        <!-- Primary Action Button -->
+        <button class="clm-btn"
+          type="button"
+          ng-click="c.login(c.username, c.password)"
+          ng-disabled="c.loading"
+          aria-label="Log in">
+          <span>{{c.loading ? 'Logging in...' : 'Log In'}}</span>
+          <svg ng-if="!c.loading" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">
+            <line x1="5" y1="12" x2="19" y2="12" />
+            <polyline points="12 5 19 12 12 19" />
+          </svg>
+        </button>
+
+        <!-- Divider -->
+        <div class="clm-separator">
+          <span>OR</span>
+        </div>
+
+        <!-- SSO Button -->
+        <button class="clm-sso-btn"
+          type="button"
+          ng-click="c.externalLogin()"
+          aria-label="Sign in with SSO">
+          <svg class="clm-ms-logo" width="16" height="16" viewBox="0 0 21 21">
+            <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
+            <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
+            <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
+            <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
+          </svg>
+          <span>Sign in with SSO</span>
+        </button>
+
+        <div class="clm-help-link">
+          Need help? <a href="mailto:it-support@adityabirla.com">Contact IT Support</a>
+        </div>
+      </div>
+
+      <div class="clm-copyright-mobile">
+        © 2026 UltraTech Cement Limited. All rights reserved.
+      </div>
+    </div>
+
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_8eb20b9197f38310be31fa17f053afd7</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[function loginCtrl($scope, $http, $window, $location, spUtil) {
+  var c = this;
+  c.loading = false;
+  c.message = '';
+
+  c.focusPassword = function() {
+    var el = document.getElementById('password');
+    if (el) el.focus();
+  };
+
+  c.login = function(username, password) {
+    if (!username || !password) {
+      c.message = 'Please enter your username and password.';
+      return;
+    }
+
+    c.loading = true;
+    c.message = '';
+    var url = spUtil.getURL({ sysparm_type: 'view_form.login' });
+
+    return $http({
+      method: 'post',
+      url: url,
+      data: $.param({
+        'sysparm_type': 'login',
+        'user_name': username,
+        'user_password': password,
+        'remember_me': false,
+        'get_redirect_url': true,
+        'is_direct_redirect': true
+      }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    }).then(function(response) {
+      c.loading = false;
+      if (!response.data) {
+        c.message = 'There was an error processing your request.';
+        return;
+      }
+      if (response.data.status === 'success') {
+        $window.location = response.data.redirect_url;
+      } else if (response.data.status === 'mfa_code_required') {
+        $window.location = '/validate_multifactor_auth_code.do';
+      } else {
+        c.message = response.data.message || 'Invalid username or password.';
+        c.password = '';
+        c.username = '';
+        var el = document.getElementById('username');
+        if (el) el.focus();
+      }
+    }, function() {
+      c.loading = false;
+      c.message = 'There was an error processing your request.';
+    });
+  };
+
+  c.externalLogin = function() {
+    $window.location = '/login_with_sso.do';
+  };
+}]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;* {
+  box-sizing: border-box;
+}
+
+.clm-login-viewport {
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
+  margin: 0;
+  padding: 40px 60px;
+  background-color: #f7f9fa;
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Background Artwork */
+.clm-bg-art {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.clm-bg-art svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Container: reduced gap between left info and right card */
+.clm-login-container {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  max-width: 1180px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 36px; /* Reduced gap between columns */
+}
+
+/* ================= LEFT COLUMN ================= */
+.clm-info-section {
+  flex: 1.15;
+  max-width: 580px;
+  display: flex;
+  flex-direction: column;
+}
+
+.clm-brand-header {
+  margin-bottom: 20px; /* Reduced spacing */
+}
+
+/* Logo Integration */
+.clm-logo-wrap {
+  display: inline-block;
+  background: transparent !important;
+}
+
+.clm-brand-logo {
+  max-width: 220px;
+  height: auto;
+  display: block;
+  background: transparent !important;
+  mix-blend-mode: multiply;
+}
+
+.clm-brand-divider {
+  width: 44px;
+  height: 4px;
+  background-color: #ffd800;
+  border-radius: 2px;
+  margin-bottom: 16px; /* Reduced spacing */
+}
+
+/* Strict Hierarchy:
+   1. "Enable" (clm-headline) -&amp;gt; Boldest (900)
+   2. "Credit Limit" (clm-kicker) -&amp;gt; Lower boldness (700)
+   3. "Streamline" (clm-subtext) -&amp;gt; Lower boldness (500)
+*/
+.clm-headline {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 40px;
+  font-weight: 900 !important; /* Boldest */
+  line-height: 1.18;
+  color: #000000 !important;
+  margin: 0 0 12px; /* Reduced spacing */
+  letter-spacing: -0.02em;
+}
+
+.clm-kicker {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13px;
+  font-weight: 700; /* Lower than headline */
+  color: #334155;
+  letter-spacing: 0.05em;
+  word-spacing: 0.15em;
+  margin-bottom: 8px; /* Reduced spacing */
+  text-transform: uppercase;
+}
+
+.clm-subtext {
+  font-family: 'Inter', sans-serif;
+  font-size: 15.5px;
+  font-weight: 500; /* Lower than kicker */
+  line-height: 1.55;
+  color: #556274;
+  max-width: 480px;
+  margin: 0 0 28px; /* Reduced spacing */
+  letter-spacing: 0.005em;
+}
+
+/* Feature Columns */
+.clm-features-row {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 32px; /* Reduced spacing */
+}
+
+.clm-feature-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0 22px;
+}
+
+.clm-feature-col:first-child {
+  padding-left: 0;
+}
+
+.clm-feature-col:last-child {
+  padding-right: 0;
+}
+
+/* Increased SVG Icon Size */
+.clm-feature-icon {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #0f172a;
+  margin-bottom: 8px;
+}
+
+.clm-feature-icon svg {
+  width: 42px !important;
+  height: 42px !important;
+  display: block;
+}
+
+.clm-feature-label {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: 0.01em;
+}
+
+.clm-feature-sep {
+  width: 1px;
+  height: 42px;
+  background-color: #cbd5e1;
+}
+
+/* Copyright text */
+.clm-copyright-desktop {
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  font-weight: 400;
+  color: #94a3b8;
+}
+
+.clm-copyright-mobile {
+  display: none;
+}
+
+/* ================= RIGHT CARD ================= */
+.clm-card-section {
+  flex: 0.85;
+  display: flex;
+  flex-direction: column;
+  align-self: center !important; /* Self-align center */
+  align-items: center;
+}
+
+.clm-card {
+  width: 100%;
+  max-width: 390px;
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 32px 28px; /* Reduced internal padding */
+  box-shadow: 0 12px 35px rgba(0, 0, 0, 0.06);
+}
+
+.clm-card-header {
+  margin-bottom: 18px; /* Reduced spacing */
+}
+
+.clm-card-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 24px;
+  font-weight: 800;
+  color: #0f172a;
+  margin: 0 0 4px;
+  letter-spacing: -0.01em;
+}
+
+.clm-card-subtitle {
+  font-family: 'Inter', sans-serif;
+  font-size: 13px;
+  font-weight: 400;
+  color: #64748b;
+  margin: 0;
+}
+
+/* Error Banner */
+.clm-err {
+  background: #fef2f2;
+  border: 1px solid #f87171;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #b91c1c;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Inputs */
+.clm-field {
+  margin-bottom: 12px; /* Reduced spacing between inputs */
+}
+
+.clm-inp-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.clm-inp-icon {
+  position: absolute;
+  left: 14px;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+}
+
+.clm-inp {
+  width: 100%;
+  height: 44px;
+  background: #f1f5f9;
+  border: 1.5px solid transparent;
+  border-radius: 8px;
+  padding: 0 16px;
+  font-size: 13.5px;
+  font-weight: 400;
+  color: #0f172a;
+  outline: none;
+  font-family: 'Inter', sans-serif;
+  transition: all 0.16s ease;
+}
+
+.clm-inp-has-icon {
+  padding-left: 44px;
+}
+
+.clm-inp:focus {
+  background: #ffffff;
+  border-color: #ffd800;
+  box-shadow: 0 0 0 3px rgba(254, 216, 0, 0.28);
+}
+
+.clm-inp::placeholder {
+  color: #94a3b8;
+  font-weight: 400;
+}
+
+/* Action Button */
+.clm-btn {
+  width: 100%;
+  height: 44px;
+  background: #fedb00;
+  border: none;
+  border-radius: 8px;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  margin-top: 8px; /* Reduced spacing */
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.clm-btn:hover {
+  background: #f2cb00;
+  transform: translateY(-1px);
+}
+
+.clm-btn:active {
+  transform: translateY(0);
+}
+
+.clm-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Divider */
+.clm-separator {
+  position: relative;
+  text-align: center;
+  margin: 14px 0; /* Reduced spacing */
+}
+
+.clm-separator::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: #e2e8f0;
+}
+
+.clm-separator span {
+  position: relative;
+  background: #ffffff;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #94a3b8;
+  letter-spacing: 0.05em;
+}
+
+/* SSO Button */
+.clm-sso-btn {
+  width: 100%;
+  height: 44px;
+  background: #ffffff;
+  border: 1.5px solid #0f172a;
+  border-radius: 8px;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #0f172a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.clm-sso-btn:hover {
+  background: #f8fafc;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+/* Support Help */
+.clm-help-link {
+  margin-top: 16px; /* Reduced spacing */
+  text-align: center;
+  font-size: 12px;
+  font-weight: 400;
+  color: #64748b;
+}
+
+.clm-help-link a {
+  color: #0265c2;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.clm-help-link a:hover {
+  text-decoration: underline;
+}
+
+/* ================= RESPONSIVE ================= */
+@media (max-width: 992px) {
+  .clm-login-viewport {
+    padding: 28px 20px;
+  }
+  
+  .clm-login-container {
+    flex-direction: column;
+    align-items: center;
+    gap: 28px;
+  }
+
+  .clm-info-section {
+    max-width: 100%;
+    text-align: center;
+    align-items: center;
+  }
+
+  .clm-headline {
+    font-size: 32px;
+  }
+
+  .clm-brand-divider {
+    margin: 0 auto 12px auto;
+  }
+
+  .clm-features-row {
+    justify-content: center;
+  }
+
+  .clm-card-section {
+    align-items: center;
+    width: 100%;
+  }
+
+  .clm-copyright-desktop {
+    display: none;
+  }
+
+  .clm-copyright-mobile {
+    display: block;
+    font-size: 11px;
+    font-weight: 400;
+    color: #94a3b8;
+    margin-top: 18px;
+    text-align: center;
+  }
+}
+
+@media (max-width: 520px) {
+  .clm-features-row {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+  }
+
+  .clm-feature-sep {
+    display: none;
+  }
+
+  .clm-feature-col {
+    padding: 0;
+  }
+
+  .clm-card {
+    padding: 22px 16px;
+  }
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id&gt;clone_uclm_login&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;Clone UCLM Login&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;true&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-10-07 10:30:54&lt;/sys_created_on&gt;&lt;sys_id&gt;8eb20b9197f38310be31fa17f053afd7&lt;/sys_id&gt;&lt;sys_mod_count&gt;19&lt;/sys_mod_count&gt;&lt;sys_name&gt;Clone UCLM Login&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_8eb20b9197f38310be31fa17f053afd7&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-10-07 12:16:45&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;link rel="preconnect" href="https://fonts.googleapis.com"&gt;
+&lt;link rel="preconnect" href="https://fonts.gstatic.com" crossorigin&gt;
+&lt;link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Plus+Jakarta+Sans:wght@500;600;700;800;900&amp;display=swap" rel="stylesheet"&gt;
+&lt;div class="clm-login-viewport"&gt;
+  &lt;!-- Dynamic Crisp Geometric Angle &amp; Sheen Background --&gt;
+  &lt;div class="clm-bg-art" aria-hidden="true"&gt;
+    &lt;svg viewBox="0 0 1440 900" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg"&gt;
+      &lt;defs&gt;
+        &lt;!-- Soft White Sheen Overlay --&gt;
+        &lt;linearGradient id="shineGlow" x1="0%" y1="100%" x2="100%" y2="0%"&gt;
+          &lt;stop offset="0%" stop-color="#ffffff" stop-opacity="0" /&gt;
+          &lt;stop offset="60%" stop-color="#ffffff" stop-opacity="0.9" /&gt;
+          &lt;stop offset="100%" stop-color="#ffffff" stop-opacity="0" /&gt;
+        &lt;/linearGradient&gt;
+        &lt;!-- Solid Yellow Corner --&gt;
+        &lt;linearGradient id="yellowPrimary" x1="0%" y1="0%" x2="100%" y2="100%"&gt;
+          &lt;stop offset="0%" stop-color="#ffe600" /&gt;
+          &lt;stop offset="100%" stop-color="#f5d000" /&gt;
+        &lt;/linearGradient&gt;
+        &lt;!-- Pale Accent Stripe --&gt;
+        &lt;linearGradient id="yellowAccent" x1="0%" y1="0%" x2="100%" y2="100%"&gt;
+          &lt;stop offset="0%" stop-color="#fff76a" stop-opacity="0.6" /&gt;
+          &lt;stop offset="100%" stop-color="#ffe600" stop-opacity="0.4" /&gt;
+        &lt;/linearGradient&gt;
+      &lt;/defs&gt;
+
+      &lt;!-- Background Accent Band --&gt;
+      &lt;polygon points="980,900 1140,900 1440,360 1440,240" fill="url(#yellowAccent)" /&gt;
+
+      &lt;!-- White Dynamic Sheen / Gloss Streak --&gt;
+      &lt;polygon points="1070,900 1130,900 1440,400 1440,300" fill="url(#shineGlow)" /&gt;
+
+      &lt;!-- Sharp Corner Polygon --&gt;
+      &lt;polygon points="1090,900 1440,900 1440,490" fill="url(#yellowPrimary)" /&gt;
+    &lt;/svg&gt;
+  &lt;/div&gt;
+
+  &lt;div class="clm-login-container"&gt;
+    
+    &lt;!-- LEFT COLUMN: Brand, Typography &amp; Core Capabilities --&gt;
+    &lt;div class="clm-info-section"&gt;
+      &lt;div class="clm-brand-header"&gt;
+        &lt;div class="clm-logo-wrap"&gt;
+          &lt;img src="https://abgdev.service-now.com/x_birl3_clm.UltraTech.png" alt="UltraTech Cement" class="clm-brand-logo" /&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div class="clm-hero-block"&gt;
+        &lt;div class="clm-brand-divider"&gt;&lt;/div&gt;
+        &lt;div class="clm-kicker"&gt;CREDIT LIMIT MANAGEMENT&lt;/div&gt;
+        &lt;h1 class="clm-headline"&gt;Enable Better Decisions.&lt;/h1&gt;
+        &lt;p class="clm-subtext"&gt;
+          Streamlined credit limit processes for stronger partnerships and sustainable growth.
+        &lt;/p&gt;
+      &lt;/div&gt;
+
+      &lt;!-- Feature Grid with Custom Provided SVGs --&gt;
+      &lt;div class="clm-features-row"&gt;
+        
+        &lt;!-- Control --&gt;
+        &lt;div class="clm-feature-col"&gt;
+          &lt;div class="clm-feature-icon"&gt;
+            &lt;svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"&gt;
+              &lt;path d="M0 0h24v24H0z" fill="none" /&gt;
+              &lt;path fill="currentColor" fill-rule="evenodd" d="M4 2h9.56L20 8.44V22H4zm13.44 6L14 4.56V8zM5.5 3.5v17h13v-11h-4.75c-.69 0-1.25-.56-1.25-1.25V3.5zm3.78 10.72l1.47 1.47l3.97-3.97l1.06 1.06l-4.145 4.145a1.25 1.25 0 0 1-.885.365c-.32 0-.64-.12-.885-.365L8.22 15.28z" clip-rule="evenodd" /&gt;
+            &lt;/svg&gt;
+          &lt;/div&gt;
+          &lt;span class="clm-feature-label"&gt;Control&lt;/span&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-feature-sep"&gt;&lt;/div&gt;
+
+        &lt;!-- Analyse --&gt;
+        &lt;div class="clm-feature-col"&gt;
+          &lt;div class="clm-feature-icon"&gt;
+            &lt;svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"&gt;
+              &lt;path d="M0 0h24v24H0z" fill="none" /&gt;
+              &lt;path fill="currentColor" d="M13 6h2v11h-2zm4-3h2v14h-2zM9 9h2v8H9zM4 19h16v2H4zm1-7h2v5H5z" /&gt;
+            &lt;/svg&gt;
+          &lt;/div&gt;
+          &lt;span class="clm-feature-label"&gt;Analyse&lt;/span&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-feature-sep"&gt;&lt;/div&gt;
+
+        &lt;!-- Safe / Secure --&gt;
+        &lt;div class="clm-feature-col"&gt;
+          &lt;div class="clm-feature-icon"&gt;
+            &lt;svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24"&gt;
+              &lt;path d="M0 0h24v24H0z" fill="none" /&gt;
+              &lt;path fill="currentColor" d="m13.896 9.946l-3.046 3.047l-1.247-1.247a.5.5 0 0 0-.707.707l1.6 1.6a.5.5 0 0 0 .707 0l3.408-3.407a.5.5 0 0 0-.715-.7m6.093-6.193a.5.5 0 0 0-.592-.387a9.1 9.1 0 0 1-7.11-1.454a.5.5 0 0 0-.574 0a9.1 9.1 0 0 1-7.11 1.454a.498.498 0 0 0-.603.49v8.018a9.13 9.13 0 0 0 3.799 7.407l3.91 2.804a.5.5 0 0 0 .582 0l3.91-2.804A9.13 9.13 0 0 0 20 11.874V3.855a.5.5 0 0 0-.01-.102M19 11.874a8.13 8.13 0 0 1-3.38 6.595L12 21.063L8.38 18.47A8.13 8.13 0 0 1 5 11.874v-7.42a10.08 10.08 0 0 0 7-1.53a10.1 10.1 0 0 0 7 1.53z" /&gt;
+            &lt;/svg&gt;
+          &lt;/div&gt;
+          &lt;span class="clm-feature-label"&gt;Secure&lt;/span&gt;
+        &lt;/div&gt;
+
+        &lt;div class="clm-feature-sep"&gt;&lt;/div&gt;
+
+        &lt;!-- Integrate --&gt;
+        &lt;div class="clm-feature-col"&gt;
+          &lt;div class="clm-feature-icon"&gt;
+            &lt;svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 20 20"&gt;
+              &lt;path d="M0 0h20v20H0z" fill="none" /&gt;
+              &lt;path fill="currentColor" d="M5.879 6.586a2.5 2.5 0 1 1 .707-.707L8.62 7.914A2.5 2.5 0 0 1 9.999 7.5c.51 0 .983.152 1.379.414l2.035-2.035a2.5 2.5 0 1 1 .707.707L12.086 8.62c.262.396.414.87.414 1.379c0 .51-.152.983-.414 1.379l2.035 2.035a2.5 2.5 0 1 1-.707.707l-2.035-2.035a2.5 2.5 0 0 1-1.379.414c-.51 0-.983-.152-1.379-.414L6.586 14.12a2.5 2.5 0 1 1-.707-.707l2.035-2.035A2.5 2.5 0 0 1 7.5 10c0-.51.152-.983.414-1.379zM6 4.5a1.5 1.5 0 1 0-3 0a1.5 1.5 0 0 0 3 0m11 0a1.5 1.5 0 1 0-3 0a1.5 1.5 0 0 0 3 0M4.5 17a1.5 1.5 0 1 0 0-3a1.5 1.5 0 0 0 0 3M17 15.5a1.5 1.5 0 1 0-3 0a1.5 1.5 0 0 0 3 0M11.5 10a1.5 1.5 0 1 0-3 0a1.5 1.5 0 0 0 3 0" /&gt;
+            &lt;/svg&gt;
+          &lt;/div&gt;
+          &lt;span class="clm-feature-label"&gt;Integrate&lt;/span&gt;
+        &lt;/div&gt;
+
+      &lt;/div&gt;
+
+      &lt;div class="clm-copyright-desktop"&gt;
+        © 2026 UltraTech Cement Limited. All rights reserved.
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- RIGHT COLUMN: Sign In Card --&gt;
+    &lt;div class="clm-card-section"&gt;
+      &lt;div class="clm-card"&gt;
+        &lt;div class="clm-card-header"&gt;
+          &lt;h2 class="clm-card-title"&gt;Sign In&lt;/h2&gt;
+          &lt;p class="clm-card-subtitle"&gt;Access Credit Limit Management&lt;/p&gt;
+        &lt;/div&gt;
+
+        &lt;!-- Alert Notification --&gt;
+        &lt;div class="clm-err" ng-show="c.message" role="alert" aria-live="assertive"&gt;
+          &lt;svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"&gt;
+            &lt;circle cx="12" cy="12" r="10" /&gt;
+            &lt;line x1="12" y1="8" x2="12" y2="12" /&gt;
+            &lt;line x1="12" y1="16" x2="12.01" y2="16" /&gt;
+          &lt;/svg&gt;
+          &lt;span&gt;{{c.message}}&lt;/span&gt;
+        &lt;/div&gt;
+
+        &lt;!-- Username Input --&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;div class="clm-inp-wrap"&gt;
+            &lt;span class="clm-inp-icon"&gt;
+              &lt;svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"&gt;
+                &lt;path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /&gt;
+                &lt;circle cx="12" cy="7" r="4" /&gt;
+              &lt;/svg&gt;
+            &lt;/span&gt;
+            &lt;input class="clm-inp clm-inp-has-icon"
+              id="username"
+              type="text"
+              placeholder="Username or email"
+              ng-model="c.username"
+              autocomplete="username"
+              autofocus
+              aria-required="true"
+              ng-keydown="$event.key === 'Enter' &amp;&amp; c.focusPassword()" /&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;!-- Password Input --&gt;
+        &lt;div class="clm-field"&gt;
+          &lt;div class="clm-inp-wrap"&gt;
+            &lt;span class="clm-inp-icon"&gt;
+              &lt;svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"&gt;
+                &lt;rect x="3" y="11" width="18" height="11" rx="2" ry="2" /&gt;
+                &lt;path d="M7 11V7a5 5 0 0 1 10 0v4" /&gt;
+              &lt;/svg&gt;
+            &lt;/span&gt;
+            &lt;input class="clm-inp clm-inp-has-icon"
+              id="password"
+              type="password"
+              placeholder="Password"
+              ng-model="c.password"
+              autocomplete="current-password"
+              aria-required="true"
+              ng-keydown="$event.key === 'Enter' &amp;&amp; c.login(c.username, c.password)" /&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;!-- Primary Action Button --&gt;
+        &lt;button class="clm-btn"
+          type="button"
+          ng-click="c.login(c.username, c.password)"
+          ng-disabled="c.loading"
+          aria-label="Log in"&gt;
+          &lt;span&gt;{{c.loading ? 'Logging in...' : 'Log In'}}&lt;/span&gt;
+          &lt;svg ng-if="!c.loading" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"&gt;
+            &lt;line x1="5" y1="12" x2="19" y2="12" /&gt;
+            &lt;polyline points="12 5 19 12 12 19" /&gt;
+          &lt;/svg&gt;
+        &lt;/button&gt;
+
+        &lt;!-- Divider --&gt;
+        &lt;div class="clm-separator"&gt;
+          &lt;span&gt;OR&lt;/span&gt;
+        &lt;/div&gt;
+
+        &lt;!-- SSO Button --&gt;
+        &lt;button class="clm-sso-btn"
+          type="button"
+          ng-click="c.externalLogin()"
+          aria-label="Sign in with SSO"&gt;
+          &lt;svg class="clm-ms-logo" width="16" height="16" viewBox="0 0 21 21"&gt;
+            &lt;rect x="1" y="1" width="9" height="9" fill="#f25022"/&gt;
+            &lt;rect x="11" y="1" width="9" height="9" fill="#7fba00"/&gt;
+            &lt;rect x="1" y="11" width="9" height="9" fill="#00a4ef"/&gt;
+            &lt;rect x="11" y="11" width="9" height="9" fill="#ffb900"/&gt;
+          &lt;/svg&gt;
+          &lt;span&gt;Sign in with SSO&lt;/span&gt;
+        &lt;/button&gt;
+
+        &lt;div class="clm-help-link"&gt;
+          Need help? &lt;a href="mailto:it-support@adityabirla.com"&gt;Contact IT Support&lt;/a&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div class="clm-copyright-mobile"&gt;
+        © 2026 UltraTech Cement Limited. All rights reserved.
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+  &lt;/div&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>-1754764883</payload_hash>
+        <record_name>Clone UCLM Login</record_name>
+        <reverted_from/>
+        <source>d386fafb973acb106bf93da0f053af20</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-07 12:16:45</sys_created_on>
+        <sys_id>3cfa139d973b8310be31fa17f053afec</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a1164b72b00000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-07 12:16:45</sys_updated_on>
+        <type>Widget</type>
+        <update_guid>fcfa139dff3b8310ed8a2f1fa8b5e2eb</update_guid>
+        <update_guid_history>fcfa139dff3b8310ed8a2f1fa8b5e2eb:-1754764883,a4da9f5de03b8310cba38a9399b17cf9:1778395393,077a575de83b8310958908d06d7a1165:385330662,e8995799b53b83103707cfbf043f92bc:356614534,7e885fd5263b8310264218274acb3e2d:1094918886,e0a71b11913b831082079837446e99b1:2042029405,79179bd5d8f78310195bf523e4241cec:1460699370,bcd65f1dcff78310b7340c266d8afd9b:298839317,61a55f19f3f783107c0c54a5426535f3:1460699370,8ff05f9de7b78310b11ea909bcf7db07:-498110302,a05097d92ab78310fd1f379eb614f1ab:-1037782644,a8409f9982b78310a6d8cb1318dcdb82:-1172426352,24101f5924b78310fce9477fec346ea8:-1037782644,4dce8b1501b78310bf994897d8c753d3:-408316949,293d8f599c7783107368db598671085c:24230588,a58b0bd1a577831003420a05062eee15:-1964253315,6f580b954e3783109f7e19fa73351d6b:-1094157102,3115cf5da3f38310fb5b76db38640301:-1964253315,24e24fd181f383105a1305afcf67f393:-937766765,86b20b9158f383101210b4532ff963db:691430193</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="Clone UCLM Login">133f1f5d977b8310be31fa17f053af37</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-07 12:35:30</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>3e42e56a8ff14ed4b869bfea41090961</sys_id>
+        <sys_metadata>8eb20b9197f38310be31fa17f053afd7</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>Clone UCLM Login</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_8eb20b9197f38310be31fa17f053afd7</sys_update_name>
+        <sys_update_version display_value="sp_widget_8eb20b9197f38310be31fa17f053afd7">3cfa139d973b8310be31fa17f053afec</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-07 12:35:30</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

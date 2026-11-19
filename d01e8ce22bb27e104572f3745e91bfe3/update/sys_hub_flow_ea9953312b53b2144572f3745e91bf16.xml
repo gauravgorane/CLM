@@ -1,0 +1,984 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_hub_flow">
+    <sys_hub_flow action="INSERT_OR_UPDATE">
+        <access>public</access>
+        <acls/>
+        <active>true</active>
+        <allow_high_security_roles>false</allow_high_security_roles>
+        <annotation/>
+        <attributes>browserActivatedIn=chrome,integrationActivatedIn=standalone,labelCacheCleanUpExecuted=true,timeFromCreateToActivate=269000,viewActivatedIn=naturalLanguage</attributes>
+        <authored_on_release_version>28100</authored_on_release_version>
+        <callable_by_client_api>false</callable_by_client_api>
+        <category/>
+        <copied_from>e0b9ab9feb702110f2549bf12a5228e6</copied_from>
+        <copied_from_name>Task Processing Flow Template</copied_from_name>
+        <description>DocDataExtractor Flow Template for processing a task</description>
+        <display_name_after_preview/>
+        <flow_priority/>
+        <generation_source/>
+        <internal_name>docintel_task_processing_flow__clm_ocr__clm_ocr</internal_name>
+        <label_cache>[{"name":"6e1fa36a-f09d-4993-afc2-b4d3ade21307.task_id","label":"1 - DocIntel - Create a Document Task➛Task ID","reference_display":"Task ID","type":"string","base_type":"string","usedInstances":{"6c05adbf-2bc4-4a24-8693-36d39a8a4b2d":["conditions"]},"attributes":{"uiType":"string","uiTypeLabel":"String","element_mapping_provider":"com.glide.flow_design.action.data.FlowDesignVariableMapper","pwd2droppable":"true","uiUniqueId":"a7335496-1038-4dd2-8efb-a38349d0513f"}},{"name":"Created_1.current.sys_id","label":"Trigger - Record Created➛Incident Record➛Sys ID","reference":"","reference_display":"Sys ID","type":"GUID","base_type":"GUID","parent_table_name":"incident","column_name":"sys_id"},{"name":"Created_1.table_name","label":"Trigger - Record Created➛Incident Table","reference":"incident","reference_display":"Incident","type":"table_name","base_type":"table_name","attributes":{"test_input_hidden":"true"}},{"name":"6c05adbf-2bc4-4a24-8693-36d39a8a4b2d.Record","label":"3 - Look Up Record➛Document Task Record","reference":"sys_di_task","reference_display":"Document Task","type":"reference","base_type":"reference","usedInstances":{"831d84e2-f49a-48f0-821d-72ab630e17ef":["record"],"a93ca2d9-1eca-44a0-9e0a-a93a64cfde2d":["task"],"46d8a86f-b38a-427b-b49e-3ca449847b9c":["task"]},"attributes":{"element_mapping_provider":"com.glide.flow_design.action.data.FlowDesignVariableMapper"}},{"name":"a93ca2d9-1eca-44a0-9e0a-a93a64cfde2d.result","label":"5 - Retrieve Extracted Values➛Result","type":"json","base_type":"json","usedInstances":{"46d8a86f-b38a-427b-b49e-3ca449847b9c":["extracted_values"]},"attributes":{"uiTypeLabel":"JSON","element_mapping_provider":"com.glide.flow_design.action.data.FlowDesignVariableMapper","uiType":"json","uiUniqueId":"be0e0bed-a81b-4f9e-a350-b710e542508c"}},{"name":"Created_1.current","label":"Trigger - Record Created➛Incident Record","reference":"x_birl3_clm_financial_documents","reference_display":"Financial Documents","type":"reference","base_type":"reference","usedInstances":{"46d8a86f-b38a-427b-b49e-3ca449847b9c":["target_record"]},"attributes":{}}]</label_cache>
+        <master_snapshot>f0aadfb12b53b2144572f3745e91bfce</master_snapshot>
+        <master_snapshot_digest/>
+        <name>DocIntel Task Processing Flow - CLM_OCR - CLM_OCR</name>
+        <natlang/>
+        <outputs/>
+        <pre_compiled>false</pre_compiled>
+        <remote_trigger_id>cdaa13f12b53b2144572f3745e91bf41</remote_trigger_id>
+        <run_as>user</run_as>
+        <run_with_roles/>
+        <sc_callable>false</sc_callable>
+        <show_draft_actions>false</show_draft_actions>
+        <show_triggered_flows>false</show_triggered_flows>
+        <status>published</status>
+        <substatus/>
+        <sys_class_name>sys_hub_flow</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:45:17</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>ea9953312b53b2144572f3745e91bf16</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>DocIntel Task Processing Flow - CLM_OCR - CLM_OCR</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_hub_flow_ea9953312b53b2144572f3745e91bf16</sys_update_name>
+        <sys_updated_by>balwinder.singh@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-29 11:30:40</sys_updated_on>
+        <type>flow</type>
+        <updation_source/>
+        <version>2</version>
+        <version_record/>
+    </sys_hub_flow>
+    <sys_translated_text action="delete_multiple" query="documentkey=ea9953312b53b2144572f3745e91bf16"/>
+    <sys_variable_value action="delete_multiple" query="document_key=ea9953312b53b2144572f3745e91bf16"/>
+    <sys_flow_record_trigger action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <condition table="x_birl3_clm_financial_documents">^EQ<item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </condition>
+        <name/>
+        <on_delete>false</on_delete>
+        <on_insert>true</on_insert>
+        <on_update>false</on_update>
+        <published_version/>
+        <run_flow_in>background</run_flow_in>
+        <run_on_extended>false</run_on_extended>
+        <run_when_setting>both</run_when_setting>
+        <run_when_user_list/>
+        <run_when_user_setting>any</run_when_user_setting>
+        <sys_class_name>sys_flow_record_trigger</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:49</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>cdaa13f12b53b2144572f3745e91bf41</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_overrides/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:49</sys_updated_on>
+        <table>x_birl3_clm_financial_documents</table>
+        <trigger_definition/>
+    </sys_flow_record_trigger>
+    <sys_trigger_runner_mapping action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <data>{"run_flow_in":"background","run_when_user_list":[],"run_when_setting":"both","run_when_user_setting":"any","run_on_extended":"false"}</data>
+        <identifier>ea9953312b53b2144572f3745e91bf16</identifier>
+        <identifier_type/>
+        <runner>FDTriggerRunner</runner>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:49</sys_created_on>
+        <sys_id>c9aa13f12b53b2144572f3745e91bf43</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-03-13 06:47:50</sys_updated_on>
+        <trigger display_value="">cdaa13f12b53b2144572f3745e91bf41</trigger>
+    </sys_trigger_runner_mapping>
+    <sys_trigger_runner_mapping action="delete_multiple" query="identifier=ea9953312b53b2144572f3745e91bf16^sys_idNOT INc9aa13f12b53b2144572f3745e91bf43"/>
+    <sys_hub_flow_stage action="delete_multiple" query="flow=ea9953312b53b2144572f3745e91bf16"/>
+    <sys_flow_cat_variable_model action="delete_multiple" query="id=ea9953312b53b2144572f3745e91bf16^sys_idNOT IN269953312b53b2144572f3745e91bf19"/>
+    <sys_flow_cat_variable_model action="INSERT_OR_UPDATE">
+        <id>ea9953312b53b2144572f3745e91bf16</id>
+        <name>DocIntel Task Processing Flow - CLM_OCR - CLM_OCR</name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:45:17</sys_created_on>
+        <sys_id>269953312b53b2144572f3745e91bf19</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_scope/>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:45:17</sys_updated_on>
+    </sys_flow_cat_variable_model>
+    <sys_flow_cat_variable action="delete_multiple" query="flow_catalog_model=269953312b53b2144572f3745e91bf19"/>
+    <sys_hub_flow_input action="delete_multiple" query="model=ea9953312b53b2144572f3745e91bf16^sys_idNOT IN229953312b53b2144572f3745e91bf40,aa9953312b53b2144572f3745e91bf47"/>
+    <sys_hub_flow_input action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <array>false</array>
+        <array_denormalized>false</array_denormalized>
+        <attributes>element_mapping_provider=com.glide.flow_design.action.data.FlowDesignVariableMapper,uiType=document_id,uiTypeLabel=Document ID</attributes>
+        <audit>false</audit>
+        <calculation><![CDATA[(function calculatedFieldValue(current) {
+
+	// Add your code here
+	return '';  // return the calculated value
+
+})(current);]]></calculation>
+        <choice/>
+        <choice_field/>
+        <choice_table/>
+        <column_label/>
+        <comments/>
+        <create_roles/>
+        <default_value/>
+        <defaultsort/>
+        <delete_roles/>
+        <dependent>table_name</dependent>
+        <dependent_on_field>table_name</dependent_on_field>
+        <display>false</display>
+        <dynamic_creation>false</dynamic_creation>
+        <dynamic_creation_script/>
+        <dynamic_default_value/>
+        <dynamic_ref_qual/>
+        <element>current</element>
+        <element_reference>false</element_reference>
+        <foreign_database/>
+        <formula/>
+        <function_definition/>
+        <function_field>false</function_field>
+        <help/>
+        <hint/>
+        <internal_type display_value="">document_id</internal_type>
+        <label>Record</label>
+        <mandatory>true</mandatory>
+        <max_length>200</max_length>
+        <model display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">ea9953312b53b2144572f3745e91bf16</model>
+        <model_id>ea9953312b53b2144572f3745e91bf16</model_id>
+        <model_table>sys_hub_flow</model_table>
+        <name>var__m_sys_hub_flow_input_ea9953312b53b2144572f3745e91bf16</name>
+        <next_element/>
+        <order>100</order>
+        <primary>false</primary>
+        <read_only>false</read_only>
+        <read_only_option/>
+        <read_roles/>
+        <reference/>
+        <reference_cascade_rule/>
+        <reference_floats>false</reference_floats>
+        <reference_key/>
+        <reference_qual/>
+        <reference_qual_condition/>
+        <reference_type/>
+        <sizeclass/>
+        <spell_check>false</spell_check>
+        <staged>false</staged>
+        <sys_class_name>sys_hub_flow_input</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:45:17</sys_created_on>
+        <sys_id>229953312b53b2144572f3745e91bf40</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name/>
+        <sys_package/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name/>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:45</sys_updated_on>
+        <table_reference>false</table_reference>
+        <text_index>false</text_index>
+        <unique>false</unique>
+        <use_dependent_field>true</use_dependent_field>
+        <use_dynamic_default>false</use_dynamic_default>
+        <use_reference_qualifier>simple</use_reference_qualifier>
+        <virtual>false</virtual>
+        <virtual_type>script</virtual_type>
+        <widget/>
+        <write_roles/>
+        <xml_view>false</xml_view>
+    </sys_hub_flow_input>
+    <sys_hub_action_input_action_instance action="delete_multiple" query="action_input=229953312b53b2144572f3745e91bf40"/>
+    <sys_hub_flow_input action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <array>false</array>
+        <array_denormalized>false</array_denormalized>
+        <attributes>element_mapping_provider=com.glide.flow_design.action.data.FlowDesignVariableMapper,test_input_hidden=true,uiType=table_name,uiTypeLabel=Table Name</attributes>
+        <audit>false</audit>
+        <calculation><![CDATA[(function calculatedFieldValue(current) {
+
+	// Add your code here
+	return '';  // return the calculated value
+
+})(current);]]></calculation>
+        <choice/>
+        <choice_field/>
+        <choice_table/>
+        <column_label/>
+        <comments/>
+        <create_roles/>
+        <default_value/>
+        <defaultsort/>
+        <delete_roles/>
+        <dependent/>
+        <dependent_on_field/>
+        <display>false</display>
+        <dynamic_creation>false</dynamic_creation>
+        <dynamic_creation_script/>
+        <dynamic_default_value/>
+        <dynamic_ref_qual/>
+        <element>table_name</element>
+        <element_reference>false</element_reference>
+        <foreign_database/>
+        <formula/>
+        <function_definition/>
+        <function_field>false</function_field>
+        <help/>
+        <hint/>
+        <internal_type display_value="">table_name</internal_type>
+        <label>Table Name</label>
+        <mandatory>false</mandatory>
+        <max_length>200</max_length>
+        <model display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">ea9953312b53b2144572f3745e91bf16</model>
+        <model_id>ea9953312b53b2144572f3745e91bf16</model_id>
+        <model_table>sys_hub_flow</model_table>
+        <name>var__m_sys_hub_flow_input_ea9953312b53b2144572f3745e91bf16</name>
+        <next_element/>
+        <order>101</order>
+        <primary>false</primary>
+        <read_only>false</read_only>
+        <read_only_option/>
+        <read_roles/>
+        <reference/>
+        <reference_cascade_rule/>
+        <reference_floats>false</reference_floats>
+        <reference_key/>
+        <reference_qual/>
+        <reference_qual_condition/>
+        <reference_type/>
+        <sizeclass/>
+        <spell_check>false</spell_check>
+        <staged>false</staged>
+        <sys_class_name>sys_hub_flow_input</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:45:17</sys_created_on>
+        <sys_id>aa9953312b53b2144572f3745e91bf47</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name/>
+        <sys_package/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name/>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:46</sys_updated_on>
+        <table_reference>false</table_reference>
+        <text_index>false</text_index>
+        <unique>false</unique>
+        <use_dependent_field>false</use_dependent_field>
+        <use_dynamic_default>false</use_dynamic_default>
+        <use_reference_qualifier>simple</use_reference_qualifier>
+        <virtual>false</virtual>
+        <virtual_type>script</virtual_type>
+        <widget/>
+        <write_roles/>
+        <xml_view>false</xml_view>
+    </sys_hub_flow_input>
+    <sys_hub_action_input_action_instance action="delete_multiple" query="action_input=aa9953312b53b2144572f3745e91bf47"/>
+    <sys_hub_flow_output action="delete_multiple" query="model=ea9953312b53b2144572f3745e91bf16"/>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=ea9953312b53b2144572f3745e91bf16"/>
+    <sys_hub_trigger_instance_v2 action="delete_multiple" query="flow=ea9953312b53b2144572f3745e91bf16^sys_idNOT IN7a9953312b53b2144572f3745e91bf8e"/>
+    <sys_hub_trigger_instance_v2 action="INSERT_OR_UPDATE">
+        <comment/>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">ea9953312b53b2144572f3745e91bf16</flow>
+        <generation_source/>
+        <name>Created</name>
+        <published_version/>
+        <remote_sys_id/>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:45:17</sys_created_on>
+        <sys_id>7a9953312b53b2144572f3745e91bf8e</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_scope/>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:46</sys_updated_on>
+        <trigger_definition display_value="Created">798916a0c31322002841b63b12d3ae7c</trigger_definition>
+        <trigger_inputs>H4sIAAAAAAAA/+VY227jNhD9FUFPLeACutiWlbetk0UNpNnW8bYPQUpQEmkLpSlXopS4i/x7h7pF1sXxJenayYsBkTQ15/DMmRHvvqki9OdzEk54JDB3ye06mnjqhaqZljekA5M4jmboukaNQd92qG7ggWGM+praUxl2CIOlM+wwAs8+FyTkmM3WKwLDQg4jjpdybom5h0UQrtULEcakp9IwWM7IcsWwgMUUswgGg9AjoXqh99T0b/ke8PcEs1g+PyLHD5mJXLZE1OcQsI8Z8gI3XhIuIljp+RHsuf4j/8MEVngwBTMrHMKmQr7gm+oufOaFhKsXd/c9VUDEaAOOcpPF7UsuXOpi2yCaa+qmYWga4NedoenohmdiorVxUYtftFDyDJY8CsI94pU8NNgKCfa+cLYuVyyAbNgwZfYx8v+F3UeaXEcJoHJJNlc+opyWbNhdBL5LvqyEH/BsJIszmwxYvOQ3WfySUEJxzERBKIzEEexHVjJkGUQeEb1dBA/T4oWffZ6iyydZ4GJWPmEBonNiQSJ5FNRncCgo4yYK4jCNfno1/jK9RH9+mo1/uZqi6dXtbDoZz64u1acUF/onljtmEeaxoAzOU6mCzz5h8gB5vHQgmp4auaG/Ep9c4SeF6p56r5ED44B7fspnIw/cYiqqxloRR+W0Cy63JYemlfJyK28tUuSvq9+baZAN7poB42rEaQYMhxh7BHdkgEM7mGgJU7SQUkW2LRfykV2Soa9p3ykdcns7NBuWgUfYZVUlmTaRz1dx6nAPGJwOiQBhz0MVHuVSiOml9MiwPb1hLoQxh1eh8iSbGZESXjJ/7UcA9A6coGA1DQbm6XW+5TTmSgBHDj+KG4dAqlCK9KGTJZ7nZ0F/KySekpnrL8EhQksUrSO0iB20wSiy7JGtD7ukbbkbDKZJBlvfqer9kzxlwogrKmqlX6Pq069+FPl8XqG3xJgeVgNiiQ5UrxQMZlCj88J6f4yxNSWU1KRRM7htAtnZ9gpZppan65Q6hBqaJZnSNRPErlnaAFPP1DTX2Cr4ThiilgFvYn37GV+U5h7bIdPqZ1AEL3XN9pFxspkD+T6G1Ezur+MTDK1WJ8y9CkWp22z4cnf5vnK7hb1E+rq3a71481JBWfAA/nRAmXCw+/c8DGLu1Y1U7qn4XHleofyQM//jedlotWTQICTb8W6uOB+URxeLZxEVCYz5ulkmssHDCoJJdccmfaJBHTChBDgD23ZcbFBqDS1i6J2ybg3zLArBC2mUtOVhl/O2SjRpU/Ye5eD7B3hUUcg12loSsrn3bv4PC8IRgAwRk/beqAFz5nukmDvOIhqvSp6/4Wo2sYdHXOdhS+x0ZLsD3bJcC9wSHIL2iYP1vjHAtjU0R4OXsG8LVrTw8b98N8viIAPpcI+v2dRpXSmdpswjIoSsefs3Ohw+ItL/4Cy8SvWXB6qk9hWEyk3Af5o8r1NuCVTZ9NrljHqBasezC2ipQOVdoXYCsWh0eID0ZxjfQCo/YTrO/KPdFtQyLNmksuW24BBCD7xJIP3RwKZme1mg9nav6MZ48i3kjt6UdLpcW6u2a+4nrRZStm715u8ANdQ0lm9tvtC2flxSjmqVi0TuvD45JNgP0XakXeQxvYeMlqCAVkvSZaDAhAIvUXyq5NEST3HWilgQOAwGX1PwQkW+/cxqUbUUN5GXqfaucWdfn40OBIaV/GPgjIC9TnNRy6Ot90wtfB3WOxDPwoOB2fFJadcvndoCfQHHyXcRe1tN0uZcW6vmfvvW92ytm5WT31TKjm3CO0b9ZldmLVGcaIW//w+6jrCMeSUAAA==</trigger_inputs>
+        <trigger_outputs/>
+        <trigger_type>record_create</trigger_type>
+        <updation_source/>
+    </sys_hub_trigger_instance_v2>
+    <sys_hub_action_instance_v2 action="delete_multiple" query="flow=ea9953312b53b2144572f3745e91bf16^sys_idNOT IN729953312b53b2144572f3745e91bf80,229953312b53b2144572f3745e91bf7c,4cf917312b53b2144572f3745e91bfa2,803a9f712b53b2144572f3745e91bf3d,456ad7b12b53b2144572f3745e91bfbd,2a7a9bb12b53b2144572f3745e91bfe8"/>
+    <sys_hub_action_instance_v2 action="INSERT_OR_UPDATE">
+        <action_type display_value="DocIntel - Process a Document Task">1ca82b5feb702110f2549bf12a522896</action_type>
+        <action_type_parent display_value="DocIntel - Process a Document Task">5fe85713eb702110f2549bf12a522824</action_type_parent>
+        <attributes/>
+        <comment/>
+        <compiled_snapshot>1ca82b5feb702110f2549bf12a522896</compiled_snapshot>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">ea9953312b53b2144572f3745e91bf16</flow>
+        <generation_source/>
+        <order>2</order>
+        <parent_ui_id/>
+        <sys_class_name>sys_hub_action_instance_v2</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:45:17</sys_created_on>
+        <sys_id>729953312b53b2144572f3745e91bf80</sys_id>
+        <sys_mod_count>3</sys_mod_count>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:51:03</sys_updated_on>
+        <ui_id>62bbfafa-512d-49be-b197-e341f1b0c8cb</ui_id>
+        <updation_source/>
+        <values>H4sIAAAAAAAA/41TXW+bMBT9K5WfIQJC0iRvU6NIkbZVWrq+dBW62NeJNWOobdKyKP9914CyaO2kPXJ8ru/5ME8nBtyr2myN82A47jq3FWzF5jPkWTZPsMzTLE0Tmc3yZSnTDGZZtshmLGIq8PgCOWD2Dx5y4hmokJge3M+CZiJ2BN0G5HSaYyphOodYJksR58vlNAbJs7jMxRQEZuk0uZ2Mg+czjQrlGg3d43gDIfygtLBo2OrpOWINWNrm0bLV6a+j/5WroURN1Adae7Ndf2TAd00ALEqk6zmO0Odx8tsVXlsRxKQRwzePRiCpkKAdRqwCI8DXtmMrb1sCLIK4N7q7MA7K+MFlBW9O/aKl0yy62rtirnOFUEXQxq5OijEoYqxr3lZo/M3DwJFr8LCjjdy39hJirTi6ISiBElrt766xgXDfhKcyjHgo9XsBvNZtZb4OgbHLXVd9tY7EYROiCOZGp3J3qF8vuW2U6VMbD3XNQV9RESw/bBTq0OhotOhLihh4b1XZ+iD8xFr18L6qAfyoLNQYkioqaBpl9kVj66PqlZCxarLX9DGRun4lB07tzWT4dyZUI0w2hK97+BGsCul8oWtoOGz8btRLi/2fNeM8XywSGSe3EuKc5zJe5FzEKEBKmS/zkgt2jkKwdxqc+xMmmShe2hDF8BYpXGVUr4BDA6XSync/2iSZClHzIqgq6NVZUlnbvowx9mIoMSzhVjX+E9k44pjw+fk30s9jHBUEAAA=</values>
+    </sys_hub_action_instance_v2>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=729953312b53b2144572f3745e91bf80"/>
+    <sys_hub_action_instance_v2 action="INSERT_OR_UPDATE">
+        <action_type display_value="DocIntel - Create a Document Task">dc85af9beb702110f2549bf12a5228d6</action_type>
+        <action_type_parent display_value="DocIntel - Create a Document Task">bea253dbeb302110f2549bf12a522840</action_type_parent>
+        <attributes/>
+        <comment/>
+        <compiled_snapshot>dc85af9beb702110f2549bf12a5228d6</compiled_snapshot>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">ea9953312b53b2144572f3745e91bf16</flow>
+        <generation_source/>
+        <order>1</order>
+        <parent_ui_id/>
+        <sys_class_name>sys_hub_action_instance_v2</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:45:17</sys_created_on>
+        <sys_id>229953312b53b2144572f3745e91bf7c</sys_id>
+        <sys_mod_count>6</sys_mod_count>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-03-10 09:29:11</sys_updated_on>
+        <ui_id>6e1fa36a-f09d-4993-afc2-b4d3ade21307</ui_id>
+        <updation_source/>
+        <values>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</values>
+    </sys_hub_action_instance_v2>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=229953312b53b2144572f3745e91bf7c"/>
+    <sys_hub_action_instance_v2 action="INSERT_OR_UPDATE">
+        <action_type display_value="Look Up Record">9d09f99587003300663ca1bb36cb0ba3</action_type>
+        <action_type_parent display_value="Look Up Record">b93f42810b30030085c083eb37673a63</action_type_parent>
+        <attributes/>
+        <comment/>
+        <compiled_snapshot>9d09f99587003300663ca1bb36cb0ba3</compiled_snapshot>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">ea9953312b53b2144572f3745e91bf16</flow>
+        <generation_source/>
+        <order>3</order>
+        <parent_ui_id/>
+        <sys_class_name>sys_hub_action_instance_v2</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:46:45</sys_created_on>
+        <sys_id>4cf917312b53b2144572f3745e91bfa2</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:51:03</sys_updated_on>
+        <ui_id>6c05adbf-2bc4-4a24-8693-36d39a8a4b2d</ui_id>
+        <updation_source/>
+        <values>H4sIAAAAAAAA/+VY0Y7aOhD9lSjPQBMChOzb1SKkSm1X6nL70laWEzuLVWOntrNbFvHvdxwngIAForLSru6jx2P7zMw5YyffVz4j/o1PkiDJk2Q4joMgioJgNIoyHKZpNMrSIMUDv+MLvKDgaXDKKQwfMS/tWC81IgwZrH+BlTBdcLz8Vk9OZFYuqDDezE1nc8aJosK/+f6z4xdYwZ6GKv9mtTd1KSiOU8rBdVaj2gNplsVmiKo5Z/u0u8z74iakIhZK0PHpH0MFoYAhx1zTjr/AgmAj1XJjURSTO8G3hjkTBnb0rfMfzZ7h3HFg/XIKUWXUzW2GqM6UM+cTbPC9UWVmSlW7ZnPJMqpdPgjNccnN7a7NOdwVhknhlriw3WrJy4X44tLhbzZoCgOWUgMIWthALfI6jPx+Lp++NiinTFQ5qSe5zDDfjLAxiqWlsXhWPuXUVhotcFEw8YAKJR9ZtRiwLHoPHAa9nMsnOFSzB9HDmQXeg7zi3hTsk8r8DStmo/gM28BiAMQ4MAS5EmpZqiqVjyjjpa4mFBba7eWvO5aOtxxrvY0cUo5+lxa3y0MdMXJJs0syxQrzD2zxSOvg1p1GF8OTFEy2lMukIMyi0HviYORHCYvJajWiYY6jEe7mQUK6gySJujjP+t10QCJMaD+MgrhnhQRr1utDNf3lbi3Fdz7yRny3u6EfS0ctwwPbp2Mb1DIMrybDQRC8JyHC4W9Ph+2V5VJwRl4hOUkysuWTlsogl8sdfR1qpDXPL4DQ8PzOMtNLly+hqmmeM8rJsdtmaif2bpv+//O2eZMkB0AEueoxwZmong4A9LXYPzxJvTTc41lFr527xdqwzg41gD0jvefWSrgATqOEezjbmzk8RyA2/b6izH6vb4y1AKKrCSDqX0cAq02Ym0QeyXnzWrTVbPyfrT/e9wcK7iwI18cE1urMsO2Z/fWhgKNWCt4lm5uZvMC5Kz8rX1Bk5zVbwByW1uchp1/0xMgDNdvTGy8izRPmv47N14xDTaGq8F7hiRqe/EpKd56oLEcLqBwr4CWtaAbk0AgrinJZCoLqN/SWSLaSOVPa1M6HjeYrBf0IT4IwPTOnXuXtbbxbXsTn42hS+TH3mkDq07QHgXhVIN4mkHZht2lagys+Tq/dtKaY8aoa8HlU7JSTKiXVC43rTCFPMOLCrnYhqPCqoP6+7R2TwNH2dwbru/jWvn5ryihOB308iqMwDIIwIHEwjuNwPErzEY4H+VajCGmRQTeFnXOgCmyPGmo0dQ4O+49rqW0bzQWoGgpOpLCf2/3YeBYW1NdrYJ0HXjeUVEpOsdjrKDO4Jz5Ma/w1X4dvrqu8iz9PJZvtZ9qZjub6td4NJftXsN8l/WgpNqZBfxySrDuOw7g7yMmomxA87OIkHcYRodkgv+ZT4Od/bcYA8McVAAA=</values>
+    </sys_hub_action_instance_v2>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=4cf917312b53b2144572f3745e91bfa2"/>
+    <sys_hub_action_instance_v2 action="INSERT_OR_UPDATE">
+        <action_type display_value="Wait For Condition">89ce8a4187120010663ca1bb36cb0be3</action_type>
+        <action_type_parent display_value="Wait For Condition">8bb9a8160b10030085c083eb37673aec</action_type_parent>
+        <attributes/>
+        <comment/>
+        <compiled_snapshot>89ce8a4187120010663ca1bb36cb0be3</compiled_snapshot>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">ea9953312b53b2144572f3745e91bf16</flow>
+        <generation_source/>
+        <order>4</order>
+        <parent_ui_id/>
+        <sys_class_name>sys_hub_action_instance_v2</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:47:51</sys_created_on>
+        <sys_id>803a9f712b53b2144572f3745e91bf3d</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:51:03</sys_updated_on>
+        <ui_id>831d84e2-f49a-48f0-821d-72ab630e17ef</ui_id>
+        <updation_source/>
+        <values>H4sIAAAAAAAA/+2XyW7bSBCGXyXgWa3h0qSavgWSjRjwxICsZA6ZgKjerMa0SIWLE43hd58m2RKpxYo9kQ0YyJHVi/76qz4V+eXeUdw5c3DMBAHskZHnu67nRlHAwKM0iBh1qcDOwElhIczOXLAs5+b5DnRVB+7vI+aGwKlEPmUYYfAxIlEcoCDiQQzmWurz4bQ59/BgTnJVLDWsPtsLTITNlea5SJ2zL18HzhJy81ulyJ2z+52lp4rVQIU2W6drtbvqy9WyfuYZqxYiLRO1Dl7ZkxO78u5yYlbMoVqON3DEj1KkXBgdEnQhBs4CUg5llq+cszKvTCAXwK9TvdrsmKu0bPNcwI9C/Wt+OPDrfVKYxJj1YPOYWH/asJxACTfmZlZW+cauTDFRtJZwIaHS5bgfazdcL0uVpe2REqhen850tUg/toY4mwt65agKI0Is6zxr5W1a8maefZ+uRV6otHHEpqgzBnrzBGWZK1qVtZx7p1KzQ2a34cN2S6VN+ZNGdFJkVd6YND0fX08nyV/vZ+MP59Nken4zm16OZ+f1CaFFc/UClkuV3ibLPLtTjUKT72J4q83DUOrsu0msULfpEFhtztCUDoYXJj5pwp8hV/WP/mmuMYdrlZ9S9a0Sl03jSekFXhQhz3MDhD0aoZiIELkiBBz6OAoj33kYOMWqGGsois5jU9zkW1Vb1DpuvU2a8rRpNh1aH2a5Wpbvjbw7YR19GKwxDY92PnSN3ruzQ9XoMs1lbC3+2cdwU4FZu/xMJn+ubM3krGnFw0otlnuxq/7Zdx/bBQulfxxKG+mobNv5AJTEfUNQ2rR+ncotr7eh3HJbFUnbmlZ0c+trked7JCaYmplCcYhwLCUiLjHDRoDLQp+PsMf+B3k/5e34pJFdF7Ms5arOq+jxZiwzbpgGKAT/u3LdgNe9t4/eo/tOOhdlj8FxX+6hFCyIe7GrQxdYEINTTUfsum8JxVPNxy2zt0ncsvtViBOcRDR0CRKSEISDEUGx5/soioB7HmZcui8761x+rJtl75W0VAuRVWUiNdz26HP3QVv/Zz2PqycoWXN1njZ/mVbRoxItXTTLtIB0d8aZdvrjwiq1aOFnzrhjbL0hsk425DqndyZc3+tX4YoxIGZkAYoDJhCOKENEMokCQUMZhJTQkfsCk4wd7+F4v1V5lUNTxY6oE3y7PUHHmqVJJ+BxaZakpja78av9iyxO4W+cfgmnPbt3Pua6hZdiam7OTWBV1F3RvivtUCY8GIW0/j4DhP3YQxBjH8WRGAksSRRA/AKUEe9od8v9Vi7YXPBKi9NS9gQda8puOgGPS7OUdY2+Ddi0F7eERScjjOy9DLJF2hd3iLdeVm+SO3kjIGfzCyV0XU/7dfYIjf2ybIPYL8zrTDff9wIuGPK4eXXEfuQjEuARGsWEuti0Hg3ECbn7+h/mv44dwBQAAA==</values>
+    </sys_hub_action_instance_v2>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=803a9f712b53b2144572f3745e91bf3d"/>
+    <sys_hub_action_instance_v2 action="INSERT_OR_UPDATE">
+        <action_type display_value="Retrieve Extracted Values">be5ce26253730110f9a4ddeeff7b125b</action_type>
+        <action_type_parent display_value="Retrieve Extracted Values">49bbe22253730110f9a4ddeeff7b12d7</action_type_parent>
+        <attributes/>
+        <comment/>
+        <compiled_snapshot>be5ce26253730110f9a4ddeeff7b125b</compiled_snapshot>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">ea9953312b53b2144572f3745e91bf16</flow>
+        <generation_source/>
+        <order>5</order>
+        <parent_ui_id/>
+        <sys_class_name>sys_hub_action_instance_v2</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:48:43</sys_created_on>
+        <sys_id>456ad7b12b53b2144572f3745e91bfbd</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:51:03</sys_updated_on>
+        <ui_id>a93ca2d9-1eca-44a0-9e0a-a93a64cfde2d</ui_id>
+        <updation_source/>
+        <values>H4sIAAAAAAAA/42Ry27bMBBFf6XgWhKshx3LuyCGgQJtAyRpNkEgjMihTZSiFJJy4hr+9w4lwXHSLrrk5TzuPfN0ZEqwFbvK03wpi9k8n83SNJ3JEgohEKW8qtOszFjEDDRIlR7cL3rtQffheTwu+GwOopZxVvMiLiAr4uWizON8IfISllDUmUjukLdWnE7UKZTrNBwepwGk8J3SwqJhq6fniHVgaZNHy1bHT1//a1VDjZpKH0avH537QxdeFiXSYI6T9G3qubvQyXKwkUYM3zwagbRfgnYYsQaMAN/aA1t525NgEcSt0YdzxU4ZP+Zr4M2p37Q0z6KLvStCUU2mzmo14aHfdcv7Bo3/MsWQa/BwT9u47+0ZXas4uhGPQAm99jeX2lhw23nVmrHFQ60/Luet7hvzY6TEznMuLtQ7MoZdQBBCTQnl/a59PfPaKDPQmj51y0FflCJYvtso1GLYPYSshstEDLy3qu59MH1kvXr4+0Sj+K8jocZAqWqg65TZVp1t92pwQsGaZKvpkUjdvlICp7YmAR5gJHQ+SDakrwf5EawKZL7TGGoOG38a9dLj12C44FyWizqLi1RgXNS8jst8XsZzhDwnXDVfADtFzB3cjQbn3mFSiOqlDyhGtBPEajxHaOFWdf6aTO1x4nV6/gN9A3FHmAMAAA==</values>
+    </sys_hub_action_instance_v2>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=456ad7b12b53b2144572f3745e91bfbd"/>
+    <sys_hub_action_instance_v2 action="INSERT_OR_UPDATE">
+        <action_type display_value="Set Extracted Values">56beeae253730110f9a4ddeeff7b124f</action_type>
+        <action_type_parent display_value="Set Extracted Values">088d22a253730110f9a4ddeeff7b12a1</action_type_parent>
+        <attributes/>
+        <comment/>
+        <compiled_snapshot>56beeae253730110f9a4ddeeff7b124f</compiled_snapshot>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">ea9953312b53b2144572f3745e91bf16</flow>
+        <generation_source/>
+        <order>6</order>
+        <parent_ui_id/>
+        <sys_class_name>sys_hub_action_instance_v2</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:06</sys_created_on>
+        <sys_id>2a7a9bb12b53b2144572f3745e91bfe8</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:51:03</sys_updated_on>
+        <ui_id>46d8a86f-b38a-427b-b49e-3ca449847b9c</ui_id>
+        <updation_source/>
+        <values>H4sIAAAAAAAA/+WVTU/cMBCG/wrKebNKHOdrbxUUqVULEttyQSia2JNdt94kOA6wXfHfO8lmvyhIUFEuvSXjseed1/PIVytHSWfipJgjArIwiAPP970iBS4lYlHEuc9C5oycEhZImXhvDQiLMrsF3WJDK/0HLa1WkAYCmExdHwW4nIPnpuiBS3GIuCgkMjk22LTaPjzQTqmaWsPy8q8PEHOlpcHSmVxdj5waDIm0aJzJ6tHSS7vUkKOm1I+bNo8uN20+b4Bd1t3Kj6Yqh78vwzGfp+dnFKqM7ET5o243lhJJTQG6wZGzgFKCrczSmVjTUsAgyPNSL7cZc1VaOsrpcu8b9YtKcc/zuswCqUGB69XtbzbYug4XJ2BhSmcL25ohVcwrJUh6b43EAsjP4/3YOuG8topa6rdYyPVmd6XbRXm2tsPZHrC5RYq0DYnAuuu00z40Ukzn1d3FRuWpKntThkVdCdDbP7DWqLy1nZ6V06pvBw6v/x95jBoXVC1bQF2rcpbVprpVfQUSvBjPNP2MC13dkbJGzcoxXSJ1Nyb3YXxK8ZM+fAlGda1+pWNoc1fse6luWvzUTRDjDDyIIzdlXuzyNIrdJEg9lwcpzRXNJw9j52HkNMvmWEPT7Eyi28lu2q7FtWWDOdna326LMKq2H0jULQ4+PIwGPJnvh9LL4zBgNLePB7dIdtNpofl5gGQkvBBkXrgsF9zlwLibRGngBpEkzQnwnIi6QEEj+hSSr2bsBVI3jH1baz1UPrC0m+1DoC724gNV7K2oCtghU1Jlg6in0DqpRNsN3NHQxhtztiv+DrgVUwQj5qcKtexr901m/c08C+P+FR0SuX9J74IlMMZFRDBGAUN6NgLh5nmObl4USRyHIcY+/wdYCi/gmFKBIOJ/zjr394fbzNBmpufsgM9jmszuMfHHojVk2jMP49Npr0PzBXJ3aHZ6jy42ep9pY4C1ofkoZ49InW6CA6bBW2Ga/KeP39blQ9i2Pr8LaSnjIUsTevsgZC7P45wewCRxYyZS6aUsEf5bPoDXvwFLvHRxoQoAAA==</values>
+    </sys_hub_action_instance_v2>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=2a7a9bb12b53b2144572f3745e91bfe8"/>
+    <sys_hub_sub_flow_instance_v2 action="delete_multiple" query="flow=ea9953312b53b2144572f3745e91bf16"/>
+    <sys_hub_flow_logic_instance_v2 action="delete_multiple" query="flow=ea9953312b53b2144572f3745e91bf16"/>
+    <sys_hub_pill_compound action="delete_multiple" query="attached_to=ea9953312b53b2144572f3745e91bf16"/>
+    <sys_hub_flow_variable action="delete_multiple" query="model=ea9953312b53b2144572f3745e91bf16"/>
+    <sys_choice action="delete_multiple" query="name=var__m_sys_hub_flow_variable_ea9953312b53b2144572f3745e91bf16"/>
+    <sys_documentation action="INSERT_OR_UPDATE">
+        <element>current</element>
+        <help/>
+        <hint/>
+        <label>Record</label>
+        <language>en</language>
+        <name>var__m_sys_hub_flow_input_ea9953312b53b2144572f3745e91bf16</name>
+        <plural/>
+        <sys_class_name>sys_documentation</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:45:17</sys_created_on>
+        <sys_id>629953312b53b2144572f3745e91bf46</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>Record</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_documentation_var__m_sys_hub_flow_input_ea9953312b53b2144572f3745e91bf16_current_en</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:45:17</sys_updated_on>
+        <url/>
+        <url_target/>
+    </sys_documentation>
+    <sys_documentation action="INSERT_OR_UPDATE">
+        <element>table_name</element>
+        <help/>
+        <hint/>
+        <label>Table Name</label>
+        <language>en</language>
+        <name>var__m_sys_hub_flow_input_ea9953312b53b2144572f3745e91bf16</name>
+        <plural/>
+        <sys_class_name>sys_documentation</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:45:17</sys_created_on>
+        <sys_id>a29953312b53b2144572f3745e91bf4b</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>Table Name</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_documentation_var__m_sys_hub_flow_input_ea9953312b53b2144572f3745e91bf16_table_name_en</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:45:17</sys_updated_on>
+        <url/>
+        <url_target/>
+    </sys_documentation>
+    <sys_choice action="delete_multiple" query="name=var__m_sys_hub_flow_input_ea9953312b53b2144572f3745e91bf16"/>
+    <sys_choice action="delete_multiple" query="name=var__m_sys_hub_flow_output_ea9953312b53b2144572f3745e91bf16"/>
+    <sys_hub_flow_snapshot action="INSERT_OR_UPDATE">
+        <access>public</access>
+        <acls/>
+        <active>true</active>
+        <allow_high_security_roles>false</allow_high_security_roles>
+        <annotation/>
+        <attributes>browserActivatedIn=chrome,integrationActivatedIn=standalone,labelCacheCleanUpExecuted=true,timeFromCreateToActivate=31170232000,viewActivatedIn=naturalLanguage</attributes>
+        <authored_on_release_version>28100</authored_on_release_version>
+        <callable_by_client_api>false</callable_by_client_api>
+        <category/>
+        <copied_from>e0b9ab9feb702110f2549bf12a5228e6</copied_from>
+        <copied_from_name/>
+        <description>DocDataExtractor Flow Template for processing a task</description>
+        <flow_priority/>
+        <internal_name>docintel_task_processing_flow__clm_ocr__clm_ocr</internal_name>
+        <label_cache>[{"name":"6e1fa36a-f09d-4993-afc2-b4d3ade21307.task_id","label":"1 - DocIntel - Create a Document Task➛Task ID","reference_display":"Task ID","type":"string","base_type":"string","usedInstances":{"6c05adbf-2bc4-4a24-8693-36d39a8a4b2d":["conditions"]},"attributes":{"uiType":"string","uiTypeLabel":"String","element_mapping_provider":"com.glide.flow_design.action.data.FlowDesignVariableMapper","pwd2droppable":"true","uiUniqueId":"a7335496-1038-4dd2-8efb-a38349d0513f"}},{"name":"Created_1.current.sys_id","label":"Trigger - Record Created➛Incident Record➛Sys ID","reference":"","reference_display":"Sys ID","type":"GUID","base_type":"GUID","parent_table_name":"incident","column_name":"sys_id"},{"name":"Created_1.table_name","label":"Trigger - Record Created➛Incident Table","reference":"incident","reference_display":"Incident","type":"table_name","base_type":"table_name","attributes":{"test_input_hidden":"true"}},{"name":"6c05adbf-2bc4-4a24-8693-36d39a8a4b2d.Record","label":"3 - Look Up Record➛Document Task Record","reference":"sys_di_task","reference_display":"Document Task","type":"reference","base_type":"reference","usedInstances":{"831d84e2-f49a-48f0-821d-72ab630e17ef":["record"],"a93ca2d9-1eca-44a0-9e0a-a93a64cfde2d":["task"],"46d8a86f-b38a-427b-b49e-3ca449847b9c":["task"]},"attributes":{"element_mapping_provider":"com.glide.flow_design.action.data.FlowDesignVariableMapper"}},{"name":"a93ca2d9-1eca-44a0-9e0a-a93a64cfde2d.result","label":"5 - Retrieve Extracted Values➛Result","type":"json","base_type":"json","usedInstances":{"46d8a86f-b38a-427b-b49e-3ca449847b9c":["extracted_values"]},"attributes":{"uiTypeLabel":"JSON","element_mapping_provider":"com.glide.flow_design.action.data.FlowDesignVariableMapper","uiType":"json","uiUniqueId":"be0e0bed-a81b-4f9e-a350-b710e542508c"}},{"name":"Created_1.current","label":"Trigger - Record Created➛Incident Record","reference":"x_birl3_clm_financial_documents","reference_display":"Financial Documents","type":"reference","base_type":"reference","usedInstances":{"46d8a86f-b38a-427b-b49e-3ca449847b9c":["target_record"]},"attributes":{}}]</label_cache>
+        <master>true</master>
+        <name>DocIntel Task Processing Flow - CLM_OCR - CLM_OCR</name>
+        <natlang/>
+        <outputs/>
+        <parent_flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">ea9953312b53b2144572f3745e91bf16</parent_flow>
+        <remote_trigger_id/>
+        <run_as>user</run_as>
+        <run_with_roles/>
+        <sc_callable>false</sc_callable>
+        <status>published</status>
+        <sys_class_name>sys_hub_flow_snapshot</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:48</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>f0aadfb12b53b2144572f3745e91bfce</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name/>
+        <sys_overrides/>
+        <sys_package/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name/>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:48</sys_updated_on>
+        <type>flow</type>
+        <version>2</version>
+    </sys_hub_flow_snapshot>
+    <sys_translated_text action="delete_multiple" query="documentkey=f0aadfb12b53b2144572f3745e91bfce"/>
+    <sys_variable_value action="delete_multiple" query="document_key=f0aadfb12b53b2144572f3745e91bfce"/>
+    <sys_hub_flow_stage action="delete_multiple" query="flow=f0aadfb12b53b2144572f3745e91bfce"/>
+    <sys_flow_cat_variable_model action="delete_multiple" query="id=f0aadfb12b53b2144572f3745e91bfce^sys_idNOT IN70aadfb12b53b2144572f3745e91bfd0"/>
+    <sys_flow_cat_variable_model action="INSERT_OR_UPDATE">
+        <id>f0aadfb12b53b2144572f3745e91bfce</id>
+        <name>DocIntel Task Processing Flow - CLM_OCR - CLM_OCR</name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:48</sys_created_on>
+        <sys_id>70aadfb12b53b2144572f3745e91bfd0</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_scope/>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:48</sys_updated_on>
+    </sys_flow_cat_variable_model>
+    <sys_flow_cat_variable action="delete_multiple" query="flow_catalog_model=70aadfb12b53b2144572f3745e91bfd0"/>
+    <sys_hub_flow_input action="delete_multiple" query="model=f0aadfb12b53b2144572f3745e91bfce^sys_idNOT IN30aadfb12b53b2144572f3745e91bfd2,7caa13f12b53b2144572f3745e91bf00"/>
+    <sys_hub_flow_input action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <array>false</array>
+        <array_denormalized>false</array_denormalized>
+        <attributes>element_mapping_provider=com.glide.flow_design.action.data.FlowDesignVariableMapper,uiType=document_id,uiTypeLabel=Document ID</attributes>
+        <audit>false</audit>
+        <calculation><![CDATA[(function calculatedFieldValue(current) {
+
+	// Add your code here
+	return '';  // return the calculated value
+
+})(current);]]></calculation>
+        <choice/>
+        <choice_field/>
+        <choice_table/>
+        <column_label/>
+        <comments/>
+        <create_roles/>
+        <default_value/>
+        <defaultsort/>
+        <delete_roles/>
+        <dependent>table_name</dependent>
+        <dependent_on_field>table_name</dependent_on_field>
+        <display>false</display>
+        <dynamic_creation>false</dynamic_creation>
+        <dynamic_creation_script/>
+        <dynamic_default_value/>
+        <dynamic_ref_qual/>
+        <element>current</element>
+        <element_reference>false</element_reference>
+        <foreign_database/>
+        <formula/>
+        <function_definition/>
+        <function_field>false</function_field>
+        <help/>
+        <hint/>
+        <internal_type display_value="">document_id</internal_type>
+        <label>Record</label>
+        <mandatory>true</mandatory>
+        <max_length>200</max_length>
+        <model display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">f0aadfb12b53b2144572f3745e91bfce</model>
+        <model_id>f0aadfb12b53b2144572f3745e91bfce</model_id>
+        <model_table>sys_hub_flow_snapshot</model_table>
+        <name>var__m_sys_hub_flow_input_f0aadfb12b53b2144572f3745e91bfce</name>
+        <next_element/>
+        <order>100</order>
+        <primary>false</primary>
+        <read_only>false</read_only>
+        <read_only_option/>
+        <read_roles/>
+        <reference/>
+        <reference_cascade_rule/>
+        <reference_floats>false</reference_floats>
+        <reference_key/>
+        <reference_qual/>
+        <reference_qual_condition/>
+        <reference_type/>
+        <sizeclass/>
+        <spell_check>false</spell_check>
+        <staged>false</staged>
+        <sys_class_name>sys_hub_flow_input</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:48</sys_created_on>
+        <sys_id>30aadfb12b53b2144572f3745e91bfd2</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name/>
+        <sys_package/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name/>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:48</sys_updated_on>
+        <table_reference>false</table_reference>
+        <text_index>false</text_index>
+        <unique>false</unique>
+        <use_dependent_field>true</use_dependent_field>
+        <use_dynamic_default>false</use_dynamic_default>
+        <use_reference_qualifier>simple</use_reference_qualifier>
+        <virtual>false</virtual>
+        <virtual_type>script</virtual_type>
+        <widget/>
+        <write_roles/>
+        <xml_view>false</xml_view>
+    </sys_hub_flow_input>
+    <sys_hub_action_input_action_instance action="delete_multiple" query="action_input=30aadfb12b53b2144572f3745e91bfd2"/>
+    <sys_hub_flow_input action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <array>false</array>
+        <array_denormalized>false</array_denormalized>
+        <attributes>element_mapping_provider=com.glide.flow_design.action.data.FlowDesignVariableMapper,test_input_hidden=true,uiType=table_name,uiTypeLabel=Table Name</attributes>
+        <audit>false</audit>
+        <calculation><![CDATA[(function calculatedFieldValue(current) {
+
+	// Add your code here
+	return '';  // return the calculated value
+
+})(current);]]></calculation>
+        <choice/>
+        <choice_field/>
+        <choice_table/>
+        <column_label/>
+        <comments/>
+        <create_roles/>
+        <default_value/>
+        <defaultsort/>
+        <delete_roles/>
+        <dependent/>
+        <dependent_on_field/>
+        <display>false</display>
+        <dynamic_creation>false</dynamic_creation>
+        <dynamic_creation_script/>
+        <dynamic_default_value/>
+        <dynamic_ref_qual/>
+        <element>table_name</element>
+        <element_reference>false</element_reference>
+        <foreign_database/>
+        <formula/>
+        <function_definition/>
+        <function_field>false</function_field>
+        <help/>
+        <hint/>
+        <internal_type display_value="">table_name</internal_type>
+        <label>Table Name</label>
+        <mandatory>false</mandatory>
+        <max_length>200</max_length>
+        <model display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">f0aadfb12b53b2144572f3745e91bfce</model>
+        <model_id>f0aadfb12b53b2144572f3745e91bfce</model_id>
+        <model_table>sys_hub_flow_snapshot</model_table>
+        <name>var__m_sys_hub_flow_input_f0aadfb12b53b2144572f3745e91bfce</name>
+        <next_element/>
+        <order>101</order>
+        <primary>false</primary>
+        <read_only>false</read_only>
+        <read_only_option/>
+        <read_roles/>
+        <reference/>
+        <reference_cascade_rule/>
+        <reference_floats>false</reference_floats>
+        <reference_key/>
+        <reference_qual/>
+        <reference_qual_condition/>
+        <reference_type/>
+        <sizeclass/>
+        <spell_check>false</spell_check>
+        <staged>false</staged>
+        <sys_class_name>sys_hub_flow_input</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:48</sys_created_on>
+        <sys_id>7caa13f12b53b2144572f3745e91bf00</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name/>
+        <sys_package/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name/>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:48</sys_updated_on>
+        <table_reference>false</table_reference>
+        <text_index>false</text_index>
+        <unique>false</unique>
+        <use_dependent_field>false</use_dependent_field>
+        <use_dynamic_default>false</use_dynamic_default>
+        <use_reference_qualifier>simple</use_reference_qualifier>
+        <virtual>false</virtual>
+        <virtual_type>script</virtual_type>
+        <widget/>
+        <write_roles/>
+        <xml_view>false</xml_view>
+    </sys_hub_flow_input>
+    <sys_hub_action_input_action_instance action="delete_multiple" query="action_input=7caa13f12b53b2144572f3745e91bf00"/>
+    <sys_hub_flow_output action="delete_multiple" query="model=f0aadfb12b53b2144572f3745e91bfce"/>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=f0aadfb12b53b2144572f3745e91bfce"/>
+    <sys_hub_trigger_instance_v2 action="delete_multiple" query="flow=f0aadfb12b53b2144572f3745e91bfce^sys_idNOT IN78aa13f12b53b2144572f3745e91bf1a"/>
+    <sys_hub_trigger_instance_v2 action="INSERT_OR_UPDATE">
+        <comment/>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">f0aadfb12b53b2144572f3745e91bfce</flow>
+        <generation_source/>
+        <name>Created</name>
+        <published_version/>
+        <remote_sys_id/>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:49</sys_created_on>
+        <sys_id>78aa13f12b53b2144572f3745e91bf1a</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_scope/>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:49</sys_updated_on>
+        <trigger_definition display_value="Created">798916a0c31322002841b63b12d3ae7c</trigger_definition>
+        <trigger_inputs>H4sIAAAAAAAA/+VY227jNhD9FUFPLeACutiWlbetk0UNpNnW8bYPQUpQEmkLpSlXopS4i/x7h7pF1sXxJenayYsBkTQ15/DMmRHvvqki9OdzEk54JDB3ye06mnjqhaqZljekA5M4jmboukaNQd92qG7ggWGM+praUxl2CIOlM+wwAs8+FyTkmM3WKwLDQg4jjpdybom5h0UQrtULEcakp9IwWM7IcsWwgMUUswgGg9AjoXqh99T0b/ke8PcEs1g+PyLHD5mJXLZE1OcQsI8Z8gI3XhIuIljp+RHsuf4j/8MEVngwBTMrHMKmQr7gm+oufOaFhKsXd/c9VUDEaAOOcpPF7UsuXOpi2yCaa+qmYWga4NedoenohmdiorVxUYtftFDyDJY8CsI94pU8NNgKCfa+cLYuVyyAbNgwZfYx8v+F3UeaXEcJoHJJNlc+opyWbNhdBL5LvqyEH/BsJIszmwxYvOQ3WfySUEJxzERBKIzEEexHVjJkGUQeEb1dBA/T4oWffZ6iyydZ4GJWPmEBonNiQSJ5FNRncCgo4yYK4jCNfno1/jK9RH9+mo1/uZqi6dXtbDoZz64u1acUF/onljtmEeaxoAzOU6mCzz5h8gB5vHQgmp4auaG/Ep9c4SeF6p56r5ED44B7fspnIw/cYiqqxloRR+W0Cy63JYemlfJyK28tUuSvq9+baZAN7poB42rEaQYMhxh7BHdkgEM7mGgJU7SQUkW2LRfykV2Soa9p3ykdcns7NBuWgUfYZVUlmTaRz1dx6nAPGJwOiQBhz0MVHuVSiOml9MiwPb1hLoQxh1eh8iSbGZESXjJ/7UcA9A6coGA1DQbm6XW+5TTmSgBHDj+KG4dAqlCK9KGTJZ7nZ0F/KySekpnrL8EhQksUrSO0iB20wSiy7JGtD7ukbbkbDKZJBlvfqer9kzxlwogrKmqlX6Pq069+FPl8XqG3xJgeVgNiiQ5UrxQMZlCj88J6f4yxNSWU1KRRM7htAtnZ9gpZppan65Q6hBqaJZnSNRPErlnaAFPP1DTX2Cr4ThiilgFvYn37GV+U5h7bIdPqZ1AEL3XN9pFxspkD+T6G1Ezur+MTDK1WJ8y9CkWp22z4cnf5vnK7hb1E+rq3a71481JBWfAA/nRAmXCw+/c8DGLu1Y1U7qn4XHleofyQM//jedlotWTQICTb8W6uOB+URxeLZxEVCYz5ulkmssHDCoJJdccmfaJBHTChBDgD23ZcbFBqDS1i6J2ybg3zLArBC2mUtOVhl/O2SjRpU/Ye5eD7B3hUUcg12loSsrn3bv4PC8IRgAwRk/beqAFz5nukmDvOIhqvSp6/4Wo2sYdHXOdhS+x0ZLsD3bJcC9wSHIL2iYP1vjHAtjU0R4OXsG8LVrTw8b98N8viIAPpcI+v2dRpXSmdpswjIoSsefs3Ohw+ItL/4Cy8SvWXB6qk9hWEyk3Af5o8r1NuCVTZ9NrljHqBasezC2ipQOVdoXYCsWh0eID0ZxjfQCo/YTrO/KPdFtQyLNmksuW24BBCD7xJIP3RwKZme1mg9nav6MZ48i3kjt6UdLpcW6u2a+4nrRZStm715u8ANdQ0lm9tvtC2flxSjmqVi0TuvD45JNgP0XakXeQxvYeMlqCAVkvSZaDAhAIvUXyq5NEST3HWilgQOAwGX1PwQkW+/cxqUbUUN5GXqfaucWdfn40OBIaV/GPgjIC9TnNRy6Ot90wtfB3WOxDPwoOB2fFJadcvndoCfQHHyXcRe1tN0uZcW6vmfvvW92ytm5WT31TKjm3CO0b9ZldmLVGcaIW//w+6jrCMeSUAAA==</trigger_inputs>
+        <trigger_outputs/>
+        <trigger_type>record_create</trigger_type>
+        <updation_source/>
+    </sys_hub_trigger_instance_v2>
+    <sys_hub_action_instance_v2 action="delete_multiple" query="flow=f0aadfb12b53b2144572f3745e91bfce^sys_idNOT INb0aa13f12b53b2144572f3745e91bf11,b0aa13f12b53b2144572f3745e91bf13,f4aa13f12b53b2144572f3745e91bf14,3caa13f12b53b2144572f3745e91bf15,34aa13f12b53b2144572f3745e91bf17,3caa13f12b53b2144572f3745e91bf18"/>
+    <sys_hub_action_instance_v2 action="INSERT_OR_UPDATE">
+        <action_type display_value="DocIntel - Create a Document Task">dc85af9beb702110f2549bf12a5228d6</action_type>
+        <action_type_parent display_value="DocIntel - Create a Document Task">bea253dbeb302110f2549bf12a522840</action_type_parent>
+        <attributes/>
+        <comment/>
+        <compiled_snapshot>dc85af9beb702110f2549bf12a5228d6</compiled_snapshot>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">f0aadfb12b53b2144572f3745e91bfce</flow>
+        <generation_source/>
+        <order>1</order>
+        <parent_ui_id/>
+        <sys_class_name>sys_hub_action_instance_v2</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:48</sys_created_on>
+        <sys_id>b0aa13f12b53b2144572f3745e91bf11</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:48</sys_updated_on>
+        <ui_id>6e1fa36a-f09d-4993-afc2-b4d3ade21307</ui_id>
+        <updation_source/>
+        <values>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</values>
+    </sys_hub_action_instance_v2>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=b0aa13f12b53b2144572f3745e91bf11"/>
+    <sys_hub_action_instance_v2 action="INSERT_OR_UPDATE">
+        <action_type display_value="DocIntel - Process a Document Task">1ca82b5feb702110f2549bf12a522896</action_type>
+        <action_type_parent display_value="DocIntel - Process a Document Task">5fe85713eb702110f2549bf12a522824</action_type_parent>
+        <attributes/>
+        <comment/>
+        <compiled_snapshot>1ca82b5feb702110f2549bf12a522896</compiled_snapshot>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">f0aadfb12b53b2144572f3745e91bfce</flow>
+        <generation_source/>
+        <order>2</order>
+        <parent_ui_id/>
+        <sys_class_name>sys_hub_action_instance_v2</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:48</sys_created_on>
+        <sys_id>b0aa13f12b53b2144572f3745e91bf13</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:48</sys_updated_on>
+        <ui_id>62bbfafa-512d-49be-b197-e341f1b0c8cb</ui_id>
+        <updation_source/>
+        <values>H4sIAAAAAAAA/41TXW+bMBT9K5WfIQJC0iRvU6NIkbZVWrq+dBW62NeJNWOobdKyKP9914CyaO2kPXJ8ru/5ME8nBtyr2myN82A47jq3FWzF5jPkWTZPsMzTLE0Tmc3yZSnTDGZZtshmLGIq8PgCOWD2Dx5y4hmokJge3M+CZiJ2BN0G5HSaYyphOodYJksR58vlNAbJs7jMxRQEZuk0uZ2Mg+czjQrlGg3d43gDIfygtLBo2OrpOWINWNrm0bLV6a+j/5WroURN1Adae7Ndf2TAd00ALEqk6zmO0Odx8tsVXlsRxKQRwzePRiCpkKAdRqwCI8DXtmMrb1sCLIK4N7q7MA7K+MFlBW9O/aKl0yy62rtirnOFUEXQxq5OijEoYqxr3lZo/M3DwJFr8LCjjdy39hJirTi6ISiBElrt766xgXDfhKcyjHgo9XsBvNZtZb4OgbHLXVd9tY7EYROiCOZGp3J3qF8vuW2U6VMbD3XNQV9RESw/bBTq0OhotOhLihh4b1XZ+iD8xFr18L6qAfyoLNQYkioqaBpl9kVj66PqlZCxarLX9DGRun4lB07tzWT4dyZUI0w2hK97+BGsCul8oWtoOGz8btRLi/2fNeM8XywSGSe3EuKc5zJe5FzEKEBKmS/zkgt2jkKwdxqc+xMmmShe2hDF8BYpXGVUr4BDA6XSync/2iSZClHzIqgq6NVZUlnbvowx9mIoMSzhVjX+E9k44pjw+fk30s9jHBUEAAA=</values>
+    </sys_hub_action_instance_v2>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=b0aa13f12b53b2144572f3745e91bf13"/>
+    <sys_hub_action_instance_v2 action="INSERT_OR_UPDATE">
+        <action_type display_value="Look Up Record">9d09f99587003300663ca1bb36cb0ba3</action_type>
+        <action_type_parent display_value="Look Up Record">b93f42810b30030085c083eb37673a63</action_type_parent>
+        <attributes/>
+        <comment/>
+        <compiled_snapshot>9d09f99587003300663ca1bb36cb0ba3</compiled_snapshot>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">f0aadfb12b53b2144572f3745e91bfce</flow>
+        <generation_source/>
+        <order>3</order>
+        <parent_ui_id/>
+        <sys_class_name>sys_hub_action_instance_v2</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:48</sys_created_on>
+        <sys_id>f4aa13f12b53b2144572f3745e91bf14</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:48</sys_updated_on>
+        <ui_id>6c05adbf-2bc4-4a24-8693-36d39a8a4b2d</ui_id>
+        <updation_source/>
+        <values>H4sIAAAAAAAA/+VY0Y7aOhD9lSjPQBMChOzb1SKkSm1X6nL70laWEzuLVWOntrNbFvHvdxwngIAForLSru6jx2P7zMw5YyffVz4j/o1PkiDJk2Q4joMgioJgNIoyHKZpNMrSIMUDv+MLvKDgaXDKKQwfMS/tWC81IgwZrH+BlTBdcLz8Vk9OZFYuqDDezE1nc8aJosK/+f6z4xdYwZ6GKv9mtTd1KSiOU8rBdVaj2gNplsVmiKo5Z/u0u8z74iakIhZK0PHpH0MFoYAhx1zTjr/AgmAj1XJjURSTO8G3hjkTBnb0rfMfzZ7h3HFg/XIKUWXUzW2GqM6UM+cTbPC9UWVmSlW7ZnPJMqpdPgjNccnN7a7NOdwVhknhlriw3WrJy4X44tLhbzZoCgOWUgMIWthALfI6jPx+Lp++NiinTFQ5qSe5zDDfjLAxiqWlsXhWPuXUVhotcFEw8YAKJR9ZtRiwLHoPHAa9nMsnOFSzB9HDmQXeg7zi3hTsk8r8DStmo/gM28BiAMQ4MAS5EmpZqiqVjyjjpa4mFBba7eWvO5aOtxxrvY0cUo5+lxa3y0MdMXJJs0syxQrzD2zxSOvg1p1GF8OTFEy2lMukIMyi0HviYORHCYvJajWiYY6jEe7mQUK6gySJujjP+t10QCJMaD+MgrhnhQRr1utDNf3lbi3Fdz7yRny3u6EfS0ctwwPbp2Mb1DIMrybDQRC8JyHC4W9Ph+2V5VJwRl4hOUkysuWTlsogl8sdfR1qpDXPL4DQ8PzOMtNLly+hqmmeM8rJsdtmaif2bpv+//O2eZMkB0AEueoxwZmong4A9LXYPzxJvTTc41lFr527xdqwzg41gD0jvefWSrgATqOEezjbmzk8RyA2/b6izH6vb4y1AKKrCSDqX0cAq02Ym0QeyXnzWrTVbPyfrT/e9wcK7iwI18cE1urMsO2Z/fWhgKNWCt4lm5uZvMC5Kz8rX1Bk5zVbwByW1uchp1/0xMgDNdvTGy8izRPmv47N14xDTaGq8F7hiRqe/EpKd56oLEcLqBwr4CWtaAbk0AgrinJZCoLqN/SWSLaSOVPa1M6HjeYrBf0IT4IwPTOnXuXtbbxbXsTn42hS+TH3mkDq07QHgXhVIN4mkHZht2lagys+Tq/dtKaY8aoa8HlU7JSTKiXVC43rTCFPMOLCrnYhqPCqoP6+7R2TwNH2dwbru/jWvn5ryihOB308iqMwDIIwIHEwjuNwPErzEY4H+VajCGmRQTeFnXOgCmyPGmo0dQ4O+49rqW0bzQWoGgpOpLCf2/3YeBYW1NdrYJ0HXjeUVEpOsdjrKDO4Jz5Ma/w1X4dvrqu8iz9PJZvtZ9qZjub6td4NJftXsN8l/WgpNqZBfxySrDuOw7g7yMmomxA87OIkHcYRodkgv+ZT4Od/bcYA8McVAAA=</values>
+    </sys_hub_action_instance_v2>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=f4aa13f12b53b2144572f3745e91bf14"/>
+    <sys_hub_action_instance_v2 action="INSERT_OR_UPDATE">
+        <action_type display_value="Wait For Condition">89ce8a4187120010663ca1bb36cb0be3</action_type>
+        <action_type_parent display_value="Wait For Condition">8bb9a8160b10030085c083eb37673aec</action_type_parent>
+        <attributes/>
+        <comment/>
+        <compiled_snapshot>89ce8a4187120010663ca1bb36cb0be3</compiled_snapshot>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">f0aadfb12b53b2144572f3745e91bfce</flow>
+        <generation_source/>
+        <order>4</order>
+        <parent_ui_id/>
+        <sys_class_name>sys_hub_action_instance_v2</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:48</sys_created_on>
+        <sys_id>3caa13f12b53b2144572f3745e91bf15</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:48</sys_updated_on>
+        <ui_id>831d84e2-f49a-48f0-821d-72ab630e17ef</ui_id>
+        <updation_source/>
+        <values>H4sIAAAAAAAA/+2XyW7bSBCGXyXgWa3h0qSavgWSjRjwxICsZA6ZgKjerMa0SIWLE43hd58m2RKpxYo9kQ0YyJHVi/76qz4V+eXeUdw5c3DMBAHskZHnu67nRlHAwKM0iBh1qcDOwElhIczOXLAs5+b5DnRVB+7vI+aGwKlEPmUYYfAxIlEcoCDiQQzmWurz4bQ59/BgTnJVLDWsPtsLTITNlea5SJ2zL18HzhJy81ulyJ2z+52lp4rVQIU2W6drtbvqy9WyfuYZqxYiLRO1Dl7ZkxO78u5yYlbMoVqON3DEj1KkXBgdEnQhBs4CUg5llq+cszKvTCAXwK9TvdrsmKu0bPNcwI9C/Wt+OPDrfVKYxJj1YPOYWH/asJxACTfmZlZW+cauTDFRtJZwIaHS5bgfazdcL0uVpe2REqhen850tUg/toY4mwt65agKI0Is6zxr5W1a8maefZ+uRV6otHHEpqgzBnrzBGWZK1qVtZx7p1KzQ2a34cN2S6VN+ZNGdFJkVd6YND0fX08nyV/vZ+MP59Nken4zm16OZ+f1CaFFc/UClkuV3ibLPLtTjUKT72J4q83DUOrsu0msULfpEFhtztCUDoYXJj5pwp8hV/WP/mmuMYdrlZ9S9a0Sl03jSekFXhQhz3MDhD0aoZiIELkiBBz6OAoj33kYOMWqGGsois5jU9zkW1Vb1DpuvU2a8rRpNh1aH2a5Wpbvjbw7YR19GKwxDY92PnSN3ruzQ9XoMs1lbC3+2cdwU4FZu/xMJn+ubM3krGnFw0otlnuxq/7Zdx/bBQulfxxKG+mobNv5AJTEfUNQ2rR+ncotr7eh3HJbFUnbmlZ0c+trked7JCaYmplCcYhwLCUiLjHDRoDLQp+PsMf+B3k/5e34pJFdF7Ms5arOq+jxZiwzbpgGKAT/u3LdgNe9t4/eo/tOOhdlj8FxX+6hFCyIe7GrQxdYEINTTUfsum8JxVPNxy2zt0ncsvtViBOcRDR0CRKSEISDEUGx5/soioB7HmZcui8761x+rJtl75W0VAuRVWUiNdz26HP3QVv/Zz2PqycoWXN1njZ/mVbRoxItXTTLtIB0d8aZdvrjwiq1aOFnzrhjbL0hsk425DqndyZc3+tX4YoxIGZkAYoDJhCOKENEMokCQUMZhJTQkfsCk4wd7+F4v1V5lUNTxY6oE3y7PUHHmqVJJ+BxaZakpja78av9iyxO4W+cfgmnPbt3Pua6hZdiam7OTWBV1F3RvivtUCY8GIW0/j4DhP3YQxBjH8WRGAksSRRA/AKUEe9od8v9Vi7YXPBKi9NS9gQda8puOgGPS7OUdY2+Ddi0F7eERScjjOy9DLJF2hd3iLdeVm+SO3kjIGfzCyV0XU/7dfYIjf2ybIPYL8zrTDff9wIuGPK4eXXEfuQjEuARGsWEuti0Hg3ECbn7+h/mv44dwBQAAA==</values>
+    </sys_hub_action_instance_v2>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=3caa13f12b53b2144572f3745e91bf15"/>
+    <sys_hub_action_instance_v2 action="INSERT_OR_UPDATE">
+        <action_type display_value="Retrieve Extracted Values">be5ce26253730110f9a4ddeeff7b125b</action_type>
+        <action_type_parent display_value="Retrieve Extracted Values">49bbe22253730110f9a4ddeeff7b12d7</action_type_parent>
+        <attributes/>
+        <comment/>
+        <compiled_snapshot>be5ce26253730110f9a4ddeeff7b125b</compiled_snapshot>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">f0aadfb12b53b2144572f3745e91bfce</flow>
+        <generation_source/>
+        <order>5</order>
+        <parent_ui_id/>
+        <sys_class_name>sys_hub_action_instance_v2</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:48</sys_created_on>
+        <sys_id>34aa13f12b53b2144572f3745e91bf17</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:48</sys_updated_on>
+        <ui_id>a93ca2d9-1eca-44a0-9e0a-a93a64cfde2d</ui_id>
+        <updation_source/>
+        <values>H4sIAAAAAAAA/42Ry27bMBBFf6XgWhKshx3LuyCGgQJtAyRpNkEgjMihTZSiFJJy4hr+9w4lwXHSLrrk5TzuPfN0ZEqwFbvK03wpi9k8n83SNJ3JEgohEKW8qtOszFjEDDRIlR7cL3rtQffheTwu+GwOopZxVvMiLiAr4uWizON8IfISllDUmUjukLdWnE7UKZTrNBwepwGk8J3SwqJhq6fniHVgaZNHy1bHT1//a1VDjZpKH0avH537QxdeFiXSYI6T9G3qubvQyXKwkUYM3zwagbRfgnYYsQaMAN/aA1t525NgEcSt0YdzxU4ZP+Zr4M2p37Q0z6KLvStCUU2mzmo14aHfdcv7Bo3/MsWQa/BwT9u47+0ZXas4uhGPQAm99jeX2lhw23nVmrHFQ60/Luet7hvzY6TEznMuLtQ7MoZdQBBCTQnl/a59PfPaKDPQmj51y0FflCJYvtso1GLYPYSshstEDLy3qu59MH1kvXr4+0Sj+K8jocZAqWqg65TZVp1t92pwQsGaZKvpkUjdvlICp7YmAR5gJHQ+SDakrwf5EawKZL7TGGoOG38a9dLj12C44FyWizqLi1RgXNS8jst8XsZzhDwnXDVfADtFzB3cjQbn3mFSiOqlDyhGtBPEajxHaOFWdf6aTO1x4nV6/gN9A3FHmAMAAA==</values>
+    </sys_hub_action_instance_v2>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=34aa13f12b53b2144572f3745e91bf17"/>
+    <sys_hub_action_instance_v2 action="INSERT_OR_UPDATE">
+        <action_type display_value="Set Extracted Values">56beeae253730110f9a4ddeeff7b124f</action_type>
+        <action_type_parent display_value="Set Extracted Values">088d22a253730110f9a4ddeeff7b12a1</action_type_parent>
+        <attributes/>
+        <comment/>
+        <compiled_snapshot>56beeae253730110f9a4ddeeff7b124f</compiled_snapshot>
+        <display_text/>
+        <flow display_value="DocIntel Task Processing Flow - CLM_OCR - CLM_OCR">f0aadfb12b53b2144572f3745e91bfce</flow>
+        <generation_source/>
+        <order>6</order>
+        <parent_ui_id/>
+        <sys_class_name>sys_hub_action_instance_v2</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:48</sys_created_on>
+        <sys_id>3caa13f12b53b2144572f3745e91bf18</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:49</sys_updated_on>
+        <ui_id>46d8a86f-b38a-427b-b49e-3ca449847b9c</ui_id>
+        <updation_source/>
+        <values>H4sIAAAAAAAA/+WVTU/cMBCG/wrKebNKHOdrbxUUqVULEttyQSia2JNdt94kOA6wXfHfO8lmvyhIUFEuvSXjseed1/PIVytHSWfipJgjArIwiAPP970iBS4lYlHEuc9C5oycEhZImXhvDQiLMrsF3WJDK/0HLa1WkAYCmExdHwW4nIPnpuiBS3GIuCgkMjk22LTaPjzQTqmaWsPy8q8PEHOlpcHSmVxdj5waDIm0aJzJ6tHSS7vUkKOm1I+bNo8uN20+b4Bd1t3Kj6Yqh78vwzGfp+dnFKqM7ET5o243lhJJTQG6wZGzgFKCrczSmVjTUsAgyPNSL7cZc1VaOsrpcu8b9YtKcc/zuswCqUGB69XtbzbYug4XJ2BhSmcL25ohVcwrJUh6b43EAsjP4/3YOuG8topa6rdYyPVmd6XbRXm2tsPZHrC5RYq0DYnAuuu00z40Ukzn1d3FRuWpKntThkVdCdDbP7DWqLy1nZ6V06pvBw6v/x95jBoXVC1bQF2rcpbVprpVfQUSvBjPNP2MC13dkbJGzcoxXSJ1Nyb3YXxK8ZM+fAlGda1+pWNoc1fse6luWvzUTRDjDDyIIzdlXuzyNIrdJEg9lwcpzRXNJw9j52HkNMvmWEPT7Eyi28lu2q7FtWWDOdna326LMKq2H0jULQ4+PIwGPJnvh9LL4zBgNLePB7dIdtNpofl5gGQkvBBkXrgsF9zlwLibRGngBpEkzQnwnIi6QEEj+hSSr2bsBVI3jH1baz1UPrC0m+1DoC724gNV7K2oCtghU1Jlg6in0DqpRNsN3NHQxhtztiv+DrgVUwQj5qcKtexr901m/c08C+P+FR0SuX9J74IlMMZFRDBGAUN6NgLh5nmObl4USRyHIcY+/wdYCi/gmFKBIOJ/zjr394fbzNBmpufsgM9jmszuMfHHojVk2jMP49Npr0PzBXJ3aHZ6jy42ep9pY4C1ofkoZ49InW6CA6bBW2Ga/KeP39blQ9i2Pr8LaSnjIUsTevsgZC7P45wewCRxYyZS6aUsEf5bPoDXvwFLvHRxoQoAAA==</values>
+    </sys_hub_action_instance_v2>
+    <sys_hub_alias_mapping action="delete_multiple" query="source_id=3caa13f12b53b2144572f3745e91bf18"/>
+    <sys_hub_sub_flow_instance_v2 action="delete_multiple" query="flow=f0aadfb12b53b2144572f3745e91bfce"/>
+    <sys_hub_flow_logic_instance_v2 action="delete_multiple" query="flow=f0aadfb12b53b2144572f3745e91bfce"/>
+    <sys_hub_pill_compound action="delete_multiple" query="attached_to=f0aadfb12b53b2144572f3745e91bfce"/>
+    <sys_hub_flow_variable action="delete_multiple" query="model=f0aadfb12b53b2144572f3745e91bfce"/>
+    <sys_choice action="delete_multiple" query="name=var__m_sys_hub_flow_variable_f0aadfb12b53b2144572f3745e91bfce"/>
+    <sys_documentation action="INSERT_OR_UPDATE">
+        <element>current</element>
+        <help/>
+        <hint/>
+        <label>Record</label>
+        <language>en</language>
+        <name>var__m_sys_hub_flow_input_f0aadfb12b53b2144572f3745e91bfce</name>
+        <plural/>
+        <sys_class_name>sys_documentation</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:48</sys_created_on>
+        <sys_id>34aadfb12b53b2144572f3745e91bfe4</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>Record</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_documentation_var__m_sys_hub_flow_input_f0aadfb12b53b2144572f3745e91bfce_current_en</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:48</sys_updated_on>
+        <url/>
+        <url_target/>
+    </sys_documentation>
+    <sys_documentation action="INSERT_OR_UPDATE">
+        <element>table_name</element>
+        <help/>
+        <hint/>
+        <label>Table Name</label>
+        <language>en</language>
+        <name>var__m_sys_hub_flow_input_f0aadfb12b53b2144572f3745e91bfce</name>
+        <plural/>
+        <sys_class_name>sys_documentation</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:48</sys_created_on>
+        <sys_id>fcaa13f12b53b2144572f3745e91bf06</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>Table Name</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_documentation_var__m_sys_hub_flow_input_f0aadfb12b53b2144572f3745e91bfce_table_name_en</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:48</sys_updated_on>
+        <url/>
+        <url_target/>
+    </sys_documentation>
+    <sys_choice action="delete_multiple" query="name=var__m_sys_hub_flow_input_f0aadfb12b53b2144572f3745e91bfce"/>
+    <sys_choice action="delete_multiple" query="name=var__m_sys_hub_flow_output_f0aadfb12b53b2144572f3745e91bfce"/>
+    <sys_hub_flow action="UPDATE">
+        <sys_id>ea9953312b53b2144572f3745e91bf16</sys_id>
+        <latest_snapshot>f0aadfb12b53b2144572f3745e91bfce</latest_snapshot>
+        <compiler_build>glide-zurich-07-01-2025__patch4-hotfix3b-01-17-2026_02-20-2026_0205.zip</compiler_build>
+        <version_record/>
+    </sys_hub_flow>
+    <sys_flow_trigger_plan action="delete_multiple" query="plan_id=ea9953312b53b2144572f3745e91bf16^sys_idNOT IN49aa13f12b53b2144572f3745e91bf46"/>
+    <sys_flow_trigger_plan action="INSERT_OR_UPDATE">
+        <binding_strategy>com.snc.process_flow.engine.binding.OncePerRecord</binding_strategy>
+        <plan>{"type":"PlanProxy","persistor":{"@class":".ChunkingPlanPersistor","table":"sys_flow_trigger_plan","id":"49aa13f12b53b2144572f3745e91bf46","name":"plan","plan_signature":null}}</plan>
+        <plan_id>ea9953312b53b2144572f3745e91bf16</plan_id>
+        <snapshot>d82d80a52b23f6104572f3745e91bf2f</snapshot>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-27 08:49:49</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>49aa13f12b53b2144572f3745e91bf46</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_overrides/>
+        <sys_scope/>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-27 08:49:49</sys_updated_on>
+        <trigger display_value="">cdaa13f12b53b2144572f3745e91bf41</trigger>
+    </sys_flow_trigger_plan>
+    <sys_flow_subflow_plan action="delete_multiple" query="plan_id=ea9953312b53b2144572f3745e91bf16"/>
+</record_update>

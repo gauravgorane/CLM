@@ -1,0 +1,2178 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $timeout, $q) {
+  var c = this;
+
+  c.activeView = 'update'; // 'update' | 'history'
+
+  c.setView = function(v) {
+    c.activeView = v;
+    if (v === 'history' && !c.historyLoaded) c.loadHistory();
+  };
+
+  c.gpSearchTerm = '';
+  c.selectedGp = '';
+  c.selectedGpCustomerName = '';
+  c.showGpSuggestions = false;
+  c.filteredGps = (c.data && c.data.gpList) || [];
+
+  c.sites = [];
+  c.groups = [];
+  c.counts = { expired: 0, affectedGroups: 0, editable: 0 };
+  c.truncated = false;
+  c.collapseState = {};
+  c.notifyState = {};
+  c.total = 0;
+
+  c.sel = {};
+  c.limits = {};
+  c.capped = {};
+
+  c.loading = false;
+  c.loadingPage = false;
+  c.submitted = false;
+  c.resultMessage = '';
+  c.validationMsg = '';
+  c.notifyMsg = '';
+  c.progress = '';
+
+  c.history = [];
+  c.historyLoaded = false;
+
+  c.histFilter = 'all';
+  c.histPageSizes = [10, 15, 25, 50];
+  c.histPageSize = 15;
+  c.histPage = 1;
+  c.histPageInput = 1;
+  c.histRows = [];
+  c.histFilteredTotal = 0;
+  c.histCounts = { total: 0, success: 0, pending: 0, failed: 0 };
+  c.failedCount = 0;
+  c.retrying = {};
+  c.retryingAll = false;
+  c.retryMsg = '';
+  c.refreshing = false;
+
+  var reqId = 0;
+  var pollTimer = null;
+
+  c.summary = { currentLimit: 0, activeBg: 0, currentNetExposure: 0, projectedLimit: 0, projectedNetExposure: 0, deltaExposure: 0 };
+
+  function hasVal(v) { return v !== undefined && v !== null && v !== ''; }
+
+  /* New (proposed) limit of a site: entered value, else unchanged */
+  function newOf(row) {
+    var v = c.limits[row.customerSysId];
+    return hasVal(v) ? (parseFloat(v) || 0) : (parseFloat(row.currentLimit) || 0);
+  }
+  function unexpiredBg(row) {
+    return row.isBgExpired ? 0 : (parseFloat(row.activeBg) || 0);
+  }
+
+  /* Recalculate rollups: Site -> Zone Code -> Group Code -> Grandparent.
+     NE is computed at Group Code level (FRS: Group Code is the base unit of NE);
+     Grandparent NE = flat sum of Group Code NE. */
+  c.calculatePanSummary = function() {
+    var s = { currentLimit: 0, activeBg: 0, currentNetExposure: 0, projectedLimit: 0, projectedNetExposure: 0, deltaExposure: 0 };
+
+    for (var gi = 0; gi < c.groups.length; gi++) {
+      var g = c.groups[gi];
+      g.currentLimit = 0; g.activeBg = 0; g.projectedLimit = 0;
+
+      for (var ii = 0; ii < g.items.length; ii++) {
+        var z = g.items[ii];
+        if (z.type !== 'zone') continue;
+        z.currentLimit = 0; z.activeBg = 0; z.projectedLimit = 0;
+        for (var ri = 0; ri < z.rows.length; ri++) {
+          var r = z.rows[ri];
+          z.currentLimit += parseFloat(r.currentLimit) || 0;
+          z.activeBg += unexpiredBg(r);
+          z.projectedLimit += newOf(r);
+        }
+        z.netExposure = z.currentLimit - z.activeBg;
+        z.projectedNe = z.projectedLimit - z.activeBg;
+
+        g.currentLimit += z.currentLimit;      // Group = sum of Zone Codes
+        g.activeBg += z.activeBg;
+        g.projectedLimit += z.projectedLimit;
+      }
+      g.netExposure = g.currentLimit - g.activeBg;
+      g.projectedNe = g.projectedLimit - g.activeBg;
+
+      s.currentLimit += g.currentLimit;
+      s.activeBg += g.activeBg;
+      s.currentNetExposure += g.netExposure;
+      s.projectedLimit += g.projectedLimit;
+      s.projectedNetExposure += g.projectedNe;
+    }
+    s.deltaExposure = s.projectedNetExposure - s.currentNetExposure;
+    c.summary = s;
+  };
+
+  c.isLimitExcess = function(row) {
+    if (!row || !hasVal(c.limits[row.customerSysId])) return false;
+    return parseFloat(c.limits[row.customerSysId]) > parseFloat(row.currentLimit || 0);
+  };
+
+  c.hasExcessLimits = function() {
+    for (var id in c.sel) {
+      var val = c.limits[id];
+      if (hasVal(val) && parseFloat(val) > parseFloat(c.sel[id].currentLimit || 0)) return true;
+    }
+    return false;
+  };
+
+  /* Grandparent search autocomplete */
+  c.onGpSearchInput = function() {
+    c.showGpSuggestions = true;
+    var term = (c.gpSearchTerm || '').trim().toLowerCase();
+    var all = (c.data && c.data.gpList) || [];
+    if (!term) { c.filteredGps = all; return; }
+    c.filteredGps = all.filter(function(p) {
+      return (p.gp && p.gp.toLowerCase().indexOf(term) > -1) ||
+             (p.customerName && p.customerName.toLowerCase().indexOf(term) > -1);
+    });
+  };
+
+  c.selectGp = function(p) {
+    c.selectedGp = p.gp;
+    c.selectedGpCustomerName = p.customerName || '';
+    c.gpSearchTerm = p.gp + ' - ' + p.customerName;
+    c.showGpSuggestions = false;
+    c.collapseState = {};
+    c.clearSelection();
+    c.fetchPage();
+  };
+
+  c.clearGp = function() {
+    c.selectedGp = '';
+    c.selectedGpCustomerName = '';
+    c.gpSearchTerm = '';
+    c.showGpSuggestions = false;
+    c.filteredGps = (c.data && c.data.gpList) || [];
+    c.sites = [];
+    c.total = 0;
+    c.groups = [];
+    c.collapseState = {};
+    c.clearSelection();
+    c.calculatePanSummary();
+  };
+
+  var onDocumentClick = function(e) {
+    if (!e.target.closest('.clm-pan-search-col')) {
+      $timeout(function() { c.showGpSuggestions = false; });
+    }
+  };
+  document.addEventListener('click', onDocumentClick);
+
+  function siteParams(extra) {
+    var p = { gp: c.selectedGp, all: true, page: 1, pageSize: 1000 };
+    for (var k in (extra || {})) p[k] = extra[k];
+    return p;
+  }
+
+  function applySites(d) {
+    c.sites = (d && d.sites) || [];
+    c.total = (d && d.total) || c.sites.length;
+    c.truncated = !!(d && d.truncated);
+    c.buildGroups();
+    c.calculatePanSummary();
+  }
+
+  c.fetchPage = function() {
+    if (!c.selectedGp) {
+      c.sites = []; c.total = 0; c.groups = [];
+      c.calculatePanSummary();
+      return;
+    }
+    var myReq = ++reqId;
+    c.loadingPage = true;
+    c.server.get(siteParams({ action: 'page' })).then(function(resp) {
+      if (myReq !== reqId) return;
+      c.loadingPage = false;
+      applySites(resp.data);
+    }, function() {
+      if (myReq !== reqId) return;
+      c.loadingPage = false;
+    });
+  };
+
+  /* Tier -> Group Code -> Zone Code -> Site grouping.
+     A Group Code is "affected" when at least one of its sites has an expired BG.
+     Only sites of affected Group Codes (and in the ZCH's zones) are editable. */
+  var TIERS = [
+    { key: 'affected', title: 'Group Codes with Expired BG', sub: 'Revise the credit limit of the sites in these Group Codes based on the reduced security cover.' },
+    { key: 'context',  title: 'Other Group Codes (view only)', sub: 'No expired BG here — shown for context and disabled.' }
+  ];
+
+  c.buildGroups = function() {
+    var byGroup = {}, order = [];
+    var counts = { expired: 0, affectedGroups: 0, editable: 0 };
+
+    for (var i = 0; i < c.sites.length; i++) {
+      var r = c.sites[i];
+      var gKey = r.groupCode || 'NA';
+      if (!byGroup[gKey]) {
+        byGroup[gKey] = { key: gKey, groupCode: r.groupCode || 'No Group Code', segment: r.segment || '', rows: [], zones: {}, zoneOrder: [], expiredCount: 0 };
+        order.push(gKey);
+      }
+      var g = byGroup[gKey];
+      g.rows.push(r);
+      if (r.isBgExpired) { g.expiredCount++; counts.expired++; }
+      var zKey = r.zoneCode || 'NA';
+      if (!g.zones[zKey]) {
+        g.zones[zKey] = {
+          type: 'zone', id: 'z|' + gKey + '|' + zKey, zoneCode: r.zoneCode || 'No Zone Code',
+          zone: r.zone || '', zchName: r.zchName || '', rows: [], hasUnassigned: false
+        };
+        g.zoneOrder.push(zKey);
+      }
+      var z = g.zones[zKey];
+      z.rows.push(r);
+      if (!r.isAssigned) { z.hasUnassigned = true; if (!z.zone) z.zone = r.zone || ''; if (!z.zchName) z.zchName = r.zchName || ''; }
+    }
+
+    var groupList = order.map(function(k) { return byGroup[k]; });
+    groupList.forEach(function(g) {
+      g.affected = g.expiredCount > 0;
+      g.tier = g.affected ? 'affected' : 'context';
+      if (g.affected) counts.affectedGroups++;
+      g.rows.forEach(function(r) {
+        r.isEditable = !!(g.affected && r.isAssigned);
+        if (r.isEditable) counts.editable++;
+      });
+
+      g.items = [];
+      g.zoneOrder.sort(function(a, b) { return String(a).localeCompare(String(b)); });
+      g.zoneOrder.forEach(function(zk) {
+        var z = g.zones[zk];
+        z.rows.sort(function(a, b) {
+          if (!!a.isBgExpired !== !!b.isBgExpired) return a.isBgExpired ? -1 : 1;
+          return String(a.customerCode || '').localeCompare(String(b.customerCode || ''));
+        });
+        g.items.push(z);
+        z.rows.forEach(function(r) { g.items.push({ type: 'site', id: 's|' + r.customerSysId, row: r }); });
+      });
+    });
+
+    groupList.sort(function(a, b) {
+      if (a.affected !== b.affected) return a.affected ? -1 : 1;
+      return String(a.groupCode).localeCompare(String(b.groupCode));
+    });
+
+    var out = [];
+    TIERS.forEach(function(tier) {
+      var gs = groupList.filter(function(g) { return g.tier === tier.key; });
+      var siteCount = 0;
+      gs.forEach(function(g) { siteCount += g.rows.length; });
+      gs.forEach(function(g, idx) {
+        g.firstInTier = (idx === 0);
+        g.tierTitle = tier.title;
+        g.tierSub = tier.sub;
+        g.tierCount = siteCount;
+        g.tierGroupCount = gs.length;
+        out.push(g);
+      });
+    });
+
+    c.groups = out;
+    c.counts = counts;
+  };
+
+  c.disabledReason = function(row) {
+    if (row.isEditable) return 'Select site';
+    if (!row.isAssigned) return 'Site is outside your assigned zone — notify the respective ZCH';
+    return 'No expired BG in this Group Code';
+  };
+
+  c.isCollapsed = function(g) {
+    var v = c.collapseState[g.key];
+    return (v === undefined) ? (g.tier === 'context') : v;
+  };
+  c.toggleCollapse = function(g) { c.collapseState[g.key] = !c.isCollapsed(g); };
+  c.setAllCollapsed = function(flag) {
+    for (var i = 0; i < c.groups.length; i++) c.collapseState[c.groups[i].key] = flag;
+  };
+
+  c.groupSelCount = function(g) {
+    var n = 0;
+    for (var i = 0; i < g.rows.length; i++) if (c.sel[g.rows[i].customerSysId]) n++;
+    return n;
+  };
+  c.groupEditableCount = function(g) {
+    var n = 0;
+    for (var i = 0; i < g.rows.length; i++) if (g.rows[i].isEditable) n++;
+    return n;
+  };
+  c.groupReadyCount = function(g) {
+    var n = 0;
+    for (var i = 0; i < g.rows.length; i++) {
+      if (g.rows[i].isEditable && hasVal(c.limits[g.rows[i].customerSysId])) n++;
+    }
+    return n;
+  };
+  c.isGroupSelected = function(g) {
+    var e = c.groupEditableCount(g);
+    return e > 0 && c.groupSelCount(g) === e;
+  };
+  c.toggleGroup = function(g) {
+    var all = c.isGroupSelected(g);
+    for (var i = 0; i < g.rows.length; i++) {
+      var r = g.rows[i];
+      if (!r.isEditable) continue;
+      if (all) delete c.sel[r.customerSysId];
+      else if (!c.sel[r.customerSysId]) c.toggleRow(r);
+    }
+    c.validationMsg = '';
+  };
+
+  c.isSel = function(row) { return !!c.sel[row.customerSysId]; };
+
+  c.toggleRow = function(row) {
+    if (!row.isEditable) return;
+    var id = row.customerSysId;
+    if (c.sel[id]) {
+      delete c.sel[id];
+    } else {
+      c.sel[id] = {
+        customerSysId: id, customerCode: row.customerCode, customerName: row.customerName,
+        salesOrg: row.salesOrg, gp: row.gp, groupCode: row.groupCode, segment: row.segment,
+        currentLimit: row.currentLimit
+      };
+    }
+    c.validationMsg = '';
+  };
+
+  c.pageAllSelected = function() {
+    var rows = c.sites.filter(function(r) { return r.isEditable; });
+    if (!rows.length) return false;
+    for (var i = 0; i < rows.length; i++) if (!c.sel[rows[i].customerSysId]) return false;
+    return true;
+  };
+
+  c.togglePage = function() {
+    var all = c.pageAllSelected();
+    for (var i = 0; i < c.sites.length; i++) {
+      var r = c.sites[i];
+      if (!r.isEditable) continue;
+      if (all) delete c.sel[r.customerSysId];
+      else if (!c.sel[r.customerSysId]) c.toggleRow(r);
+    }
+    c.validationMsg = '';
+  };
+
+  c.clearSelection = function() {
+    c.sel = {}; c.limits = {}; c.capped = {};
+    c.validationMsg = '';
+    c.calculatePanSummary();
+  };
+
+  /* Reduce-only rule; no minimum limit (can go down to 0) */
+  c.onRowValueChange = function(row) {
+    var id = row.customerSysId;
+    var val = c.limits[id];
+    var curr = parseFloat(row.currentLimit) || 0;
+    delete c.capped[id];
+
+    if (hasVal(val)) {
+      var num = parseFloat(val);
+      if (num > curr) { c.limits[id] = curr; c.capped[id] = true; }
+      else if (num < 0) { c.limits[id] = 0; }
+    }
+    if (c.limits[id] != null && !c.sel[id]) c.toggleRow(row);
+
+    c.validationMsg = c.capped[id]
+      ? 'Site ' + row.customerCode + ': value capped to Current CL (₹' + c.formatINR(curr) + ') — limits can only be reduced.'
+      : '';
+    c.calculatePanSummary();
+  };
+
+  c.selectedCount = function() { return Object.keys(c.sel).length; };
+  c.readyCount = function() {
+    var n = 0;
+    for (var id in c.sel) if (hasVal(c.limits[id])) n++;
+    return n;
+  };
+  c.missingCount = function() { return c.selectedCount() - c.readyCount(); };
+
+  c.formatINR = function(v) {
+    var n = parseFloat(v);
+    if (isNaN(n)) return '0';
+    return n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+  };
+
+  /* Notify the ZCH of another zone (once per Zone Code) */
+  c.notifyKey = function(g, z) { return (c.selectedGp || '') + '|' + g.key + '|' + z.zoneCode; };
+
+  c.notifyZone = function(g, z) {
+    var k = c.notifyKey(g, z);
+    var rows = z.rows.filter(function(r) { return !r.isAssigned; });
+    if (!rows.length || c.notifyState[k]) return;
+    c.notifyState[k] = 'sending';
+    c.notifyMsg = '';
+    var first = rows[0];
+
+    c.server.get({
+      action: 'notify_zch',
+      customerSysId: first.customerSysId, customerCode: first.customerCode, customerName: first.customerName,
+      zone: first.zone, gp: c.selectedGp, groupCode: g.groupCode,
+      sites: rows.map(function(r) {
+        return { customerSysId: r.customerSysId, customerCode: r.customerCode, isBgExpired: !!r.isBgExpired, bgExpiryDate: r.bgExpiryDate || '' };
+      })
+    }).then(function(resp) {
+      var ok = !(resp.data && resp.data.notifyOk === false);
+      if (ok) c.notifyState[k] = 'sent'; else delete c.notifyState[k];
+      c.notifyMsg = (resp.data && resp.data.notifyMessage) || ('Notification sent to ZCH for Zone ' + first.zone);
+    }, function() {
+      delete c.notifyState[k];
+      c.notifyMsg = 'Failed to send notification to ZCH for Zone ' + first.zone + '. Please try again.';
+    });
+  };
+
+  /* ---------- History ---------- */
+  function isRetrying(e) { return e && e.status === 'Pending' && (e.attempts > 0 || e.connRetries > 0); }
+  c.statusLabel = function(e) { if (!e) return ''; return isRetrying(e) ? 'Retrying' : e.status; };
+  c.statusClass = function(e) {
+    if (!e) return 'is-pending';
+    if (e.status === 'Success') return 'is-success';
+    if (e.status === 'Failed') return 'is-failed';
+    return 'is-pending';
+  };
+  c.showError = function(e) { return e && e.error && e.status !== 'Success'; };
+
+  function statusBucket(h) {
+    if (h.status === 'Success') return 'Success';
+    if (h.status === 'Failed') return 'Failed';
+    return 'Pending';
+  }
+
+  c.histFilterLabel = function() {
+    return { Success: 'Success', Pending: 'Pending / Retrying', Failed: 'Failed' }[c.histFilter] || 'All';
+  };
+
+  c.rebuildHistory = function() {
+    var all = c.history || [];
+    var counts = { total: all.length, success: 0, pending: 0, failed: 0 };
+    var filtered = [];
+    for (var i = 0; i < all.length; i++) {
+      var b = statusBucket(all[i]);
+      if (b === 'Success') counts.success++;
+      else if (b === 'Failed') counts.failed++;
+      else counts.pending++;
+      if (c.histFilter === 'all' || c.histFilter === b) filtered.push(all[i]);
+    }
+    c.histCounts = counts;
+    c.histFilteredTotal = filtered.length;
+
+    var pages = Math.max(Math.ceil(filtered.length / c.histPageSize), 1);
+    if (c.histPage > pages) c.histPage = pages;
+    if (c.histPage < 1) c.histPage = 1;
+    c.histPageInput = c.histPage;
+
+    var start = (c.histPage - 1) * c.histPageSize;
+    var slice = filtered.slice(start, start + c.histPageSize);
+
+    for (var k = 0; k < slice.length; k++) {
+      var row = slice[k];
+      var isStart = (k === 0) || ((slice[k - 1].gp || '') !== (row.gp || ''));
+      row._gpGroupStart = isStart;
+      if (isStart) {
+        var cnt = 0;
+        for (var m = k; m < slice.length && (slice[m].gp || '') === (row.gp || ''); m++) cnt++;
+        row._gpGroupCount = cnt;
+        row._gpLatestDate = row.requestedOn;
+      }
+    }
+    c.histRows = slice;
+  };
+
+  c.setHistFilter = function(f) { c.histFilter = f; c.histPage = 1; c.rebuildHistory(); };
+  c.histTotalPages = function() { return Math.max(Math.ceil(c.histFilteredTotal / c.histPageSize), 1); };
+  c.histRangeFrom = function() { return c.histFilteredTotal === 0 ? 0 : (c.histPage - 1) * c.histPageSize + 1; };
+  c.histRangeTo = function() { return Math.min(c.histPage * c.histPageSize, c.histFilteredTotal); };
+
+  c.histGoTo = function(p, force) {
+    p = parseInt(p, 10);
+    if (isNaN(p)) { c.histPageInput = c.histPage; return; }
+    p = Math.min(Math.max(p, 1), c.histTotalPages());
+    if (p === c.histPage && !force) { c.histPageInput = c.histPage; return; }
+    c.histPage = p;
+    c.rebuildHistory();
+  };
+
+  function setHistory(raw) {
+    c.history = raw || [];
+    c.historyLoaded = true;
+    c.rebuildHistory();
+  }
+
+  function applyFresh(d) {
+    if (!d) return;
+    if (d.sites) applySites(d);
+    if (d.history) setHistory(d.history);
+    if (typeof d.failedCount !== 'undefined') c.failedCount = d.failedCount;
+  }
+
+  function hasInFlight() {
+    for (var j = 0; j < c.history.length; j++) if (c.history[j].status === 'Pending') return true;
+    return false;
+  }
+
+  c.loadHistory = function() {
+    c.server.get({ action: 'history' }).then(function(resp) {
+      setHistory((resp.data && resp.data.history) || []);
+      c.failedCount = (resp.data && resp.data.failedCount) || 0;
+    });
+  };
+
+  function refreshQuiet() {
+    return c.server.get({ action: 'history' }).then(function(h) {
+      setHistory((h.data && h.data.history) || []);
+      c.failedCount = (h.data && h.data.failedCount) || 0;
+      if (c.selectedGp) return c.server.get(siteParams({ action: 'page' }));
+    }).then(function(p) {
+      if (p && p.data && p.data.sites) applySites(p.data);
+    });
+  }
+
+  c.refreshAll = function() {
+    c.refreshing = true;
+    refreshQuiet().finally(function() { c.refreshing = false; });
+  };
+
+  c.retryOne = function(entry) {
+    if (!entry || c.retrying[entry.id]) return;
+    if (!confirm('Retry SAP sync for site ' + (entry.customerCode || '') + '?')) return;
+    c.retrying[entry.id] = true;
+    c.retryMsg = '';
+    c.server.get(siteParams({ action: 'retry', queueId: entry.id })).then(function(resp) {
+      delete c.retrying[entry.id];
+      var d = resp.data || {};
+      c.retryMsg = d.retry_result ? d.retry_result.message : '';
+      applyFresh(d);
+      if (d.retry_result && d.retry_result.ok) c.pollQueue(4);
+    }, function() {
+      delete c.retrying[entry.id];
+      c.retryMsg = 'Could not submit retry. Please try again.';
+    });
+  };
+
+  c.retryAllFailed = function() {
+    if (c.retryingAll || c.failedCount < 1) return;
+    if (!confirm('Retry all ' + c.failedCount + ' failed SAP updates?')) return;
+    c.retryingAll = true;
+    c.retryMsg = '';
+    c.server.get(siteParams({ action: 'retry_failed' })).then(function(resp) {
+      c.retryingAll = false;
+      var d = resp.data || {};
+      c.retryMsg = d.retry_result ? d.retry_result.message : '';
+      applyFresh(d);
+      if (d.retry_result && d.retry_result.ok) c.pollQueue(4);
+    }, function() {
+      c.retryingAll = false;
+      c.retryMsg = 'Failed to submit batch retry.';
+    });
+  };
+
+  c.pollQueue = function(tries) {
+    if (pollTimer) $timeout.cancel(pollTimer);
+    pollTimer = $timeout(function() {
+      refreshQuiet().then(function() {
+        if (hasInFlight() && tries > 1) c.pollQueue(tries - 1);
+        else c.retryMsg = '';
+      });
+    }, 25000);
+  };
+
+  $scope.$on('$destroy', function() {
+    if (pollTimer) $timeout.cancel(pollTimer);
+    document.removeEventListener('click', onDocumentClick);
+  });
+
+  /* Submit: batches of 40 to avoid HTTP 414 */
+  c.submit = function() {
+    var payload = [], missing = 0;
+    c.validationMsg = '';
+
+    for (var id in c.sel) {
+      var s = c.sel[id];
+      var newLimit = c.limits[id];
+      if (!hasVal(newLimit)) { missing++; continue; }
+
+      var numLimit = parseFloat(newLimit);
+      var currLimit = parseFloat(s.currentLimit || 0);
+      if (numLimit > currLimit) {
+        c.validationMsg = 'Limit for site ' + s.customerCode + ' (₹' + c.formatINR(numLimit) + ') exceeds current limit of ₹' + c.formatINR(currLimit) + '. Limits cannot be increased here.';
+        return;
+      }
+      payload.push({
+        customerSysId: s.customerSysId, customerCode: s.customerCode, customerName: s.customerName,
+        salesOrg: s.salesOrg, gp: s.gp, groupCode: s.groupCode, segment: s.segment,
+        oldCreditLimit: currLimit, newCreditLimit: numLimit
+      });
+    }
+
+    if (missing > 0) { c.validationMsg = missing + ' selected site(s) are missing a new credit limit.'; return; }
+    if (payload.length === 0) return;
+
+    var CHUNK = 40, chunks = [];
+    for (var i = 0; i < payload.length; i += CHUNK) chunks.push(payload.slice(i, i + CHUNK));
+
+    var completed = 0, rejected = 0, rejectMsgs = [];
+    c.loading = true;
+    c.progress = '0/' + payload.length;
+
+    var chain = $q.when();
+    chunks.forEach(function(chunk) {
+      chain = chain.then(function() {
+        return c.server.get({ action: 'submit', updates: chunk }).then(function(resp) {
+          var d = resp.data || {};
+          completed += d.count || 0;
+          rejected += (d.rejected || []).length;
+          (d.rejected || []).forEach(function(m) { rejectMsgs.push(m); });
+          c.progress = completed + '/' + payload.length;
+        });
+      });
+    });
+
+    chain.then(function() {
+      c.loading = false;
+      c.resultMessage = completed + ' Key customer credit limit adjustment(s) submitted to SAP queue.' +
+        (rejected ? ' ' + rejected + ' rejected by validation: ' + rejectMsgs.join(' | ') : '');
+      c.submitted = true;
+    }, function() {
+      c.loading = false;
+      c.validationMsg = 'Submission failed after ' + completed + ' record(s). Check Recent Updates before retrying.';
+    });
+  };
+
+  c.reset = function() {
+    c.clearGp();
+    c.validationMsg = '';
+    c.notifyMsg = '';
+    c.resultMessage = '';
+    c.notifyState = {};
+    c.submitted = false;
+    c.activeView = 'update';
+    c.loadHistory();
+  };
+
+  if (!(c.data && c.data.error)) c.loadHistory();
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+.clm-bgm { background: #ffffff; min-height: 100vh; padding: 20px 24px 40px; color: #1a1a1a; box-sizing: border-box; width: 100%; }
+.clm-bgm *, .clm-bgm *::before, .clm-bgm *::after { box-sizing: border-box; }
+
+/* Breadcrumbs */
+.clm-breadcrumb-nav { margin-bottom: 14px; }
+.clm-breadcrumb { display: flex; align-items: center; flex-wrap: wrap; list-style: none; padding: 0; margin: 0; font-size: 13px; }
+.clm-breadcrumb-item { display: inline-flex; align-items: center; }
+.clm-breadcrumb-link { color: #af272f; text-decoration: none; font-weight: 700; }
+.clm-breadcrumb-link:hover { text-decoration: underline; color: #8c1e25; }
+.clm-breadcrumb-sep { margin: 0 8px; color: #8c9ba5; font-weight: 700; }
+.clm-breadcrumb-item.active { color: #5a6a7a; font-weight: 700; }
+
+/* Page Header Banner */
+.clm-hero { position: relative; overflow: hidden; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 20px 32px; padding: 28px 32px; margin-bottom: 20px; border-radius: 12px; background: linear-gradient(135deg, #9b1111 0%, #b81e1e 45%, #e0301e 100%); color: #ffffff; box-shadow: 0 10px 28px rgba(120, 20, 15, 0.28); }
+.clm-hero::before, .clm-hero::after { content: ""; position: absolute; border-radius: 50%; pointer-events: none; }
+.clm-hero::before { width: 360px; height: 360px; right: -110px; top: -190px; background: rgba(244, 123, 48, 0.55); }
+.clm-hero::after  { width: 260px; height: 260px; right: 160px; bottom: -200px; background: rgba(120, 15, 15, 0.45); }
+.clm-hero-left, .clm-hero-right { position: relative; z-index: 1; }
+.clm-hero-left { flex: 1 1 380px; min-width: 0; }
+.clm-hero-bar { width: 44px; height: 6px; margin-bottom: 12px; border-radius: 3px; background: #fff200; }
+.clm-hero-title { margin: 0; font-size: 26px; font-weight: 700; line-height: 1.25; color: #ffffff; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.clm-hero-accent { color: #fff200; }
+.clm-hero-badge { font-size: 12px; background: rgba(255,255,255,.2); padding: 3px 9px; border-radius: 4px; border: 1px solid rgba(255,255,255,.4); text-transform: uppercase; letter-spacing: .5px; }
+.clm-hero-sub { max-width: 720px; margin-top: 6px; font-size: 15px; font-weight: 400; line-height: 1.5; color: #ffeae4; }
+.clm-hero-right { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+.clm-hero-stat { min-width: 120px; padding-left: 24px; border-left: 1px solid rgba(255,255,255,.3); text-align: right; }
+.clm-hero-stat-v { font-size: 34px; font-weight: 700; line-height: 1.1; letter-spacing: 1px; color: #fff200; white-space: nowrap; text-shadow: 0 1px 3px rgba(80,10,10,.35); }
+.clm-hero-stat-k { margin-top: 6px; font-size: 12px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: #ffd9cf; white-space: nowrap; }
+
+/* View Switcher */
+.clm-view-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
+.clm-view-tab { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; min-height: 54px; background: #fff; font: inherit; border: 1px solid #dde3ea; border-top: 4px solid #cdd4dc; border-radius: 8px; font-size: 13px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; cursor: pointer; text-align: left; appearance: none; transition: box-shadow .15s, border-color .15s; }
+.clm-view-tab:hover { box-shadow: 0 2px 8px rgba(0,0,0,.06); }
+.clm-view-tab:focus { outline: none; }
+.clm-view-tab.is-active { background: #fffcf0; border-color: #e87722; box-shadow: 0 0 0 2px rgba(232,119,34,.25); color: #1a1a1a; }
+.clm-view-badge { display: inline-block; padding: 2px 9px; background: #eef1f5; color: #3a4451; border-radius: 12px; font-size: 11.5px; font-weight: 700; letter-spacing: 0; }
+.clm-view-tab.is-active .clm-view-badge { background: #f3d54e; color: #1a1a1a; }
+.clm-view-badge.is-bad { background: #fdecea !important; color: #b3261e !important; }
+
+/* Sections &amp; Structural Blocks */
+.clm-section { background: #fff; border: 1px solid #e0e6ed; border-radius: 8px; padding: 22px 24px; box-shadow: 0 4px 16px rgba(0,0,0,.04); }
+.clm-block { margin-top: 16px; background: #fff; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden; }
+.clm-block:first-child { margin-top: 0; }
+.clm-block.is-search-block { overflow: visible !important; position: relative; z-index: 100; }
+.clm-block-head { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; padding: 14px 20px; background: #fafbfc; border-bottom: 1px solid #dde3ea; }
+.clm-block-title { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; letter-spacing: .8px; }
+.clm-block-title::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: #f3d54e; flex-shrink: 0; }
+.clm-block-sub { margin: 4px 0 0 14px; font-size: 12px; color: #5a6a7a; }
+.clm-block-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.clm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: #fff; border: 1px solid #dde3ea; border-radius: 12px; font-size: 12px; font-weight: 700; color: #1a1a1a; white-space: nowrap; }
+.clm-chip-k { font-weight: 400; color: #5a6a7a; }
+.clm-chip-live { background: #eaf7ee; border-color: #b9e3c6; color: #1e8449; }
+.clm-chip-req { background: #fff8e1; border-color: #f3d54e; color: #7a5a00; }
+.clm-tw-body { padding: 18px 20px; overflow: visible !important; }
+
+/* Top Filter Bar */
+.clm-bgm-top-filter-bar { display: flex; gap: 16px; align-items: flex-end; position: relative; z-index: 110; }
+.clm-pan-search-col { flex: 1 1 100%; position: relative; }
+.clm-pan-search-col .clm-bgm-label { display: block; margin-bottom: 6px; }
+.clm-pan-input-container { position: relative; display: flex; align-items: center; width: 100%; }
+.clm-pan-search-icon { position: absolute; left: 14px; color: #7f8c9a; font-size: 14px; pointer-events: none; }
+.clm-pan-input { padding-left: 38px !important; padding-right: 36px !important; height: 40px; font-size: 13.5px; font-weight: 600; }
+.clm-pan-clear-btn { position: absolute; right: 10px; background: none; border: none; font-size: 14px; color: #9aa5b1; cursor: pointer; padding: 4px 8px; }
+.clm-pan-clear-btn:hover { color: #b3261e; }
+
+/* Autocomplete Dropdown */
+.clm-pan-dropdown { position: absolute; top: 100%; left: 0; right: 0; z-index: 9999 !important; background: #ffffff; border: 1px solid #cdd4dc; border-radius: 8px; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18); max-height: 240px; overflow-y: auto; margin-top: 4px; }
+.clm-pan-option { padding: 10px 14px; cursor: pointer; border-bottom: 1px solid #f0f3f6; transition: background 0.15s; }
+.clm-pan-option:last-child { border-bottom: none; }
+.clm-pan-option:hover { background: #fdf6f0; }
+.clm-pan-opt-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px; }
+.clm-pan-mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 13px; color: #b81e1e; }
+.clm-pan-opt-count { font-size: 11px; background: #eef1f5; padding: 2px 8px; border-radius: 10px; font-weight: 700; color: #5a6a7a; }
+.clm-pan-opt-name { font-size: 12.5px; color: #1a1a1a; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Summary */
+.clm-bgm-summary-block { border-left: 4px solid #b81e1e; }
+.clm-summary-section-title { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 10px; }
+.clm-summary-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+.clm-sum-tile { padding: 12px 14px; border: 1px solid #dde3ea; border-radius: 6px; background: #fafbfc; }
+.clm-sum-tile.is-calc { background: #fffcf0; border-color: #f1e2a0; border-top: 3px solid #e87722; }
+.clm-sum-k { font-size: 11.5px; font-weight: 700; color: #5a6a7a; text-transform: uppercase; margin-bottom: 4px; }
+.clm-sum-v { font-size: 20px; font-weight: 700; color: #1a1a1a; line-height: 1.1; white-space: nowrap; }
+.clm-text-calc { color: #d35400; }
+.clm-sum-s { font-size: 11px; color: #7f8c9a; margin-top: 4px; }
+.clm-delta-tag { font-weight: 700; }
+.clm-delta-tag.is-up { color: #c0392b; }
+.clm-delta-tag.is-down { color: #1e8449; }
+.clm-sum-table th.clm-bgm-th-calc { background: #fff8e1 !important; color: #7a5a00 !important; }
+.clm-sum-table td.clm-td-calc { background: #fffdf5 !important; }
+
+/* Fields, Links, Inputs, Buttons */
+.clm-bgm-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; position: relative; }
+.clm-bgm-label { margin: 0; font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-bgm-link { background: none; border: none; padding: 4px 6px; font-size: 12px; font-weight: 700; color: #af272f; cursor: pointer; }
+.clm-bgm-link:hover:not([disabled]) { text-decoration: underline; }
+.clm-input { width: 100%; height: 38px; padding: 0 12px; border: 1px solid #cdd4dc; border-radius: 6px; background: #fff; font-size: 13px; color: #1a1a1a; outline: none; transition: border-color .2s, box-shadow .2s; }
+.clm-input:focus { border-color: #e87722; box-shadow: 0 0 0 3px rgba(232,119,34,.12); }
+.clm-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 38px; padding: 0 18px; border: 1px solid transparent; border-radius: 6px; font-size: 12.5px; font-weight: 700; cursor: pointer; white-space: nowrap; text-decoration: none !important; transition: all .2s; }
+.clm-btn:disabled { opacity: .5; cursor: not-allowed; }
+.clm-btn-outline { background: #fff; border-color: #cdd4dc; color: #1a1a1a; }
+.clm-btn-outline:not(:disabled):hover { background: #1a1a1a; border-color: #1a1a1a; color: #f3d54e; }
+.clm-btn-primary { background: #e87722; border-color: #e87722; color: #fff; }
+.clm-btn-primary:not(:disabled):hover { background: #d35400; border-color: #d35400; }
+.clm-checkbox { width: 16px; height: 16px; margin: 0; cursor: pointer; accent-color: #e87722; vertical-align: middle; }
+.clm-checkbox:disabled { cursor: not-allowed; }
+
+/* Notify button */
+.clm-btn-notify { height: 32px; padding: 0 12px; background: #fff8e1; border: 1px solid #f3d54e; color: #7a5a00; font-size: 12px; font-weight: 700; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: all 0.2s; }
+.clm-btn-notify:hover:not(:disabled) { background: #f3d54e; color: #1a1a1a; }
+.clm-btn-notify:disabled { opacity: 0.65; cursor: not-allowed; }
+
+/* Grandparent grouping rows (Recent Updates) */
+.clm-pan-group-row td { background: #f7f8fa !important; padding: 8px 14px !important; border-top: 2px solid #c9d4e2 !important; border-bottom: 1px solid #dde3ea !important; text-align: left; white-space: normal; }
+.clm-pan-group-content { display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap; }
+.clm-pan-group-left { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.clm-pan-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; background: #fdf5f3; border: 1px solid #f5cfca; border-radius: 14px; font-size: 12px; font-weight: 700; color: #b81e1e; letter-spacing: .4px; }
+.clm-pan-custname { font-weight: 700; color: #1a1a1a; font-size: 13px; }
+.clm-pan-count { font-size: 12px; color: #5a6a7a; }
+
+/* Tables */
+.clm-table-wrap { overflow-x: auto; background: #fff; -webkit-overflow-scrolling: touch; }
+.clm-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.clm-table th { background: #eef1f5; color: #2b3440; padding: 10px 12px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; text-align: center; white-space: nowrap; border: 1px solid #dde3ea; }
+.clm-table td { padding: 10px 12px; color: #1a1a1a; text-align: center; white-space: normal; border: 1px solid #e6eaef; vertical-align: middle; background: #fff; }
+.clm-table .grp { border-left: 2px solid #c9d1db !important; }
+.clm-table tr.super th { letter-spacing: 1px; padding: 10px 12px; }
+.clm-table th.bg-blank { background: #f7f8fa; }
+.clm-table th.bg-code { background: #e3eefa; color: #0b5394; }
+.clm-table th.bg-seg { background: #f1f3f7; color: #3a4451; }
+.clm-table th.bg-req { background: #e6f4ea; color: #2e7d32; }
+
+.clm-bgm-th-left, .clm-bgm-td-left { text-align: left !important; }
+.clm-bgm-num { text-align: right !important; }
+.clm-bgm-col-check { width: 44px; min-width: 44px; text-align: center !important; }
+.clm-bgm-th-highlight { background: #fff8e1 !important; color: #7a5a00 !important; }
+.clm-bgm-net-exposure { background: #fffdf5 !important; }
+
+.clm-bgm-table tbody tr.clm-site-row, .clm-bgm-table tbody tr.clm-zone-row { cursor: pointer; transition: background-color .15s; }
+.clm-bgm-table tbody tr.clm-site-row:hover td { background: #fafbfc; }
+.clm-bgm-table tbody tr.is-selected td { background: #fffcf0; }
+.clm-bgm-table tbody tr.is-selected td:first-child { box-shadow: inset 4px 0 0 #f3d54e; }
+.clm-bgm-table tbody tr.is-expired-row td { background: #fff9f9; }
+.clm-bgm-table tbody tr.is-unassigned-row { cursor: not-allowed; }
+.clm-bgm-table tbody tr.is-unassigned-row td { opacity: 0.6; background: #f7f8fa; }
+
+.clm-cust-name { font-weight: 700; color: #1a1a1a; font-size: 13px; line-height: 1.35; }
+.clm-cust-sub { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; margin-top: 4px; }
+.clm-cust-code { font-size: 12px; color: #5a6a7a; }
+.clm-bgm-tag { display: inline-block; padding: 2px 7px; border: 1px solid #d6dbe1; border-radius: 4px; background: #f5f6f8; font-size: 11px; font-weight: 700; }
+.clm-bgm-tag-seg { background: #eef6fb; border-color: #bae3ff; color: #1782c5; }
+.clm-chip-expired { background: #fdecea; border: 1px solid #f5c2bc; color: #b3261e; padding: 1px 5px; border-radius: 4px; font-size: 10px; margin-left: 4px; }
+.clm-tag-expired { color: #c0392b; font-weight: 700; }
+
+.clm-bgm-input-num { width: 130px; height: 34px; padding: 4px 8px; text-align: right; font-weight: 700; }
+.clm-bgm-input-num.is-missing { border-color: #f3d54e; background: #fffdf3; }
+.clm-bgm-input-num.is-error { border-color: #e23d28 !important; background: #fef5f4 !important; color: #b3261e !important; }
+.clm-bgm-input-hint { font-size: 10px; margin-top: 2px; }
+.clm-bgm-mono { font-family: "SFMono-Regular", Consolas, monospace !important; font-size: 12px; }
+.clm-bgm-muted { color: #a0aab6; font-style: italic; }
+
+/* Status, Error &amp; Retry */
+.clm-bgm-last { text-align: left; }
+.clm-bgm-last-top { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; }
+.clm-date-transition { font-size: 12.5px; color: #2b3440; white-space: nowrap; }
+.clm-bgm-last-sub { font-size: 11px; color: #7f8c9a; margin-top: 3px; }
+.clm-bgm-status { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; border: 1px solid transparent; }
+.clm-bgm-status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.clm-bgm-status.is-pending { background: #fff8e1; border-color: #f3d54e; color: #7a5a00; }
+.clm-bgm-status.is-success { background: #eaf7ee; border-color: #b9e3c6; color: #1e8449; }
+.clm-bgm-status.is-failed  { background: #fdecea; border-color: #f5c2bc; color: #b3261e; }
+.clm-bgm-att { display: inline-block; padding: 2px 7px; background: #f4f6f9; border: 1px solid #e6eaef; border-radius: 6px; font-size: 11px; font-weight: 700; color: #3a4451; }
+.clm-bgm-last-err { margin-top: 4px; font-size: 11px; line-height: 1.3; color: #b3261e; word-break: break-word; }
+.clm-bgm-err-cell { font-size: 11.5px; color: #b3261e; white-space: normal !important; word-break: break-word !important; min-width: 200px; max-width: 380px; line-height: 1.35; }
+.clm-bgm-retry-btn { background: #c0392b; border-color: #c0392b; color: #fff; height: 34px; padding: 0 14px; font-size: 12px; }
+.clm-bgm-retry-btn:not(:disabled):hover { background: #a93226; border-color: #a93226; }
+.clm-bgm-retry-sm { height: 26px; padding: 0 10px; font-size: 11px; margin-top: 4px; }
+
+/* Result Row &amp; Pager */
+.clm-tw-res { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; padding: 14px 20px; background: #fffcf0; border-top: 1px solid #f1e2a0; }
+.clm-tw-res-k { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-tw-res-f { margin-top: 2px; font-size: 12px; color: #7f8c9a; }
+.clm-tw-res-v { font-size: 26px; font-weight: 700; color: #1a1a1a; line-height: 1.1; }
+.clm-tw-res.is-ok { background: #f4fbf6; border-top-color: #b9e3c6; }
+.clm-tw-res.is-ok .clm-tw-res-v { color: #1e8449; }
+.clm-bgm-res-right { display: flex; align-items: center; gap: 20px; margin-left: auto; }
+.clm-bgm-error { margin-top: 4px; font-size: 12px; font-weight: 700; color: #c0392b; }
+
+.clm-bgm-pager { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; padding: 12px 20px; border-top: 1px solid #dde3ea; background: #fafbfc; font-size: 12.5px; }
+.clm-bgm-pager-ctrl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.clm-bgm-pager-size { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 400; color: #3a4451; }
+.clm-bgm-pager-size .clm-input { width: 72px; height: 30px; padding: 0 8px; font-size: 12.5px; }
+.clm-bgm-pbtn { height: 30px; min-width: 32px; padding: 0 10px; font-size: 12px; font-weight: 700; }
+.clm-bgm-pager-page { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; }
+.clm-bgm-pager-input { width: 60px; height: 30px; padding: 0 6px; text-align: center; }
+
+/* Banner, Notes &amp; State */
+.clm-bgm-alert { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; margin-bottom: 16px; padding: 12px 16px; background: #fef5f4; border: 1px solid #f5c2bc; border-left: 4px solid #e23d28; border-radius: 6px; font-size: 13px; }
+.clm-bgm-alert-sub { display: block; margin-top: 2px; font-size: 12px; color: #5a6a7a; }
+.clm-bgm-alert-btns { display: flex; align-items: center; gap: 12px; }
+.clm-bgm-note { margin: -6px 0 14px; font-size: 12px; font-weight: 700; color: #5a6a7a; }
+.clm-bgm-note.is-info { background: #e3f2fd; border: 1px solid #90caf9; color: #0d47a1; padding: 10px 14px; border-radius: 6px; }
+.clm-bgm-loadbar { height: 3px; background: transparent; position: relative; overflow: hidden; }
+.clm-bgm-loadbar.is-on { background: #fbe3cf; }
+.clm-bgm-loadbar.is-on::after { content: ""; position: absolute; top: 0; left: -40%; width: 40%; height: 100%; background: #e87722; animation: slide 1s infinite ease-in-out; }
+@keyframes slide { 0% { left: -40%; } 100% { left: 100%; } }
+
+.clm-bgm-state { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 36px 20px; text-align: center; }
+.clm-bgm-state-icon { width: 50px; height: 50px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 700; }
+.clm-bgm-state-icon.is-ok { background: #27ae60; color: #fff; }
+.clm-bgm-state-icon.is-bad { background: #c0392b; color: #fff; }
+.clm-bgm-state-icon.is-info { background: #e3f2fd; color: #1976d2; }
+.clm-bgm-state-heading { font-size: 16px; font-weight: 700; color: #1a1a1a; margin-top: 4px; }
+.clm-bgm-state-text { max-width: 580px; font-size: 13.5px; line-height: 1.5; color: #5a6a7a; }
+.clm-state-actions { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+
+/* Site code + Territory columns */
+.clm-site-code { font-size: 13px; font-weight: 700; color: #1a1a1a; letter-spacing: .3px; }
+.clm-table th.clm-loc-th { min-width: 240px; line-height: 1.3; }
+.clm-th-sub { display: block; margin-top: 3px; font-size: 11px; font-weight: 400; color: #7f8c9a; text-transform: none; letter-spacing: 0; }
+.clm-loc-main { font-size: 13px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; line-height: 1.35; }
+.clm-loc-sub { margin-top: 3px; font-size: 12px; font-weight: 400; color: #5a6a7a; text-transform: uppercase; line-height: 1.4; }
+.clm-loc-out { color: #c0392b; font-weight: 700; }
+
+/* View tabs, search hint, identity, New CL header */
+.clm-view-tab-l { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
+.clm-view-ico { width: 18px; text-align: center; font-size: 15px; color: #7f8c9a; }
+.clm-view-tab.is-active .clm-view-ico { color: #e87722; }
+.clm-view-tab-r { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
+.clm-bgm-hint { margin: 2px 0 8px; font-size: 12px; color: #5a6a7a; }
+.clm-pan-search-col .clm-bgm-label { margin-bottom: 0; }
+.clm-bgm-identity { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 8px 0 0 14px; }
+.clm-bgm-identity-name { font-size: 16px; font-weight: 700; color: #1a1a1a; line-height: 1.3; }
+.clm-bgm-identity .clm-pan-badge { font-size: 12.5px; padding: 4px 12px; }
+.clm-table th.clm-newcl-th { white-space: normal; min-width: 210px; }
+.clm-th-note { max-width: 240px; margin: 4px auto 0; line-height: 1.35; color: #2e7d32; }
+.clm-th-note .fa { margin-right: 3px; }
+.clm-bgm-input-num.is-capped { border-color: #e87722; background: #fff8f0; }
+
+/* Tier -&gt; Group Code -&gt; Zone Code -&gt; Site grouping */
+.clm-zone-bulk { display: inline-flex; gap: 6px; margin-left: 6px; }
+.clm-bgm-table tr.clm-tier-row td { padding: 10px 16px; text-align: left; background: #f7f8fa; border-top: 2px solid #c9d1db; cursor: default; }
+.clm-tier-content { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; }
+.clm-tier-dot { width: 10px; height: 10px; border-radius: 50%; background: #7f8c9a; flex-shrink: 0; }
+.clm-tier-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #1a1a1a; }
+.clm-tier-count { font-size: 12px; font-weight: 700; color: #3a4451; padding: 2px 9px; background: #fff; border: 1px solid #dde3ea; border-radius: 12px; }
+.clm-tier-sub { font-size: 12px; color: #5a6a7a; }
+/* Key tiers: affected (red) / context (grey) */
+.clm-bgm-table tr.clm-tier-row.is-affected td { background: #fef5f4; border-top-color: #e23d28; }
+.clm-tier-row.is-affected .clm-tier-dot { background: #e23d28; }
+.clm-tier-row.is-affected .clm-tier-title { color: #b3261e; }
+.clm-bgm-table tr.clm-tier-row.is-context td { background: #f1f3f7; border-top-color: #9aa5b1; }
+.clm-tier-row.is-context .clm-tier-dot { background: #9aa5b1; }
+.clm-tier-row.is-context .clm-tier-title { color: #5a6a7a; }
+
+.clm-bgm-table tr.clm-zone-row td { background: #f1f3f7; padding-top: 9px; padding-bottom: 9px; border-top: 1px solid #c9d1db; }
+.clm-bgm-table tr.clm-zone-row:hover td { background: #e9edf2; }
+.clm-bgm-table tr.clm-zone-row td.clm-bgm-net-exposure { background: #fbf4dc !important; }
+.clm-zone-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.clm-zone-toggle { width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: #fff; border: 1px solid #cdd4dc; border-radius: 6px; cursor: pointer; color: #3a4451; flex-shrink: 0; transition: all .15s; }
+.clm-zone-toggle:hover { background: #1a1a1a; border-color: #1a1a1a; color: #f3d54e; }
+.clm-zone-caret { display: inline-block; font-size: 13px; line-height: 1; transition: transform .15s; }
+.clm-zone-row.is-collapsed .clm-zone-caret { transform: rotate(-90deg); }
+.clm-zone-k { font-size: 11px; font-weight: 700; color: #5a6a7a; text-transform: uppercase; letter-spacing: .6px; }
+.clm-zone-name { font-size: 13.5px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; }
+.clm-zone-count { font-size: 12px; color: #5a6a7a; }
+.clm-zone-sel { font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 10px; background: #fff8e1; border: 1px solid #f3d54e; color: #7a5a00; }
+.clm-zone-subtotal { font-size: 11px; font-weight: 700; color: #7f8c9a; text-transform: uppercase; letter-spacing: .5px; }
+.clm-zone-progress { font-size: 12px; font-weight: 700; color: #3a4451; }
+.clm-zg.is-context .clm-zone-name { color: #7f8c9a; }
+.clm-bgm-table tr.clm-site-row td.clm-site-cell { padding-left: 30px; }
+
+/* Key additions: Zone Code sub-row + projected (cascade preview) values */
+.clm-bgm-table tr.clm-zonecode-row td { background: #f9fafc; padding-top: 7px; padding-bottom: 7px; font-size: 12.5px; border-top: 1px dashed #c9d1db; }
+.clm-zonecode-cell { padding-left: 30px !important; }
+.clm-zonecode-cell .clm-zone-name { font-size: 12.5px; }
+.clm-proj { font-size: 11px; font-weight: 700; color: #d35400; margin-top: 2px; white-space: nowrap; }
+.clm-bgm-table tbody.is-context tr.clm-group-row td { opacity: .85; }
+
+/* Recent Updates &amp; SAP Status */
+.clm-section-title { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; font-size: 14px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; letter-spacing: 1px; }
+.clm-section-num { width: 26px; height: 26px; border-radius: 50%; background: #f3d54e; color: #1a1a1a; font-size: 13px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.clm-hs-sec2 { margin-top: 26px; }
+.clm-hs .clm-block { margin-top: 0; }
+.clm-hs-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.clm-hs-stat { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 16px 18px; background: #fff; border: 1px solid #dde3ea; border-top: 4px solid #cdd4dc; border-radius: 8px; cursor: pointer; text-align: left; font: inherit; appearance: none; transition: box-shadow .15s, background .15s; }
+.clm-hs-stat:hover { box-shadow: 0 2px 8px rgba(0,0,0,.06); }
+.clm-hs-stat:focus { outline: none; }
+.clm-hs-stat-k { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-hs-stat-v { font-size: 26px; font-weight: 700; line-height: 1.1; color: #1a1a1a; }
+.clm-hs-stat.is-total   { border-top-color: #af272f; }
+.clm-hs-stat.is-success { border-top-color: #27ae60; }
+.clm-hs-stat.is-success .clm-hs-stat-v { color: #1e8449; }
+.clm-hs-stat.is-pending { border-top-color: #e87722; }
+.clm-hs-stat.is-pending .clm-hs-stat-v { color: #d35400; }
+.clm-hs-stat.is-failed  { border-top-color: #e23d28; }
+.clm-hs-stat.is-failed .clm-hs-stat-v { color: #c0392b; }
+.clm-hs-stat.is-active { background: #fffcf0; box-shadow: 0 0 0 2px rgba(243,213,78,.45); }
+.clm-hs-btn { height: 34px; padding: 0 14px; font-size: 12.5px; }
+.clm-bgm-hist th.clm-hs-th-sub { font-size: 11.5px; font-weight: 400; color: #5a6a7a; }
+.clm-bgm-hist tr.super th { border-bottom: 1px solid #dde3ea; }
+.clm-hs-site { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.clm-bgm-tag-seg.is-rmc { background: #f3eefc; border-color: #d9c8f5; color: #6a3fb5; }
+.clm-hs-by { font-size: 13px; color: #1a1a1a; }
+.clm-bgm-hist td { vertical-align: middle; }
+.clm-bgm-hist .clm-bgm-retry-sm { margin-top: 0; }
+
+/* Responsive */
+@media (max-width: 1200px) {
+  .clm-hs-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .clm-summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 768px) {
+  .clm-view-nav { grid-template-columns: 1fr; }
+  .clm-bgm-top-filter-bar { flex-direction: column; align-items: stretch; }
+  .clm-summary-grid { grid-template-columns: 1fr; }
+}
+
+/* Global Font */
+.clm-widget, .clm-widget *, .clm-widget input, .clm-widget select, .clm-widget button {
+  font-family: "Oxygen", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>false</has_preview>
+        <id>clm_key_bg_expiry_monitor</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>CLM Key BG Expiry Monitor</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+  // ======================= CONFIG — VERIFY THESE AGAINST YOUR INSTANCE =======================
+  var T_CUST        = 'x_birl3_clm_clm_customer_master1';
+  var T_MONITOR     = 'x_birl3_clm_bank_guarantee_monitor';
+  var T_QUEUE       = 'x_birl3_clm_clm_servicenow_to_sap_send_back';
+  var T_MATRIX      = 'x_birl3_clm_approval_matrix';
+
+  // Key-hierarchy fields on the customer master (ASSUMED names — change if different)
+  var F_GP          = 'grand_parent';   // Grandparent Code (apex, common across segments)
+  var F_GROUP       = 'groupcode';         // Group Code (segment specific)
+  var F_ZONECODE    = 'zonalparentcode';         // Zone Code (under Group Code)
+  var F_CG3         = 'cg3';                // Customer Group 3 (N09 = contractor)
+
+  var CG1_KEY       = 'N00';                // Key customer (FRS: CG1 N00)
+  var CG3_CONTRACTOR= 'N09';                // contractor sites -> excluded from Key processes
+  var QUEUE_TYPE    = 'key_bg';             // customer_type on send-back queue (history/retry scoping)
+  var MONITOR_TYPE  = 'key';                // customer_type on monitor (audit) table — must be a valid choice
+  var NOTIFY_EVENT  = 'x_birl3_clm.bg_monitor_notify_zch';
+  // ===========================================================================================
+
+  var MAX_ATTEMPTS  = 3;
+  var MAX_SITES     = 1000;
+  var HISTORY_LIMIT = 500;
+
+  data.error = '';
+  data.sites = [];
+  data.gpList = [];
+  data.total = 0;
+  data.totalGps = 0;
+  data.expiredGps = 0;
+  data.truncated = false;
+  data.maxAttempts = MAX_ATTEMPTS;
+
+  var userId = gs.getUserID();
+  var isAdmin = gs.hasRole('admin');
+  var isZch = false;
+  var isPanIndia = false;
+  var userZones = [];
+  var today = new GlideDate().getValue();
+
+  function formatGeo(name, code) {
+    name = (name || '').trim();
+    code = (code || '').trim();
+    if (!name && !code) return '—';
+    if (code && code.length === 32 && /^[0-9a-f]{32}$/i.test(code)) return name || '—';
+    if (name && code && name !== code) {
+      if (name.indexOf('(' + code + ')') !== -1) return name;
+      return name + ' (' + code + ')';
+    }
+    return name || code;
+  }
+
+  // 1. ZCH matrix verification & zone -> ZCH mapping
+  var zoneZchMap = {};
+  var matrixGr = new GlideRecord(T_MATRIX);
+  var rqc = matrixGr.addQuery('role_name', 'CONTAINS', 'ZCH');
+  rqc.addOrCondition('role_name', 'CONTAINS', 'Zonal');
+  matrixGr.query();
+  while (matrixGr.next()) {
+    var approverId = matrixGr.getValue('approver_user');
+    var approverName = matrixGr.getDisplayValue('approver_user');
+    var z = matrixGr.getValue('zone');
+    if (z && approverName) {
+      if (!zoneZchMap[z]) zoneZchMap[z] = [];
+      if (zoneZchMap[z].indexOf(approverName) === -1) zoneZchMap[z].push(approverName);
+    }
+    if (approverId === userId) {
+      isZch = true;
+      var pIndiaVal = matrixGr.getValue('pan_india');
+      if (pIndiaVal === '1' || pIndiaVal === 'true' || pIndiaVal === true) isPanIndia = true;
+      if (z && userZones.indexOf(z) === -1) userZones.push(z);
+    }
+  }
+
+  if (!isZch && !isAdmin) {
+    data.error = 'Access Restricted: You must be a designated Zone Commercial Head (ZCH) or Administrator to access the Bank Guarantee Monitor.';
+    return;
+  }
+
+  data.isAdmin = isAdmin;
+  data.isPanIndia = isPanIndia;
+  data.userZones = userZones;
+  data.zoneZchMap = zoneZchMap;
+
+  function isSiteAssigned(zCode) {
+    return !!(isAdmin || isPanIndia || (zCode && userZones.indexOf(zCode) > -1));
+  }
+
+  function getCreditSegment(seg) {
+    seg = (seg || '').trim();
+    if (seg === 'Cement' || seg === 'GIL' || seg === 'BPD') return 'GIL';
+    if (seg === 'RMC' || seg === 'URMX') return 'URMX';
+    return 'GIL';
+  }
+
+  // 2. Live follow-up (review) date from SAP — the review date must stay UNCHANGED on BG-expiry revisions
+  function getFollowUpDateFromWSDL(customerCode, customerSysId, salesOrg) {
+    if (!salesOrg && customerSysId) {
+      var cMaster = new GlideRecord(T_CUST);
+      if (cMaster.get(customerSysId)) {
+        salesOrg = cMaster.getValue('salesorg') || cMaster.getValue('sales_org') || '';
+      }
+    }
+    try {
+      var obj = new x_birl3_clm.CLM_NEW_WSDL1();
+      var res = obj.getCreditDetails(customerCode, salesOrg);
+      if (typeof res === 'string') res = JSON.parse(res);
+      if (res && res.followUpDate && res.followUpDate !== '0000-00-00') return String(res.followUpDate).trim();
+    } catch (e) {
+      gs.error('WSDL Error for ' + customerCode + ': ' + e.message);
+    }
+    var cGr = new GlideRecord(T_CUST);
+    if (cGr.get(customerSysId)) return cGr.getValue('next_review_date') || '';
+    return '';
+  }
+
+  // 3. Base query: active, Key (CG1 = N00), contractor sites (CG3 = N09) excluded
+  function baseKeyQuery(gr) {
+    gr.addQuery('is_active', 'true');
+    gr.addQuery('cg1', CG1_KEY);
+    if (gr.isValidField(F_CG3)) gr.addQuery(F_CG3, '!=', CG3_CONTRACTOR);
+    return gr;
+  }
+
+  // A Group Code is "affected" when any of its (non-contractor, active Key) sites has an expired BG
+  function isGroupAffected(gp, groupCode) {
+    var ga = new GlideAggregate(T_CUST);
+    baseKeyQuery(ga);
+    ga.addQuery(F_GP, gp);
+    ga.addQuery(F_GROUP, groupCode);
+    ga.addQuery('bg_expiry_date', '<', today);
+    ga.addAggregate('COUNT');
+    ga.query();
+    return ga.next() && parseInt(ga.getAggregate('COUNT'), 10) > 0;
+  }
+
+  function loadPage(gp, loadAll, page, size) {
+    if (loadAll) { page = 1; size = MAX_SITES; }
+    else {
+      page = Math.max(parseInt(page, 10) || 1, 1);
+      size = Math.min(Math.max(parseInt(size, 10) || 15, 5), 100);
+    }
+
+    var gr = new GlideRecord(T_CUST);
+    baseKeyQuery(gr);
+    if (gp) gr.addQuery(F_GP, gp); else gr.addQuery('sys_id', '-1');
+
+    var ga = new GlideAggregate(T_CUST);
+    ga.addEncodedQuery(gr.getEncodedQuery());
+    ga.addAggregate('COUNT');
+    ga.query();
+    data.total = ga.next() ? parseInt(ga.getAggregate('COUNT'), 10) : 0;
+    data.truncated = !!loadAll && data.total > size;
+
+    gr.orderBy(F_GROUP);
+    gr.orderBy(F_ZONECODE);
+    gr.orderBy('customer_code_sap');
+    var start = (page - 1) * size;
+    gr.chooseWindow(start, start + size);
+    gr.query();
+
+    var rows = [];
+    while (gr.next()) {
+      var bgExp = gr.getValue('bg_expiry_date') || '';
+      var isExpired = !!(bgExp && bgExp < today);
+
+      var zCode = gr.getValue('zone') || '';
+      var zName = gr.isValidField('zone_name') && gr.getValue('zone_name') ? gr.getDisplayValue('zone_name') : (gr.getDisplayValue('zone') || zCode);
+      var rCode = gr.getValue('region') || '';
+      var rName = gr.isValidField('region_name') && gr.getValue('region_name') ? gr.getDisplayValue('region_name') : (gr.getDisplayValue('region') || rCode);
+      var dCode = gr.getValue('depot') || '';
+      var dName = gr.isValidField('depot_name') && gr.getValue('depot_name') ? gr.getDisplayValue('depot_name') : (gr.getDisplayValue('depot') || dCode);
+
+      var cl = parseFloat(gr.getValue('cr_limit')) || 0;
+      var bg = parseFloat(gr.getValue('bank_guarantee') || gr.getValue('security_deposit')) || 0;
+      var netExp = cl - (isExpired ? 0 : bg);    // expired BG is not counted
+
+      var zchList = zoneZchMap[zCode] || [];
+      var sOrg = gr.isValidField('salesorg') ? gr.getValue('salesorg') : (gr.getValue('sales_org') || '');
+
+      rows.push({
+        customerSysId: gr.getUniqueValue(),
+        customerCode: gr.getValue('customer_code_sap'),
+        customerName: gr.getValue('customer_name'),
+        salesOrg: sOrg,
+        gp: gr.getValue(F_GP) || '',
+        groupCode: gr.isValidField(F_GROUP) ? (gr.getDisplayValue(F_GROUP) || gr.getValue(F_GROUP) || '') : '',
+        zoneCode: gr.isValidField(F_ZONECODE) ? (gr.getDisplayValue(F_ZONECODE) || gr.getValue(F_ZONECODE) || '') : '',
+        segment: gr.getValue('segment'),
+        zone: zCode,
+        zoneDisplay: formatGeo(zName, zCode),
+        zchName: zchList.join(', '),
+        region: rCode,
+        regionDisplay: formatGeo(rName, rCode),
+        depot: dCode,
+        depotDisplay: formatGeo(dName, dCode),
+        currentLimit: cl,
+        activeBg: bg,
+        netExposure: netExp,
+        bgExpiryDate: bgExp,
+        isBgExpired: isExpired,
+        isAssigned: isSiteAssigned(zCode)
+      });
+    }
+    data.sites = rows;
+    data.page = page;
+    data.pageSize = size;
+  }
+
+  // 4. Grandparent list (only GPs that have BG on at least one site in the ZCH's scope)
+  function loadGpList() {
+    var map = {}, order = [];
+
+    var ga = new GlideAggregate(T_CUST);
+    baseKeyQuery(ga);
+    ga.addNotNullQuery(F_GP);
+    ga.addNotNullQuery('bank_guarantee');
+    ga.addQuery('bank_guarantee', '!=', '');
+    ga.addQuery('bank_guarantee', '!=', '0');
+    if (!isAdmin && !isPanIndia) {
+      if (userZones.length > 0) ga.addQuery('zone', 'IN', userZones.join(','));
+      else ga.addQuery('sys_id', '-1');
+    }
+    ga.groupBy(F_GP);
+    ga.addAggregate('COUNT');
+    ga.orderBy(F_GP);
+    ga.query();
+    while (ga.next()) {
+      var g = ga.getValue(F_GP);
+      if (!g) continue;
+      map[g] = { gp: g, customerName: '', siteCount: parseInt(ga.getAggregate('COUNT'), 10) || 0, expiredCount: 0 };
+      order.push(g);
+    }
+
+    // expired counts per GP (same scope)
+    var ea = new GlideAggregate(T_CUST);
+    baseKeyQuery(ea);
+    ea.addNotNullQuery(F_GP);
+    ea.addQuery('bg_expiry_date', '<', today);
+    ea.addNotNullQuery('bank_guarantee');
+    ea.addQuery('bank_guarantee', '!=', '');
+    ea.addQuery('bank_guarantee', '!=', '0');
+    if (!isAdmin && !isPanIndia) {
+      if (userZones.length > 0) ea.addQuery('zone', 'IN', userZones.join(','));
+      else ea.addQuery('sys_id', '-1');
+    }
+    ea.groupBy(F_GP);
+    ea.addAggregate('COUNT');
+    ea.query();
+    while (ea.next()) {
+      var k = ea.getValue(F_GP);
+      if (map[k]) map[k].expiredCount = parseInt(ea.getAggregate('COUNT'), 10) || 0;
+    }
+
+    var list = [], expiredGps = 0;
+    order.forEach(function(g) {
+      var cGr = new GlideRecord(T_CUST);
+      cGr.addQuery(F_GP, g);
+      cGr.addQuery('cg1', CG1_KEY);
+      cGr.setLimit(1);
+      cGr.query();
+      if (cGr.next()) map[g].customerName = cGr.getValue('customer_name') || '';
+      if (map[g].expiredCount > 0) expiredGps++;
+      list.push(map[g]);
+    });
+    // GPs with expired BG first
+    list.sort(function(a, b) { return (b.expiredCount > 0 ? 1 : 0) - (a.expiredCount > 0 ? 1 : 0); });
+
+    data.gpList = list;
+    data.totalGps = list.length;
+    data.expiredGps = expiredGps;
+  }
+
+  // 5. History
+  function loadHistory() {
+    data.history = [];
+    var failCount = 0;
+
+    var qGr = new GlideRecord(T_QUEUE);
+    qGr.addQuery('customer_type', QUEUE_TYPE);
+    if (!isAdmin && !isPanIndia && userZones.length > 0) {
+      qGr.addQuery('u_customer_code.zone', 'IN', userZones.join(','));
+    }
+    qGr.orderByDesc('sys_created_on');
+    qGr.setLimit(HISTORY_LIMIT);
+    qGr.query();
+
+    var seen = {};
+    while (qGr.next()) {
+      var cid = qGr.getValue('u_customer_code');
+      var ref = qGr.u_customer_code.getRefRecord();
+      var hasRef = ref && ref.isValidRecord();
+
+      var custName = hasRef ? (ref.getValue('customer_name') || '') : '';
+      var custCode = hasRef ? (ref.getValue('customer_code_sap') || '') : qGr.getDisplayValue('u_customer_code');
+      var gp = hasRef ? (ref.getValue(F_GP) || '') : '';
+      var grp = (hasRef && ref.isValidField(F_GROUP)) ? (ref.getDisplayValue(F_GROUP) || ref.getValue(F_GROUP) || '') : '';
+      var seg = hasRef ? (ref.getValue('segment') || '') : (qGr.getValue('u_credit_segment') || '');
+      var st = qGr.getValue('u_status') || 'Pending';
+
+      var oldLim = 0;
+      var bgReq = qGr.getValue('bg_request');
+      if (bgReq) {
+        var bgMonGr = new GlideRecord(T_MONITOR);
+        if (bgMonGr.get(bgReq) || bgMonGr.get('number', bgReq)) oldLim = parseFloat(bgMonGr.getValue('old_credit_limit')) || 0;
+      }
+      if (!oldLim && cid) {
+        var monLookup = new GlideRecord(T_MONITOR);
+        monLookup.addQuery('customer_site_code', cid);
+        monLookup.orderByDesc('sys_created_on');
+        monLookup.setLimit(1);
+        monLookup.query();
+        if (monLookup.next()) oldLim = parseFloat(monLookup.getValue('old_credit_limit')) || 0;
+      }
+
+      var entry = {
+        id: qGr.getUniqueValue(),
+        customerSysId: cid,
+        customerCode: custCode,
+        customerName: custName,
+        gp: gp,
+        groupCode: grp,
+        segment: seg,
+        oldLimit: oldLim,
+        newLimit: parseFloat(qGr.getValue('u_approved_code_limit')) || 0,
+        requestedBy: qGr.getDisplayValue('sys_created_by'),
+        requestedOn: qGr.getDisplayValue('sys_created_on'),
+        status: st,
+        error: qGr.getValue('u_last_error') || '',
+        attempts: parseInt(qGr.getValue('u_attempt_count'), 10) || 0,
+        connRetries: parseInt(qGr.getValue('u_connection_retry_count'), 10) || 0,
+        canRetry: false
+      };
+      if (st === 'Failed' && !seen[cid]) { entry.canRetry = true; failCount++; }
+      seen[cid] = true;
+      data.history.push(entry);
+    }
+    data.failedCount = failCount;
+  }
+
+  // 6. Submit — server-side re-validation of every rule, then audit + SAP queue.
+  //    No approval workflow, no maker-checker, review date unchanged (FRS: BG Expiry Revision).
+  function submitUpdates() {
+    var updates = input.updates || [];
+    var count = 0;
+    data.rejected = [];
+
+    for (var i = 0; i < updates.length; i++) {
+      var u = updates[i];
+
+      var cust = new GlideRecord(T_CUST);
+      baseKeyQuery(cust);
+      cust.addQuery('sys_id', u.customerSysId);
+      cust.setLimit(1);
+      cust.query();
+      if (!cust.next()) { data.rejected.push((u.customerCode || '?') + ': not an active Key site (or contractor-tagged)'); continue; }
+
+      var code = cust.getValue('customer_code_sap');
+      var curLimit = parseFloat(cust.getValue('cr_limit')) || 0;
+      var newLimit = parseFloat(u.newCreditLimit);
+
+      if (!isSiteAssigned(cust.getValue('zone'))) { data.rejected.push(code + ': outside your assigned zone'); continue; }
+      if (!isGroupAffected(cust.getValue(F_GP), cust.getValue(F_GROUP))) { data.rejected.push(code + ': Group Code has no expired BG'); continue; }
+      if (isNaN(newLimit) || newLimit < 0) { data.rejected.push(code + ': invalid limit'); continue; }
+      if (newLimit > curLimit) { data.rejected.push(code + ': limit can only be reduced'); continue; }
+
+      var creditSeg = getCreditSegment(cust.getValue('segment'));
+      var liveFollowUpDate = getFollowUpDateFromWSDL(code, u.customerSysId, cust.getValue('salesorg') || cust.getValue('sales_org') || '');
+
+      // Audit record (feeds "BG Expiry Revision Report")
+      var mon = new GlideRecord(T_MONITOR);
+      mon.initialize();
+      mon.setValue('customer_site_code', u.customerSysId);
+      mon.setValue('credit_limit', newLimit);
+      mon.setValue('old_credit_limit', curLimit);            // authoritative, from DB — not from client
+      mon.setValue('credit_segment', creditSeg);
+      mon.setValue('next_review_date', liveFollowUpDate);    // unchanged
+      mon.setValue('customer_type', MONITOR_TYPE);
+      mon.setValue('description', 'BG Expiry — ZCH discretionary adjustment (Key, GP ' + cust.getValue(F_GP) + ', Group ' + cust.getValue(F_GROUP) + ') submitted by ' + gs.getUserDisplayName());
+      var monId = mon.insert();
+
+      // SAP send-back queue
+      var q = new GlideRecord(T_QUEUE);
+      q.initialize();
+      q.setValue('u_customer_code', u.customerSysId);
+      q.setValue('u_approved_code_limit', newLimit);
+      if (q.isValidField('u_credit_segment')) q.setValue('u_credit_segment', creditSeg);
+      q.setValue('u_status', 'Pending');
+      q.setValue('u_attempt_count', 0);
+      q.setValue('u_connection_retry_count', 0);
+      q.setValue('u_last_error', '');
+      q.setValue('customer_type', QUEUE_TYPE);
+      if (q.isValidField('u_next_review_date')) q.setValue('u_next_review_date', liveFollowUpDate);
+      if (q.isValidField('next_review_date')) q.setValue('next_review_date', liveFollowUpDate);
+      if (q.isValidField('bg_request')) q.setValue('bg_request', monId);
+      var qId = q.insert();
+
+      if (qId || monId) count++;
+    }
+    data.count = count;
+  }
+
+  // 7. Notify ZCH of another zone
+  function notifyOtherZoneZch(custSysId, custCode, custName, zone, gp, groupCode, sites) {
+    if (!zone) return { ok: false, notifyMessage: 'Zone is missing.' };
+
+    var zchUserIds = [], zchNames = [];
+    var mxGr = new GlideRecord(T_MATRIX);
+    mxGr.addQuery('zone', zone);
+    var rq = mxGr.addQuery('role_name', 'CONTAINS', 'ZCH');
+    rq.addOrCondition('role_name', 'CONTAINS', 'Zonal');
+    mxGr.query();
+    while (mxGr.next()) {
+      var uId = mxGr.getValue('approver_user');
+      var uName = mxGr.getDisplayValue('approver_user');
+      if (uId && zchUserIds.indexOf(uId) === -1) { zchUserIds.push(uId); zchNames.push(uName); }
+    }
+    if (zchUserIds.length === 0) {
+      return { ok: false, notifyMessage: 'No designated ZCH found in Approval Matrix for Zone ' + zone + '.' };
+    }
+
+    sites = sites || [];
+    var siteList = [], expiredCnt = 0;
+    for (var i = 0; i < sites.length; i++) {
+      var s = sites[i] || {};
+      siteList.push({ customerSysId: s.customerSysId || '', customerCode: s.customerCode || '', isBgExpired: !!s.isBgExpired, bgExpiryDate: s.bgExpiryDate || '' });
+      if (s.isBgExpired) expiredCnt++;
+    }
+    if (!siteList.length) siteList.push({ customerSysId: custSysId, customerCode: custCode, isBgExpired: false, bgExpiryDate: '' });
+
+    var payload = {
+      customerSysId: custSysId, customerCode: custCode, customerName: custName,
+      zone: zone, grandparent: gp, groupCode: groupCode, customerType: 'Key',
+      sites: siteList, siteCount: siteList.length, expiredCount: expiredCnt,
+      requestedBy: gs.getUserDisplayName(), requestedByEmail: gs.getUser().getEmail()
+    };
+
+    var custGr = new GlideRecord(T_CUST);
+    if (!custGr.get(custSysId)) {
+      custGr.addQuery('customer_code_sap', custCode);
+      custGr.setLimit(1);
+      custGr.query();
+      custGr.next();
+    }
+    gs.eventQueue(NOTIFY_EVENT, custGr, zchUserIds.join(','), JSON.stringify(payload));
+
+    var targetName = zchNames.length ? zchNames.join(', ') : ('Zone ' + zone + ' Commercial Head');
+    return {
+      ok: true,
+      notifyMessage: 'Notification sent to ' + targetName + ' for ' + siteList.length + ' site(s)' + (expiredCnt ? ' (' + expiredCnt + ' with expired BG).' : '.')
+    };
+  }
+
+  // 8. Retry
+  function retryQueue(queueId) {
+    var q = new GlideRecord(T_QUEUE);
+    if (!queueId || !q.get(queueId)) return { ok: false, message: 'Queue record not found.' };
+    if (q.getValue('customer_type') !== QUEUE_TYPE) return { ok: false, message: 'Not a Key BG record.' };
+
+    var cCode = q.u_customer_code.customer_code_sap ? q.u_customer_code.customer_code_sap.toString() : q.getValue('u_customer_code');
+    var seg = q.u_customer_code.segment ? q.u_customer_code.segment.toString() : '';
+
+    var liveFollowUp = getFollowUpDateFromWSDL(cCode, q.getValue('u_customer_code'), '');
+    if (liveFollowUp) {
+      if (q.isValidField('u_next_review_date')) q.setValue('u_next_review_date', liveFollowUp);
+      if (q.isValidField('next_review_date')) q.setValue('next_review_date', liveFollowUp);
+    }
+    if (q.isValidField('u_credit_segment') && seg) q.setValue('u_credit_segment', getCreditSegment(seg));
+
+    q.setValue('u_status', 'Pending');
+    q.setValue('u_attempt_count', 0);
+    q.setValue('u_connection_retry_count', 0);
+    q.setValue('u_last_error', 'Manual Retry triggered by ' + gs.getUserDisplayName() + ' on ' + new GlideDateTime().getDisplayValue());
+    q.update();
+    return { ok: true, message: 'Retry submitted. The SAP Writeback job will reprocess this site.' };
+  }
+
+  // Dispatch
+  var action = (input && input.action) ? input.action : 'load';
+  var gp = (input && input.gp) || '';
+  var loadAll = !!(input && input.all);
+
+  if (action === 'load') {
+    loadGpList();
+    loadPage('', false, 1, 15);
+  } else if (action === 'page') {
+    loadPage(gp, loadAll, input.page, input.pageSize);
+  } else if (action === 'notify_zch') {
+    var nr = notifyOtherZoneZch(input.customerSysId, input.customerCode, input.customerName, input.zone, input.gp, input.groupCode, input.sites);
+    data.notifyOk = nr.ok;
+    data.notifyMessage = nr.notifyMessage;
+  } else if (action === 'history') {
+    loadHistory();
+  } else if (action === 'submit') {
+    submitUpdates();
+  } else if (action === 'retry') {
+    data.retry_result = retryQueue(input.queueId);
+    if (gp) loadPage(gp, loadAll, input.page, input.pageSize);
+    loadHistory();
+  } else if (action === 'retry_failed') {
+    var qFail = new GlideRecord(T_QUEUE);
+    qFail.addQuery('u_status', 'Failed');
+    qFail.addQuery('customer_type', QUEUE_TYPE);
+    if (!isAdmin && !isPanIndia && userZones.length > 0) qFail.addQuery('u_customer_code.zone', 'IN', userZones.join(','));
+    qFail.query();
+    var rCount = 0;
+    while (qFail.next()) { retryQueue(qFail.getUniqueValue()); rCount++; }
+    data.retry_result = { ok: true, message: rCount + ' update(s) requeued for SAP processing.' };
+    if (gp) loadPage(gp, loadAll, input.page, input.pageSize);
+    loadHistory();
+  }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-16 05:19:29</sys_created_on>
+        <sys_id>6e0b73ce3ba01b1087401044c3e45aa7</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>CLM Key BG Expiry Monitor</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_6e0b73ce3ba01b1087401044c3e45aa7</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 05:54:36</sys_updated_on>
+        <template><![CDATA[<div class="clm-widget clm-bgm">
+
+  <!-- BREADCRUMB NAVIGATION -->
+  <nav class="clm-breadcrumb-nav" aria-label="Breadcrumb">
+    <ol class="clm-breadcrumb">
+      <li class="clm-breadcrumb-item">
+        <a href="?id=uclm_dashboard" class="clm-breadcrumb-link"><i class="fa fa-home m-r-xs"></i> Home</a>
+      </li>
+      <li class="clm-breadcrumb-sep" aria-hidden="true">&rsaquo;</li>
+      <li class="clm-breadcrumb-item active" aria-current="page">Bank Guarantee Monitor (Key)</li>
+    </ol>
+  </nav>
+
+  <!-- PAGE HEADER BANNER -->
+  <div class="clm-hero">
+    <div class="clm-hero-left">
+      <div class="clm-hero-bar"></div>
+      <div class="clm-hero-title">
+        Bank Guarantee <span class="clm-hero-accent">Monitor</span>
+        <span class="clm-hero-badge">Key Customers</span>
+      </div>
+      <div class="clm-hero-sub">Monitor expired bank guarantees and revise site-level credit limits for the affected Group Codes, grouped by Grandparent Code.</div>
+    </div>
+    <div class="clm-hero-right" ng-if="!c.data.error && !c.submitted && c.data.totalGps > 0">
+      <div class="clm-hero-stat">
+        <div class="clm-hero-stat-v">{{c.data.totalGps || 0}}</div>
+        <div class="clm-hero-stat-k">Grandparent Codes with BG</div>
+      </div>
+      <div class="clm-hero-stat" ng-if="c.data.expiredGps > 0">
+        <div class="clm-hero-stat-v">{{c.data.expiredGps}}</div>
+        <div class="clm-hero-stat-k">With Expired BG</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIEW SWITCHER TABS -->
+  <div class="clm-view-nav" ng-if="!c.data.error && !c.submitted">
+    <button type="button" class="clm-view-tab" ng-class="{'is-active': c.activeView === 'update'}" ng-click="c.setView('update')">
+      <span class="clm-view-tab-l">
+        <i class="fa fa-pencil-square-o clm-view-ico"></i>
+        <span>Select &amp; Adjust Limits</span>
+      </span>
+      <span class="clm-view-tab-r">
+        <span class="clm-view-badge" ng-if="c.selectedGp" title="Sites under selected Grandparent Code">{{c.total}} sites</span>
+      </span>
+    </button>
+    <button type="button" class="clm-view-tab" ng-class="{'is-active': c.activeView === 'history'}" ng-click="c.setView('history')">
+      <span class="clm-view-tab-l">
+        <i class="fa fa-history clm-view-ico"></i>
+        <span>Recent Updates &amp; SAP Status</span>
+      </span>
+      <span class="clm-view-tab-r">
+        <span class="clm-view-badge" ng-if="c.historyLoaded" title="Recent updates">{{c.history.length}}</span>
+        <span class="clm-view-badge is-bad" ng-if="c.failedCount > 0" title="Failed Updates to SAP">{{c.failedCount}} Failed</span>
+      </span>
+    </button>
+  </div>
+
+  <!-- Error state -->
+  <div class="clm-section" ng-if="c.data.error">
+    <div class="clm-block clm-block-dev">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Access Restricted</div>
+          <div class="clm-block-sub">The BG Monitor widget is reserved exclusively for ZCH and Admin personnel.</div>
+        </div>
+      </div>
+      <div class="clm-bgm-state">
+        <div class="clm-bgm-state-icon is-bad">!</div>
+        <div class="clm-bgm-state-text">{{c.data.error}}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Success state -->
+  <div class="clm-section" ng-if="c.submitted">
+    <div class="clm-block">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Adjustments Queued Successfully</div>
+          <div class="clm-block-sub">Credit limit adjustments queued in send-back queue for SAP synchronization.</div>
+        </div>
+        <div class="clm-block-meta">
+          <span class="clm-chip clm-chip-live">Queued for SAP</span>
+        </div>
+      </div>
+      <div class="clm-bgm-state">
+        <div class="clm-bgm-state-icon is-ok">&#10003;</div>
+        <div class="clm-bgm-state-text">{{c.resultMessage}}</div>
+        <div class="clm-state-actions">
+          <button type="button" class="clm-btn clm-btn-primary" ng-click="c.reset()">Process Next Batch</button>
+          <button type="button" class="clm-btn clm-btn-outline" ng-click="c.reset(); c.setView('history');">View Recent Updates</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIEW 1: SELECTION & LIMIT ADJUSTMENT -->
+  <div class="clm-section" ng-if="!c.data.error && !c.submitted && c.activeView === 'update'">
+
+    <!-- Failed SAP Writes Alert -->
+    <div class="clm-bgm-alert" ng-if="c.failedCount > 0">
+      <div>
+        <b>{{c.failedCount}} credit limit update(s) failed during SAP writeback.</b>
+        <span class="clm-bgm-alert-sub">You can retry transmission now or view error logs under Recent Updates.</span>
+      </div>
+      <div class="clm-bgm-alert-btns">
+        <button type="button" class="clm-bgm-link" ng-click="c.setView('history')">View details</button>
+        <button type="button" class="clm-btn clm-bgm-retry-btn" ng-disabled="c.retryingAll" ng-click="c.retryAllFailed()">
+          <span ng-if="!c.retryingAll">&#8635; Retry all failed</span>
+          <span ng-if="c.retryingAll">Submitting&hellip;</span>
+        </button>
+      </div>
+    </div>
+    <div class="clm-bgm-note" ng-if="c.retryMsg">{{c.retryMsg}}</div>
+    <div class="clm-bgm-note is-info" ng-if="c.notifyMsg">{{c.notifyMsg}}</div>
+
+    <!-- Search Card -->
+    <div class="clm-block is-search-block">
+      <div class="clm-tw-body">
+        <div class="clm-bgm-top-filter-bar">
+          <div class="clm-pan-search-col">
+            <label class="clm-bgm-label" for="clmBgmGpSearch">Search Grandparent Code or Customer Name</label>
+            <div class="clm-bgm-hint">Search Key customer Grandparent Codes mapped to your assigned zone(s) with Bank Guarantee records.</div>
+            <div class="clm-pan-input-container">
+              <i class="fa fa-search clm-pan-search-icon"></i>
+              <input id="clmBgmGpSearch" type="text" class="clm-input clm-pan-input"
+                     ng-model="c.gpSearchTerm"
+                     ng-change="c.onGpSearchInput()"
+                     ng-focus="c.showGpSuggestions = true"
+                     placeholder="Type Grandparent Code or Customer Name..." autocomplete="off" />
+              <button type="button" class="clm-pan-clear-btn" ng-if="c.gpSearchTerm" ng-click="c.clearGp()">&#10005;</button>
+            </div>
+
+            <div class="clm-pan-dropdown" ng-if="c.showGpSuggestions && c.filteredGps.length > 0">
+              <div class="clm-pan-option"
+                   ng-repeat="p in c.filteredGps | limitTo:15"
+                   ng-mousedown="c.selectGp(p)">
+                <div class="clm-pan-opt-top">
+                  <span class="clm-pan-mono"><b>{{p.gp}}</b></span>
+                  <span class="clm-pan-opt-count">
+                    {{p.siteCount}} site(s) with BG
+                    <span class="clm-chip-expired" ng-if="p.expiredCount > 0">{{p.expiredCount}} EXPIRED</span>
+                  </span>
+                </div>
+                <div class="clm-pan-opt-name">{{p.customerName}}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- GRANDPARENT LEVEL MASTER SUMMARY -->
+    <div class="clm-block clm-bgm-summary-block" ng-if="c.selectedGp && c.sites.length > 0">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Grandparent Level Summary</div>
+          <div class="clm-bgm-identity">
+            <span class="clm-bgm-identity-name">{{c.selectedGpCustomerName || '&mdash;'}}</span>
+            <span class="clm-pan-badge"><i class="fa fa-sitemap"></i> Grandparent: <b>{{c.selectedGp}}</b></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="clm-tw-body">
+        <div class="clm-summary-section-title">Current &amp; Updated Credit Position</div>
+        <div class="clm-summary-grid">
+          <div class="clm-sum-tile">
+            <div class="clm-sum-k">Current CL</div>
+            <div class="clm-sum-v">&#8377;{{c.formatINR(c.summary.currentLimit)}}</div>
+            <div class="clm-sum-s">Existing active allocation</div>
+          </div>
+          <div class="clm-sum-tile">
+            <div class="clm-sum-k">Total Active BG (Unexpired)</div>
+            <div class="clm-sum-v text-success">&#8377;{{c.formatINR(c.summary.activeBg)}}</div>
+            <div class="clm-sum-s">Active collateral held</div>
+          </div>
+          <div class="clm-sum-tile">
+            <div class="clm-sum-k">Current NE</div>
+            <div class="clm-sum-v" ng-class="{'text-danger': c.summary.currentNetExposure > 0, 'text-success': c.summary.currentNetExposure <= 0}">&#8377;{{c.formatINR(c.summary.currentNetExposure)}}</div>
+            <div class="clm-sum-s">Sum of Group Code NE</div>
+          </div>
+          <div class="clm-sum-tile is-calc">
+            <div class="clm-sum-k">Updated CL</div>
+            <div class="clm-sum-v clm-text-calc">&#8377;{{c.formatINR(c.summary.projectedLimit)}}</div>
+            <div class="clm-sum-s">Live sum with proposed adjustments</div>
+          </div>
+          <div class="clm-sum-tile is-calc">
+            <div class="clm-sum-k">Updated NE</div>
+            <div class="clm-sum-v" ng-class="{'text-danger': c.summary.projectedNetExposure > 0, 'text-success': c.summary.projectedNetExposure <= 0}">&#8377;{{c.formatINR(c.summary.projectedNetExposure)}}</div>
+            <div class="clm-sum-s">
+              Updated CL &minus; Active BG
+              <span class="clm-delta-tag" ng-if="c.summary.deltaExposure !== 0" ng-class="c.summary.deltaExposure > 0 ? 'is-up' : 'is-down'">
+                ({{c.summary.deltaExposure > 0 ? '+' : ''}}&#8377;{{c.formatINR(c.summary.deltaExposure)}})
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Group Code-wise Position Table (Group Code is the base unit of NE for Key customers) -->
+        <div class="clm-summary-section-title m-t-md">Group Code-wise Position</div>
+        <div class="clm-table-wrap">
+          <table class="clm-table clm-sum-table">
+            <thead>
+              <tr>
+                <th class="clm-bgm-th-left">Group Code</th>
+                <th>Segment</th>
+                <th>Sites</th>
+                <th>Status</th>
+                <th class="clm-bgm-num">Current CL (₹)</th>
+                <th class="clm-bgm-num">Active BG (₹)</th>
+                <th class="clm-bgm-num">Current NE (₹)</th>
+                <th class="clm-bgm-num clm-bgm-th-calc">Updated CL (₹)</th>
+                <th class="clm-bgm-num clm-bgm-th-calc">Updated NE (₹)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr ng-repeat="g in c.groups track by g.key">
+                <td class="clm-bgm-th-left font-weight-bold">{{g.groupCode}}</td>
+                <td><span class="clm-bgm-tag clm-bgm-tag-seg">{{g.segment || '—'}}</span></td>
+                <td>{{g.rows.length}}</td>
+                <td>
+                  <span class="clm-chip-expired" ng-if="g.affected">BG EXPIRED</span>
+                  <span class="clm-bgm-muted" ng-if="!g.affected">Not affected</span>
+                </td>
+                <td class="clm-bgm-num">&#8377;{{c.formatINR(g.currentLimit)}}</td>
+                <td class="clm-bgm-num text-success">&#8377;{{c.formatINR(g.activeBg)}}</td>
+                <td class="clm-bgm-num font-weight-bold" ng-class="{'text-danger': g.netExposure > 0, 'text-success': g.netExposure <= 0}">&#8377;{{c.formatINR(g.netExposure)}}</td>
+                <td class="clm-bgm-num font-weight-bold clm-td-calc">&#8377;{{c.formatINR(g.projectedLimit)}}</td>
+                <td class="clm-bgm-num font-weight-bold clm-td-calc" ng-class="{'text-danger': g.projectedNe > 0, 'text-success': g.projectedNe <= 0}">&#8377;{{c.formatINR(g.projectedNe)}}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="clm-bgm-hint m-t-md">Zone Code limit = sum of its Site Codes; Group Code limit = sum of its Zone Codes. These roll-ups are derived, so your site-level revisions cascade upward automatically (preview shown above).</div>
+      </div>
+    </div>
+
+    <!-- Customer Sites Table: tier (Affected → Context) → Group Code → Zone Code → Sites -->
+    <div class="clm-block" ng-if="c.selectedGp">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Customer Sites Under Grandparent {{c.selectedGp}}</div>
+          <div class="clm-block-sub">Only sites in Group Codes with an expired BG are editable. Other Group Codes stay visible for context but are disabled.</div>
+        </div>
+        <div class="clm-block-meta">
+          <span class="clm-chip" ng-class="{'clm-chip-req': c.selectedCount() > 0}">
+            <span class="clm-chip-k">Selected Sites:</span> {{c.selectedCount()}}
+          </span>
+          <button type="button" class="clm-bgm-link" ng-if="c.selectedCount() > 0" ng-click="c.clearSelection()">&#10005; Clear selection</button>
+          <span class="clm-zone-bulk" ng-if="c.groups.length">
+            <button type="button" class="clm-btn clm-btn-outline clm-bgm-pbtn" ng-click="c.setAllCollapsed(false)">&#9662; Expand all</button>
+            <button type="button" class="clm-btn clm-btn-outline clm-bgm-pbtn" ng-click="c.setAllCollapsed(true)">&#9656; Collapse all</button>
+          </span>
+        </div>
+      </div>
+
+      <div class="clm-bgm-loadbar" ng-class="{'is-on': c.loadingPage}"></div>
+
+      <div class="clm-table-wrap clm-bgm-table-wrap" ng-class="{'is-loading': c.loadingPage}">
+        <table class="clm-table clm-bgm-table">
+          <thead>
+            <tr class="super">
+              <th class="bg-blank clm-bgm-col-check"></th>
+              <th class="bg-code">Site</th>
+              <th class="bg-seg grp">Location</th>
+              <th class="bg-seg grp" colspan="4">Collateral, Limits &amp; NE</th>
+              <th class="bg-req grp">Adjusted Limit (ZCH Discretion)</th>
+            </tr>
+            <tr>
+              <th class="clm-bgm-col-check">
+                <input type="checkbox" class="clm-checkbox" title="Select all editable sites"
+                       ng-checked="c.pageAllSelected()" ng-click="c.togglePage()" />
+              </th>
+              <th class="clm-bgm-th-left">Site Code</th>
+              <th class="grp clm-bgm-th-left clm-loc-th">
+                Territory
+                <span class="clm-th-sub">Depot &middot; Region &middot; Zone</span>
+              </th>
+              <th class="grp clm-bgm-num">Current CL</th>
+              <th class="clm-bgm-num">Active BG</th>
+              <th class="clm-bgm-num clm-bgm-th-highlight">NE<span class="clm-th-sub">CL &minus; BG</span></th>
+              <th>BG Expiry Date</th>
+              <th class="grp clm-newcl-th">New CL (₹) / Actions<span class="clm-th-sub clm-th-note"><i class="fa fa-info-circle"></i> Can only reduce the limit &middot; values above Current CL are capped to Current CL</span></th>
+            </tr>
+          </thead>
+
+          <!-- One tbody per Group Code -->
+          <tbody ng-repeat="g in c.groups track by g.key" class="clm-zg" ng-class="'is-' + g.tier">
+
+            <!-- Tier header (first group of each tier) -->
+            <tr class="clm-tier-row" ng-class="'is-' + g.tier" ng-if="g.firstInTier">
+              <td colspan="8">
+                <div class="clm-tier-content">
+                  <span class="clm-tier-dot"></span>
+                  <span class="clm-tier-title">{{g.tierTitle}}</span>
+                  <span class="clm-tier-count">{{g.tierCount}} site(s) &middot; {{g.tierGroupCount}} group code(s)</span>
+                  <span class="clm-tier-sub">{{g.tierSub}}</span>
+                </div>
+              </td>
+            </tr>
+
+            <!-- Group Code row -->
+            <tr class="clm-zone-row clm-group-row" ng-class="{'is-collapsed': c.isCollapsed(g)}" ng-click="c.toggleCollapse(g)">
+              <td class="clm-bgm-col-check" ng-click="$event.stopPropagation()">
+                <input type="checkbox" class="clm-checkbox" ng-if="c.groupEditableCount(g) > 0"
+                       title="Select all editable sites in this Group Code"
+                       ng-checked="c.isGroupSelected(g)" ng-click="c.toggleGroup(g)" />
+              </td>
+              <td colspan="2" class="clm-bgm-td-left">
+                <div class="clm-zone-head">
+                  <button type="button" class="clm-zone-toggle" aria-label="Expand or collapse group code"
+                          aria-expanded="{{!c.isCollapsed(g)}}"
+                          ng-click="c.toggleCollapse(g); $event.stopPropagation()">
+                    <span class="clm-zone-caret">&#9662;</span>
+                  </button>
+                  <span class="clm-zone-k">Group Code</span>
+                  <span class="clm-zone-name">{{g.groupCode}}</span>
+                  <span class="clm-bgm-tag clm-bgm-tag-seg" ng-if="g.segment">{{g.segment}}</span>
+                  <span class="clm-zone-count">{{g.rows.length}} site(s)</span>
+                  <span class="clm-chip-expired" ng-if="g.expiredCount > 0">{{g.expiredCount}} EXPIRED</span>
+                  <span class="clm-zone-sel" ng-if="c.groupSelCount(g) > 0">{{c.groupSelCount(g)}} selected</span>
+                </div>
+              </td>
+              <td class="grp clm-bgm-num font-weight-bold">
+                &#8377;{{c.formatINR(g.currentLimit)}}
+                <div class="clm-proj" ng-if="g.projectedLimit !== g.currentLimit">&rarr; &#8377;{{c.formatINR(g.projectedLimit)}}</div>
+              </td>
+              <td class="clm-bgm-num" title="Unexpired BG only">&#8377;{{c.formatINR(g.activeBg)}}</td>
+              <td class="clm-bgm-num font-weight-bold clm-bgm-net-exposure">
+                <span ng-class="{'text-danger': g.netExposure > 0, 'text-success': g.netExposure <= 0}">&#8377;{{c.formatINR(g.netExposure)}}</span>
+                <div class="clm-proj" ng-if="g.projectedNe !== g.netExposure">&rarr; &#8377;{{c.formatINR(g.projectedNe)}}</div>
+              </td>
+              <td><span class="clm-zone-subtotal">Group Code NE</span></td>
+              <td class="grp">
+                <span class="clm-zone-progress" ng-if="g.affected">{{c.groupReadyCount(g)}} / {{c.groupEditableCount(g)}} with new CL</span>
+                <span class="clm-bgm-muted" ng-if="!g.affected">No expired BG &mdash; view only</span>
+              </td>
+            </tr>
+
+            <!-- Zone Code sub-rows + Site rows (flattened as g.items) -->
+            <tr ng-repeat-start="it in g.items track by it.id" ng-if="!c.isCollapsed(g) && it.type === 'zone'" class="clm-zonecode-row">
+              <td></td>
+              <td colspan="2" class="clm-bgm-td-left clm-zonecode-cell">
+                <span class="clm-zone-k">Zone Code</span>
+                <span class="clm-zone-name">{{it.zoneCode}}</span>
+                <span class="clm-zone-count">{{it.rows.length}} site(s)</span>
+              </td>
+              <td class="grp clm-bgm-num">
+                &#8377;{{c.formatINR(it.currentLimit)}}
+                <div class="clm-proj" ng-if="it.projectedLimit !== it.currentLimit">&rarr; &#8377;{{c.formatINR(it.projectedLimit)}}</div>
+              </td>
+              <td class="clm-bgm-num">&#8377;{{c.formatINR(it.activeBg)}}</td>
+              <td class="clm-bgm-num">&#8377;{{c.formatINR(it.netExposure)}}</td>
+              <td><span class="clm-zone-subtotal">Zone Code subtotal</span></td>
+              <td class="grp" ng-click="$event.stopPropagation()">
+                <button type="button" class="clm-btn clm-btn-notify" ng-if="g.affected && it.hasUnassigned"
+                        ng-disabled="c.notifyState[c.notifyKey(g, it)] === 'sending' || c.notifyState[c.notifyKey(g, it)] === 'sent'"
+                        ng-click="c.notifyZone(g, it)"
+                        title="Notify the ZCH of the zone that owns these site(s)">
+                  <i class="fa fa-bell"></i>
+                  <span ng-if="!c.notifyState[c.notifyKey(g, it)]">Notify ZCH<span ng-if="it.zchName">: <b>{{it.zchName}}</b></span> (Zone {{it.zone}})</span>
+                  <span ng-if="c.notifyState[c.notifyKey(g, it)] === 'sending'">Notifying&hellip;</span>
+                  <span ng-if="c.notifyState[c.notifyKey(g, it)] === 'sent'">Notified &#10003;</span>
+                </button>
+              </td>
+            </tr>
+
+            <tr ng-repeat-end ng-if="!c.isCollapsed(g) && it.type === 'site'"
+                class="clm-site-row"
+                ng-class="{'is-selected': c.isSel(it.row), 'is-expired-row': it.row.isBgExpired, 'is-unassigned-row': !it.row.isEditable}"
+                ng-click="it.row.isEditable && c.toggleRow(it.row)">
+
+              <td class="clm-bgm-col-check" data-label="Select">
+                <input type="checkbox" class="clm-checkbox" ng-checked="c.isSel(it.row)"
+                       ng-disabled="!it.row.isEditable"
+                       title="{{c.disabledReason(it.row)}}"
+                       ng-click="c.toggleRow(it.row); $event.stopPropagation()" />
+              </td>
+
+              <td class="clm-bgm-td-left clm-site-cell" data-label="Site Code">
+                <div class="clm-site-code">{{it.row.customerCode}}</div>
+                <div class="clm-cust-sub" ng-if="it.row.segment">
+                  <span class="clm-bgm-tag clm-bgm-tag-seg">{{it.row.segment}}</span>
+                </div>
+              </td>
+
+              <td class="grp clm-bgm-td-left" data-label="Territory">
+                <div class="clm-loc-main">{{it.row.depotDisplay}}</div>
+                <div class="clm-loc-sub">
+                  {{it.row.regionDisplay}} &middot;
+                  <span ng-class="{'clm-loc-out': !it.row.isAssigned}">{{it.row.zoneDisplay}}</span>
+                </div>
+              </td>
+
+              <td class="grp clm-bgm-num font-weight-bold" data-label="Current CL">&#8377;{{c.formatINR(it.row.currentLimit)}}</td>
+              <td class="clm-bgm-num" data-label="Active BG">&#8377;{{c.formatINR(it.row.activeBg)}}</td>
+              <td class="clm-bgm-num font-weight-bold clm-bgm-net-exposure" data-label="NE (CL − BG)">
+                <span ng-class="{'text-danger': it.row.netExposure > 0, 'text-success': it.row.netExposure <= 0}">&#8377;{{c.formatINR(it.row.netExposure)}}</span>
+              </td>
+
+              <td data-label="BG Expiry Date">
+                <span ng-if="!it.row.bgExpiryDate" class="clm-bgm-muted">Not Available</span>
+                <span ng-if="it.row.bgExpiryDate" ng-class="{'clm-tag-expired': it.row.isBgExpired}">
+                  {{it.row.bgExpiryDate}}
+                  <span ng-if="it.row.isBgExpired" class="clm-chip-expired">EXPIRED</span>
+                </span>
+              </td>
+
+              <td class="grp" data-label="New CL / Action" ng-click="$event.stopPropagation()">
+                <div ng-if="it.row.isEditable">
+                  <input type="number" class="clm-input clm-bgm-input-num" min="0"
+                         placeholder="Enter new CL"
+                         title="{{c.capped[it.row.customerSysId] ? 'Capped to Current CL' : ''}}"
+                         ng-class="{'is-missing': c.isSel(it.row) && (c.limits[it.row.customerSysId] == null), 'is-capped': c.capped[it.row.customerSysId]}"
+                         ng-model="c.limits[it.row.customerSysId]"
+                         ng-change="c.onRowValueChange(it.row)" />
+                </div>
+                <span class="clm-bgm-muted" ng-if="!it.row.isEditable">{{c.disabledReason(it.row)}}</span>
+              </td>
+            </tr>
+          </tbody>
+
+          <tbody ng-if="c.sites.length === 0 && !c.loadingPage">
+            <tr class="clm-bgm-empty-row">
+              <td colspan="8" class="clm-bgm-empty">No Key customer sites found for this Grandparent Code.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="clm-bgm-pager">
+        <div class="clm-bgm-pager-info">
+          Showing <b>{{c.sites.length}}</b> of <b>{{c.total}}</b> sites
+          <span ng-if="c.counts.expired"> &middot; <b class="text-danger">{{c.counts.expired}}</b> expired BG</span>
+          <span ng-if="c.counts.affectedGroups"> &middot; <b>{{c.counts.affectedGroups}}</b> affected group code(s)</span>
+          <span ng-if="c.counts.editable"> &middot; <b>{{c.counts.editable}}</b> editable by you</span>
+        </div>
+        <div class="clm-bgm-pager-info text-danger" ng-if="c.truncated">
+          List limited to the first {{c.sites.length}} sites for this Grandparent Code.
+        </div>
+      </div>
+
+      <!-- Submit Summary Row -->
+      <div class="clm-tw-res clm-bgm-res" ng-class="{'is-ok': c.readyCount() > 0 && c.missingCount() === 0 && !c.hasExcessLimits()}">
+        <div>
+          <div class="clm-tw-res-k">Ready for SAP Dispatch</div>
+          <div class="clm-tw-res-f">
+            {{c.selectedCount()}} site(s) selected
+            <span ng-if="c.missingCount() > 0"> &middot; {{c.missingCount()}} still require a new credit limit</span>
+          </div>
+          <div class="clm-bgm-error" ng-if="c.validationMsg">{{c.validationMsg}}</div>
+        </div>
+        <div class="clm-bgm-res-right">
+          <div class="clm-tw-res-v">{{c.readyCount()}}</div>
+          <button type="button" class="clm-btn clm-btn-primary"
+                  ng-disabled="c.selectedCount() === 0 || c.loading || c.hasExcessLimits()"
+                  ng-click="c.submit()">
+            <span ng-if="!c.loading"><i class="fa fa-paper-plane m-r-xs"></i> Submit Limit Adjustments</span>
+            <span ng-if="c.loading">Submitting&hellip; {{c.progress}}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Empty State -->
+    <div class="clm-block clm-bgm-empty-selection-block" ng-if="!c.selectedGp">
+      <div class="clm-bgm-state">
+        <div class="clm-bgm-state-icon is-info"><i class="fa fa-search"></i></div>
+        <div class="clm-bgm-state-heading">No Grandparent Code Selected</div>
+        <div class="clm-bgm-state-text">
+          Search and select a Grandparent Code above to review and adjust credit limits for the site codes in its Group Codes with expired bank guarantees.
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- VIEW 2: RECENT UPDATES & SAP STATUS (BG Expiry Revision audit) -->
+  <div class="clm-section clm-hs" ng-if="!c.data.error && !c.submitted && c.activeView === 'history'">
+
+    <div class="clm-section-title"><span class="clm-section-num">1</span> Update Overview</div>
+    <div class="clm-hs-stats">
+      <button type="button" class="clm-hs-stat is-total" ng-class="{'is-active': c.histFilter === 'all'}" ng-click="c.setHistFilter('all')">
+        <span class="clm-hs-stat-k">Total Updates</span>
+        <span class="clm-hs-stat-v">{{c.histCounts.total}}</span>
+      </button>
+      <button type="button" class="clm-hs-stat is-success" ng-class="{'is-active': c.histFilter === 'Success'}" ng-click="c.setHistFilter('Success')">
+        <span class="clm-hs-stat-k">Success</span>
+        <span class="clm-hs-stat-v">{{c.histCounts.success}}</span>
+      </button>
+      <button type="button" class="clm-hs-stat is-pending" ng-class="{'is-active': c.histFilter === 'Pending'}" ng-click="c.setHistFilter('Pending')">
+        <span class="clm-hs-stat-k">Pending / Retrying</span>
+        <span class="clm-hs-stat-v">{{c.histCounts.pending}}</span>
+      </button>
+      <button type="button" class="clm-hs-stat is-failed" ng-class="{'is-active': c.histFilter === 'Failed'}" ng-click="c.setHistFilter('Failed')">
+        <span class="clm-hs-stat-k">Failed SAP Updates</span>
+        <span class="clm-hs-stat-v">{{c.histCounts.failed}}</span>
+      </button>
+    </div>
+
+    <div class="clm-bgm-note" ng-if="c.retryMsg" style="margin-top:14px;">{{c.retryMsg}}</div>
+
+    <div class="clm-section-title clm-hs-sec2"><span class="clm-section-num">2</span> Recent Updates &amp; SAP Status</div>
+
+    <div class="clm-block">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Recent Key BG Credit Limit Updates</div>
+          <div class="clm-block-sub">Latest credit limit changes grouped by Grandparent Code with live SAP writeback statuses.</div>
+        </div>
+        <div class="clm-block-meta">
+          <span class="clm-chip" ng-if="c.historyLoaded"><span class="clm-chip-k">Showing:</span> {{c.histFilteredTotal}} updates</span>
+          <span class="clm-chip clm-chip-req" ng-if="c.histFilter !== 'all'"><span class="clm-chip-k">Filter:</span> {{c.histFilterLabel()}}</span>
+          <button type="button" class="clm-bgm-link" ng-if="c.histFilter !== 'all'" ng-click="c.setHistFilter('all')">&#10005; Clear filter</button>
+          <span class="clm-chip" ng-if="!c.historyLoaded">Loading&hellip;</span>
+          <button type="button" class="clm-btn clm-btn-outline clm-hs-btn" ng-disabled="c.refreshing" ng-click="c.refreshAll()">
+            <span ng-if="!c.refreshing">&#8635; Refresh</span>
+            <span ng-if="c.refreshing">Refreshing&hellip;</span>
+          </button>
+          <button type="button" class="clm-btn clm-bgm-retry-btn clm-hs-btn"
+                  ng-if="c.failedCount > 0" ng-disabled="c.retryingAll" ng-click="c.retryAllFailed()">
+            <span ng-if="!c.retryingAll">&#8635; Retry all failed ({{c.failedCount}})</span>
+            <span ng-if="c.retryingAll">Submitting&hellip;</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="clm-table-wrap clm-bgm-hist-wrap">
+        <table class="clm-table clm-bgm-hist">
+          <thead>
+            <tr class="super">
+              <th class="bg-code clm-bgm-th-left">Site</th>
+              <th class="bg-seg grp">Status &amp; Action</th>
+              <th class="grp" rowspan="2">Requested By &amp; On</th>
+              <th class="grp" rowspan="2">Attempts</th>
+              <th class="grp clm-bgm-th-left" rowspan="2">Error Message</th>
+              <th class="grp" rowspan="2">Action</th>
+            </tr>
+            <tr>
+              <th class="clm-bgm-th-left">Site Code<span class="clm-th-sub">Code &middot; Group Code &middot; Segment</span></th>
+              <th class="grp clm-hs-th-sub">Old CL &rarr; New CL</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr ng-repeat-start="h in c.histRows track by h.id" ng-if="h._gpGroupStart" class="clm-pan-group-row">
+              <td colspan="6" class="clm-pan-group-cell">
+                <div class="clm-pan-group-content">
+                  <div class="clm-pan-group-left">
+                    <span class="clm-pan-badge"><i class="fa fa-sitemap m-r-xs"></i> Grandparent: <b>{{h.gp || 'NO GP'}}</b></span>
+                    <span class="clm-pan-custname">{{h.customerName}}</span>
+                    <span class="clm-pan-count">({{h._gpGroupCount}} site update(s) on this page)</span>
+                  </div>
+                  <div class="clm-pan-group-right">
+                    <span class="clm-pan-count"><i class="fa fa-clock-o m-r-xs"></i> Batch Date: <b>{{h._gpLatestDate}}</b></span>
+                  </div>
+                </div>
+              </td>
+            </tr>
+
+            <tr ng-repeat-end class="clm-bgm-hist-row">
+              <td class="clm-bgm-td-left" data-label="Site Code">
+                <div class="clm-hs-site">
+                  <span class="clm-site-code">{{h.customerCode}}</span>
+                  <span class="clm-bgm-tag" ng-if="h.groupCode">{{h.groupCode}}</span>
+                  <span class="clm-bgm-tag clm-bgm-tag-seg" ng-class="{'is-rmc': h.segment === 'RMC' || h.segment === 'URMX'}" ng-if="h.segment">{{h.segment}}</span>
+                </div>
+              </td>
+
+              <td class="grp clm-bgm-td-left" data-label="Old → New">
+                <div class="clm-bgm-last-top">
+                  <span class="clm-date-transition">&#8377;{{c.formatINR(h.oldLimit)}} &rarr; <b>&#8377;{{c.formatINR(h.newLimit)}}</b></span>
+                  <span class="clm-bgm-status" ng-class="c.statusClass(h)">{{c.statusLabel(h)}}</span>
+                </div>
+              </td>
+
+              <td class="grp" data-label="Requested By &amp; On">
+                <div class="clm-hs-by">{{h.requestedBy}}</div>
+                <div class="clm-bgm-last-sub">{{h.requestedOn}}</div>
+              </td>
+
+              <td class="grp" data-label="Attempts">
+                <span class="clm-bgm-att">{{h.attempts}}/{{c.data.maxAttempts}}</span>
+                <div ng-if="h.connRetries > 0" class="clm-bgm-last-sub">{{h.connRetries}} conn. retr{{h.connRetries === 1 ? 'y' : 'ies'}}</div>
+              </td>
+
+              <td class="grp clm-bgm-td-left clm-bgm-err-cell" data-label="Error Message">
+                <span ng-if="c.showError(h)">{{h.error}}</span>
+                <span ng-if="!c.showError(h)" class="clm-bgm-muted">&mdash;</span>
+              </td>
+
+              <td class="grp" data-label="Action">
+                <button type="button" class="clm-btn clm-bgm-retry-btn clm-bgm-retry-sm"
+                        ng-if="h.canRetry" ng-disabled="c.retrying[h.id]" ng-click="c.retryOne(h)">
+                  <span ng-if="!c.retrying[h.id]">&#8635; Retry</span>
+                  <span ng-if="c.retrying[h.id]">Submitting&hellip;</span>
+                </button>
+                <span ng-if="!h.canRetry && h.status == 'Failed'" class="clm-bgm-muted" title="A newer update exists for this site">Superseded</span>
+                <span ng-if="h.status == 'Success'" class="text-success font-weight-bold"><i class="fa fa-check-circle"></i> Synced</span>
+                <span ng-if="h.status != 'Success' && h.status != 'Failed'" class="clm-bgm-muted">In queue</span>
+              </td>
+            </tr>
+
+            <tr ng-if="c.historyLoaded && c.histRows.length === 0" class="clm-bgm-empty-row">
+              <td colspan="6" class="clm-bgm-empty">
+                <span ng-if="c.histFilter === 'all'">No monitor audit records logged yet.</span>
+                <span ng-if="c.histFilter !== 'all'">No {{c.histFilterLabel()}} updates found.</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="clm-bgm-pager">
+        <div class="clm-bgm-pager-info">
+          Showing <b>{{c.histRangeFrom()}}&ndash;{{c.histRangeTo()}}</b> of <b>{{c.histFilteredTotal}}</b> updates
+        </div>
+        <div class="clm-bgm-pager-ctrl">
+          <label class="clm-bgm-pager-size">Rows per page
+            <select class="clm-input" ng-model="c.histPageSize" ng-change="c.histGoTo(1, true)"
+                    ng-options="n for n in c.histPageSizes"></select>
+          </label>
+          <button type="button" class="clm-btn clm-btn-outline clm-bgm-pbtn" ng-disabled="c.histPage <= 1" ng-click="c.histGoTo(1)">&laquo;</button>
+          <button type="button" class="clm-btn clm-btn-outline clm-bgm-pbtn" ng-disabled="c.histPage <= 1" ng-click="c.histGoTo(c.histPage - 1)">&lsaquo; Prev</button>
+          <span class="clm-bgm-pager-page">
+            Page
+            <input type="number" class="clm-input clm-bgm-pager-input" min="1" max="{{c.histTotalPages()}}"
+                   ng-model="c.histPageInput" ng-keyup="$event.keyCode === 13 && c.histGoTo(c.histPageInput)"
+                   ng-blur="c.histPageInput = c.histPage" />
+            of {{c.histTotalPages()}}
+          </span>
+          <button type="button" class="clm-btn clm-btn-outline clm-bgm-pbtn" ng-disabled="c.histPage >= c.histTotalPages()" ng-click="c.histGoTo(c.histPage + 1)">Next &rsaquo;</button>
+          <button type="button" class="clm-btn clm-btn-outline clm-bgm-pbtn" ng-disabled="c.histPage >= c.histTotalPages()" ng-click="c.histGoTo(c.histTotalPages())">&raquo;</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>6e0b73ce3ba01b1087401044c3e45aa7</id>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-16 05:19:29</sys_created_on>
+        <sys_id>6a0b73ce3ba01b1087401044c3e45aae</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 05:19:29</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

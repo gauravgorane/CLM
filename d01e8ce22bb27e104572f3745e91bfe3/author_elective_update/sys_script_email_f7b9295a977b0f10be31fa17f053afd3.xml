@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="DELETE">
+        <name>clm_rfi_mention_body</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function runMailScript(current, template, email, email_action, event) {
+    var userId = event.parm1 ? event.parm1.toString() : '';
+    var recipientName = 'Colleague';
+
+    if (userId) {
+        var userGr = new GlideRecord('sys_user');
+        if (userGr.get(userId)) {
+            recipientName = userGr.getDisplayValue('name');
+        }
+    }
+
+    var requestNumber = current.getValue('number') || '';
+    var panNumber = current.getValue('pan') || '';
+    var instanceUrl = gs.getProperty('glide.servlet.uri');
+    var portalUrl = instanceUrl + 'sp?id=clm_credit_requests&number=' + encodeURIComponent(requestNumber);
+
+    template.print('<p style="font-family: Arial, sans-serif; font-size: 14px; color: #333;">Hello ' + recipientName + ',</p>');
+    template.print('<p style="font-family: Arial, sans-serif; font-size: 14px; color: #333;">You were mentioned in Credit Limit Request <strong>' + requestNumber + '</strong> (PAN: <strong>' + panNumber + '</strong>).</p>');
+    template.print('<p style="margin: 20px 0;"><a href="' + portalUrl + '" style="background-color: #C8102E; color: #ffffff; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; display: inline-block;">View Limit Request Details</a></p>');
+    template.print('<p style="font-family: Arial, sans-serif; font-size: 12px; color: #777;">You have also been added to the Watch List for future updates on this request.</p>');
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-10 06:37:30</sys_created_on>
+        <sys_id>f7b9295a977b0f10be31fa17f053afd3</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>clm_rfi_mention_body</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_f7b9295a977b0f10be31fa17f053afd3</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-10 08:19:08</sys_updated_on>
+    </sys_script_email>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sys_script_email_f7b9295a977b0f10be31fa17f053afd3</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_script_email"&gt;&lt;sys_script_email action="INSERT_OR_UPDATE"&gt;&lt;name&gt;clm_rfi_mention_body&lt;/name&gt;&lt;new_lines_to_html&gt;false&lt;/new_lines_to_html&gt;&lt;script&gt;&lt;![CDATA[(function runMailScript(current, template, email, email_action, event) {
+    var userId = event.parm1 ? event.parm1.toString() : '';
+    var recipientName = 'Colleague';
+
+    if (userId) {
+        var userGr = new GlideRecord('sys_user');
+        if (userGr.get(userId)) {
+            recipientName = userGr.getDisplayValue('name');
+        }
+    }
+
+    var requestNumber = current.getValue('number') || '';
+    var panNumber = current.getValue('pan') || '';
+    var instanceUrl = gs.getProperty('glide.servlet.uri');
+    var portalUrl = instanceUrl + 'sp?id=clm_credit_requests&amp;number=' + encodeURIComponent(requestNumber);
+
+    template.print('&lt;p style="font-family: Arial, sans-serif; font-size: 14px; color: #333;"&gt;Hello ' + recipientName + ',&lt;/p&gt;');
+    template.print('&lt;p style="font-family: Arial, sans-serif; font-size: 14px; color: #333;"&gt;You were mentioned in Credit Limit Request &lt;strong&gt;' + requestNumber + '&lt;/strong&gt; (PAN: &lt;strong&gt;' + panNumber + '&lt;/strong&gt;).&lt;/p&gt;');
+    template.print('&lt;p style="margin: 20px 0;"&gt;&lt;a href="' + portalUrl + '" style="background-color: #C8102E; color: #ffffff; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; display: inline-block;"&gt;View Limit Request Details&lt;/a&gt;&lt;/p&gt;');
+    template.print('&lt;p style="font-family: Arial, sans-serif; font-size: 12px; color: #777;"&gt;You have also been added to the Watch List for future updates on this request.&lt;/p&gt;');
+})(current, template, email, email_action, event);]]&gt;&lt;/script&gt;&lt;sys_class_name&gt;sys_script_email&lt;/sys_class_name&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-10-10 06:37:30&lt;/sys_created_on&gt;&lt;sys_id&gt;f7b9295a977b0f10be31fa17f053afd3&lt;/sys_id&gt;&lt;sys_mod_count&gt;2&lt;/sys_mod_count&gt;&lt;sys_name&gt;clm_rfi_mention_body&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sys_script_email_f7b9295a977b0f10be31fa17f053afd3&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-10-10 08:19:08&lt;/sys_updated_on&gt;&lt;/sys_script_email&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>52025793</payload_hash>
+        <record_name>clm_rfi_mention_body</record_name>
+        <reverted_from/>
+        <source>d386fafb973acb106bf93da0f053af20</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-10 08:19:08</sys_created_on>
+        <sys_id>5d518ada97bf0f10be31fa17f053af2a</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a124e4fb700000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-10 08:19:08</sys_updated_on>
+        <type>Email Script</type>
+        <update_guid>5d518ada6cbf0f100903209939f6a229</update_guid>
+        <update_guid_history>5d518ada6cbf0f100903209939f6a229:52025793,a94a2d9ad87b0f10d71b2aa43f624f23:1022659379,a01ae19af37b0f103bb80cbfd4d38be3:-1456434861</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-02 17:14:25</sys_created_on>
+        <sys_db_object display_value="" name="sys_script_email">sys_script_email</sys_db_object>
+        <sys_id>0c9fcf10eab3482089f86d0214227840</sys_id>
+        <sys_metadata>f7b9295a977b0f10be31fa17f053afd3</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_rfi_mention_body</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sys_script_email_f7b9295a977b0f10be31fa17f053afd3</sys_update_name>
+        <sys_update_version display_value="sys_script_email_f7b9295a977b0f10be31fa17f053afd3">5d518ada97bf0f10be31fa17f053af2a</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-02 17:14:25</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>false</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_p1_crm_site_draft</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition/>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>Trigger NSH Notification on Draft Submit</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous /*null when async*/) {
+
+    // 1. Find the NSH User (Fallback to hardcoded username as per your logic)
+    var nshUserSysId = '';
+    var shUser = new GlideRecord('sys_user');
+    if (shUser.get('user_name', 'gayatri.bhandge@mindsprint.com')) {
+        nshUserSysId = shUser.getUniqueValue();
+    }
+
+    if (nshUserSysId) {
+        // 2. Fire the Event for the Email Notification
+        // Parm1 is the recipient (NSH user), Parm2 is the submitter
+        gs.eventQueue('x_birl3_clm.draft.staged', current, nshUserSysId, current.submitted_by);
+
+        // 3. Create the In-App Notification (Bell icon)
+        var notifTitle = 'New CRM P1 Draft Staged: ' + current.site_code;
+        var totalAskLakhs = (parseFloat(current.desired_limit) / 100000).toFixed(2);
+        var notifBody = 'Draft demand details for ' + current.customer_name + ' (' + current.site_code + ') submitted by CRM. Total Ask: ₹' + totalAskLakhs + 'L.';
+
+        var inAppGr = new GlideRecord('sys_notification_in_app_message');
+        if (inAppGr.isValid()) {
+            inAppGr.initialize();
+            inAppGr.setValue('recipient', nshUserSysId);
+            inAppGr.setValue('title', notifTitle);
+            inAppGr.setValue('body', notifBody);
+            inAppGr.setValue('source_record', current.getUniqueValue());
+            inAppGr.setValue('source_table', 'x_birl3_clm_p1_crm_site_draft');
+            inAppGr.setValue('read', false);
+            inAppGr.insert();
+        }
+    }
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-07 10:04:56</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>543cdc7b2b83c7104572f3745e91bf2b</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>Trigger NSH Notification on Draft Submit</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_543cdc7b2b83c7104572f3745e91bf2b</sys_update_name>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-07 10:04:56</sys_updated_on>
+        <template/>
+        <when>after</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=543cdc7b2b83c7104572f3745e91bf2b"/>
+</record_update>

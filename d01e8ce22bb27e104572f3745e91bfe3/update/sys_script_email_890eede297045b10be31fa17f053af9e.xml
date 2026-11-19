@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm.trade_doc.otp</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function runMailScript(current, template, email, email_action, event) {
+    try {
+        var custMaster = current;
+        if (!custMaster || !custMaster.isValidRecord()) {
+            template.print("<div style='font-family: Arial, sans-serif; color: #d9534f;'>Record unavailable</div>");
+            return;
+        }
+
+        function esc(str) {
+            if (str === null || str === undefined) return '';
+            return (str + '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        // Direct read from Customer Master
+        var custName = custMaster.getValue('customer_name') || 'Customer';
+        var otpCode  = (event && event.parm2) ? (event.parm2 + '').trim() : '------';
+
+        email.setSubject('UltraTech | One-time password for your form submission');
+
+        // Calculate 10-minute expiry
+        var gdt = new GlideDateTime();
+        gdt.addSeconds(600);
+
+        var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        var day = ('0' + gdt.getDayOfMonthLocalTime()).slice(-2);
+        var month = months[gdt.getMonthLocalTime() - 1] || 'Oct';
+        var year = gdt.getYearLocalTime();
+
+        var disp = gdt.getDisplayValue();
+        var timePart = disp.indexOf(' ') > -1 ? disp.split(' ')[1] : '11:52:00';
+        var timeParts = timePart.split(':');
+        var hh = parseInt(timeParts[0], 10);
+        var mm = timeParts[1] || '00';
+        var ampm = hh >= 12 ? 'PM' : 'AM';
+        hh = hh % 12;
+        hh = hh ? hh : 12;
+        var formattedHh = ('0' + hh).slice(-2);
+
+        var expiryFormatted = day + '-' + month + '-' + year + ', ' + formattedHh + ':' + mm + ' ' + ampm;
+
+        // Resolve Assigned TSH Contact Details
+        var tshName = 'your UltraTech representative';
+        var tshPhone = '';
+        if (custMaster.tsh) {
+            var tshGr = custMaster.tsh.getRefRecord();
+            if (tshGr && tshGr.isValidRecord()) {
+                if (tshGr.getTableName() === 'x_birl3_clm_tsh') {
+                    var userGr = tshGr.name ? tshGr.name.getRefRecord() : null;
+                    if (userGr && userGr.isValidRecord()) {
+                        tshName = userGr.getValue('name') || tshName;
+                        tshPhone = userGr.getValue('mobile_phone') || userGr.getValue('phone') || '';
+                    } else {
+                        tshName = tshGr.getDisplayValue('name') || tshName;
+                    }
+                } else {
+                    tshName = tshGr.getValue('name') || tshGr.getDisplayValue();
+                    tshPhone = tshGr.getValue('mobile_phone') || tshGr.getValue('phone') || '';
+                }
+            }
+        }
+
+        var h = '';
+        h += '<p style="margin: 0 0 16px 0; font-size: 15px; line-height: 1.5; color: #1a1a1a;">Dear <strong>' + esc(custName) + '</strong>,</p>';
+
+        h += '<p style="margin: 0 0 20px 0; font-size: 14px; line-height: 1.6; color: #3a4451;">';
+        h += 'Use the one-time password below to complete your submission on the <strong style="color: #1a1a1a;">UltraTech CLM Portal</strong>.';
+        h += '</p>';
+
+        h += '<div style="margin: 22px 0; padding: 20px; background-color: #fafbfc; border: 1px solid #e0e6ed; border-left: 4px solid #E87722; border-radius: 6px; text-align: left;">';
+        h += '  <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; font-weight: 700; color: #5a6a7a; margin-bottom: 6px;">One-Time Password</div>';
+        h += '  <div style="font-size: 32px; font-weight: 700; letter-spacing: 4px; color: #AF272F; font-family: monospace; line-height: 1.2;">' + esc(otpCode) + '</div>';
+        h += '  <div style="margin-top: 8px; font-size: 12.5px; color: #7f8c9a;">Valid for <strong>10 minutes</strong> (till ' + esc(expiryFormatted) + ')</div>';
+        h += '</div>';
+
+        h += '<p style="margin: 0 0 16px 0; font-size: 13.5px; line-height: 1.6; color: #3a4451;">';
+        h += 'For your security, <strong>do not share this OTP with anyone</strong>, including UltraTech staff.';
+        h += '</p>';
+
+        h += '<p style="margin: 0 0 18px 0; font-size: 13.5px; line-height: 1.6; color: #5a6a7a;">';
+        h += 'If you did not try to submit this form, please ignore this email or contact your UltraTech representative, <strong style="color: #1a1a1a;">' + esc(tshName) + '</strong>' + (tshPhone ? (', <strong>' + esc(tshPhone) + '</strong>') : '') + '.';
+        h += '</p>';
+
+        template.print(h);
+
+    } catch (err) {
+        gs.error('[clm.trade_doc.otp] Exception: ' + err.message);
+        template.print('<div style="color:red; font-size:12px;">Error generating OTP message: ' + err.message + '</div>');
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-23 11:49:06</sys_created_on>
+        <sys_id>890eede297045b10be31fa17f053af9e</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>clm.trade_doc.otp</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_890eede297045b10be31fa17f053af9e</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-23 12:26:40</sys_updated_on>
+    </sys_script_email>
+</record_update>

@@ -1,0 +1,638 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_clm_new_credit_request</collection>
+        <condition>current.state == 'Submitted' &amp;&amp; current.customer_type == 'Trade'</condition>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition/>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>CLM Trade Calculate on Submit</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[// ============================================================
+//  CLM BEFORE BUSINESS RULE
+//  Table  : x_birl3_clm_clm_new_credit_request
+//  When   : Before Insert / Before Update (state -> Submitted)
+//  Change : blocks the request when any approver in the chain
+//           has no active mapped user (missingRoles check)
+// ============================================================
+
+function getCalendarMonths(firstOrderDateStr) {
+    if (!firstOrderDateStr || firstOrderDateStr === '' || firstOrderDateStr === 'null') return 0;
+    var fParts = (firstOrderDateStr + '').split('-');
+    var fYear  = parseInt(fParts[0]) || 0;
+    var fMonth = parseInt(fParts[1]) || 0;
+    var fDay   = parseInt(fParts[2]) || 0;
+    var tNow   = new GlideDateTime();
+    var tStr   = tNow.getValue();
+    var tYear  = parseInt(tStr.substring(0, 4));
+    var tMonth = parseInt(tStr.substring(5, 7));
+    var tDay   = parseInt(tStr.substring(8, 10));
+    var months = (tYear - fYear) * 12 + (tMonth - fMonth);
+    if (tDay < fDay) months -= 1;
+    return months < 0 ? 0 : months;
+}
+
+// ── Oldest active Cement code under PAN: CG2, vintage, code and NOD ──
+function getOldestCementCodeData(pan) {
+    var result = { cg2Code: '', vintageMonths: 0, vintageDays: 0, code: '', nod: -1 };
+    if (!pan) return result;
+
+    var bestDateNum = null;
+    var bestCg2     = '';
+    var bestVintageMonths = 0;
+    var bestVintageDays   = 0;
+    var bestCode    = '';
+    var bestNod     = -1;
+
+    var gr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+    gr.addQuery('pan',      pan);
+    gr.addQuery('segment',  'Cement');
+    gr.addQuery('is_active', true);
+    gr.query();
+
+    while (gr.next()) {
+        var code = gr.customer_code_sap + '';
+        var so   = gr.salesorg + '';
+        var cg2  = gr.cg2_code + '';
+        if (!code) continue;
+
+        try {
+            var wsdl      = new x_birl3_clm.CLM_NEW_WSDL1();
+            var resultStr = wsdl.getCreditDetails(code, so);
+            if (!resultStr) continue;
+
+            var parsed  = JSON.parse(resultStr);
+            var liveFod = parsed.firstOrderDate || '';
+
+            if (!liveFod || liveFod.indexOf('0000') === 0 || liveFod === '') continue;
+
+            var fd    = new GlideDate();
+            fd.setValue(liveFod);
+            var fdNum = fd.getNumericValue();
+
+            if (bestDateNum === null || fdNum < bestDateNum) {
+                bestDateNum = fdNum;
+                bestCg2     = cg2;
+                bestCode    = code;
+                var pn      = parseInt(parsed.nod, 10);
+                bestNod     = isNaN(pn) ? -1 : pn;
+
+                var td  = new GlideDate();
+                var dd  = Math.floor((td.getNumericValue() - fdNum) / (1000 * 60 * 60 * 24));
+                bestVintageDays = dd > 0 ? dd : 0;
+
+                var fParts = (liveFod + '').split('-');
+                var fYear  = parseInt(fParts[0]) || 0;
+                var fMonth = parseInt(fParts[1]) || 0;
+                var fDay   = parseInt(fParts[2]) || 0;
+                var tNow   = new GlideDateTime();
+                var tStr   = tNow.getValue();
+                var tYear  = parseInt(tStr.substring(0, 4));
+                var tMonth = parseInt(tStr.substring(5, 7));
+                var tDay   = parseInt(tStr.substring(8, 10));
+                var mDiff  = (tYear - fYear) * 12 + (tMonth - fMonth);
+                if (tDay < fDay) mDiff -= 1;
+                bestVintageMonths = mDiff < 0 ? 0 : mDiff;
+            }
+        } catch(e) {
+            gs.error('CLM BR [CementBPD] WSDL error for ' + code + ': ' + e.message);
+        }
+    }
+
+    result.cg2Code       = bestCg2;
+    result.vintageMonths = bestVintageMonths;
+    result.vintageDays   = bestVintageDays;
+    result.code          = bestCode;
+    result.nod           = bestNod;
+
+    gs.info('CLM BR [CementBPD] oldest Cement: pan=' + pan +
+            ' cg2=' + bestCg2 + ' vintageMonths=' + bestVintageMonths +
+            ' code=' + bestCode + ' nod=' + bestNod);
+    return result;
+}
+
+(function executeRule(current, previous) {
+
+    if (current.customer_type + '' !== 'Trade') return;
+
+    gs.info('CLM BR: firing for ' + current.customer.getDisplayValue());
+
+    try {
+
+        // ── Auto-number ──────────────────────────────────────────
+        if (!current.request_number || current.request_number + '' === '') {
+            var numGr = new GlideRecord('sys_number');
+            numGr.addQuery('category', 'x_birl3_clm_clm_new_credit_request');
+            numGr.setLimit(1);
+            numGr.query();
+            if (numGr.next()) {
+                var n = parseInt(numGr.number) || 1000001;
+                current.request_number = numGr.prefix + n;
+                numGr.number = n + 1;
+                numGr.update();
+            }
+        }
+
+        var custSysId   = current.customer + '';
+        var segment     = current.segment  + '';
+        var reqLimit    = parseFloat(current.requested_limit)      || 0;
+        var activeSD    = parseFloat(current.active_sd)            || 0;
+        var outstanding = parseFloat(current.outstanding_amount)   || 0;
+        var avgSales    = parseFloat(current.avg_monthly_sales_mt) || 0;
+        var salesLast   = parseFloat(current.sales_last_month)     || 0;
+        var salesPrev   = parseFloat(current.sales_prev_month)     || 0;
+
+        // ── Read cement_bpd flag ─────────────────────────────────
+        var isCementBpd = current.cement_bpd + '' === 'true';
+
+        // ── Approver-mapping check state ─────────────────────────
+        // Only enforced on insert or when state becomes Submitted, so a mapping
+        // removed mid-approval can never block an approver's action.
+        var missingRoles   = [];
+        var enforceMapping = (current.operation() == 'insert') || current.state.changesTo('Submitted');
+
+        // customer code + Active NOD for the 3-6 month performance check
+        var perfCode = '';
+        var perfNod  = parseFloat(current.getValue('u_active_nod'));   // live SAP NOD saved by the widget
+        if (isNaN(perfNod)) perfNod = -1;
+
+        // ── Load customer master ─────────────────────────────────
+        var custGr        = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        var vintageDays   = current.customer_vintage_days || 0;
+        var vintageMonths = 0;
+        var cg2Code       = '';
+        var pan           = '';
+
+        if (custGr.get(custSysId)) {
+            cg2Code        = custGr.cg2_code + '';
+            pan            = custGr.pan      + '';
+            current.region = custGr.region   + '';
+            current.zone   = custGr.zone     + '';
+            current.depot  = custGr.depot    + '';
+            segment        = custGr.segment  + '';
+            perfCode       = custGr.customer_code_sap + '';
+
+            if (vintageDays == 0) {
+                var fos = custGr.first_order_date + '';
+                if (fos && fos !== '' && fos !== 'null') {
+                    var fd = new GlideDate();
+                    fd.setValue(fos);
+                    var td = new GlideDate();
+                    var dd = Math.floor(
+                        (td.getNumericValue() - fd.getNumericValue()) / (1000 * 60 * 60 * 24)
+                    );
+                    vintageDays   = dd > 0 ? dd : 0;
+                    vintageMonths = getCalendarMonths(fos);
+                }
+            }
+        }
+
+        // calendar months (same as the widget), not floor(days/30)
+        if (vintageMonths === 0 && vintageDays > 0) {
+            var fDt = new GlideDateTime();
+            fDt.addDaysUTC(-vintageDays);
+            vintageMonths = getCalendarMonths(fDt.getDate().toString());
+        }
+        current.customer_vintage_days = vintageDays;
+
+        // ── CEMENT+BPD: override CG2 and vintage from oldest active Cement code ──
+        var cementCg2Data = null;
+        if (isCementBpd && segment === 'BPD' && pan) {
+            cementCg2Data = getOldestCementCodeData(pan);
+            if (cementCg2Data.cg2Code) {
+                cg2Code       = cementCg2Data.cg2Code;
+                vintageMonths = cementCg2Data.vintageMonths;
+                vintageDays   = cementCg2Data.vintageDays;
+                // sales + NOD check is judged on the oldest Cement code
+                if (cementCg2Data.code) { perfCode = cementCg2Data.code; perfNod = cementCg2Data.nod; }
+                gs.info('CLM BR [CementBPD]: overriding CG2=' + cg2Code +
+                        ' vintageMonths=' + vintageMonths);
+            }
+        }
+
+        // ── DOWNGRADE: fixed 2-step, segment-specific, no deviation/CV/PAN logic ──
+        if (current.is_downgrade + '' === 'true') {
+            var DG = {
+                'Cement': { auto: 'TSH',     appr: 'RHM'       },
+                'RMC':    { auto: 'TSM',     appr: 'RH_CH_RMC' },
+                'BPD':    { auto: 'TSH_BPD', appr: 'ZH_BPD'    }
+            };
+            var dg = DG[segment] || DG['Cement'];   // always the requested code's own segment
+            var dgField = {
+                'TSH':'u_approver_tsh','RHM':'u_approver_rhm',
+                'TSM':'u_approver_tsm','RH_CH_RMC':'u_approver_rh_ch_rmc',
+                'TSH_BPD':'u_approver_tsh_bpd','ZH_BPD':'u_approver_zh_bpd'
+            };
+
+            // clear stale approver fields
+            for (var kk in dgField) current.setValue(dgField[kk], '');
+            ['u_approver_zch','u_approver_ho'].forEach(function(f){ current.setValue(f, ''); });
+
+            var dgResolver = new CLMUserResolver();
+            var dgUsers = [];
+            [dg.auto, dg.appr].forEach(function(r) {
+                var u = dgResolver.getUser(r, current.region + '', current.zone + '', segment, current.depot + '', false); // isCementBpd = false
+                if (u) { current.setValue(dgField[r], u); dgUsers.push(u); }
+                else   { missingRoles.push(r); }
+            });
+
+            // ★ BLOCK: an unmapped approver must never be silently skipped by the Flow
+            if (missingRoles.length && enforceMapping) {
+                gs.addErrorMessage('Approver not mapped for: ' + missingRoles.join(', ') + '. Contact admin.');
+                current.setAbortAction(true);
+                return;
+            }
+
+            current.required_approver_level = dg.appr;
+            current.u_approver_role         = dg.appr;
+            current.u_approver_list         = dgUsers.join(',');
+            current.is_deviation            = false;
+            current.net_exposure            = 0;
+            current.nod_days                = 0;
+
+            var dgHierarchy = [{ role: dg.auto, level: 1 }, { role: dg.appr, level: 2 }];
+            var dgSeq = buildApproverSequence(dgHierarchy, dg.appr, dgResolver,
+                            current.region + '', current.zone + '', segment, current.depot + '', false);
+            gs.getSession().putClientData('clm_approver_sequence', JSON.stringify(dgSeq));
+
+            var dgGrp = new GlideRecord('sys_user_group');
+            dgGrp.addQuery('name', 'CLM_' + dg.appr);
+            dgGrp.setLimit(1); dgGrp.query();
+            if (dgGrp.next()) current.approver_group = dgGrp.sys_id + '';
+
+            gs.info('CLM BR DOWNGRADE | ' + current.request_number + ' | ' + segment + ' | ' + dg.auto + ' -> ' + dg.appr);
+            return;   // skip all enhancement logic
+        }
+
+        // ── Aging (6-month) ─────────────────────────────────────
+        var total = 0, safe = 0, warning = 0, critical = 0, toxic = 0, mCount = 0;
+        var salesLastSnap = 0, salesPrevSnap = 0;
+
+        var agGr = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+        agGr.addQuery('customer', custSysId);
+        agGr.orderByDesc('snapshot_month');
+        agGr.setLimit(6);
+        agGr.query();
+
+        while (agGr.next()) {
+            mCount++;
+            total    += parseFloat(agGr.total_outstanding)    || 0;
+            safe     += (parseFloat(agGr.bucket_0_30_days)    || 0) +
+                        (parseFloat(agGr.bucket_22_30_days)   || 0) +
+                        (parseFloat(agGr.bucket_31_45_days)   || 0) +
+                        (parseFloat(agGr.bucket_46_60_days)   || 0);
+            warning  += parseFloat(agGr.bucket_61_75_days)    || 0;
+            critical += parseFloat(agGr.bucket_76_90_days)    || 0;
+            toxic    += (parseFloat(agGr.bucket_91_120_days)  || 0) +
+                        (parseFloat(agGr.bucket_gt120_days)   || 0);
+            if (mCount === 1) {
+                salesLastSnap = parseFloat(agGr.sales_current_month) || 0;
+                salesPrevSnap = parseFloat(agGr.sales_prev_month)    || 0;
+            }
+        }
+
+        var agingRating = 'A';
+        if (total > 0) {
+            var safePct  = safe / total;
+            var toxicPct = (critical + toxic) / total;
+            if      (safePct >= 0.80 && toxicPct <= 0.10) agingRating = 'A';
+            else if (safePct >= 0.60 && toxicPct <= 0.20) agingRating = 'B';
+            else                                            agingRating = 'C';
+        }
+        current.aging_rating = agingRating;
+
+        // ── NOD ─────────────────────────────────────────────────
+        var nod   = 0;
+        var avg2M = salesLast > 0 ? (salesLast + salesPrev) / 2
+                                  : (salesLastSnap + salesPrevSnap) / 2;
+
+        var totalSalesValue = 0;
+        var nodAgGr = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+        nodAgGr.addQuery('customer', custSysId);
+        nodAgGr.orderByDesc('snapshot_month');
+        nodAgGr.setLimit(6);
+        nodAgGr.query();
+        while (nodAgGr.next()) {
+            totalSalesValue += parseFloat(nodAgGr.sales_current_month) || 0;
+        }
+
+        if (vintageDays <= 60) {
+            if (totalSalesValue > 0)
+                nod = Math.ceil((outstanding / totalSalesValue) * Math.min(vintageDays, 60));
+            else
+                nod = 0;
+        } else {
+            if (avg2M > 0)
+                nod = Math.round((outstanding / avg2M) * 30);
+        }
+        current.nod_days = nod;
+
+        // ── Multiplier ──────────────────────────────────────────
+        var netExposureForMult = Math.max(0, reqLimit - activeSD);
+        var multiplier = 1;
+
+        if (isCementBpd && segment === 'BPD') {
+            if (vintageMonths < 3) {
+                multiplier = 1;
+            } else if (vintageMonths < 6) {
+                multiplier = new CLMStartupMultiplier().evaluate(perfCode, perfNod).multiplier;
+            } else {
+                var mGrCB = new GlideRecord('x_birl3_clm_clm_multiplier');
+                mGrCB.addQuery('cg2_code',  cg2Code);
+                mGrCB.addQuery('segment',   'Cement');
+                mGrCB.addQuery('is_active', true);
+                mGrCB.setLimit(1);
+                mGrCB.query();
+                multiplier = mGrCB.next() ? (parseInt(mGrCB.multiplier) || 1) : 1;
+            }
+            gs.info('CLM BR [CementBPD]: multiplier=' + multiplier + ' (from Cement CG2)');
+        } else if (segment === 'RMC' || segment === 'BPD') {
+            var router0 = new CLMApprovalRouter();
+            multiplier = router0.getAllowedMultipleForNetExposure(segment, netExposureForMult) || 1;
+        } else {
+            // Standard Cement
+            if (vintageMonths < 3) {
+                multiplier = 1;
+            } else if (vintageMonths < 6) {
+                multiplier = new CLMStartupMultiplier().evaluate(perfCode, perfNod).multiplier;
+            } else {
+                var mGr = new GlideRecord('x_birl3_clm_clm_multiplier');
+                mGr.addQuery('cg2_code',  cg2Code);
+                mGr.addQuery('segment',   segment);
+                mGr.addQuery('is_active', true);
+                mGr.setLimit(1);
+                mGr.query();
+                multiplier = mGr.next() ? (parseInt(mGr.multiplier) || 1) : 1;
+            }
+        }
+        current.system_multiplier = multiplier;
+
+        // ── Key calculations ────────────────────────────────────
+        var netExposure  = Math.max(0, reqLimit - activeSD);
+        var maxAllowable = activeSD * multiplier;
+        var impliedMult  = activeSD > 0 ? reqLimit / activeSD : 0;
+        var isDeviation  = impliedMult > multiplier;
+
+        current.net_exposure        = netExposure;
+        current.max_allowable_limit = maxAllowable;
+        current.implied_multiplier  = impliedMult;
+        current.initiator           = gs.getUserID();
+
+        // ── Approval routing ────────────────────────────────────
+        var router   = new CLMApprovalRouter();
+        var approver = router.getApprover(
+            segment, 'Trade', netExposure, nod, isDeviation,
+            impliedMult, vintageDays, multiplier, isCementBpd
+        );
+        var targetRole = approver.role;
+        current.required_approver_level = targetRole;
+        current.u_approver_role         = targetRole;
+
+        // ── Sync isDeviation to segment-correct source ───────────
+        if (isCementBpd && segment === 'BPD') {
+            isDeviation = approver.escalated || (impliedMult > multiplier);
+        } else if (segment === 'RMC' || segment === 'BPD') {
+            isDeviation = approver.escalated || false;
+        }
+
+        // ── Zero SD override ────────────────────────────────────
+        if (activeSD <= 0) {
+            isDeviation = true;
+            if (!approver.escalated) {
+                var escalatedSegment = (isCementBpd && segment === 'BPD') ? 'CementBPD' : segment;
+                var zeroSdEsc = router.getEscalatedRole(escalatedSegment, targetRole);
+                if (zeroSdEsc.changed) {
+                    targetRole              = zeroSdEsc.role;
+                    approver.role           = targetRole;
+                    approver.escalated      = true;
+                    current.required_approver_level = targetRole;
+                    current.u_approver_role         = targetRole;
+                }
+            }
+        }
+        current.is_deviation = isDeviation;
+
+        // ── Role hierarchies ────────────────────────────────────
+        var ROLE_HIERARCHY_CEMENT     = ['TSH','RHM','ZHM','NSH','NSH_CCH','CMO','CMO_CFO','MD'];
+                             var ROLE_HIERARCHY_RMC        = ['TSM','RH_CH_RMC','ZH_RMC',
+                                         'CH_RMC','HEAD_RMC','HEAD_KEY_CCH','BH','BH_CFO','MD'];
+        var ROLE_HIERARCHY_BPD        = ['TSH_BPD','ZH_BPD','HSBPD','HBPD',
+                                         'CCH_HBPD','BH','CFO','MD'];
+        var ROLE_HIERARCHY_CEMENT_BPD = ['TSH_BPD','ZH_BPD','RHM','ZHM',
+                                         'NSH_CCH','CMO','CMO_CFO','MD'];
+
+        var ROLE_HIERARCHY;
+        if (isCementBpd && segment === 'BPD') {
+            ROLE_HIERARCHY = ROLE_HIERARCHY_CEMENT_BPD;
+        } else if (segment === 'RMC') {
+            ROLE_HIERARCHY = ROLE_HIERARCHY_RMC;
+        } else if (segment === 'BPD') {
+            ROLE_HIERARCHY = ROLE_HIERARCHY_BPD;
+        } else {
+            ROLE_HIERARCHY = ROLE_HIERARCHY_CEMENT;
+        }
+
+        var targetIndex = ROLE_HIERARCHY.indexOf(targetRole);
+
+        // ── Map router role → field name ─────────────────────────
+        var ROLE_TO_FIELD = {
+            'TSH':              'u_approver_tsh',
+            'RHM':              'u_approver_rhm',
+            'ZHM':              'u_approver_zhm',
+            'ZCH':              'u_approver_zch',
+            'HO':               'u_approver_ho',
+            'NSH':              'u_approver_nsh',
+            'NSH_CCH':          'u_approver_nsh_cch',
+            'CMO':              'u_approver_cmo',
+            'CMO_CFO':          'u_approver_cmo_cfo',
+            'CFO':              'u_approver_cfo',
+            'MD':               'u_approver_md',
+            'TSM':              'u_approver_tsm',
+            'RH_CH_RMC':        'u_approver_rh_ch_rmc',
+            'ZH_RMC':           'u_approver_zh_rmc',
+            'HEAD_RMC':         'u_approver_head_rmc',
+            'HEAD_KEY_RMC':     'u_approver_head_key_ch_rmc',
+            'CH_RMC':           'u_approver_ch_rmc',
+            'HEAD_KEY_CCH':     'u_approver_head_key_cch',
+            'BH':               'u_approver_bh',
+            'BH_CFO':           'u_approver_bh_cfo',
+            'TSH_BPD':          'u_approver_tsh_bpd',
+            'ZH_BPD':           'u_approver_zh_bpd',
+            'HSBPD':            'u_approver_hsbpd',
+            'HBPD':             'u_approver_hbpd',
+            'CCH_HBPD':         'u_approver_cch_hbpd'
+        };
+
+        // ── Resolve users and populate role fields ───────────────
+        var resolver  = new CLMUserResolver();
+        var depot     = current.depot  + '';
+        var region    = current.region + '';
+        var zone      = current.zone   + '';
+        var usersList = [];
+
+        // Helper: resolve one role → populate its field; records unmapped roles
+        function resolveAndPopulate(roleKey) {
+            var userSysId = resolver.getUser(
+                roleKey, region, zone, segment, depot,
+                (isCementBpd && segment === 'BPD')
+            );
+            if (!userSysId) missingRoles.push(roleKey);     // ★ track unmapped role
+
+            var fieldName = ROLE_TO_FIELD[roleKey];
+            if (fieldName && userSysId) current.setValue(fieldName, userSysId);
+
+            if (roleKey === 'NSH_CCH') {
+                var nshUser = resolver.getUser('NSH', region, zone, segment, depot, false);
+                if (nshUser) {
+                    current.setValue('u_approver_nsh', nshUser);
+                    if (usersList.indexOf(nshUser) === -1) usersList.push(nshUser);
+                } else {
+                    missingRoles.push('NSH');                // ★ track unmapped NSH
+                }
+            }
+            if (userSysId && usersList.indexOf(userSysId) === -1) usersList.push(userSysId);
+            return userSysId;
+        }
+
+        var cv = router.getCommercialValidationConfig(targetRole, segment, isCementBpd).triggersCV;
+
+        // clear stale values so ZCH/HO never linger
+        for (var k in ROLE_TO_FIELD) { current.setValue(ROLE_TO_FIELD[k], ''); }
+
+        if (targetIndex !== -1) {
+            for (var i = 0; i <= targetIndex; i++) resolveAndPopulate(ROLE_HIERARCHY[i]);
+            if (cv) { resolveAndPopulate('ZCH'); resolveAndPopulate('HO'); }
+        } else {
+            resolveAndPopulate(targetRole);
+        }
+
+        current.u_approver_list = usersList.join(',');
+
+        // ★ BLOCK: an unmapped approver must never be silently skipped by the Flow
+        if (missingRoles.length && enforceMapping) {
+            gs.addErrorMessage('Approver not mapped for: ' + missingRoles.join(', ') + '. Contact admin.');
+            current.setAbortAction(true);
+            return;
+        }
+
+        // ── Build approver sequence JSON ─────────────────────────
+        var hierarchyMapBR = {
+            'Cement_Trade': [
+                { role: 'TSH',      level: 1 }, { role: 'RHM',     level: 2 },
+                { role: 'ZHM',      level: 3 }, { role: 'NSH',     level: 4 },
+                { role: 'NSH_CCH',  level: 5 }, { role: 'CMO',     level: 6 },
+                { role: 'CMO_CFO',  level: 7 }, { role: 'MD',      level: 8 }
+            ],
+                         'RMC_Trade': [
+                { role: 'TSM', level: 1 },          { role: 'RH_CH_RMC', level: 2 },
+                { role: 'ZH_RMC', level: 3 },       { role: 'CH_RMC', level: 4 },
+                { role: 'HEAD_RMC', level: 5 },     { role: 'HEAD_KEY_CCH', level: 6 },
+                { role: 'BH', level: 7 },           { role: 'BH_CFO', level: 8 },
+                { role: 'MD', level: 9 }
+            ],
+            'BPD_Trade': [
+                { role: 'TSH_BPD',  level: 1 }, { role: 'ZH_BPD',   level: 2 },
+                { role: 'HSBPD',    level: 3 }, { role: 'HBPD',     level: 4 },
+                { role: 'CCH_HBPD', level: 5 }, { role: 'BH',       level: 6 },
+                { role: 'CFO',      level: 7 }, { role: 'MD',        level: 8 }
+            ],
+            'CementBPD_Trade': [
+                { role: 'TSH_BPD', level: 1 },
+                { role: 'ZH_BPD',  level: 2 },
+                { role: 'RHM',     level: 3 },
+                { role: 'ZHM',     level: 4 },
+                { role: 'NSH_CCH', level: 5 },
+                { role: 'CMO',     level: 6 },
+                { role: 'CMO_CFO', level: 7 },
+                { role: 'MD',      level: 8 }
+            ]
+        };
+
+        var hierarchyKey;
+        if (isCementBpd && segment === 'BPD') {
+            hierarchyKey = 'CementBPD_Trade';
+        } else {
+            hierarchyKey = segment + '_Trade';
+        }
+        var hierarchy = hierarchyMapBR[hierarchyKey] || hierarchyMapBR['Cement_Trade'];
+
+        var approverSequence = buildApproverSequence(
+            hierarchy, targetRole, resolver, region, zone, segment, depot, isCementBpd
+        );
+
+        var seqJson = JSON.stringify(approverSequence);
+        gs.getSession().putClientData('clm_approver_sequence', seqJson);
+        gs.info('CLM BR: stored sequence (' + approverSequence.length + ' steps) in session');
+
+        // ── Approver group ───────────────────────────────────────
+        var grpGr = new GlideRecord('sys_user_group');
+        grpGr.addQuery('name', 'CLM_' + approver.role);
+        grpGr.setLimit(1);
+        grpGr.query();
+        if (grpGr.next()) current.approver_group = grpGr.sys_id + '';
+
+        // ── Review date ──────────────────────────────────────────
+        var gdt = new GlideDateTime();
+        gdt.addMonthsUTC(1);
+        gdt.setDayOfMonthUTC(1);
+        gdt.addDaysUTC(-1);
+        gdt.addMonthsUTC(12);
+        gs.info('Next Review Date: ' + gdt.getDate());
+
+        gs.info('CLM BR DONE | ' + current.request_number +
+            ' | Seg: '        + segment +
+            ' | CementBpd: '  + isCementBpd +
+            ' | Mult: '       + multiplier + 'x' +
+            ' | CG2: '        + cg2Code +
+            ' | NetExp: Rs'   + (netExposure / 100000).toFixed(2) + 'L' +
+            ' | ImplMult: '   + impliedMult.toFixed(2) + 'x' +
+            ' | Vintage: '    + vintageDays + 'd (' + vintageMonths + 'm)' +
+            ' | PerfCode: '   + perfCode + ' PerfNOD: ' + perfNod +
+            ' | Dev: '        + isDeviation +
+            ' | NOD: '        + nod +
+            ' | Target: '     + targetRole);
+
+    } catch (e) {
+        gs.error('CLM BR ERROR: ' + e.message);
+    }
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-21 13:06:23</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>5028ed8997f33290be31fa17f053afe8</sys_id>
+        <sys_mod_count>68</sys_mod_count>
+        <sys_name>CLM Trade Calculate on Submit</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_5028ed8997f33290be31fa17f053afe8</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-21 13:41:08</sys_updated_on>
+        <template/>
+        <when>before</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=5028ed8997f33290be31fa17f053afe8"/>
+</record_update>

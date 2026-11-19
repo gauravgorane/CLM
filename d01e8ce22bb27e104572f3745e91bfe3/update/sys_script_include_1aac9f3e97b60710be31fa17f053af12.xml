@@ -1,0 +1,290 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLMSapCreditWriteback</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLMSapCreditWriteback</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var CLMSapCreditWriteback = Class.create();
+CLMSapCreditWriteback.prototype = {
+    initialize: function() {
+        this.MAX_ATTEMPTS = 3;
+        // If true: when SAP returns a non-success message AND read-back doesn't match,
+        // mark Failed immediately (business rejection, retry won't help).
+        this.FAIL_FAST_ON_SAP_MESSAGE = false;
+        // If true: even when SAP says "Customer Successfully Changed", read back to confirm.
+        this.VERIFY_AFTER_SUCCESS = false;
+        // SAP success text (case-insensitive match)
+        this.SAP_SUCCESS_REGEX = /successfully\s+changed/i;
+    },
+
+    processQueue: function() {
+        var gr = new GlideRecord('x_birl3_clm_clm_servicenow_to_sap_send_back');
+        gr.addQuery('u_status', 'Pending');
+        gr.addQuery('u_attempt_count', '<', this.MAX_ATTEMPTS);
+        gr.query();
+
+        while (gr.next()) {
+            this._sendToSap(gr);
+        }
+    },
+
+    _sendToSap: function(gr) {
+        // 1. SANITIZATION
+        var kunnr       = String(gr.getDisplayValue('u_customer_code') || '').trim();
+        var creditSgmnt = String(gr.getValue('u_credit_segment') || '').trim();
+        var crLimit     = String(gr.getValue('u_approved_code_limit') || '0').trim();
+
+        // Dot-walk to get Sales Org from the Customer Master table
+        var salesOrg    = String(gr.u_customer_code.salesorg || '').trim();
+
+        // 2. DATE FORMATTER: exact YYYY-MM-DD
+        var rawDate     = String(gr.getValue('u_next_review_date') || '').trim();
+        var nextReDate  = '';
+
+        if (rawDate.match(/^\d{2}-\d{2}-\d{4}/)) {
+            var parts = rawDate.substring(0, 10).split('-');
+            nextReDate = parts[2] + '-' + parts[0] + '-' + parts[1];
+        } else if (rawDate.length >= 10) {
+            nextReDate = rawDate.substring(0, 10);
+        }
+
+        if (!kunnr || !creditSgmnt || !nextReDate) {
+            this._markResult(gr, 'Failed', 'Missing mandatory field(s) - Kunnr/CreditSgmnt/NextReDate');
+            return;
+        }
+
+        try {
+            var req = new sn_ws.RESTMessageV2();
+
+           req.setEndpoint("http://vs4grqapqas.abgplanet.abg.com:8000/sap/bc/srt/rfc/sap/zfsd_cust_cr_limit_automation/300/zfsd_cust_cr_limit_automation/zfsd_cust_cr_limit_automation?sap-client=300");
+
+            req.setMIDServer("linux-mid-server-dev-1");
+            req.setHttpMethod("POST");
+
+            req.setRequestHeader("Content-Type", "text/xml; charset=utf-8");
+            req.setRequestHeader("Accept", "text/xml");
+            req.setRequestHeader(
+                "SOAPAction",
+                "urn:sap-com:document:sap:soap:functions:mc-style:ZFSD_CUST_CR_LIMIT_AUTOMATION:ZfsdCustCrLimitAutomationRequest"
+            );
+            req.setAuthenticationProfile('basic', '9b873b49977d8f50be31fa17f053af59');
+
+            var body =
+                '<?xml version="1.0" encoding="UTF-8"?>\n' +
+                '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:sap-com:document:sap:soap:functions:mc-style">\n' +
+                '   <soapenv:Header/>\n' +
+                '   <soapenv:Body>\n' +
+                '      <urn:ZfsdCustCrLimitAutomation>\n' +
+                '         <ItInput>\n' +
+                '            <item>\n' +
+                '               <Kunnr>' + this._xmlEscape(kunnr) + '</Kunnr>\n' +
+                '               <CreditSgmnt>' + this._xmlEscape(creditSgmnt) + '</CreditSgmnt>\n' +
+                '               <CrLimit>' + this._xmlEscape(crLimit) + '</CrLimit>\n' +
+                '               <NextReDate>' + nextReDate + '</NextReDate>\n' +
+                '            </item>\n' +
+                '         </ItInput>\n' +
+                '         <ItOutput>\n' +
+                '            <item>\n' +
+                '               <Kunnr></Kunnr>\n' +
+                '               <Message></Message>\n' +
+                '            </item>\n' +
+                '         </ItOutput>\n' +
+                '      </urn:ZfsdCustCrLimitAutomation>\n' +
+                '   </soapenv:Body>\n' +
+                '</soapenv:Envelope>';
+
+            gs.info("==== OUTGOING SAP PAYLOAD ====\n" + body + "\n==============================");
+
+            req.setRequestBody(body);
+            req.setHttpTimeout(60000);
+
+            var response     = req.execute();
+            var httpStatus   = response.getStatusCode();
+            var responseBody = response.getBody();
+            var errorMsg     = response.getErrorMessage();
+
+            gs.info("==== SAP RAW RESPONSE BODY ====\n" + responseBody + "\n===============================");
+
+            if (errorMsg) {
+                this._markConnectionFailure(gr, 'Transport error: ' + errorMsg);
+                gs.info('CLM SAP Writeback: transport error for ' + kunnr + ' - ' + errorMsg);
+                return;
+            }
+
+            // Parse ItOutput items; pick the message that belongs to this Kunnr
+            var outItems   = this._parseOutputItems(responseBody);
+            var sapMessage = this._messageForKunnr(outItems, kunnr);
+
+            if (httpStatus != 200) {
+                this._markConnectionFailure(gr, 'Non-200 response (HTTP ' + httpStatus + '): ' + (sapMessage || 'no message'));
+                return;
+            }
+
+            gs.info('CLM SAP Writeback: SAP message for ' + kunnr + ' = ' + (sapMessage || '(none)'));
+
+            // Explicit SAP success -> done (optionally still read back)
+            if (sapMessage && this.SAP_SUCCESS_REGEX.test(sapMessage) && !this.VERIFY_AFTER_SUCCESS) {
+                this._markResult(gr, 'Success', '');
+                return;
+            }
+
+            // Otherwise (or if VERIFY_AFTER_SUCCESS) verify by reading back
+            this._verifyAndMark(gr, kunnr, salesOrg, crLimit, sapMessage);
+
+        } catch (ex) {
+            this._markResult(gr, 'Failed', 'Script exception: ' + ex.message);
+        }
+    },
+
+    _verifyAndMark: function(gr, kunnr, salesOrg, expectedLimit, sapMessage) {
+        try {
+            var wsdl = new CLM_NEW_WSDL1();
+
+            var rawResult = wsdl.getCreditDetails(kunnr, salesOrg);
+
+            if (!rawResult) {
+                this._markConnectionFailure(gr,
+                    (sapMessage ? 'SAP: ' + sapMessage + ' | ' : '') +
+                    'Verification call returned no data for ' + kunnr + ' (SAP/MID likely unreachable)');
+                return;
+            }
+
+            var creditDetails;
+            try {
+                creditDetails = JSON.parse(rawResult);
+            } catch (parseEx) {
+                this._markConnectionFailure(gr,
+                    (sapMessage ? 'SAP: ' + sapMessage + ' | ' : '') +
+                    'Verification response not parseable: ' + parseEx.message);
+                return;
+            }
+
+            var sapLimit = parseFloat(creditDetails.creditLimit || 0);
+            var expected = parseFloat(expectedLimit);
+
+            gs.info('CLM SAP Writeback Verify: ' + kunnr + ' (SalesOrg: ' + salesOrg + ')' +
+                    ' | expected=' + expected + ' | sapReturned=' + sapLimit);
+
+            if (!isNaN(sapLimit) && Math.abs(sapLimit - expected) < 0.01) {
+                this._markResult(gr, 'Success', '');
+            } else {
+                var err = (sapMessage ? 'SAP: ' + sapMessage + ' | ' : '') +
+                          'Verification mismatch - SAP shows ' + sapLimit + ', expected ' + expected;
+
+                if (sapMessage && this.FAIL_FAST_ON_SAP_MESSAGE) {
+                    this._markResult(gr, 'Failed', err + ' (SAP business rejection - not retried)');
+                } else {
+                    this._retryOrFail(gr, err);
+                }
+            }
+
+        } catch (ex) {
+            this._markConnectionFailure(gr,
+                (sapMessage ? 'SAP: ' + sapMessage + ' | ' : '') +
+                'Verification exception: ' + ex.message);
+            gs.info('CLM SAP Writeback Verify: exception for ' + kunnr + ' - ' + ex.message);
+        }
+    },
+
+    _markConnectionFailure: function(gr, errorText) {
+        var connAttempts = parseInt(gr.getValue('u_connection_retry_count') || 0, 10) + 1;
+
+        gr.u_status                  = 'Pending';
+        gr.u_last_error              = errorText;
+        gr.u_connection_retry_count  = connAttempts;
+        gr.u_processed_on            = new GlideDateTime();
+        gr.update();
+
+        gs.info('CLM SAP Writeback: connection-level failure #' + connAttempts +
+                ' for record ' + gr.getUniqueValue() + ' - staying Pending');
+    },
+
+    _retryOrFail: function(gr, errorText) {
+        var attemptsSoFar = parseInt(gr.getValue('u_attempt_count') || 0, 10) + 1;
+
+        if (attemptsSoFar >= this.MAX_ATTEMPTS) {
+            this._markResult(gr, 'Failed', errorText + ' (max attempts reached)');
+        } else {
+            gr.u_status        = 'Pending';
+            gr.u_last_error    = errorText;
+            gr.u_attempt_count = attemptsSoFar;
+            gr.u_processed_on  = new GlideDateTime();
+            gr.update();
+        }
+    },
+
+    _markResult: function(gr, status, errorText) {
+        gr.u_status         = status;
+        gr.u_last_error     = errorText || '';
+        gr.u_attempt_count  = parseInt(gr.getValue('u_attempt_count') || 0, 10) + 1;
+        gr.u_processed_on   = new GlideDateTime();
+        gr.update();
+    },
+
+    // Parses <ItOutput><item><Kunnr/><Message/></item>...</ItOutput>
+    // Returns [{kunnr, message}] and skips the empty echo item (<Kunnr/><Message/>).
+    _parseOutputItems: function(xmlBody) {
+        var results = [];
+        if (!xmlBody) return results;
+
+        var outMatch = /<(?:\w+:)?ItOutput[^>]*>([\s\S]*?)<\/(?:\w+:)?ItOutput>/.exec(xmlBody);
+        if (!outMatch) return results;
+
+        var itemRe = /<(?:\w+:)?item[^>]*>([\s\S]*?)<\/(?:\w+:)?item>/g;
+        var m;
+        while ((m = itemRe.exec(outMatch[1])) !== null) {
+            var kunnr   = this._tagValue(m[1], 'Kunnr');
+            var message = this._tagValue(m[1], 'Message');
+            if (kunnr || message) {
+                results.push({ kunnr: kunnr, message: message });
+            }
+        }
+        return results;
+    },
+
+    _tagValue: function(xml, tag) {
+        var re = new RegExp('<(?:\\w+:)?' + tag + '(?:\\s[^>]*)?>([^<]*)</(?:\\w+:)?' + tag + '>');
+        var m = re.exec(xml);
+        return m ? m[1].trim() : '';
+    },
+
+    // Message for the Kunnr we sent; falls back to all non-empty messages joined
+    _messageForKunnr: function(items, kunnr) {
+        var own = [];
+        var all = [];
+        for (var i = 0; i < items.length; i++) {
+            if (!items[i].message) continue;
+            all.push(items[i].message);
+            if (items[i].kunnr === kunnr) own.push(items[i].message);
+        }
+        return (own.length ? own : all).join(' | ');
+    },
+
+    _xmlEscape: function(s) {
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    },
+
+    type: 'CLMSapCreditWriteback'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-08-23 11:12:43</sys_created_on>
+        <sys_id>1aac9f3e97b60710be31fa17f053af12</sys_id>
+        <sys_mod_count>17</sys_mod_count>
+        <sys_name>CLMSapCreditWriteback</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_1aac9f3e97b60710be31fa17f053af12</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-17 12:34:45</sys_updated_on>
+    </sys_script_include>
+</record_update>

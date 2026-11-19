@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>false</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>false</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_clm_servicenow_to_sap_send_back</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition table="x_birl3_clm_clm_servicenow_to_sap_send_back">u_status=Success^customer_type=non_trade^EQ<item display_value="Success" endquery="false" field="u_status" goto="false" newquery="false" operator="=" or="false" value="Success"/>
+            <item display_value="Non-Trade" endquery="false" field="customer_type" goto="false" newquery="false" operator="=" or="false" value="non_trade"/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>CLM: NT PAN SITE Update</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous /*null when async*/) {
+
+    var panReqId = current.getValue('nt_request');
+    if (!panReqId) return;
+
+    // Check if any sibling site records under this PAN request are still pending or failed
+    var pendingPanRows = new GlideRecord('x_birl3_clm_clm_servicenow_to_sap_send_back');
+    var qcPan = pendingPanRows.addQuery('nt_request', panReqId);
+    pendingPanRows.addQuery('u_status', '!=', 'Success');
+    pendingPanRows.setLimit(1);
+    pendingPanRows.query();
+
+    // Proceed only if all child site writeback rows in this PAN batch have succeeded
+    if (!pendingPanRows.hasNext()) {
+        // 1. Update parent NT PAN Request state to 3
+        var panGr = new GlideRecord('x_birl3_clm_nt_pan_request');
+        if (panGr.get(panReqId)) {
+            panGr.setValue('state', '3');
+            panGr.update();
+        }
+
+        // 2. Update all child Site Requests for this PAN to approved
+        var siteGr = new GlideRecord('x_birl3_clm_nt_site_request');
+        siteGr.addQuery('pan_request', panReqId);
+        siteGr.query();
+        while (siteGr.next()) {
+            siteGr.setValue('approval', 'approved');
+            siteGr.update();
+        }
+
+        gs.info('CLM SAP Writeback Sync: NT PAN Request ' + panReqId + ' set to State 3 and child sites marked Approved.');
+    }
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-03 09:24:29</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>30f575c697941b10be31fa17f053afdd</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>CLM: NT PAN SITE Update</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_30f575c697941b10be31fa17f053afdd</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-03 10:19:43</sys_updated_on>
+        <template/>
+        <when>after</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=30f575c697941b10be31fa17f053afdd"/>
+</record_update>

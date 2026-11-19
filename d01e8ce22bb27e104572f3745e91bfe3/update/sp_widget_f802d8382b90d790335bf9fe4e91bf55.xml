@@ -1,0 +1,1804 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[/*
+  CLM Customer 360 (ZHM, Non-Trade) - Client Script  v1.0
+  - Always Non-Trade (CG1 = N01 on the server). Picking another business broadcasts 'clm.business.changed';
+    the parent dashboard swaps in that business's Customer 360 and this dropdown snaps back to Non-Trade
+  - Customer search shows PAN. Site table: Active BG + BG Expiry (instead of Active SD + SD Multiplier)
+  - ZHM data flow (same as Trade ZHM): live SAP returns limit + outstanding per site; mergeSapData re-sums the
+    aggregate limit from the SAP site limits (master limit kept when SAP returns 0). Active BG comes from the master
+  - Opening a customer from Portfolio Overview is accepted only for Non-Trade
+*/
+function CLMNTCustomer360ZHMController($scope, $timeout, $rootScope, $document) {
+    var c = this;
+    var OWN_BUSINESS = 'nonTrade';
+
+    c.searchTerm = '';
+    c.loading = true;
+    c.sapLoading = false;
+    c.charts = {};
+
+    c.suggestions    = [];
+    c.suggestLoading = false;
+    var _suggestTimer = null;
+    var loadReqId = 0;
+    var suggestReqId = 0;
+
+    c.selectedSite = '';
+    c.siteSearch = '';
+    c.siteDropdownOpen = false;
+    c.selectedMonth = '';
+    c.tableData = [];
+
+    c.accessDenied = !!(c.data && c.data.accessDenied);
+
+    // ===================== BUSINESS FILTER =====================
+    var FALLBACK_BUSINESS_OPTIONS = [
+        { value: 'trade',    label: 'Trade',        cg1: 'T00', enabled: true  },
+        { value: 'nonTrade', label: 'Non-Trade',    cg1: 'N01', enabled: true  },
+        { value: 'key',      label: 'Key Customer', cg1: 'N00', enabled: true }
+    ];
+    c.businessOptions = (c.data && c.data.businessOptions && c.data.businessOptions.length) ? c.data.businessOptions : FALLBACK_BUSINESS_OPTIONS;
+    c.business = OWN_BUSINESS;
+
+    function getBusinessOption(v) {
+        for (var i = 0; i < c.businessOptions.length; i++) { if (c.businessOptions[i].value === v) return c.businessOptions[i]; }
+        return null;
+    }
+    c.getBusinessOptionText = function(b) { return b.label + (b.enabled ? '' : ' (Coming soon)'); };
+    c.getBusinessLabel = function() { var b = getBusinessOption(OWN_BUSINESS); return b ? b.label : 'Non-Trade'; };
+    c.isSearchEnabled = function() { return !c.accessDenied; };
+    c.getSearchPlaceholder = function() { return 'Customer name, PAN or site code'; };
+    c.getSearchHint = function() { return 'customer name, PAN or site code'; };
+
+    c.onBusinessChange = function() {
+        var target = getBusinessOption(c.business);
+        if (!target || !target.enabled) { c.business = OWN_BUSINESS; return; }
+        if (c.business === OWN_BUSINESS) return;
+        c.business = OWN_BUSINESS;   // this widget always stays Non-Trade; the parent swaps the page
+        console.log('[CLM Non-Trade ZHM C360] business change requested ->', target.value);
+        $rootScope.$broadcast('clm.business.changed', { business: target.value, cg1: target.cg1, from: OWN_BUSINESS });
+    };
+    var offBizActive = $rootScope.$on('clm.business.active', function() { c.business = OWN_BUSINESS; });
+
+    var CHART_JS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js';
+    var CHART_FONT = '"Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif';
+    var CHART_IDS = { sales: 'ntC360SalesChartZHM', aging: 'ntC360AgingChartZHM' };
+    var DETAIL_CARD_ID = 'c360DetailNTZHM';
+
+    function ensureChartJs(cb) {
+        if (typeof Chart !== 'undefined') { cb(); return; }
+        if (!window.__clmChartJsPromise) {
+            window.__clmChartJsPromise = new Promise(function(resolve, reject) {
+                var existing = document.querySelector('script[data-clm-chartjs]');
+                if (existing) {
+                    existing.addEventListener('load', resolve);
+                    existing.addEventListener('error', reject);
+                    return;
+                }
+                var script = document.createElement('script');
+                script.src = CHART_JS_URL;
+                script.setAttribute('data-clm-chartjs', 'true');
+                script.onload = resolve;
+                script.onerror = reject;
+                document.head.appendChild(script);
+            });
+        }
+        window.__clmChartJsPromise.then(function() { $timeout(cb); }).catch(function(err) { console.error('CLM Widget: failed to load Chart.js', err); });
+    }
+    ensureChartJs(function() {});
+
+    function handleClickOutside(event) {
+        var target = event.target;
+        if (!target.closest('.clm-custom-dropdown')) {
+            $timeout(function() { c.siteDropdownOpen = false; });
+        }
+    }
+    $document.on('click', handleClickOutside);
+    $scope.$on('$destroy', function() { $document.off('click', handleClickOutside); });
+
+    // =================================================================
+    // FORMATTERS
+    // =================================================================
+    c.fmtDynamic = function(val) {
+        if (val === null || val === undefined || val === '') return '—';
+        var numericVal = parseFloat(String(val).replace(/,/g, ''));
+        if (isNaN(numericVal)) return '—';
+        if (numericVal === 0) return '₹0';
+        var absVal = Math.abs(numericVal);
+        var sign = numericVal < 0 ? '-' : '';
+        if (absVal >= 10000000) return sign + '₹' + (absVal / 10000000).toFixed(2) + 'Cr';
+        if (absVal >= 100000)   return sign + '₹' + (absVal / 100000).toFixed(2) + 'L';
+        if (absVal >= 1000)     return sign + '₹' + (absVal / 1000).toFixed(1) + 'K';
+        return sign + '₹' + (absVal % 1 === 0 ? absVal : absVal.toFixed(2));
+    };
+    c.fmtLakh = c.fmtDynamic;
+    c.fmtK = c.fmtDynamic;
+
+    c.fmtDash = function(val) {
+        var p = parseFloat(val);
+        return (!val || isNaN(p) || p === 0) ? '—' : c.fmtDynamic(p);
+    };
+    c.fmtRatio = function(value) {
+        var p = parseFloat(value);
+        return (value === undefined || value === null || isNaN(p)) ? '—' : p.toFixed(2);
+    };
+    c.fmtPercent = function(val) {
+        var p = parseFloat(val);
+        if (isNaN(p)) return '—';
+        var rounded = Math.round(p * 10) / 10;
+        var sign = rounded > 0 ? '+' : '';
+        return sign + rounded.toFixed(1) + '%';
+    };
+    c.riskValueClass = function(val) {
+        if (val === null || val === undefined || isNaN(val)) return 'clm-risk-neutral';
+        if (val < 0) return 'clm-risk-negative';
+        if (val > 0) return 'clm-risk-positive';
+        return 'clm-risk-neutral';
+    };
+
+    var parseSafeNumber = function(val) {
+        if (val === null || val === undefined) return 0;
+        if (typeof val === 'number') return isNaN(val) ? 0 : val;
+        var str = String(val).replace(/[₹\s,]/g, '').trim();
+        var multiplier = 1;
+        if (str.toUpperCase().endsWith('L')) { multiplier = 100000; str = str.slice(0, -1); }
+        else if (str.toUpperCase().endsWith('K')) { multiplier = 1000; str = str.slice(0, -1); }
+        var num = parseFloat(str);
+        return isNaN(num) ? 0 : num * multiplier;
+    };
+
+    // =================================================================
+    // SEARCH
+    // =================================================================
+    c.onTyping = function($event) {
+        if (!c.isSearchEnabled()) { c.suggestions = []; return; }
+        if ($event.keyCode === 13) { c.suggestions = []; c.doSearch(); return; }
+        if ($event.keyCode === 27) { c.suggestions = []; return; }
+
+        var term = (c.searchTerm || '').trim();
+        if (term.length < 2) {
+            c.suggestions = []; c.suggestLoading = false;
+            if (_suggestTimer) { $timeout.cancel(_suggestTimer); }
+            return;
+        }
+
+        if (_suggestTimer) { $timeout.cancel(_suggestTimer); }
+        _suggestTimer = $timeout(function() {
+            var myId = ++suggestReqId;
+            c.suggestLoading = true;
+            c.server.get({ action: 'suggest', term: term, business: OWN_BUSINESS }).then(function(r) {
+                if (myId !== suggestReqId) return;
+                c.suggestions    = (r.data && r.data.suggestions) || [];
+                c.suggestLoading = false;
+            }, function() {
+                if (myId !== suggestReqId) return;
+                c.suggestions = []; c.suggestLoading = false;
+            });
+        }, 250);
+    };
+
+    c.selectSuggestion = function(s) {
+        if (!c.isSearchEnabled()) return;
+        c.searchTerm  = s.pan || s.code;
+        c.suggestions = [];
+        c.selectedMonth = '';
+        if (s.sysId) { c.load({ sysId: s.sysId, code: s.code, pan: s.pan }); }
+        else { c.load(s.pan); }
+    };
+
+    c.doSearch = function() {
+        if (!c.isSearchEnabled()) return;
+        if (c.searchTerm && c.searchTerm.trim() !== '') {
+            c.selectedMonth = '';
+            c.load(c.searchTerm.trim());
+        }
+    };
+
+    // =================================================================
+    // LOAD
+    // =================================================================
+    c.load = function(param) {
+        var myId = ++loadReqId;
+        c.loading = true;
+        c.sapLoading = false;
+        c.suggestions = [];
+
+        var payload = { business: OWN_BUSINESS };
+        if (param && typeof param === 'object') {
+            if (param.sysId) payload.sysId = param.sysId;
+            c.searchTerm = param.pan || param.code || c.searchTerm;
+        } else {
+            payload.search = param || '';
+            c.searchTerm = param || c.searchTerm;
+        }
+
+        c.server.get(payload).then(function(r) {
+            if (myId !== loadReqId) return;
+            c.data = r.data || {};
+            if (c.data.accessDenied) c.accessDenied = true;
+            if (c.data.error || !c.data.panIdentity) { c.loading = false; return; }
+            ntOnLoaded(myId);
+        }, function() {
+            if (myId !== loadReqId) return;
+            c.loading = false;
+        });
+    };
+
+    function ntOnLoaded(myId) {
+        if (c.data.panIdentity && c.data.panIdentity.pan) {
+            c.searchTerm = c.data.panIdentity.pan;
+        }
+
+        c.selectedMonth = c.data.selectedMonthVal;
+
+        if (c.data.siteList && c.data.siteList.length > 0) {
+            var initialSite = c.data.siteList[0];
+            c.selectedSite = initialSite.sysId;
+            c.siteSearch = initialSite.code + ' · ' + initialSite.segment;
+        }
+
+        c.loading = false;
+        c.updateTable();
+        c.onMonthChange();
+
+        $timeout(function() {
+            c.drawSalesChart();
+            c.drawAgingChart();
+        }, 300);
+
+        /*if (c.data.liveSapEnabled && c.data.siteList && c.data.siteList.length > 0) {
+            c.sapLoading = true;
+            var sitesForSap = c.data.siteList.map(function(s) { return { code: s.code, sysId: s.sysId, salesOrg: s.salesOrg }; });
+
+            c.server.get({ action: 'fetch_live_sap', sites: sitesForSap, business: OWN_BUSINESS }).then(function(sapRes) {
+                if (myId !== loadReqId) return;
+                c.mergeSapData(sapRes.data && sapRes.data.liveResults);
+                c.sapLoading = false;
+            }, function() {
+                if (myId !== loadReqId) return;
+                c.sapLoading = false;
+            });
+        }*/
+			        c.sapLoading = false;
+    }
+
+    function destroyAllCharts() {
+        if (typeof Chart === 'undefined') { c.charts = {}; return; }
+        [CHART_IDS.sales, CHART_IDS.aging].forEach(function(id) {
+            var canvas = document.getElementById(id);
+            var existing = canvas ? Chart.getChart(canvas) : null;
+            if (existing) { try { existing.destroy(); } catch (e) {} }
+        });
+        c.charts = {};
+    }
+    $scope.$on('$destroy', function() { destroyAllCharts(); });
+
+    // Aggregate limit re-summed from the live SAP site limits (master limit kept when SAP returns 0).
+    // Outstanding: live SAP value when SAP answered, otherwise the snapshot value stays.
+    /*c.mergeSapData = function(liveResults) {
+        if (!liveResults || !c.data || !c.data.siteList) return;
+        var aggOutst = 0, aggLimit = 0;
+
+        c.data.siteList.forEach(function(site) {
+            var sapData = liveResults[site.sysId];
+            if (sapData) {
+                if (sapData.success) site.liveOutst = sapData.liveOutst || 0;
+                if (sapData.limit > 0) site.limit = sapData.limit;
+            }
+            aggOutst += site.liveOutst || 0;
+            aggLimit += (parseFloat(site.limit) || 0);
+        });
+
+        c.data.liveAggOutst = aggOutst;
+        c.data.indicators.limit = aggLimit;
+
+        c.onMonthChange();
+    };*/
+
+    // =================================================================
+    // SITE TABLE (rows built client-side for the selected month)
+    // =================================================================
+        c.onMonthChange = function() {
+        if (!c.data || !c.data.siteList || !c.data.filterMonths) return;
+
+        var isLatestMonth = (c.selectedMonth === c.data.filterMonths[0].value);
+
+        c.data.table1Data = [];
+        var activeBgTotal = 0, aggLimit = 0, aggOut = 0;
+
+        c.data.siteList.forEach(function(site) {
+            activeBgTotal += (parseFloat(site.activeBg) || 0);
+            aggLimit += (parseFloat(site.limit) || 0);
+            aggOut += (parseFloat(site.liveOutst) || 0);
+
+            var histArr = c.data.siteMonthly[site.sysId] || [];
+            var hist = histArr.find(function(h) { return h.monthKey === c.selectedMonth; });
+            if (!hist) {
+                hist = { outstanding: 0, salesVolume: 0, salesValue: 0, b0_30: 0, b31_60: 0, b61_90: 0, b91_p: 0 };
+            }
+
+            var overdue_lt_60 = hist.b0_30 + hist.b31_60;
+            var overdue_60_90 = hist.b61_90;
+            var overdue_gt_90 = hist.b91_p;
+
+            var risk = 'No Overdue';
+            var riskClass = 'clm-risk-None';
+            if (overdue_gt_90 > 0) { risk = 'High'; riskClass = 'clm-risk-High'; }
+            else if (overdue_60_90 > 0) { risk = 'Medium'; riskClass = 'clm-risk-Medium'; }
+            else if (overdue_lt_60 > 0) { risk = 'Low'; riskClass = 'clm-risk-Low'; }
+
+            c.data.table1Data.push({
+                sysId: site.sysId, code: site.code, segment: site.segment, zone: site.zone, region: site.region,
+                depot: site.depot, limit: site.limit, activeBg: site.activeBg,
+                bgExpiry: site.bgExpiry, bgExpiryText: site.bgExpiryText, bgExpiryClass: site.bgExpiryClass,
+                osSalesRatio: site.osSalesRatio, revenueAtRisk: site.revenueAtRisk, p2Composite: site.p2Composite,
+                risk: risk, riskClass: riskClass,
+                outstanding: isLatestMonth ? site.liveOutst : hist.outstanding,
+                b0_30: hist.b0_30, b31_60: hist.b31_60, b61_90: hist.b61_90, b91_p: hist.b91_p,
+                salesVolume: hist.salesVolume, salesValue: hist.salesValue,
+                reviewIn: site.reviewIn, reviewColor: site.reviewColor
+            });
+        });
+
+        var panHistRow = (c.data.monthly || []).find(function(m) { return m.monthKey === c.selectedMonth; });
+        if (!panHistRow) panHistRow = { outstanding: 0, b91_p: 0 };
+
+        c.data.liveApiOk = true;
+        c.data.liveAggOutst = aggOut;
+        c.data.indicators.limit = aggLimit;
+        c.data.indicators.outstanding = panHistRow.outstanding;
+        c.data.indicators.aggregateOutstanding = aggOut;
+        c.data.indicators.available = aggLimit - aggOut;
+        c.data.indicators.utilisation = aggLimit > 0 ? Math.round((aggOut / aggLimit) * 100) : 0;
+        c.data.indicators.activeBg = activeBgTotal;
+        c.data.indicators.od90 = panHistRow.b91_p;
+        c.data.indicators.od90Clean = panHistRow.b91_p <= 0;
+
+        c.updateTable();
+    };
+    c.getSelectedMonthLabel = function() {
+        if (!c.data || !c.data.filterMonths) return '';
+        var match = c.data.filterMonths.find(function(m) { return m.value === c.selectedMonth; });
+        return match ? match.label : '';
+    };
+
+    c.openSiteDropdown = function() { c.siteDropdownOpen = true; };
+
+    c.clearSiteSearch = function($event) {
+        if ($event) $event.preventDefault();
+        c.siteSearch = '';
+        c.openSiteDropdown();
+    };
+
+    c.getFilteredSites = function() {
+        if (!c.data || !c.data.siteList) return [];
+        var term = (c.siteSearch || '').toLowerCase();
+        if (!term || c.siteSearch.indexOf('·') > -1) return c.data.siteList;
+        return c.data.siteList.filter(function(s) {
+            return s.code.toLowerCase().indexOf(term) > -1 || (s.segment || '').toLowerCase().indexOf(term) > -1;
+        });
+    };
+
+    c.selectBottomSite = function(site, $event) {
+        if ($event) $event.stopPropagation();
+        c.selectedSite = site.sysId;
+        c.siteSearch = site.code + ' · ' + site.segment;
+        c.updateTable();
+        c.siteDropdownOpen = false;
+    };
+
+    c.selectSite = function(sysId) {
+        var targetSite = c.data.siteList.find(function(s) { return s.sysId === sysId; });
+        if (targetSite) {
+            c.selectedSite = targetSite.sysId;
+            c.siteSearch = targetSite.code + ' · ' + targetSite.segment;
+            c.updateTable();
+        }
+        var el = document.getElementById(DETAIL_CARD_ID);
+        if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    };
+
+    c.updateTable = function() {
+        if (!c.data || !c.selectedSite || !c.data.siteMonthly) return;
+        c.tableData = c.data.siteMonthly[c.selectedSite] || [];
+
+        var targetSite = c.data.siteList.find(function(s) { return s.sysId === c.selectedSite; });
+        if (targetSite && targetSite.limit > 0) {
+            c.tableData.forEach(function(row) {
+                row.limit = targetSite.limit;
+                row.util = Math.round((row.outstanding / row.limit) * 100);
+            });
+            if (c.tableData.length > 0) {
+                c.tableData[c.tableData.length - 1].outstanding = targetSite.liveOutst;
+                c.tableData[c.tableData.length - 1].util = Math.round((targetSite.liveOutst / targetSite.limit) * 100);
+            }
+        }
+    };
+
+    // ---- shared chart styling ----
+    var MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    function shortMonth(r) {
+        var key = String(r.monthKey || r.rawMonth || r.month || '');
+        var m = key.match(/^(\d{4})-(\d{2})/);
+        if (!m) return r.month || '';
+        return MONTH_SHORT[parseInt(m[2], 10) - 1] + ' ' + m[1].slice(-2);
+    }
+    function axisUnit(max) {
+        var a = Math.abs(max || 0);
+        if (a >= 10000000) return { div: 10000000, sfx: ' Cr' };
+        if (a >= 100000)   return { div: 100000,   sfx: ' L' };
+        if (a >= 1000)     return { div: 1000,     sfx: ' K' };
+        return { div: 1, sfx: '' };
+    }
+    function trimNum(n) {
+        var d = Math.abs(n) >= 100 ? 0 : (Math.abs(n) >= 10 ? 1 : 2);
+        return String(parseFloat(n.toFixed(d)));
+    }
+    function autoTicks(prefix) {
+        return {
+            maxTicksLimit: 6,
+            callback: function(v) {
+                if (v === 0) return prefix + '0';
+                var u = axisUnit(Math.max(Math.abs(this.max), Math.abs(this.min)));
+                return prefix + trimNum(v / u.div) + u.sfx;
+            }
+        };
+    }
+    function tipValue(prefix, v) {
+        var u = axisUnit(v);
+        return prefix + trimNum(v / u.div) + u.sfx;
+    }
+    function applyChartDefaults() {
+        Chart.defaults.font.family = CHART_FONT;
+        Chart.defaults.font.size = 12;
+        Chart.defaults.color = '#5a6a7a';
+    }
+    var LEGEND = {
+        display: true, position: 'bottom',
+        labels: {
+            usePointStyle: true, boxWidth: 12, boxHeight: 12, padding: 18, color: '#1a1a1a', font: { weight: '700' },
+            sort: function(a, b) { return a.datasetIndex - b.datasetIndex; },
+            generateLabels: function(chart) {
+                var items = Chart.defaults.plugins.legend.labels.generateLabels(chart);
+                items.forEach(function(it) {
+                    var ds = chart.data.datasets[it.datasetIndex];
+                    if (ds && ds.type === 'line') { it.pointStyle = 'line'; it.lineWidth = 3; it.strokeStyle = ds.borderColor; }
+                });
+                return items;
+            }
+        }
+    };
+    var X_AXIS = { grid: { display: false }, border: { color: '#dde3ea' }, ticks: { color: '#1a1a1a', font: { weight: '700' } } };
+    var AXIS_TITLE = function(text) { return { display: true, text: text, color: '#3a4451', font: { size: 12, weight: '700' } }; };
+
+    c.drawSalesChart = function() {
+        if (!c.data || !c.data.monthly || !c.data.monthly.length) return;
+        ensureChartJs(function() {
+            var canvas = document.getElementById(CHART_IDS.sales);
+            if (!canvas) return;
+            applyChartDefaults();
+            var existing = Chart.getChart(canvas);
+            if (existing) existing.destroy();
+
+            var rows = c.data.monthly.slice(-6);
+            var chartLabels = rows.map(shortMonth);
+            var volumeData  = rows.map(function(r) { return parseSafeNumber(r.salesVolume); });
+            var valueData   = rows.map(function(r) { return parseSafeNumber(r.salesValue); });
+
+            c.charts.sales = new Chart(canvas.getContext('2d'), {
+                type: 'bar',
+                data: {
+                    labels: chartLabels,
+                    datasets: [
+                        { type: 'bar', label: 'Credit Sales Volume (MT)', data: volumeData, yAxisID: 'ySalesVolume', order: 1, pointStyle: 'rect',
+                          backgroundColor: '#0b5394', hoverBackgroundColor: '#073b6b', borderRadius: 3, maxBarThickness: 56, categoryPercentage: 0.6 },
+                        { type: 'line', label: 'Credit Sales Value (₹)', data: valueData, yAxisID: 'ySalesValue', order: 0, tension: 0.35,
+                          borderColor: '#E87722', borderWidth: 2.5, backgroundColor: '#ffffff', pointStyle: 'circle', pointRadius: 5, pointHoverRadius: 6,
+                          pointBorderWidth: 2, pointBorderColor: '#E87722', pointBackgroundColor: '#ffffff' }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false, resizeDelay: 0,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: LEGEND,
+                        tooltip: { mode: 'index', intersect: false, callbacks: { label: function(ctx) {
+                            var v = ctx.parsed.y || 0;
+                            return ctx.dataset.yAxisID === 'ySalesValue' ? ' Value: ' + tipValue('₹', v) : ' Volume: ' + tipValue('', v) + ' MT';
+                        } } }
+                    },
+                    scales: {
+                        x: X_AXIS,
+                        ySalesVolume: { type: 'linear', position: 'left', beginAtZero: true, grace: '10%', grid: { color: '#eef1f5' }, border: { display: false },
+                                        title: AXIS_TITLE('Volume (MT)'), ticks: autoTicks('') },
+                        ySalesValue:  { type: 'linear', position: 'right', beginAtZero: true, grace: '10%', grid: { drawOnChartArea: false }, border: { display: false },
+                                        title: AXIS_TITLE('Value (₹)'), ticks: angular.extend(autoTicks('₹'), { color: '#E87722' }) }
+                    }
+                }
+            });
+        });
+    };
+
+    c.drawAgingChart = function() {
+        if (!c.data || !c.data.monthly || !c.data.monthly.length) return;
+        ensureChartJs(function() {
+            var canvas = document.getElementById(CHART_IDS.aging);
+            if (!canvas) return;
+            applyChartDefaults();
+            var existing = Chart.getChart(canvas);
+            if (existing) existing.destroy();
+
+            var rows = c.data.monthly.slice(-6);
+            var chartLabels = rows.map(shortMonth);
+            var BAR = { borderColor: '#ffffff', borderWidth: { top: 1 }, maxBarThickness: 56, categoryPercentage: 0.6, pointStyle: 'rectRounded' };
+
+            c.charts.aging = new Chart(canvas.getContext('2d'), {
+                type: 'bar',
+                data: {
+                    labels: chartLabels,
+                    datasets: [
+                        angular.extend({ label: '0-30D',  data: rows.map(function(r) { return parseSafeNumber(r.b0_30); }),  backgroundColor: '#27ae60' }, BAR),
+                        angular.extend({ label: '31-60D', data: rows.map(function(r) { return parseSafeNumber(r.b31_60); }), backgroundColor: '#8fd1a0' }, BAR),
+                        angular.extend({ label: '61-90D', data: rows.map(function(r) { return parseSafeNumber(r.b61_90); }), backgroundColor: '#f0a030' }, BAR),
+                        angular.extend({ label: '>90D',   data: rows.map(function(r) { return parseSafeNumber(r.b91_p); }),  backgroundColor: '#e23d28' }, BAR)
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false, resizeDelay: 0,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: LEGEND,
+                        tooltip: { mode: 'index', intersect: false, callbacks: { label: function(ctx) { return ' ' + ctx.dataset.label + ': ' + tipValue('₹', ctx.parsed.y || 0); } } }
+                    },
+                    scales: {
+                        x: angular.extend({ stacked: true }, X_AXIS),
+                        y: { stacked: true, beginAtZero: true, grace: '10%', grid: { color: '#eef1f5' }, border: { display: false },
+                             title: AXIS_TITLE('Outstanding (₹)'), ticks: autoTicks('₹') }
+                    }
+                }
+            });
+        });
+    };
+
+    // =================================================================
+    // HAND-OFF FROM PORTFOLIO OVERVIEW (Non-Trade only)
+    // =================================================================
+    var offCustomerSelected = $rootScope.$on('clm.customer.selected', function(event, payload) {
+        var biz = (payload && typeof payload === 'object' && payload.business) ? payload.business : OWN_BUSINESS;
+        if (biz !== OWN_BUSINESS) return;
+        c.data = {}; c.loading = true; c.selectedMonth = '';
+        if (payload && typeof payload === 'object' && payload.sysId) {
+            c.load({ sysId: payload.sysId, code: payload.code, pan: payload.pan });
+        } else {
+            c.load(payload);
+        }
+    });
+    $scope.$on('$destroy', function() { offCustomerSelected(); offBizActive(); });
+
+    var pendingBiz = $rootScope.clmPendingCustomerBusiness;
+    if ($rootScope.clmPendingCustomerSysId && (!pendingBiz || pendingBiz === OWN_BUSINESS)) {
+        var pendingSysId = $rootScope.clmPendingCustomerSysId;
+        var pendingCode  = $rootScope.clmPendingCustomerCode;
+        var pendingPan   = $rootScope.clmPendingCustomerPan;
+        delete $rootScope.clmPendingCustomerSysId;
+        delete $rootScope.clmPendingCustomerCode;
+        delete $rootScope.clmPendingCustomerPan;
+        delete $rootScope.clmPendingCustomerBusiness;
+        c.load({ sysId: pendingSysId, code: pendingCode, pan: pendingPan });
+    } else {
+        c.load();   // no customer yet (or a ?search= deep link)
+    }
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* =========================================================================
+   CLM Customer 360 (ZHM, Non-Trade) - CSS  v1.0
+   Same design system as Trade ZHM Customer 360 v2.3; detail card id is #c360DetailNTZHM
+   Oxygen font rule kept LAST
+   ========================================================================= */
+@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+.clm-c360 { color:#1a1a1a; background:#f4f5f7; padding:20px; }
+
+/* ---------- Section ---------- */
+.clm-c3-section { margin-top:16px; background:#fff; border:1px solid #e0e6ed; border-radius:8px; padding:24px 28px; }
+.clm-c3-section-title { display:flex; align-items:center; gap:12px; margin-bottom:18px;
+  font-size:14px; font-weight:700; color:#1a1a1a; text-transform:uppercase; letter-spacing:1px; }
+.clm-c3-section-num { width:26px; height:26px; border-radius:50%; background:#F3D54E; color:#1a1a1a;
+  font-size:13px; font-weight:700; display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; }
+
+/* ---------- Card (block) ---------- */
+.clm-c3-block { margin-top:16px; background:#fff; border:1px solid #dde3ea; border-radius:8px; overflow:hidden; }
+.clm-c3-first { margin-top:0; }
+.clm-c3-head { display:flex; align-items:center; justify-content:space-between; gap:12px 20px; flex-wrap:wrap;
+  padding:14px 20px; background:#fafbfc; border-bottom:1px solid #dde3ea; }
+.clm-c3-title { display:flex; align-items:center; gap:10px; font-size:13px; font-weight:700; color:#1a1a1a;
+  text-transform:uppercase; letter-spacing:.8px; }
+.clm-c3-title::before { content:""; width:4px; height:16px; border-radius:2px; background:#F3D54E; flex-shrink:0; }
+.clm-c3-sub { margin:4px 0 0 14px; font-size:12px; color:#5a6a7a; }
+.clm-c3-meta { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.clm-c3-body { padding:18px 20px; }
+
+.clm-c3-block-dev { border-color:#f3c2bc; }
+.clm-c3-block-dev .clm-c3-head { background:#fef5f4; border-bottom:0; }
+.clm-c3-block-dev .clm-c3-title { color:#b3261e; text-transform:none; letter-spacing:0; }
+.clm-c3-block-dev .clm-c3-title::before { background:#E23D28; }
+
+/* ---------- Chips ---------- */
+.clm-c3-chip { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; background:#fff;
+  border:1px solid #dde3ea; border-radius:12px; font-size:12px; font-weight:700; color:#1a1a1a; white-space:nowrap; }
+.clm-c3-chip-k { font-weight:400; color:#5a6a7a; }
+.clm-c3-chip-live { background:#eaf7ee; border-color:#b9e3c6; color:#1e8449; }
+.clm-c3-chip-req  { background:#fff8e1; border-color:#f3d54e; color:#7a5a00; }
+
+.clm-c3-spin { width:12px; height:12px; border:2px solid #cfead8; border-top-color:#1e8449; border-radius:50%;
+  animation:clm-c3-spin 1s linear infinite; }
+.clm-c3-chip-req .clm-c3-spin { border-color:#f6e7a6; border-top-color:#7a5a00; }
+@keyframes clm-c3-spin { to { transform:rotate(360deg); } }
+
+/* ---------- Search ---------- */
+.clm-c3-search { margin-top:0; overflow:visible; }
+.clm-c3-search-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:14px 20px; }
+.clm-c3-search-k { display:flex; align-items:center; gap:10px; font-size:13px; font-weight:700; color:#1a1a1a;
+  text-transform:uppercase; letter-spacing:.8px; }
+.clm-c3-search-k::before { content:""; width:4px; height:16px; border-radius:2px; background:#F3D54E; }
+.clm-c3-search-k.is-off { color:#9aa5b1; }
+.clm-c3-search-k.is-off::before { background:#dde3ea; }
+.clm-c3-search-hint { font-size:12px; color:#7f8c9a; }
+.clm-c3-search-live { margin-left:auto; }
+.clm-c3-search-sep { width:1px; height:24px; background:#dde3ea; margin:0 4px; }
+
+.clm-c3-input { width:100%; height:36px; padding:6px 12px; box-sizing:border-box; border:1px solid #cdd4dc;
+  border-radius:6px; font-size:13px; color:#1a1a1a; background:#fff; outline:none;
+  transition:border-color .15s ease, box-shadow .15s ease; }
+.clm-c3-input:focus { border-color:#1a1a1a; box-shadow:0 0 0 3px rgba(243,213,78,.45); }
+.clm-c3-input:disabled { background:#f6f7f9; border-color:#e6eaef; color:#9aa5b1; cursor:not-allowed; }
+
+.clm-c3-btn { height:36px; padding:0 18px; border:1px solid #1a1a1a; border-radius:6px; background:#1a1a1a;
+  color:#F3D54E; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.6px; cursor:pointer; white-space:nowrap; }
+.clm-c3-btn:hover { background:#333; }
+.clm-c3-btn:disabled, .clm-c3-btn:disabled:hover { background:#cdd4dc; border-color:#cdd4dc; color:#fff; cursor:not-allowed; }
+
+.clm-c3-biz { display:flex; align-items:center; gap:12px; margin:0; font-weight:normal; }
+.clm-c3-biz-select { height:36px; min-width:180px; padding:0 10px; box-sizing:border-box; border:1px solid #cdd4dc; border-radius:6px;
+  background:#fff; font-size:13px; font-weight:700; color:#1a1a1a; outline:none; cursor:pointer;
+  transition:border-color .15s ease, box-shadow .15s ease; }
+.clm-c3-biz-select:hover, .clm-c3-biz-select:focus { border-color:#1a1a1a; }
+.clm-c3-biz-select option { color:#1a1a1a; font-weight:400; }
+.clm-c3-biz-select option:disabled { color:#b0b9c4; }
+
+.clm-c3-typeahead { position:relative; flex:0 1 320px; min-width:220px; }
+.clm-c3-suggest { position:absolute; top:calc(100% + 4px); left:0; right:0; z-index:9999; max-height:280px; overflow-y:auto;
+  margin:0; padding:4px 0; list-style:none; background:#fff; border:1px solid #dde3ea; border-top:2px solid #F3D54E;
+  border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,.10); }
+.clm-c3-suggest li { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:8px 12px;
+  border-bottom:1px solid #eef1f5; font-size:13px; cursor:pointer; }
+.clm-c3-suggest li:last-child { border-bottom:0; }
+.clm-c3-suggest li:hover { background:#fffcf0; }
+.clm-c3-sug-name { flex:1; font-weight:700; color:#1a1a1a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.clm-c3-sug-meta { flex-shrink:0; padding:2px 6px; border-radius:4px; background:#eef1f5; font-size:11px; color:#5a6a7a; white-space:nowrap; }
+.clm-c3-suggest-loading { pointer-events:none; }
+.clm-c3-suggest-msg { padding:10px 12px; font-size:12px; font-style:italic; color:#7f8c9a; }
+
+/* ---------- KPI cards ---------- */
+.clm-c3-kpi-row { display:grid; grid-template-columns:minmax(0,2fr) minmax(0,1fr); gap:16px; margin-top:16px; }
+.clm-c3-kpi-row &gt; .clm-c3-block { margin-top:0; }
+.clm-c3-kpi-row.clm-c3-first { margin-top:0; }
+.clm-c3-kpi-card { display:flex; flex-direction:column; }
+.clm-c3-kpi-card .clm-c3-body { flex:1; }
+
+.clm-c3-factors { display:grid; gap:12px; }
+.clm-c3-factors-4 { grid-template-columns:repeat(4,minmax(0,1fr)); }
+.clm-c3-factors-2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.clm-c3-factor { padding:12px 14px; border:1px solid #e0e6ed; border-radius:6px; background:#fafbfc; }
+.clm-c3-factor-k { margin-bottom:4px; font-size:12px; color:#5a6a7a; }
+.clm-c3-factor-v { font-size:18px; font-weight:700; color:#1a1a1a; white-space:nowrap; }
+.clm-c3-factor-s { margin-top:4px; font-size:11px; color:#7f8c9a; }
+.clm-c3-factor.is-ok  { background:#f4fbf6; border-color:#cfead8; } .clm-c3-factor.is-ok  .clm-c3-factor-v { color:#1e8449; }
+.clm-c3-factor.is-bad { background:#fef5f4; border-color:#f5c2bc; } .clm-c3-factor.is-bad .clm-c3-factor-v { color:#c0392b; }
+
+.clm-c3-res { display:flex; align-items:center; justify-content:space-between; gap:12px 20px; flex-wrap:wrap;
+  padding:16px 20px; background:#fffcf0; border-top:1px solid #f1e2a0; }
+.clm-c3-res-k { font-size:13px; font-weight:700; color:#3a4451; text-transform:uppercase; letter-spacing:.6px; }
+.clm-c3-res-f { margin-top:3px; font-size:12px; color:#7f8c9a; }
+.clm-c3-res-v { margin-left:auto; font-size:30px; font-weight:700; line-height:1.1; color:#1a1a1a; }
+.clm-c3-res.is-ok  { background:#f4fbf6; border-top-color:#b9e3c6; } .clm-c3-res.is-ok  .clm-c3-res-v { color:#1e8449; }
+.clm-c3-res.is-bad { background:#fef5f4; border-top-color:#f5c2bc; } .clm-c3-res.is-bad .clm-c3-res-v { color:#c0392b; }
+
+/* ---------- Charts ---------- */
+.clm-c3-chart-row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+.clm-c3-chart-wrap { position:relative; height:280px; padding:14px 16px 12px; box-sizing:border-box; }
+.clm-c3-chart-wrap canvas { width:100% !important; height:100% !important; }
+
+/* ---------- Tables ---------- */
+.clm-c3-table-wrap { overflow-x:auto; background:#fff; }
+.clm-c3-table-scroll { max-height:460px; overflow-y:auto; }
+.clm-c3-table { width:100%; border-collapse:separate; border-spacing:0; font-size:13px; font-variant-numeric:tabular-nums; }
+.clm-c3-table th { background:#eef1f5; color:#2b3440; padding:10px 12px; font-size:12px; font-weight:700;
+  text-transform:uppercase; letter-spacing:.6px; text-align:center; white-space:nowrap; border-bottom:1px solid #dde3ea; }
+.clm-c3-table td { padding:12px; color:#1a1a1a; text-align:center; white-space:nowrap; vertical-align:middle;
+  border-bottom:1px solid #e6eaef; background:#fff; }
+.clm-c3-table tr &gt; :first-child { text-align:left; }
+.clm-c3-table tbody tr:last-child td { border-bottom:0; }
+.clm-c3-table-wide th { font-size:11px; padding:9px 10px; }
+.clm-c3-table-wide td { padding:10px; }
+
+.clm-c3-table tr.super th { height:36px; box-sizing:border-box; padding:0 12px; letter-spacing:1px; }
+.clm-c3-table th.bg-blank  { background:#f7f8fa; }
+.clm-c3-table th.bg-code   { background:#e3eefa; color:#0b5394; }
+.clm-c3-table th.bg-pan    { background:#fdf3e1; color:#a35400; }
+.clm-c3-table th.bg-seg    { background:#f1f3f7; color:#3a4451; }
+.clm-c3-table th.bg-req    { background:#e6f4ea; color:#2e7d32; }
+.clm-c3-table th.bg-assess { background:#efe9f9; color:#6a3fb5; }
+.clm-c3-table th.bg-ageing { background:#e3f2e7; color:#14532d; }
+.clm-c3-table th.ag-safe-sub { background:#edf7ef; color:#14532d; }
+.clm-c3-table th.ag-warn-sub { background:#fff4e5; color:#7a4100; }
+.clm-c3-table th.ag-risk-sub { background:#fdeeec; color:#8f1d16; }
+
+.clm-c3-table-scroll thead th { position:sticky; z-index:3; }
+.clm-c3-table-scroll thead tr.super th { top:0; }
+.clm-c3-table-scroll thead tr.cols th  { top:36px; }
+.clm-c3-table-scroll tr &gt; :first-child { position:sticky; left:0; z-index:2; }
+.clm-c3-table-scroll thead tr &gt; :first-child { z-index:4; }
+
+.clm-c3-site-code { font-weight:700; color:#1a1a1a; }
+.clm-c3-cell-sub { margin-top:2px; font-size:12px; color:#5a6a7a; }
+.clm-c3-empty { padding:24px !important; text-align:center !important; color:#7f8c9a; }
+.clm-c3-table td.v-key { font-weight:700; }
+.clm-c3-table td.v-bad  { color:#c0392b; font-weight:700; }
+.clm-c3-table td.v-warn { color:#a15a00; font-weight:700; }
+.clm-c3-table td.zero { color:#b0b9c4; }
+.clm-c3-table td.warn-val { color:#a15a00; font-weight:700; background:#fffaf2; }
+.clm-c3-table td.risk-val { color:#b3261e; font-weight:700; background:#fff6f5; }
+
+.clm-c3-click { cursor:pointer; }
+.clm-c3-click:hover td { background:#fafbfc; }
+.clm-c3-table tr.is-selected td { background:#fffcf0; }
+.clm-c3-table tr.is-selected &gt; :first-child { box-shadow:inset 4px 0 0 #F3D54E; }
+
+.clm-c3-rating { display:inline-block; padding:3px 10px; border-radius:12px; border:1px solid; font-size:11.5px; font-weight:700; }
+.clm-c3-rating.r-a { background:#eaf7ee; color:#1e8449; border-color:#b9e3c6; }
+.clm-c3-rating.r-b { background:#fff4e0; color:#a15a00; border-color:#f6d39a; }
+.clm-c3-rating.r-c { background:#fdecea; color:#b3261e; border-color:#f5c2bc; }
+.clm-c3-rating.r-n { background:#f5f7f9; color:#5a6a7a; border-color:#dde3ea; }
+
+/* classes returned by the scripts (review-in, BG expiry, revenue at risk) */
+.clm-text-red    { color:#c0392b !important; }
+.clm-text-orange { color:#a15a00 !important; }
+.clm-text-green  { color:#1e8449 !important; }
+.clm-text-muted  { color:#7f8c9a !important; font-weight:400; }
+.clm-risk-negative { color:#c0392b !important; }
+.clm-risk-positive { color:#1e8449 !important; }
+.clm-risk-neutral  { color:#7f8c9a !important; font-weight:400; }
+
+/* ---------- Site dropdown (detail card head) ---------- */
+.clm-c3-dd { position:relative; width:280px; }
+.clm-c3-dd-input { height:34px; padding-right:48px; }
+.clm-c3-dd-clear { position:absolute; right:28px; top:11px; z-index:10; font-size:12px; color:#7f8c9a; cursor:pointer; }
+.clm-c3-dd-arrow { position:absolute; right:10px; top:11px; font-size:12px; color:#5a6a7a; pointer-events:none; }
+.clm-c3-dd-list { position:absolute; top:calc(100% + 4px); right:0; width:100%; z-index:1000; max-height:220px; overflow-y:auto;
+  margin:0 !important; padding:0 !important; list-style:none !important; background:#fff; border:1px solid #dde3ea;
+  border-radius:6px; box-shadow:0 6px 12px rgba(0,0,0,.10); text-align:left; }
+.clm-c3-dd-list li { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 12px;
+  border-bottom:1px solid #eef1f5; font-size:13px; color:#1a1a1a; cursor:pointer; }
+.clm-c3-dd-list li:last-child { border-bottom:0; }
+.clm-c3-dd-list li:hover { background:#fafbfc; }
+.clm-c3-dd-list li.is-active { background:#fffcf0; box-shadow:inset 3px 0 0 #F3D54E; }
+.clm-c3-dd-seg { font-size:11px; color:#5a6a7a; }
+.clm-c3-dd-none { justify-content:center !important; font-size:12px !important; color:#7f8c9a !important; cursor:default !important; }
+#c360DetailNTZHM { overflow:visible; }
+#c360DetailNTZHM &gt; .clm-c3-head { border-radius:8px 8px 0 0; }
+
+/* ---------- Context bar ---------- */
+.clm-c3-context { position:sticky; top:0; z-index:20; display:flex; align-items:center; justify-content:space-between;
+  gap:12px 24px; flex-wrap:wrap; margin-top:16px; padding:14px 20px; background:#fff;
+  border:1px solid #dde3ea; border-left:5px solid #F3D54E; border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,.05); }
+.clm-c3-context-k { font-size:12px; font-weight:700; color:#5a6a7a; text-transform:uppercase; letter-spacing:.6px; }
+.clm-c3-context-v { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin-top:2px; }
+.clm-c3-context-pan { font-size:20px; font-weight:700; color:#1a1a1a; letter-spacing:.5px; }
+.clm-c3-context-name { font-size:14px; font-weight:700; color:#3a4451; }
+.clm-c3-context-sub { margin-top:2px; font-size:12px; color:#5a6a7a; }
+.clm-c3-chip-biz { margin-left:8px; padding:2px 9px; background:#1a1a1a; border-color:#1a1a1a; color:#F3D54E;
+  font-size:11px; letter-spacing:.4px; vertical-align:middle; }
+
+.clm-c3-month-picker { display:grid; grid-template-columns:auto auto; align-items:center; gap:2px 12px; margin:0;
+  padding:0 !important; background:transparent !important; border:none !important; box-shadow:none !important; cursor:pointer; }
+.clm-c3-month-picker select { grid-row:span 2; height:38px; min-width:130px; padding:0 10px; border:1px solid #1a1a1a;
+  border-radius:6px; background:#1a1a1a; color:#F3D54E; font-size:15px; font-weight:700; outline:none; cursor:pointer; }
+.clm-c3-month-picker select option { background:#fff; color:#1a1a1a; }
+.clm-c3-month-picker select:focus { box-shadow:0 0 0 3px rgba(243,213,78,.5); }
+
+/* ---------- Empty / loading states ---------- */
+.clm-c3-hint { display:flex; flex-direction:column; align-items:center; gap:6px; padding:40px 24px; text-align:center; font-size:13px; color:#5a6a7a; }
+.clm-c3-hint &gt; .fa { font-size:28px; color:#cdd4dc; margin-bottom:4px; }
+.clm-c3-hint-title { font-size:15px; font-weight:700; color:#1a1a1a; }
+.clm-c3-spin-lg { width:22px; height:22px; border-width:3px; margin-bottom:4px; }
+
+/* ---------- Responsive ---------- */
+@media (max-width:1100px) {
+  .clm-c3-kpi-row { grid-template-columns:1fr; }
+  .clm-c3-factors-4 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@media (max-width:900px) {
+  .clm-c3-chart-row { grid-template-columns:1fr; }
+  .clm-c3-search-sep { display:none; }
+}
+@media (max-width:640px) {
+  .clm-c360 { padding:12px; }
+  .clm-c3-section { padding:16px; }
+  .clm-c3-head, .clm-c3-body, .clm-c3-res, .clm-c3-search-row { padding-left:14px; padding-right:14px; }
+  .clm-c3-biz { flex:1 1 100%; flex-wrap:wrap; }
+  .clm-c3-biz-select { flex:1 1 100%; }
+  .clm-c3-typeahead { flex:1 1 100%; }
+  .clm-c3-btn { flex:1 1 100%; }
+  .clm-c3-search-live { margin-left:0; }
+  .clm-c3-factors-4, .clm-c3-factors-2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .clm-c3-factor-v { font-size:16px; }
+  .clm-c3-res-v { font-size:24px; }
+  .clm-c3-meta, .clm-c3-dd { width:100%; }
+  .clm-c3-context { position:static; padding:12px 14px; }
+  .clm-c3-month-picker { width:100%; grid-template-columns:1fr auto; box-sizing:border-box; }
+  .clm-c3-context-pan { font-size:18px; }
+  .clm-c3-chart-wrap { height:230px; }
+}
+
+/* ---------- One font family (keep LAST) ---------- */
+.clm-c360, .clm-c360 *, .clm-c360 input, .clm-c360 select,
+.clm-c360 textarea, .clm-c360 button, .clm-c360 table {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}
+.clm-c360 .fa { font-family: FontAwesome !important; }</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>false</has_preview>
+        <id>clm_nt_zhm_customer_360</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>clm_nt_zhm_customer_360</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[/*
+  CLM Customer 360 (ZHM, Non-Trade) - Server Script  v1.0
+  - CG1 hard-locked to N01: master 'cg1', aging 'customer.cg1', request 'customer.cg1', sales tables 'u_customer.cg1'
+  - Access from x_birl3_clm_approval_matrix (approver_user = logged-in user, role_name in ROLE_SEGMENT_MAP):
+      role -> segment; pan_india = true -> no zone / region / depot restriction, otherwise the union of the user's
+      zone / region / depot values (empty = no restriction). Applied to the customer lookup, typeahead and PAN sites
+  - Business dropdown options come from x_birl3_clm.CLMBusinessAccess.getAccess('ZHM'); an option is enabled when its
+    dashboard is built. This widget itself only serves Non-Trade
+  - No customer_code_sap de-duplication: everything is keyed by sys_id
+  - Active BG = master.bank_guarantee (shown positive); BG expiry = master.bg_expiry_date
+  - fetch_live_sap returns the live SAP limit + outstanding per site (as in the Trade ZHM widget)
+  - Aggregate monthly history is built from ONE snapshot row per site per month (newest)
+  - Live SAP can be switched off with LIVE_SAP_ENABLED
+*/
+(function() {
+    var TABLES = {
+        master:         'x_birl3_clm_clm_customer_master1',
+        request:        'x_birl3_clm_clm_new_credit_request',
+        aging:          'x_birl3_clm_clm_aging_snapshot',
+        approvalMatrix: 'x_birl3_clm_approval_matrix',
+        salesVol:       'x_birl3_clm_clm_sales_data',
+        salesVal:       'x_birl3_clm_clm_cement_rmc_bpd_values'
+    };
+    var CG1 = 'N01';
+    var OWN_BUSINESS = 'nonTrade';
+    var LIVE_SAP_ENABLED = true;
+
+    // Non-Trade ZHM roles (approval matrix role_name) -> segment
+    var ROLE_SEGMENT_MAP = {
+        'NT CEMENT ZHM':  'Cement',
+        'NT CEMENT ZCH':  'Cement',
+        'NT RMC ZH':      'RMC',
+        'NT RMC ZCH':     'RMC',
+        'NT BPD ZH BPD':  'BPD',
+        'NT BPD ZCH':     'BPD'
+    };
+
+    var FIELDS = {
+        custCode: 'customer_code_sap', custName: 'customer_name', custPan: 'pan', custCg1: 'cg1',
+        custRegion: 'region_name', custZone: 'zone', custZoneName: 'zone_name', custSegment: 'segment',
+        custSalesOrg: 'salesorg', custBg: 'bank_guarantee', custBgExpiry: 'bg_expiry_date',
+        agingCustomer: 'customer', snapshotMonth: 'snapshot_month', totalOutstanding: 'total_outstanding',
+        bucket0_30: 'bucket_0_30_days', bucket31_45: 'bucket_31_45_days', bucket46_60: 'bucket_46_60_days',
+        bucket61_75: 'bucket_61_75_days', bucket76_90: 'bucket_76_90_days',
+        bucket91_120: 'bucket_91_120_days', bucketGt120: 'bucket_gt120_days',
+        expectedSob: 'u_tool_expected_sob'
+    };
+
+    // Same keys as the other dashboards. 'built' = the dashboard exists
+    var BUSINESS_CONFIG = {
+        trade:    { key: 'trade',    label: 'Trade',        cg1: 'T00', layout: 'trade',    built: true,  order: 1 },
+        nonTrade: { key: 'nonTrade', label: 'Non-Trade',    cg1: 'N01', layout: 'nonTrade', built: true,  order: 2 },
+        key:      { key: 'key',      label: 'Key Customer', cg1: 'N00', layout: 'key',      built: true, order: 3 }
+    };
+
+    // Search fields: name (contains), site code and PAN
+    var SEARCH_FIELDS = [
+        { field: FIELDS.custName, suggestOp: 'CONTAINS',   lookupOp: 'CONTAINS' },
+        { field: FIELDS.custCode, suggestOp: 'STARTSWITH', lookupOp: '=' },
+        { field: FIELDS.custPan,  suggestOp: 'STARTSWITH', lookupOp: '=' }
+    ];
+
+    var MONTH_ABBR  = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+    var MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+    function numStr(v) {
+        var n = parseFloat(String(v === null || v === undefined ? '' : v).replace(/[^0-9.\-]/g, ''));
+        return isNaN(n) ? 0 : n;
+    }
+    function isTrue(v) { return v === true || v === 'true' || v === '1' || v === 1; }
+    function pushUnique(arr, raw) {
+        if (raw === null || raw === undefined || raw === '') return;
+        String(raw).split(',').forEach(function(p) { p = p.trim(); if (p && arr.indexOf(p) === -1) arr.push(p); });
+    }
+
+    var hasInput = (typeof input !== 'undefined' && input);
+    var action = hasInput ? (input.action || '') : '';
+    var spParam = function(name) { return (typeof $sp !== 'undefined') ? ($sp.getParameter(name) || '') : ''; };
+    var gdtToday = new GlideDateTime();
+
+    // ---------- Business dropdown options (from the shared access Script Include) ----------
+    function getBusinessOptions() {
+        var acc;
+        try { acc = new x_birl3_clm.CLMBusinessAccess().getAccess('ZHM'); }
+        catch (e) { gs.warn('CLM C360 NT ZHM: CLMBusinessAccess failed: ' + e); acc = {}; acc[OWN_BUSINESS] = true; }
+        var arr = [];
+        for (var k in BUSINESS_CONFIG) {
+            if (!BUSINESS_CONFIG.hasOwnProperty(k)) continue;
+            var b = BUSINESS_CONFIG[k];
+            if (!acc[b.key]) continue;   // no access: not listed at all
+            arr.push({ value: b.key, label: b.label, cg1: b.cg1, layout: b.layout, enabled: !!b.built, order: b.order });
+        }
+        arr.sort(function(a, b) { return a.order - b.order; });
+        return arr;
+    }
+    if (action !== 'suggest' && action !== 'fetch_live_sap') {
+        data.businessOptions = getBusinessOptions();
+        data.defaultBusiness = OWN_BUSINESS;
+    }
+    data.business = OWN_BUSINESS;
+    data.liveSapEnabled = LIVE_SAP_ENABLED;
+
+    // ---------- Access (approval matrix) ----------
+    function loadAccess() {
+        var acc = { allowed: false, panIndia: false, segments: [], zones: [], regions: [], depots: [] };
+        var segSet = {};
+        var gr = new GlideRecord(TABLES.approvalMatrix);
+        if (!gr.isValid()) return acc;
+        gr.addQuery('approver_user', gs.getUserID());
+        gr.query();
+        while (gr.next()) {
+            var rv = String(gr.getValue('role_name') || '').toUpperCase().trim();
+            var rd = String(gr.getDisplayValue('role_name') || '').toUpperCase().trim();
+            var seg = ROLE_SEGMENT_MAP[rv] || ROLE_SEGMENT_MAP[rd];
+            if (!seg) continue;
+            segSet[seg] = true;
+            if (isTrue(gr.getValue('pan_india'))) acc.panIndia = true;
+            pushUnique(acc.zones,   gr.getValue('zone'));
+            pushUnique(acc.regions, gr.getValue('region'));
+            pushUnique(acc.depots,  gr.getValue('depot'));
+        }
+        acc.segments = Object.keys(segSet);
+        acc.allowed = acc.segments.length > 0;
+        return acc;
+    }
+    var access = loadAccess();
+    if (!access.allowed) {
+        data.error = 'You do not have access to view this dashboard.';
+        data.accessDenied = true;
+        return;
+    }
+
+    // Master scope: CG1 = N01 + role segments + matrix geography
+    function applyScope(gr) {
+        gr.addQuery(FIELDS.custCg1, CG1);
+        gr.addQuery(FIELDS.custSegment, 'IN', access.segments.join(','));
+        if (!access.panIndia) {
+            if (access.zones.length)   gr.addQuery('zone',   'IN', access.zones.join(','));
+            if (access.regions.length) gr.addQuery('region', 'IN', access.regions.join(','));
+            if (access.depots.length)  gr.addQuery('depot',  'IN', access.depots.join(','));
+        }
+    }
+
+    var _validFields = null;
+    function validSearchFields() {
+        if (_validFields) return _validFields;
+        var probe = new GlideRecord(TABLES.master);
+        _validFields = SEARCH_FIELDS.filter(function(f) { return probe.isValidField(f.field); });
+        return _validFields;
+    }
+    function addSearchConditions(gr, term, opKey) {
+        var fields = validSearchFields();
+        if (!fields.length) return false;
+        var q = gr.addQuery(fields[0].field, fields[0][opKey], term);
+        for (var i = 1; i < fields.length; i++) q.addOrCondition(fields[i].field, fields[i][opKey], term);
+        return true;
+    }
+
+    // ---------- Live SAP (limit + outstanding) ----------
+    /*function getLiveCreditData(customerCode, salesOrg) {
+        var out = { creditLimit: 0, outstandingAmount: 0, success: false };
+        if (!customerCode) return out;
+        try {
+            var apiCall = new x_birl3_clm.CLM_NEW_WSDL1();
+            var rawResult = apiCall.getCreditDetails(customerCode, salesOrg || '');
+            if (!rawResult) return out;
+            var parsed = JSON.parse(rawResult);
+            out.creditLimit       = parseFloat(parsed.creditLimit) || 0;
+            out.outstandingAmount = parseFloat(parsed.outstandingAmount) || 0;
+            var allBlank = true;
+            for (var k in parsed) { if (parsed[k]) { allBlank = false; break; } }
+            if (!allBlank) out.success = true;
+        } catch (e) { }
+        return out;
+    }*/
+
+    // BG expiry -> display text + colour (expired red, <=30 days orange, else green)
+    function fmtBgExpiry(raw) {
+        var out = { text: '—', color: 'clm-text-muted' };
+        var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(raw || ''));
+        if (!m) return out;
+        var exp = new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+        var now = new Date();
+        var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        var days = Math.round((exp.getTime() - today.getTime()) / 86400000);
+        out.text = m[3] + ' ' + MONTH_NAMES[parseInt(m[2], 10) - 1] + ' ' + m[1].slice(-2);
+        out.color = days < 0 ? 'clm-text-red' : (days <= 30 ? 'clm-text-orange' : 'clm-text-green');
+        return out;
+    }
+
+    function requireOwnBusiness(key) {
+        if (key && String(key) !== OWN_BUSINESS) {
+            data.error = 'This is the Non-Trade Customer 360. Use the Business filter to open another business.';
+            return false;
+        }
+        return true;
+    }
+
+    // --- ASYNC SAP FETCH ---
+    /*if (action === 'fetch_live_sap') {
+        data.liveResults = {};
+        if (!LIVE_SAP_ENABLED || !requireOwnBusiness(input.business)) return;
+        var sitesToFetch = input.sites || [];
+        for (var f = 0; f < sitesToFetch.length; f++) {
+            var s = sitesToFetch[f];
+            var liveSap = getLiveCreditData(s.code, s.salesOrg);
+            data.liveResults[s.sysId] = {
+                limit: liveSap.creditLimit,
+                liveOutst: liveSap.outstandingAmount,
+                success: liveSap.success
+            };
+        }
+        return;
+    }*/
+
+    // --- TYPEAHEAD (name / PAN / site code; one row per PAN) ---
+    if (action === 'suggest') {
+        data.suggestions = [];
+        if (!requireOwnBusiness(input.business)) return;
+        var term = (input.term || '').trim();
+        if (term.length < 2) return;
+
+        var grSug = new GlideRecord(TABLES.master);
+        if (!addSearchConditions(grSug, term, 'suggestOp')) return;
+        applyScope(grSug);
+        grSug.orderBy(FIELDS.custName);
+        grSug.setLimit(30);
+        grSug.query();
+
+        var seen = {};
+        while (grSug.next() && data.suggestions.length < 8) {
+            var pan = grSug.getValue(FIELDS.custPan) || '';
+            var key = pan || grSug.getUniqueValue();
+            if (seen[key]) continue;
+            seen[key] = true;
+            data.suggestions.push({
+                sysId: grSug.getUniqueValue(),
+                name: grSug.getValue(FIELDS.custName),
+                code: grSug.getValue(FIELDS.custCode),
+                pan: pan
+            });
+        }
+        return;
+    }
+
+    // --- MAIN LOAD ---
+    data.error = null;
+    data.initialLoad = false;
+    data.panIdentity = null;
+    data.siteList = [];
+
+    var directSysId = (hasInput && input.sysId) ? input.sysId : '';
+    var rawSearch = (hasInput && input.search) ? input.search :
+                    (typeof options !== 'undefined' && options.search ? options.search : spParam('search'));
+    var searchTerm = rawSearch ? String(rawSearch).trim() : '';
+
+    if (!directSysId && !searchTerm) { data.initialLoad = true; return; }
+    if (!requireOwnBusiness(hasInput ? input.business : '')) return;
+
+    var grCustLookup = new GlideRecord(TABLES.master);
+    if (directSysId) {
+        grCustLookup.addQuery('sys_id', directSysId);
+    } else if (!addSearchConditions(grCustLookup, searchTerm, 'lookupOp')) {
+        data.error = 'No search fields available on the customer master.';
+        return;
+    }
+    applyScope(grCustLookup);
+    grCustLookup.setLimit(1);
+    grCustLookup.query();
+
+    if (!grCustLookup.next()) {
+        data.error = directSysId
+            ? 'This customer is not in your Non-Trade scope (CG1 ' + CG1 + ').'
+            : 'No Non-Trade customer found for "' + searchTerm + '".';
+        return;
+    }
+
+    ntView(grCustLookup);
+
+    // =================================================================
+    // NON-TRADE VIEW (PAN -> site codes), everything scoped to CG1 = N01
+    // =================================================================
+    function ntView(grCust) {
+        data.filterMonths = [];
+        var nDate = new Date();
+        for (var fm = 1; fm <= 6; fm++) {
+            var d = new Date(nDate.getFullYear(), nDate.getMonth() - fm, 1);
+            var ym = d.getFullYear() + '-' + pad2(d.getMonth() + 1);
+            data.filterMonths.push({ value: ym, label: MONTH_NAMES[d.getMonth()] + ' ' + String(d.getFullYear()).slice(-2) });
+        }
+        var selectedMonthVal = data.filterMonths[0].value;
+        data.selectedMonthVal = selectedMonthVal;
+
+        var targetPan = grCust.getValue(FIELDS.custPan);
+        var panKnown = !!targetPan;
+        if (!targetPan) targetPan = 'UNKNOWN-' + grCust.getValue(FIELDS.custCode);
+
+        data.panIdentity = { pan: targetPan, primaryName: grCust.getValue(FIELDS.custName), zones: [], segments: [] };
+
+        // ---- PAN sites (master, Non-Trade only, in scope) ----
+        var panSysIds = [];
+        var siteDataMap = {};
+        var zoneSet = {}, segmentSet = {};
+
+        var grPan = new GlideRecord(TABLES.master);
+        if (panKnown) grPan.addQuery(FIELDS.custPan, targetPan);
+        else grPan.addQuery('sys_id', grCust.getUniqueValue());
+        applyScope(grPan);
+        grPan.query();
+
+        while (grPan.next()) {
+            var sId = grPan.getUniqueValue();
+            var sCode = (grPan.getValue(FIELDS.custCode) || '') + '';
+            var sZone = grPan.getDisplayValue(FIELDS.custZoneName) || grPan.getDisplayValue(FIELDS.custZone);
+            var sSeg = grPan.getDisplayValue(FIELDS.custSegment);
+            if (sZone) zoneSet[sZone] = true;
+            if (sSeg) segmentSet[sSeg] = true;
+
+            panSysIds.push(sId);
+            siteDataMap[sId] = {
+                sysId: sId, code: sCode, salesOrg: grPan.getValue(FIELDS.custSalesOrg),
+                name: grPan.getValue(FIELDS.custName), segment: sSeg, zone: sZone,
+                region: grPan.getDisplayValue(FIELDS.custRegion),
+                depot: grPan.getDisplayValue('depot_name') || grPan.getDisplayValue('depot'),
+                crLimit: numStr(grPan.getValue('cr_limit')),
+                outstanding: numStr(grPan.getValue('ughai_after_adjustment_net_os')),
+                activeBg: Math.abs(numStr(grPan.getValue(FIELDS.custBg))),   // bank_guarantee
+                bgExpiry: grPan.getValue(FIELDS.custBgExpiry) || ''
+            };
+        }
+        data.panIdentity.zones = Object.keys(zoneSet);
+        data.panIdentity.segments = Object.keys(segmentSet);
+
+        var idList = panSysIds.join(',');
+
+        // ---- Requests (newest first; keyed by customer sys_id) ----
+        var siteReqData = {};
+        if (panSysIds.length) {
+            var grReqBulk = new GlideRecord(TABLES.request);
+            grReqBulk.addQuery('customer', 'IN', idList);
+            grReqBulk.addQuery('customer.cg1', CG1);
+            grReqBulk.orderByDesc('sys_created_on');
+            grReqBulk.query();
+            while (grReqBulk.next()) {
+                var reqCust = (grReqBulk.getValue('customer') || '') + '';
+                if (!reqCust) continue;
+                if (!siteReqData[reqCust]) {
+                    var sobNum = parseFloat(grReqBulk.getValue(FIELDS.expectedSob));
+                    siteReqData[reqCust] = {
+                        reviewDate: grReqBulk.getValue('next_review_date'),
+                        expectedSob: isNaN(sobNum) ? null : sobNum,
+                        p2Composite: ''
+                    };
+                }
+                // scan older requests so P2 is found even if the newest request is blank
+                if (!siteReqData[reqCust].p2Composite) {
+                    var rawDirect = grReqBulk.u_tool_p2 + '';
+                    var rawGet = grReqBulk.getValue('u_tool_p2') || '';
+                    var finalP2 = (rawDirect !== 'undefined' && rawDirect !== 'null' && rawDirect.trim() !== '') ? rawDirect : rawGet;
+                    if (finalP2 && finalP2.trim() !== '') siteReqData[reqCust].p2Composite = finalP2.trim();
+                }
+            }
+        }
+
+        // ---- Sales (12 months value for the average, 6 months volume), Non-Trade customers only ----
+        var monthlySalesValueMap = {}, monthlySalesVolumeMap = {}, siteSalesAvgMap = {};
+
+        if (panSysIds.length) {
+            var grSalesValBulk = new GlideRecord(TABLES.salesVal);
+            grSalesValBulk.addQuery('u_customer', 'IN', idList);
+            grSalesValBulk.addQuery('u_customer.cg1', CG1);
+            grSalesValBulk.query();
+            while (grSalesValBulk.next()) {
+                var custIdVal = grSalesValBulk.getValue('u_customer');
+                if (!custIdVal) continue;
+                if (!monthlySalesValueMap[custIdVal]) monthlySalesValueMap[custIdVal] = {};
+                var sum12 = 0, count12 = 0;
+                for (var m12 = 0; m12 < 12; m12++) {
+                    var d12 = new Date(nDate.getFullYear(), nDate.getMonth() - m12, 1);
+                    var mthAbbr = MONTH_ABBR[d12.getMonth()];
+                    var ymV = d12.getFullYear() + '-' + pad2(d12.getMonth() + 1);
+                    var valRaw = grSalesValBulk.getValue(mthAbbr) || grSalesValBulk.getValue('u_' + mthAbbr);
+                    var v = parseFloat(valRaw);
+                    if (!isNaN(v)) { monthlySalesValueMap[custIdVal][ymV] = v; sum12 += v; count12++; }
+                }
+                siteSalesAvgMap[custIdVal] = count12 > 0 ? (sum12 / count12) : null;
+            }
+
+            var grSalesVolBulk = new GlideRecord(TABLES.salesVol);
+            grSalesVolBulk.addQuery('u_customer', 'IN', idList);
+            grSalesVolBulk.addQuery('u_customer.cg1', CG1);
+            grSalesVolBulk.query();
+            while (grSalesVolBulk.next()) {
+                var custIdVol = grSalesVolBulk.getValue('u_customer');
+                if (!custIdVol) continue;
+                if (!monthlySalesVolumeMap[custIdVol]) monthlySalesVolumeMap[custIdVol] = {};
+                for (var j = 0; j < 6; j++) {
+                    var d6 = new Date(nDate.getFullYear(), nDate.getMonth() - j, 1);
+                    var mthAbbrV = MONTH_ABBR[d6.getMonth()];
+                    var ymVol = d6.getFullYear() + '-' + pad2(d6.getMonth() + 1);
+                    var volRaw = grSalesVolBulk.getValue(mthAbbrV) || grSalesVolBulk.getValue('u_' + mthAbbrV);
+                    var vVol = parseFloat(volRaw);
+                    if (!isNaN(vVol)) monthlySalesVolumeMap[custIdVol][ymVol] = vVol;
+                }
+            }
+        }
+
+        // ---- Site list ----
+         var aggReqLimit = 0;
+        var aggOutstanding = 0;
+        var aggActiveBg = 0;
+			
+        for (var sl = 0; sl < panSysIds.length; sl++) {
+            var sIdObj = panSysIds[sl] + '';
+            var sData = siteDataMap[sIdObj];
+            if (!sData) continue;
+
+            aggReqLimit += sData.crLimit;
+            aggOutstanding += sData.outstanding;
+            aggActiveBg += sData.activeBg;
+
+            var rData = siteReqData[sIdObj] || {};
+
+            var avgSales = siteSalesAvgMap[sIdObj];
+            var siteRevAtRisk = null;
+            if (avgSales !== null && avgSales !== undefined && rData.expectedSob !== null && rData.expectedSob !== 0 && rData.expectedSob !== undefined) {
+                siteRevAtRisk = ((avgSales - rData.expectedSob) / rData.expectedSob) * 100;
+            }
+
+            var reviewDays = '--', reviewColor = 'clm-text-muted';
+            if (rData.reviewDate) {
+                var diff = GlideDateTime.subtract(gdtToday, new GlideDateTime(rData.reviewDate)).getRoundedDayPart();
+                reviewDays = diff + 'd';
+                if (diff <= 15) reviewColor = 'clm-text-red';
+                else if (diff <= 30) reviewColor = 'clm-text-orange';
+                else reviewColor = 'clm-text-green';
+            }
+
+            var bgx = fmtBgExpiry(sData.bgExpiryRaw);
+
+            data.siteList.push({
+                sysId: sIdObj, code: sData.code, salesOrg: sData.salesOrg,
+                name: sData.name, segment: sData.segment, zone: sData.zone,
+                region: sData.region, depot: sData.depot,
+                limit: sData.crLimit,
+                activeBg: sData.activeBg, bgExpiry: bgx.text, bgExpiryColor: bgx.color,
+                liveOutst: sData.outstanding,
+                revenueAtRisk: siteRevAtRisk,
+                p2Composite: rData.p2Composite || '',
+                reviewIn: reviewDays, reviewColor: reviewColor, osSalesRatio: 0
+            });
+        }
+
+        // ---- Aging history (last 6 snapshot months, Non-Trade customers only) ----
+        var snapMonths = [];
+        if (panSysIds.length) {
+            var grDates = new GlideAggregate(TABLES.aging);
+            grDates.addQuery(FIELDS.agingCustomer, 'IN', idList);
+            grDates.addQuery('customer.cg1', CG1);
+            grDates.groupBy(FIELDS.snapshotMonth);
+            grDates.orderByDesc(FIELDS.snapshotMonth);
+            grDates.setLimit(6);
+            grDates.query();
+            while (grDates.next()) snapMonths.push(grDates.getValue(FIELDS.snapshotMonth));
+        }
+
+        // newest snapshot row per site per month
+        var siteHist = {};
+        if (snapMonths.length) {
+            var grAge = new GlideRecord(TABLES.aging);
+            grAge.addQuery(FIELDS.agingCustomer, 'IN', idList);
+            grAge.addQuery('customer.cg1', CG1);
+            grAge.addQuery(FIELDS.snapshotMonth, 'IN', snapMonths.join(','));
+            grAge.orderByDesc('sys_created_on');
+            grAge.query();
+
+            while (grAge.next()) {
+                var aCid = grAge.getValue(FIELDS.agingCustomer);
+                var rawMonth = grAge.getValue(FIELDS.snapshotMonth);
+                var ymA = rawMonth.substring(0, 7);
+                if (siteHist[aCid] && siteHist[aCid][ymA]) continue;
+
+                var b0   = parseFloat(grAge.getValue(FIELDS.bucket0_30))  || 0;
+                var b31  = parseFloat(grAge.getValue(FIELDS.bucket31_45)) || 0;
+                var b46  = parseFloat(grAge.getValue(FIELDS.bucket46_60)) || 0;
+                var b61  = parseFloat(grAge.getValue(FIELDS.bucket61_75)) || 0;
+                var b76  = parseFloat(grAge.getValue(FIELDS.bucket76_90)) || 0;
+                var b91  = parseFloat(grAge.getValue(FIELDS.bucket91_120))|| 0;
+                var b120 = parseFloat(grAge.getValue(FIELDS.bucketGt120)) || 0;
+                var snapOut = parseFloat(grAge.getValue(FIELDS.totalOutstanding)) || 0;
+
+                var mappedVol = (monthlySalesVolumeMap[aCid] && monthlySalesVolumeMap[aCid][ymA]) ? monthlySalesVolumeMap[aCid][ymA] : 0;
+                var mappedVal = (monthlySalesValueMap[aCid] && monthlySalesValueMap[aCid][ymA]) ? monthlySalesValueMap[aCid][ymA] : 0;
+
+                if (!siteHist[aCid]) siteHist[aCid] = {};
+                siteHist[aCid][ymA] = {
+                    month: grAge.getDisplayValue(FIELDS.snapshotMonth), rawMonth: rawMonth, monthKey: ymA,
+                    outstanding: snapOut, salesVolume: mappedVol, salesValue: mappedVal,
+                    b0_30: b0, b31_60: b31 + b46, b61_90: b61 + b76, b91_p: b91 + b120
+                };
+            }
+        }
+
+        // PAN-level history = sum of the per-site rows
+        var panHist = {};
+        for (var hs in siteHist) {
+            for (var hk in siteHist[hs]) {
+                var r = siteHist[hs][hk];
+                if (!panHist[hk]) {
+                    panHist[hk] = { month: r.month, rawMonth: r.rawMonth, monthKey: hk, limit: aggReqLimit,
+                                    outstanding: 0, salesVolume: 0, salesValue: 0, b0_30: 0, b31_60: 0, b61_90: 0, b91_p: 0, util: 0 };
+                }
+                panHist[hk].outstanding += r.outstanding;
+                panHist[hk].salesVolume += r.salesVolume;
+                panHist[hk].salesValue  += r.salesValue;
+                panHist[hk].b0_30  += r.b0_30;
+                panHist[hk].b31_60 += r.b31_60;
+                panHist[hk].b61_90 += r.b61_90;
+                panHist[hk].b91_p  += r.b91_p;
+            }
+        }
+
+        snapMonths.sort();
+        data.monthly = [];
+        snapMonths.forEach(function(m) {
+            var key = m.substring(0, 7);
+            if (panHist[key]) {
+                panHist[key].util = aggReqLimit > 0 ? Math.round((panHist[key].outstanding / aggReqLimit) * 100) : 0;
+                data.monthly.push(panHist[key]);
+            }
+        });
+
+        data.siteMonthly = {};
+        for (var sid in siteHist) {
+            data.siteMonthly[sid] = [];
+            snapMonths.forEach(function(m) {
+                var key = m.substring(0, 7);
+                if (siteHist[sid][key]) data.siteMonthly[sid].push(siteHist[sid][key]);
+            });
+        }
+
+        // OS / Sales per site + default outstanding = selected-month snapshot (live SAP overrides it on the client)
+        var aggOutstanding = 0;
+        for (var t = 0; t < data.siteList.length; t++) {
+            var site = data.siteList[t];
+            var custOutSum = 0, custSalSum = 0;
+            var hArr = data.siteMonthly[site.sysId] || [];
+            for (var h = 0; h < hArr.length; h++) { custOutSum += hArr[h].outstanding; custSalSum += hArr[h].salesValue; }
+            site.osSalesRatio = custSalSum > 0 ? (custOutSum / custSalSum) : 0;
+
+            var latest = siteHist[site.sysId] && siteHist[site.sysId][selectedMonthVal];
+            site.liveOutst = latest ? latest.outstanding : 0;
+            aggOutstanding += site.liveOutst;
+        }
+
+        var selectedPanHist = panHist[selectedMonthVal] || { outstanding: 0, b91_p: 0 };
+
+        data.indicators = {
+            limit:                aggReqLimit,
+            aggregateOutstanding: aggOutstanding,
+            outstanding:          selectedPanHist.outstanding,
+            available:            aggReqLimit - aggOutstanding,
+            utilisation:          aggReqLimit > 0 ? Math.round((aggOutstanding / aggReqLimit) * 100) : 0,
+            activeBg:             aggActiveBg,
+            od90:                 selectedPanHist.b91_p,
+            od90Clean:            selectedPanHist.b91_p <= 0
+        };
+        data.liveApiOk = true;
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gayatri.bhandge@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-30 04:53:17</sys_created_on>
+        <sys_id>f802d8382b90d790335bf9fe4e91bf55</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>clm_nt_zhm_customer_360</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_f802d8382b90d790335bf9fe4e91bf55</sys_update_name>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 15:40:57</sys_updated_on>
+        <template><![CDATA[<!--
+  CLM Customer 360 (ZHM, Non-Trade) - HTML  v1.0
+  - Always Non-Trade (CG1 = N01). Picking Trade in the Business filter asks the parent dashboard to swap the page
+  - Customer search shows PAN; "Site Codes" wording; Active BG + BG Expiry instead of Active SD + SD Multiplier
+  - Ids: canvases ntC360SalesChartZHM / ntC360AgingChartZHM, detail card #c360DetailNTZHM
+-->
+<div class="clm-c360">
+
+    <!-- ===================== SEARCH ===================== -->
+    <div class="clm-c3-block clm-c3-search">
+        <div class="clm-c3-search-row">
+
+            <label class="clm-c3-biz">
+                <span class="clm-c3-search-k">Business</span>
+                <select class="clm-c3-biz-select" ng-model="c.business" ng-change="c.onBusinessChange()"
+                        ng-options="b.value as c.getBusinessOptionText(b) disable when !b.enabled for b in c.businessOptions"></select>
+            </label>
+
+            <span class="clm-c3-search-sep"></span>
+
+            <span class="clm-c3-search-k" ng-class="{'is-off': !c.isSearchEnabled()}">Customer Search</span>
+            <div class="clm-c3-typeahead">
+                <input type="text" class="clm-c3-input" placeholder="{{c.getSearchPlaceholder()}}"
+                       ng-model="c.searchTerm" ng-keyup="c.onTyping($event)" autocomplete="off"
+                       ng-disabled="!c.isSearchEnabled()">
+                <ul class="clm-c3-suggest" ng-if="c.suggestions.length > 0">
+                    <li ng-repeat="s in c.suggestions" ng-mousedown="c.selectSuggestion(s)">
+                        <span class="clm-c3-sug-name">{{s.name}}</span>
+                        <span class="clm-c3-sug-meta">{{s.pan || s.code}}</span>
+                    </li>
+                </ul>
+                <div class="clm-c3-suggest clm-c3-suggest-loading" ng-if="c.suggestLoading">
+                    <div class="clm-c3-suggest-msg">Searching&hellip;</div>
+                </div>
+            </div>
+            <button class="clm-c3-btn" ng-click="c.doSearch()" ng-disabled="!c.isSearchEnabled()">Search</button>
+            <span class="clm-c3-search-hint">or click any customer in the Portfolio Overview tab</span>
+            <span class="clm-c3-chip clm-c3-chip-live clm-c3-search-live" ng-if="c.sapLoading">
+                <span class="clm-c3-spin"></span> Fetching live SAP data&hellip;
+            </span>
+        </div>
+    </div>
+
+    <div ng-if="c.data.error" class="clm-c3-block clm-c3-block-dev">
+        <div class="clm-c3-head"><div class="clm-c3-title">{{c.data.error}}</div></div>
+    </div>
+
+    <div ng-if="!c.data.error && c.data.panIdentity && !c.loading">
+
+        <!-- ===================== CONTEXT BAR (PAN + MONTH) ===================== -->
+        <div class="clm-c3-context">
+            <div class="clm-c3-context-id">
+                <div class="clm-c3-context-k">Viewing PAN <span class="clm-c3-chip clm-c3-chip-biz">{{c.getBusinessLabel()}}</span></div>
+                <div class="clm-c3-context-v">
+                    <span class="clm-c3-context-pan">{{c.data.panIdentity.pan}}</span>
+                    <span class="clm-c3-context-name">{{c.data.panIdentity.primaryName}}</span>
+                </div>
+                <div class="clm-c3-context-sub">{{c.data.siteList.length}} site codes across {{c.data.panIdentity.segments.join(', ')}}</div>
+            </div>
+            <label class="clm-c3-month-picker">
+                <select ng-model="c.selectedMonth" ng-change="c.onMonthChange()">
+                    <option ng-repeat="m in c.data.filterMonths" value="{{m.value}}">{{m.label}}</option>
+                </select>
+            </label>
+        </div>
+
+        <!-- ===================== 1. CUSTOMER OVERVIEW ===================== -->
+        <div class="clm-c3-section">
+            <div class="clm-c3-section-title"><span class="clm-c3-section-num">1</span> Customer Overview</div>
+
+            <div class="clm-c3-kpi-row clm-c3-first">
+
+                <div class="clm-c3-block clm-c3-kpi-card">
+                    <div class="clm-c3-head">
+                        <div class="clm-c3-heading">
+                            <div class="clm-c3-title">Live Credit Position</div>
+                            <div class="clm-c3-sub">Aggregate of all site codes under this PAN &middot; limit &amp; outstanding from SAP, bank guarantee from the customer master</div>
+                        </div>
+                        <div class="clm-c3-meta">
+                            <span class="clm-c3-chip clm-c3-chip-live" ng-if="!c.sapLoading">Live</span>
+                            <span class="clm-c3-chip clm-c3-chip-req" ng-if="c.sapLoading"><span class="clm-c3-spin"></span> Fetching</span>
+                        </div>
+                    </div>
+                    <div class="clm-c3-body">
+                        <div class="clm-c3-factors clm-c3-factors-4">
+                            <div class="clm-c3-factor">
+                                <div class="clm-c3-factor-k">Aggregate credit limit</div>
+                                <div class="clm-c3-factor-v">{{c.fmtLakh(c.data.indicators.limit)}}</div>
+                            </div>
+                            <div class="clm-c3-factor">
+                                <div class="clm-c3-factor-k">Net O/S</div>
+                                <div class="clm-c3-factor-v">{{c.fmtLakh(c.data.indicators.aggregateOutstanding)}}</div>
+                              <div class="clm-c3-factor-s">Total O/S - Advances</div>
+                            </div>
+                            <div class="clm-c3-factor">
+                                <div class="clm-c3-factor-k">Aggregate active BG</div>
+                                <div class="clm-c3-factor-v">{{c.fmtLakh(c.data.indicators.activeBg)}}</div>
+                            </div>
+                            <div class="clm-c3-factor" ng-class="{'is-bad': c.data.indicators.utilisation > 100}">
+                                <div class="clm-c3-factor-k">Utilisation</div>
+                                <div class="clm-c3-factor-v">{{c.data.indicators.utilisation}}%</div>
+                                <div class="clm-c3-factor-s">Outstanding &divide; limit</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="clm-c3-res" ng-class="c.data.indicators.available < 0 ? 'is-bad' : 'is-ok'">
+                        <div>
+                            <div class="clm-c3-res-k">Available Limit</div>
+                            <div class="clm-c3-res-f">Credit limit &minus; aggregate outstanding</div>
+                        </div>
+                        <div class="clm-c3-res-v">{{c.fmtLakh(c.data.indicators.available)}}</div>
+                    </div>
+                </div>
+
+                <div class="clm-c3-block clm-c3-kpi-card">
+                    <div class="clm-c3-head">
+                        <div class="clm-c3-heading">
+                            <div class="clm-c3-title">Month Snapshot</div>
+                            <div class="clm-c3-sub">Ageing snapshot for the selected month</div>
+                        </div>
+                        <div class="clm-c3-meta">
+                            <span class="clm-c3-chip">{{c.getSelectedMonthLabel()}}</span>
+                        </div>
+                    </div>
+                    <div class="clm-c3-body">
+                        <div class="clm-c3-factors clm-c3-factors-2">
+                            <div class="clm-c3-factor">
+                                <div class="clm-c3-factor-k">Total outstanding</div>
+                                <div class="clm-c3-factor-v">{{c.fmtLakh(c.data.indicators.outstanding)}}</div>
+                            </div>
+                            <div class="clm-c3-factor" ng-class="{'is-bad': (c.data.table1Data | filter:{risk:'High'}:true).length > 0}">
+                                <div class="clm-c3-factor-k">High-risk sites</div>
+                                <div class="clm-c3-factor-v">{{(c.data.table1Data | filter:{risk:'High'}:true).length}} of {{c.data.table1Data.length}}</div>
+                                <div class="clm-c3-factor-s">Sites with dues &gt;90 days</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="clm-c3-res" ng-class="c.data.indicators.od90Clean ? 'is-ok' : 'is-bad'">
+                        <div>
+                            <div class="clm-c3-res-k">Overdue &gt;90 Days</div>
+                            <div class="clm-c3-res-f">PAN total for {{c.getSelectedMonthLabel()}}</div>
+                        </div>
+                        <div class="clm-c3-res-v">{{c.data.indicators.od90Clean ? '₹0' : c.fmtLakh(c.data.indicators.od90)}}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===================== 2. TRENDS ===================== -->
+        <div class="clm-c3-section">
+            <div class="clm-c3-section-title"><span class="clm-c3-section-num">2</span> Trends &mdash; Last 6 Months</div>
+            <div class="clm-c3-chart-row">
+                <div class="clm-c3-block clm-c3-first">
+                    <div class="clm-c3-head">
+                        <div class="clm-c3-heading">
+                            <div class="clm-c3-title">Sales Trend (6M)</div>
+                            <div class="clm-c3-sub">Credit sales volume (bars) vs value (line) &middot; PAN aggregate</div>
+                        </div>
+                    </div>
+                    <div class="clm-c3-chart-wrap"><canvas id="ntC360SalesChartZHM"></canvas></div>
+                </div>
+                <div class="clm-c3-block clm-c3-first">
+                    <div class="clm-c3-head">
+                        <div class="clm-c3-heading">
+                            <div class="clm-c3-title">Ageing Breakdown (6M)</div>
+                            <div class="clm-c3-sub">Outstanding split by days overdue &middot; PAN aggregate</div>
+                        </div>
+                    </div>
+                    <div class="clm-c3-chart-wrap"><canvas id="ntC360AgingChartZHM"></canvas></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===================== 3. SITE CODES ===================== -->
+        <div class="clm-c3-section">
+            <div class="clm-c3-section-title"><span class="clm-c3-section-num">3</span> Site Codes</div>
+
+            <div class="clm-c3-block clm-c3-first">
+                <div class="clm-c3-head">
+                    <div class="clm-c3-heading">
+                        <div class="clm-c3-title">Site Codes Under PAN</div>
+                        <div class="clm-c3-sub">Snapshot as of {{c.getSelectedMonthLabel()}} &middot; click a row to view its 6-month detail below</div>
+                    </div>
+                    <div class="clm-c3-meta">
+                        <span class="clm-c3-chip"><span class="clm-c3-chip-k">Sites</span> {{c.data.table1Data.length}}</span>
+                        <span class="clm-c3-chip"><span class="clm-c3-chip-k">Month</span> {{c.getSelectedMonthLabel()}}</span>
+                    </div>
+                </div>
+                <div class="clm-c3-table-wrap clm-c3-table-scroll">
+                    <table class="clm-c3-table clm-c3-table-wide">
+                        <thead>
+                            <tr class="super">
+                                <th colspan="2" class="bg-code">Site &amp; Location</th>
+                                <th colspan="5" class="bg-pan grp">Credit &amp; Exposure</th>
+                                <th colspan="3" class="bg-assess grp">Assessment</th>
+                                <th colspan="4" class="bg-ageing grp">Ageing</th>
+                                <th colspan="2" class="bg-req grp">Sales</th>
+                                <th class="bg-seg grp">Review</th>
+                            </tr>
+                            <tr class="cols">
+                                <th>Site Code</th>
+                                <th>Territory</th>
+                                <th class="grp">Limit</th>
+                                <th>Act BG</th>
+                                <th>BG Expiry</th>
+                                <th>OS Bal</th>
+                                <th>OS / Sales</th>
+                                <th class="grp">Rev at Risk</th>
+                                <th>P2 Comp.</th>
+                                <th>Risk</th>
+                                <th class="grp ag-safe-sub">0&ndash;30D</th>
+                                <th class="ag-safe-sub">31&ndash;60D</th>
+                                <th class="ag-warn-sub">61&ndash;90D</th>
+                                <th class="ag-risk-sub">&gt;90D</th>
+                                <th class="grp">Vol</th>
+                                <th>Value</th>
+                                <th class="grp">Due In</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr ng-repeat="row in c.data.table1Data" ng-click="c.selectSite(row.sysId)"
+                                ng-class="{'is-selected': c.selectedSite === row.sysId}" class="clm-c3-click">
+                                <td>
+                                    <div class="clm-c3-site-code">{{row.code}}</div>
+                                    <div class="clm-c3-cell-sub">{{row.segment}}</div>
+                                </td>
+                                <td>
+                                    <div>{{row.depot}}</div>
+                                    <div class="clm-c3-cell-sub">{{row.region}} &middot; {{row.zone}}</div>
+                                </td>
+                                <td class="grp">{{c.fmtLakh(row.limit)}}</td>
+                                <td>{{c.fmtDash(row.activeBg)}}</td>
+                                <td ng-class="row.bgExpiryColor">{{row.bgExpiry}}</td>
+                                <td class="v-key">{{c.fmtLakh(row.outstanding)}}</td>
+                                <td>{{c.fmtRatio(row.osSalesRatio)}}</td>
+                                <td class="grp v-key" ng-class="c.riskValueClass(row.revenueAtRisk)">{{c.fmtPercent(row.revenueAtRisk)}}</td>
+                                <td>{{row.p2Composite || '—'}}</td>
+                                <td>
+                                    <span class="clm-c3-rating"
+                                          ng-class="{'r-c': row.risk === 'High', 'r-b': row.risk === 'Medium', 'r-a': row.risk === 'Low', 'r-n': row.risk === 'No Overdue'}">{{row.risk}}</span>
+                                </td>
+                                <td class="grp" ng-class="{'zero': !row.b0_30}">{{c.fmtDash(row.b0_30)}}</td>
+                                <td ng-class="{'zero': !row.b31_60}">{{c.fmtDash(row.b31_60)}}</td>
+                                <td ng-class="row.b61_90 > 0 ? 'warn-val' : 'zero'">{{c.fmtDash(row.b61_90)}}</td>
+                                <td ng-class="row.b91_p > 0 ? 'risk-val' : 'zero'">{{c.fmtDash(row.b91_p)}}</td>
+                                <td class="grp">{{row.salesVolume}} MT</td>
+                                <td>{{c.fmtLakh(row.salesValue)}}</td>
+                                <td class="grp v-key" ng-class="row.reviewColor">{{row.reviewIn}}</td>
+                            </tr>
+                            <tr ng-if="!c.data.table1Data.length">
+                                <td colspan="17" class="clm-c3-empty">No site codes found for this PAN.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 6-month detail -->
+            <div class="clm-c3-block" id="c360DetailNTZHM">
+                <div class="clm-c3-head">
+                    <div class="clm-c3-heading">
+                        <div class="clm-c3-title">6-Month Detail</div>
+                        <div class="clm-c3-sub">Monthly trend for one site code &middot; select a row above or search here</div>
+                    </div>
+                    <div class="clm-c3-meta">
+                        <div class="clm-custom-dropdown clm-c3-dd" ng-class="{open: c.siteDropdownOpen}">
+                            <input type="text" class="clm-c3-input clm-c3-dd-input" autocomplete="off"
+                                   ng-model="c.siteSearch"
+                                   ng-focus="c.openSiteDropdown()"
+                                   placeholder="Search or select site code...">
+                            <i class="fa fa-times clm-c3-dd-clear" ng-if="c.siteSearch" ng-mousedown="c.clearSiteSearch($event)"></i>
+                            <i class="fa fa-chevron-down clm-c3-dd-arrow"></i>
+                            <ul class="clm-c3-dd-list" ng-if="c.siteDropdownOpen">
+                                <li ng-repeat="site in c.getFilteredSites()"
+                                    ng-mousedown="c.selectBottomSite(site, $event)"
+                                    ng-class="{'is-active': c.selectedSite === site.sysId}">
+                                    <strong>{{site.code}}</strong>
+                                    <span class="clm-c3-dd-seg">{{site.segment}}</span>
+                                </li>
+                                <li ng-if="c.getFilteredSites().length === 0" class="clm-c3-dd-none">No matching sites</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="clm-c3-table-wrap">
+                    <table class="clm-c3-table">
+                        <thead>
+                            <tr class="super">
+                                <th class="bg-blank"></th>
+                                <th colspan="2" class="bg-pan grp">Credit</th>
+                                <th colspan="2" class="bg-req grp">Sales</th>
+                                <th class="bg-seg grp">Exposure</th>
+                                <th colspan="4" class="bg-ageing grp">Ageing</th>
+                            </tr>
+                            <tr class="cols">
+                                <th>Month</th>
+                                <th class="grp">Credit Limit</th>
+                                <th>Util %</th>
+                                <th class="grp">Vol</th>
+                                <th>Value</th>
+                                <th class="grp">Outstanding</th>
+                                <th class="grp ag-safe-sub">0&ndash;30D</th>
+                                <th class="ag-safe-sub">31&ndash;60D</th>
+                                <th class="ag-warn-sub">61&ndash;90D</th>
+                                <th class="ag-risk-sub">OD &gt;90D</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr ng-repeat="row in c.tableData">
+                                <td class="v-key">{{row.month}}</td>
+                                <td class="grp">{{c.fmtLakh(row.limit)}}</td>
+                                <td class="v-key" ng-class="{'v-bad': row.util > 100, 'v-warn': row.util >= 90 && row.util <= 100}">{{row.util}}%</td>
+                                <td class="grp">{{row.salesVolume}} MT</td>
+                                <td>{{c.fmtLakh(row.salesValue)}}</td>
+                                <td class="grp v-key">{{c.fmtLakh(row.outstanding)}}</td>
+                                <td class="grp" ng-class="{'zero': !row.b0_30}">{{c.fmtDash(row.b0_30)}}</td>
+                                <td ng-class="{'zero': !row.b31_60}">{{c.fmtDash(row.b31_60)}}</td>
+                                <td ng-class="row.b61_90 > 0 ? 'warn-val' : 'zero'">{{c.fmtDash(row.b61_90)}}</td>
+                                <td ng-class="row.b91_p > 0 ? 'risk-val' : 'zero'">{{c.fmtDash(row.b91_p)}}</td>
+                            </tr>
+                            <tr ng-if="c.tableData.length === 0">
+                                <td colspan="10" class="clm-c3-empty">No historical data available.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- ===================== EMPTY / LOADING STATES ===================== -->
+    <div ng-if="!c.data.error && !c.data.panIdentity && !c.loading" class="clm-c3-block clm-c3-hint">
+        <i class="fa fa-search"></i>
+        <div class="clm-c3-hint-title">Search a {{c.getBusinessLabel()}} customer</div>
+        <div>Search by {{c.getSearchHint()}} &mdash; or click a customer in the Portfolio Overview tab.</div>
+    </div>
+
+    <div ng-if="c.loading" class="clm-c3-block clm-c3-hint">
+        <span class="clm-c3-spin clm-c3-spin-lg"></span>
+        <div>Loading customer&hellip;</div>
+    </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>f802d8382b90d790335bf9fe4e91bf55</id>
+        <sys_created_by>gayatri.bhandge@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-30 04:53:17</sys_created_on>
+        <sys_id>b802d0f82b90d790335bf9fe4e91bf01</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-30 04:53:17</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

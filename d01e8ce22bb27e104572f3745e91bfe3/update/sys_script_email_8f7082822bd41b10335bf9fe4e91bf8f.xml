@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_key_approved_details</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function runMailScript(current, template, email, email_action, event) {
+
+    function esc(s) { return GlideStringUtil.escapeHTML((s || '') + '').replace(/\n/g, '<br>'); }
+    function inr(v) {
+        var n = Math.round(parseFloat(v) || 0);
+        var s = Math.abs(n).toString();
+        var last = s.slice(-3), rest = s.slice(0, -3);
+        if (rest) { last = ',' + last; rest = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ','); }
+        return (n < 0 ? '-' : '') + '&#8377;' + rest + last;
+    }
+    function stepState(gr) {
+        var raw = ((gr.getValue('state') || '') + ' ' + (gr.getDisplayValue('state') || '')).toLowerCase();
+        if (/\brejected\b/.test(raw)) return 'rejected';
+        if (/returned|cancel|sent back/.test(raw)) return 'returned';
+        if (/\bapproved\b/.test(raw)) return 'approved';
+        return 'pending';
+    }
+    function stepComment(gr) {
+        var v = gr.getValue('comments');
+        if (v) return v;
+        try {
+            var jf = new GlideRecord('sys_journal_field');
+            jf.addQuery('element_id', gr.getUniqueValue());
+            jf.addQuery('element', 'comments');
+            jf.orderByDesc('sys_created_on');
+            jf.setLimit(1);
+            jf.query();
+            if (jf.next()) return jf.getValue('value') || '';
+        } catch (e) {}
+        return '';
+    }
+
+    var TD = 'style="padding:9px 12px;font-size:13px;color:#1a1a1a;border:1px solid #e0e6ed;"';
+    var TL = 'style="padding:9px 12px;font-size:13px;color:#3a4451;background-color:#fffcf0;border:1px solid #e0e6ed;width:38%;"';
+    var TH = 'style="padding:8px 12px;font-size:12px;color:#2b3440;background-color:#eef1f5;border:1px solid #e0e6ed;text-align:left;"';
+    var OPEN = '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">';
+    function head(t) { template.print('<p style="margin:22px 0 8px 0;font-size:12px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#3a4451;">' + t + '</p>'); }
+    function row(l, v) { template.print('<tr><td ' + TL + '>' + l + '</td><td ' + TD + '>' + v + '</td></tr>'); }
+
+    var requested = parseFloat(current.getValue('total_requested_limit')) || 0;
+    var approved = parseFloat(current.getValue('approved_limit')) || 0;
+    var review = current.isValidField('next_review_date') ? current.getDisplayValue('next_review_date') : '';
+
+    // approval banner
+    template.print('<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:8px 0 6px 0;"><tr>' +
+        '<td style="background-color:#eaf7ee;border:1px solid #b9e3c6;border-radius:6px;padding:16px;">' +
+        '<div style="font-size:12px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#1e8449;">Request approved</div>' +
+        '<div style="font-size:15px;color:#1a1a1a;margin-top:6px;line-height:1.6;">Your Key customer credit limit request <b>' + esc(current.getValue('number')) +
+        '</b> has been approved for <b>' + inr(approved) + '</b>.</div>' +
+        '</td></tr></table>');
+
+    // summary + limits
+    head('Request summary');
+    template.print(OPEN);
+    row('Request', '<b>' + esc(current.getValue('number')) + '</b>');
+    row('Grandparent / Group Code', esc(current.getValue('grandparent_code')) + ' / ' + esc(current.getValue('group_code')));
+    row('Segment', esc(current.getValue('segment')));
+    row('Requested Limit', inr(requested));
+    row('Approved Limit', '<b style="color:#1e8449;">' + inr(approved) + '</b>' + ((approved > 0 && requested > 0 && approved < requested) ? ' <span style="color:#7a5a00;">(lower than requested)</span>' : ''));
+    if (review) row('Next Review Date', esc(review));
+    template.print('</table>');
+
+    // sites in this request
+    try {
+        var sg = new GlideRecord('x_birl3_clm_clm_key_site');
+        if (sg.isValid() && sg.isValidField('group_request')) {
+            var q = sg.addQuery('group_request', current.getUniqueValue());
+            q.addOrCondition('group_request', current.getValue('number'));
+            sg.orderBy('site_code');
+            sg.query();
+            var hdr = false;
+            while (sg.next()) {
+                if (!hdr) {
+                    head('Sites in this request');
+                    template.print(OPEN);
+                    template.print('<tr><th ' + TH + '>Site Code</th><th ' + TH + ' align="right">Requested Limit</th></tr>');
+                    hdr = true;
+                }
+                template.print('<tr><td ' + TD + '>' + esc(sg.getDisplayValue('site_code')) + '</td><td ' + TD + ' align="right">' +
+                    inr(sg.getValue('site_desired_limit')) + '</td></tr>');
+            }
+            if (hdr) template.print('</table>');
+        }
+    } catch (e) {}
+
+    // approval history
+    var acted = [];
+    var st = new GlideRecord('x_birl3_clm_key_approval_step');
+    st.addQuery('request', current.getUniqueValue());
+    st.orderBy('sequence');
+    st.query();
+    while (st.next()) {
+        var s = stepState(st);
+        if (s === 'pending') continue;
+        acted.push({
+            role: st.getDisplayValue('role_name') || st.getDisplayValue('level') || 'Approver',
+            approver: st.getDisplayValue('approver'),
+            state: s,
+            limit: st.getValue('approved_limit'),
+            comments: stepComment(st),
+            when: st.getDisplayValue('actioned_on')
+        });
+    }
+    if (acted.length) {
+        head('Approval history');
+        template.print(OPEN);
+        template.print('<tr><th ' + TH + '>Level</th><th ' + TH + '>Approver</th><th ' + TH + '>Decision</th><th ' + TH + '>Limit</th><th ' + TH + '>Comments</th><th ' + TH + '>Date</th></tr>');
+        acted.forEach(function(x) {
+            var d = x.state.charAt(0).toUpperCase() + x.state.slice(1);
+            template.print('<tr><td ' + TD + '>' + esc(x.role) + '</td><td ' + TD + '>' + esc(x.approver) + '</td><td ' + TD + '>' + d +
+                '</td><td ' + TD + '>' + (parseFloat(x.limit) > 0 ? inr(x.limit) : '-') + '</td><td ' + TD + '>' + (esc(x.comments) || '-') +
+                '</td><td ' + TD + '>' + (esc(x.when) || '-') + '</td></tr>');
+        });
+        template.print('</table>');
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-03 10:08:36</sys_created_on>
+        <sys_id>8f7082822bd41b10335bf9fe4e91bf8f</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_key_approved_details</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_8f7082822bd41b10335bf9fe4e91bf8f</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-03 10:08:36</sys_updated_on>
+    </sys_script_email>
+</record_update>

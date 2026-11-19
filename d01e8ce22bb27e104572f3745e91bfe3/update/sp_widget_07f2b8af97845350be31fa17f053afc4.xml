@@ -1,0 +1,1423 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $window, spUtil) {
+    var c = this;
+
+    c.data.currentStep        = 1;
+    c.data.isSubmitting       = false;
+    c.data.isFetching         = false;
+    c.data.isInitialized      = false;
+    c.data.allSites           = [];
+    c.data.gpBlocked          = false;
+    c.data.gpBlockReason      = '';
+    c.data.distinctGPCodes    = [];
+    c.data.distinctGroupCodes = [];
+
+    c.showDoneeDropdown = false;
+    c.doneeSearch       = '';
+    c.donorSearch       = '';
+    c.donorCurrentPage  = 1;
+    c.donorItemsPerPage = 5;
+
+    function emptySelection() {
+        return {
+            gpCode: '', groupCode: '',
+            doneeSite: '', doneeSiteDisplayCode: '', doneeSiteDisplayName: '', doneeSiteName: '',
+            doneeObj: null, doneeAmount: null,
+            donorSite: '', donorSiteName: '', donorObj: null, donorAvailable: null,
+            comments: ''
+        };
+    }
+    c.selected = emptySelection();
+
+    // ---------- Initial load ----------
+    c.loadInitialGPs = function() {
+        c.data.isFetching = true;
+        c.server.get({ action: 'load_initial_gps' }).then(function(r) {
+            c.data.isInitialized   = true;
+            c.data.isFetching      = false;
+            c.data.isAdmin         = !!r.data.isAdmin;
+            c.data.distinctGPCodes = r.data.distinctGPCodes || [];
+            c.data.userRegions     = r.data.userRegions || [];
+
+            if (c.data.distinctGPCodes.length === 0) {
+                spUtil.addInfoMessage("No Grandparent Codes found for your assigned Region(s): " + (c.data.userRegions.join(', ') || 'None'));
+            }
+        });
+    };
+    c.loadInitialGPs();
+
+    $window.onclick = function(event) {
+        if (!event.target.closest('.abg-custom-select')) {
+            c.showDoneeDropdown = false;
+            $scope.$applyAsync();
+        }
+    };
+
+    // ---------- Helpers ----------
+    c.formatINR = function(val) {
+        if (val === null || val === undefined || isNaN(val)) return '0.00';
+        return Number(val).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+    c.getMathMin = function(a, b) { return Math.min(a, b); };
+
+    // ---------- Swap type & approval chain (mirrors FRS) ----------
+    c.swapTypeFor = function(donee, donor) {
+        if (!donee || !donor) return '';
+        if (donee.segKey !== donor.segKey) return 'Inter-Segment';
+        if (donee.zone !== donor.zone) return 'Inter-Zone';
+        if (donee.region !== donor.region) return 'Inter-Region';
+        return 'Intra-Region';
+    };
+
+    c.chainFor = function(type, doneeSeg, donorSeg) {
+        var isRMC = doneeSeg === 'RMC';
+        var initiator = isRMC ? 'Donee TSM (initiates)' : 'Donee CRM (initiates)';
+
+        if (type === 'Intra-Region') {
+            return isRMC ? [initiator, 'Donor TSM', 'Donor RH']
+                         : ['CRM (self) - auto-approved'];
+        }
+        if (type === 'Inter-Region') {
+            return isRMC ? [initiator, 'Donor TSM', 'Donor RH']
+                         : [initiator, 'Donor CRM'];
+        }
+        if (type === 'Inter-Zone') {
+            if (isRMC) return [initiator, 'Donor TSM', 'Donor RH RMC', 'Donor ZH RMC'];
+            return [initiator, 'Donor CRM', doneeSeg === 'BPD' ? 'ZK HBPD of Donor site' : 'Donor ZH Key'];
+        }
+        // Inter-Segment: full donor-segment chain
+        var donorChains = {
+            'RMC':    ['Donor TSM', 'RH/CH', 'ZH', 'Head RMC'],
+            'BPD':    ['Donor CRM BPD', 'ZK HBPD', 'HS BPD', 'HBPD'],
+            'CEMENT': ['Donor CRM', 'ZH Key of Donor site', 'Head KA']
+        };
+        return [initiator].concat(donorChains[donorSeg] || ['Donor segment hierarchy']);
+    };
+
+    c.getPreviewType = function() {
+        return c.swapTypeFor(c.selected.doneeObj, c.selected.donorObj);
+    };
+    c.getPreviewChain = function() {
+        if (!c.selected.doneeObj || !c.selected.donorObj) return [];
+        return c.chainFor(c.getPreviewType(), c.selected.doneeObj.segKey, c.selected.donorObj.segKey);
+    };
+
+    // ---------- GP / Group ----------
+    c.onGrandparentChange = function() {
+        c.selected.groupCode = '';
+        c.data.distinctGroupCodes = [];
+        c.data.allSites = [];
+        c.data.debug = null;
+        c.data.gpBlocked = false;
+        c.data.gpBlockReason = '';
+        c.clearDonee();
+        c.clearDonor();
+
+        if (c.selected.gpCode) {
+            c.data.isFetching = true;
+            c.server.get({ action: 'fetch_groups_for_gp', selectedGP: c.selected.gpCode }).then(function(r) {
+                c.data.isFetching = false;
+                if (r.data.gpBlocked) {
+                    c.data.gpBlocked = true;
+                    c.data.gpBlockReason = r.data.gpBlockReason;
+                    return;
+                }
+                if (r.data.serverError) { spUtil.addErrorMessage(r.data.serverError); return; }
+                c.data.distinctGroupCodes = r.data.distinctGroupCodes || [];
+            });
+        }
+    };
+
+    c.onGroupChange = function() {
+        c.data.allSites = [];
+        c.data.debug = null;
+        c.clearDonee();
+        c.clearDonor();
+
+        if (c.selected.gpCode && c.selected.groupCode) {
+            c.data.isFetching = true;
+            c.server.get({
+                action: 'fetch_all_sites',
+                selectedGP: c.selected.gpCode,
+                selectedGroup: c.selected.groupCode
+            }).then(function(r) {
+                c.data.isFetching = false;
+                if (r.data.gpBlocked) {
+                    c.data.gpBlocked = true;
+                    c.data.gpBlockReason = r.data.gpBlockReason;
+                    return;
+                }
+                if (r.data.serverError) { spUtil.addErrorMessage(r.data.serverError); return; }
+                c.data.allSites = r.data.allSites || [];
+                c.data.debug = r.data.debug || null;
+            });
+        }
+    };
+
+    // ---------- Donee ----------
+    c.toggleDoneeDropdown = function(event) {
+        if (event) event.stopPropagation();
+        c.showDoneeDropdown = !c.showDoneeDropdown;
+        if (c.showDoneeDropdown) c.doneeSearch = '';
+    };
+
+    c.getGroupSites = function() {
+        return (c.data.allSites || []).filter(function(s) {
+            return s.group_code === c.selected.groupCode;
+        });
+    };
+
+    c.hasAnyAllowedDonee = function() {
+        return c.getGroupSites().some(function(s) { return s.is_allowed_donee; });
+    };
+
+    c.getFilteredDoneeSites = function() {
+        var list = c.getGroupSites();
+        if (!c.doneeSearch) return list;
+        var q = c.doneeSearch.toLowerCase().trim();
+        return list.filter(function(s) {
+            return (s.customer_code && s.customer_code.toLowerCase().indexOf(q) > -1) ||
+                   (s.name && s.name.toLowerCase().indexOf(q) > -1) ||
+                   (s.zone && s.zone.toLowerCase().indexOf(q) > -1) ||
+                   (s.region && s.region.toLowerCase().indexOf(q) > -1);
+        });
+    };
+
+    c.selectDonee = function(site) {
+        c.selected.doneeSite = site.sys_id;
+        c.selected.doneeSiteDisplayCode = site.customer_code;
+        c.selected.doneeSiteDisplayName = site.name;
+        c.selected.doneeSiteName = site.customer_code + ' — ' + site.name;
+        c.selected.doneeObj = site;
+
+        c.showDoneeDropdown = false;
+        c.doneeSearch = '';
+        c.donorSearch = '';
+        c.clearDonor();
+    };
+
+    c.clearDonee = function() {
+        c.selected.doneeSite = '';
+        c.selected.doneeSiteDisplayCode = '';
+        c.selected.doneeSiteDisplayName = '';
+        c.selected.doneeSiteName = '';
+        c.selected.doneeObj = null;
+        c.selected.doneeAmount = null;
+    };
+
+    // ---------- Donor ----------
+    c.clearDonor = function() {
+        c.selected.donorSite = '';
+        c.selected.donorSiteName = '';
+        c.selected.donorObj = null;
+        c.selected.donorAvailable = null;
+        c.donorCurrentPage = 1;
+    };
+
+    c.isDonorEligible = function(site) {
+        return !!site && site.available >= c.selected.doneeAmount && c.selected.doneeAmount > 0;
+    };
+
+    // Donors = every other Key site under the Grandparent Code
+    c.getDonorSites = function() {
+        return (c.data.allSites || []).filter(function(site) {
+            return site.sys_id !== c.selected.doneeSite;
+        });
+    };
+
+    c.getFilteredDonors = function() {
+        var donors = c.getDonorSites();
+        if (c.donorSearch) {
+            var q = c.donorSearch.toLowerCase().trim();
+            donors = donors.filter(function(s) {
+                return (s.customer_code && s.customer_code.toLowerCase().indexOf(q) > -1) ||
+                       (s.name && s.name.toLowerCase().indexOf(q) > -1) ||
+                       (s.group_code && s.group_code.toLowerCase().indexOf(q) > -1) ||
+                       (s.segment && s.segment.toLowerCase().indexOf(q) > -1) ||
+                       (s.zone && s.zone.toLowerCase().indexOf(q) > -1) ||
+                       (s.region && s.region.toLowerCase().indexOf(q) > -1);
+            });
+        }
+        // Eligible first, then highest available
+        return donors.slice().sort(function(a, b) {
+            var ea = c.isDonorEligible(a) ? 1 : 0, eb = c.isDonorEligible(b) ? 1 : 0;
+            if (ea !== eb) return eb - ea;
+            return b.available - a.available;
+        });
+    };
+
+    c.getPaginatedDonors = function() {
+        var filtered = c.getFilteredDonors();
+        var start = (c.donorCurrentPage - 1) * c.donorItemsPerPage;
+        return filtered.slice(start, start + c.donorItemsPerPage);
+    };
+
+    c.totalDonorPages = function() {
+        return Math.ceil(c.getFilteredDonors().length / c.donorItemsPerPage) || 1;
+    };
+
+    c.hasOnlyInsufficientSites = function() {
+        var donors = c.getDonorSites();
+        if (donors.length === 0) return false;
+        return donors.every(function(site) { return !c.isDonorEligible(site); });
+    };
+
+    c.selectDonor = function(site) {
+        if (!c.isDonorEligible(site)) return;
+        c.selected.donorSite = site.sys_id;
+        c.selected.donorSiteName = site.customer_code + ' — ' + site.name;
+        c.selected.donorObj = site;
+        c.selected.donorAvailable = site.available;
+    };
+
+    // ---------- Navigation / submit ----------
+    c.isStep1Valid = function() {
+        return !!(c.selected.gpCode && c.selected.groupCode && !c.data.gpBlocked &&
+                  c.selected.doneeSite && c.selected.doneeAmount > 0 && c.selected.donorSite);
+    };
+
+    c.goToReview = function() { c.data.currentStep = 2; };
+
+    c.goToDashboard = function() {
+        $window.location.href = '?id=uclm_key_limit_swap';
+    };
+
+    c.submitSwap = function() {
+        if (!c.selected.comments || !c.selected.comments.trim()) {
+            spUtil.addErrorMessage("Business rationale is mandatory.");
+            return;
+        }
+
+        c.data.isSubmitting = true;
+        c.server.get({
+            action: 'submitSwap',
+            payload: {
+                gpCode:      c.selected.gpCode,
+                groupCode:   c.selected.groupCode,
+                doneeSite:   c.selected.doneeSite,
+                donorSite:   c.selected.donorSite,
+                doneeAmount: c.selected.doneeAmount,
+                comments:    c.selected.comments
+            }
+        }).then(function(r) {
+            c.data.isSubmitting = false;
+            if (r.data.serverError) {
+                spUtil.addErrorMessage(r.data.serverError);
+                c.data.currentStep = 2;
+                return;
+            }
+            c.data.swapNumber = r.data.swapNumber;
+            c.data.currentStep = 3;
+        }).catch(function() {
+            c.data.isSubmitting = false;
+            spUtil.addErrorMessage("System communication error. Please try again.");
+        });
+    };
+
+    c.resetForm = function() {
+        c.data.currentStep = 1;
+        c.data.swapNumber = null;
+        c.data.allSites = [];
+        c.data.debug = null;
+        c.data.gpBlocked = false;
+        c.data.gpBlockReason = '';
+        c.data.distinctGroupCodes = [];
+        c.showDoneeDropdown = false;
+        c.doneeSearch = '';
+        c.donorSearch = '';
+        c.donorCurrentPage = 1;
+        c.donorItemsPerPage = 5;
+        c.selected = emptySelection();
+        c.loadInitialGPs();
+    };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* Container &amp; Spacing Utilities */
+.abg-widget-container {
+  background-color: #FFFFFF;
+  padding: 24px;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
+  font-family: 'Oxygen', Arial, sans-serif;
+}
+
+.bg-light-panel {
+  background-color: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 6px;
+}
+
+.section-spacing-sm { margin-top: 12px; margin-bottom: 20px; }
+.section-spacing-md { margin-top: 24px; margin-bottom: 28px; }
+
+/* Base Spacing Utilities */
+.m-n { margin: 0 !important; }
+.m-t-none { margin-top: 0 !important; }
+.m-t-xs { margin-top: 5px !important; }
+.m-t-sm { margin-top: 10px !important; }
+.m-t-md { margin-top: 15px !important; }
+.m-b-none { margin-bottom: 0 !important; }
+.m-b-xs { margin-bottom: 5px !important; }
+.m-b-sm { margin-bottom: 10px !important; }
+.m-b-md { margin-bottom: 15px !important; }
+.m-b-lg { margin-bottom: 25px !important; }
+.m-l-sm { margin-left: 10px !important; }
+.m-r-xxs { margin-right: 3px !important; }
+.m-r-xs { margin-right: 5px !important; }
+.m-r-sm { margin-right: 10px !important; }
+.m-r-md { margin-right: 15px !important; }
+.p-l-0 { padding-left: 0 !important; }
+.p-t-md { padding-top: 15px !important; }
+.p-md { padding: 15px !important; }
+.p-xl { padding: 40px !important; }
+
+/* Theme Colors */
+.abg-text-red { color: #C8102E !important; }
+.abg-border-top-red { border-top: 4px solid #C8102E; }
+.hover-red:hover { color: #C8102E !important; text-decoration: none; }
+
+/* Flex &amp; Layout */
+.flex-align-center { display: flex; flex-wrap: wrap; align-items: center; }
+
+.page-size-box { width: 140px !important; max-width: 140px; }
+.page-size-box .input-group-addon {
+  padding: 6px 12px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: #495057 !important;
+  background-color: #e9ecef !important;
+  border: 1px solid #ced4da !important;
+  border-right: none !important;
+  border-radius: 4px 0 0 4px !important;
+  width: auto !important;
+  display: table-cell !important;
+  vertical-align: middle !important;
+}
+.page-size-box select.form-control {
+  border: 1px solid #ced4da !important;
+  border-radius: 0 4px 4px 0 !important;
+  height: 34px !important;
+  display: table-cell !important;
+  width: 100% !important;
+}
+
+.bg-light { background-color: #f8f9fa !important; }
+.abg-header h2 { color: #333333; font-weight: 700; margin-top: 0; margin-bottom: 8px; font-size: 24px; }
+.position-relative { position: relative; }
+.border-top-dashed { border-top: 2px dashed #EAEAEA; }
+.border-top { border-top: 1px solid #EAEAEA; }
+.text-donee-heading { color: #C8102E; font-weight: 700; }
+.text-donor-heading { color: #1782c5; font-weight: 700; }
+
+.abg-input-group label { font-weight: 600; color: #4A4A4A; margin-bottom: 6px; }
+.abg-input-group .form-control {
+  border: 1px solid #D1D1D1;
+  border-radius: 4px;
+  padding: 10px 15px;
+  height: auto;
+  font-size: 14px;
+  transition: all 0.2s ease;
+}
+.abg-input-group .form-control:focus {
+  border-color: #C8102E;
+  box-shadow: 0 0 0 2px rgba(200, 16, 46, 0.15);
+  outline: none;
+}
+
+/* Custom Select */
+.abg-custom-select { position: relative; width: 100%; user-select: none; }
+.abg-select-display {
+  border: 1px solid #D1D1D1;
+  border-radius: 4px;
+  padding: 10px 15px;
+  background: #FFF;
+  cursor: pointer;
+  font-size: 14px;
+  min-height: 44px;
+  transition: all 0.2s ease;
+}
+.abg-custom-select.open .abg-select-display {
+  border-color: #C8102E;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  box-shadow: 0 0 0 2px rgba(200, 16, 46, 0.15);
+}
+.abg-select-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: #FFF;
+  border: 1px solid #C8102E;
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+  z-index: 1050;
+  overflow: hidden;
+}
+.dropdown-search-wrapper {
+  padding: 8px 10px;
+  background-color: #f8f9fa;
+  border-bottom: 1px solid #e9ecef;
+}
+.select-options-scroll { max-height: 260px; overflow-y: auto; }
+
+.abg-select-option {
+  padding: 12px 15px;
+  border-bottom: 1px solid #F1F5F9;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+}
+.abg-select-option:last-child { border-bottom: none; }
+.abg-select-option:hover:not(.disabled-option) {
+  background: #FFF5F5;
+  border-left: 3px solid #C8102E;
+  padding-left: 12px;
+}
+.selected-option {
+  background: #fce8ea;
+  border-left: 3px solid #C8102E;
+  padding-left: 12px;
+}
+.selected-option .site-code { color: #C8102E; }
+.disabled-option { opacity: 0.65; cursor: not-allowed; background: #F9FAFB; }
+.site-meta { font-size: 12px; margin-top: 4px; }
+
+/* Badges */
+.abg-limit-badge {
+  background-color: #e6f4ea !important;
+  color: #137333 !important;
+  border: 1px solid #ceead6;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 12px;
+}
+.abg-badge-ongoing { background-color: #F59E0B; font-weight: 600; padding: 4px 8px; border-radius: 4px; }
+.abg-badge-unauth { background-color: #EF4444; font-weight: 600; padding: 4px 8px; border-radius: 4px; color: #FFF; }
+.bg-dark-gray { background: #666; color: #FFF; font-size: 10px; }
+
+.swap-type-badge {
+  display: inline-block;
+  background: #eef6fc;
+  color: #1782c5;
+  border: 1px solid #c9e2f4;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+
+/* Approval chain preview */
+.abg-chain { line-height: 2.2; }
+.chain-step {
+  display: inline-block;
+  background: #fff5f5;
+  border: 1px solid #f3c6cd;
+  color: #8a0c20;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 14px;
+}
+.chain-arrow { color: #999; margin: 0 6px; font-weight: 700; }
+
+/* Admin diagnostics */
+.diag-box {
+  background: #f4f6f8;
+  border: 1px dashed #b7c0c7;
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 11px;
+  color: #555;
+  margin-bottom: 12px;
+  word-break: break-word;
+}
+
+/* Table */
+.widget-table-wrapper { border-radius: 6px; border: 1px solid #EAEAEA; overflow-x: auto; }
+.abg-table { margin-bottom: 0; width: 100%; font-size: 13px; }
+.abg-table thead th {
+  background-color: #F8F9FA;
+  color: #333;
+  font-weight: 600;
+  border-bottom: 2px solid #EAEAEA;
+  text-transform: uppercase;
+  font-size: 11px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.abg-table tbody td { vertical-align: middle !important; border-top: 1px solid #EAEAEA; padding: 10px 12px; }
+.selected-row { background-color: #fce8ea !important; border-left: 4px solid #C8102E; }
+.disabled-row { opacity: 0.55; cursor: not-allowed; background-color: #f9f9f9; }
+.disabled-row:hover { background-color: #f9f9f9 !important; }
+
+.summary-label { font-size: 12px; }
+.amount-display { font-size: 18px; }
+
+/* Buttons */
+.abg-btn-primary {
+  background-color: #C8102E;
+  color: #FFFFFF;
+  font-weight: 600;
+  padding: 8px 22px;
+  border-radius: 4px;
+  border: none;
+  transition: background-color 0.2s;
+  white-space: nowrap;
+}
+.abg-btn-primary:hover:not([disabled]) { background-color: #A00D25; color: #FFFFFF; }
+.abg-btn-primary[disabled] { background-color: #E0E0E0; color: #9E9E9E; cursor: not-allowed; }
+
+.abg-btn-outline {
+  background: transparent;
+  border: 1px solid #C8102E;
+  color: #C8102E;
+  font-weight: 600;
+  padding: 8px 20px;
+  border-radius: 4px;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.abg-btn-outline:hover { background: #C8102E; color: #FFF; text-decoration: none; }
+
+.success-icon { font-size: 64px; color: #2E7D32; line-height: 1; }
+
+.slide-down { animation: slideDownFade 0.3s ease-out; }
+@keyframes slideDownFade {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 767px) {
+  .abg-widget-container { padding: 14px; }
+  .flex-align-center { flex-direction: column; align-items: stretch; }
+  .m-b-sm-mobile { margin-bottom: 12px !important; }
+  .m-t-sm-mobile { margin-top: 10px !important; }
+  .text-center-mobile { text-align: center !important; }
+  .page-size-box { width: 100% !important; max-width: 100%; }
+  .w-100-mobile { display: block; width: 100%; margin-right: 0 !important; margin-bottom: 10px; }
+  .display-block-mobile { display: block; }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>false</has_preview>
+        <id>clm_key_limit_swap_request</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>CLM Key Limit Swap Request</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    var CONFIG = {
+        TABLES: {
+            CUSTOMER:      'x_birl3_clm_clm_customer_master1', 
+            SWAP_REQUEST:  'x_birl3_clm_key_limit_swap', // FIXED: Matches your exact table name
+            CRM_GP_REQ:    'x_birl3_clm_clm_key_crm_gp_request', 
+            GROUP_REQ:     'x_birl3_clm_key_group_code_request', 
+            MATRIX:        'x_birl3_clm_approval_matrix'
+        }
+    };
+
+    var userId = gs.getUserID();
+    var action = input ? input.action : null;
+
+    // Helper: Safely resolve swap table name without falling back to Non-Trade
+    function getSwapTableName() {
+        if (gs.tableExists(CONFIG.TABLES.SWAP_REQUEST)) {
+            return CONFIG.TABLES.SWAP_REQUEST;
+        }
+        return null;
+    }
+
+    // 1. Fetch Logged-in User's Assigned Jurisdictions (CRM / TSM)
+    function getUserPermissions(targetUserId) {
+        var permissions = [];
+        var regions = [];
+
+        if (gs.tableExists(CONFIG.TABLES.MATRIX)) {
+            var mxGr = new GlideRecord(CONFIG.TABLES.MATRIX);
+            mxGr.addQuery('approver_user', targetUserId);
+            
+            var typeCond = mxGr.addQuery('customer_type', 'Key');
+            typeCond.addOrCondition('customer_type', 'key_customer');
+            typeCond.addOrCondition('customer_type', 'KEY');
+
+            var roleCond = mxGr.addQuery('role_name', 'CONTAINS', 'CRM');
+            roleCond.addOrCondition('role_name', 'CONTAINS', 'TSM');
+            mxGr.query();
+
+            while (mxGr.next()) {
+                var reg = (mxGr.getValue('region') || '').trim();
+                var zon = (mxGr.getValue('zone') || '').trim();
+                var seg = (mxGr.getValue('segment') || '').trim();
+
+                if (reg && regions.indexOf(reg) === -1) {
+                    regions.push(reg);
+                }
+
+                permissions.push({
+                    segment: seg.toUpperCase(),
+                    zone: zon.toUpperCase(),
+                    region: reg.toUpperCase()
+                });
+            }
+        }
+        return { permissions: permissions, regions: regions };
+    }
+
+    function isUserAuthorizedForSite(siteSeg, siteZone, siteReg, userPerms) {
+        if (gs.hasRole('x_birl3_clm.admin') || gs.hasRole('admin')) return true;
+
+        var sSeg = (siteSeg || '').toUpperCase().trim();
+        var sReg = (siteReg || '').toUpperCase().trim();
+
+        for (var i = 0; i < userPerms.length; i++) {
+            var p = userPerms[i];
+            if (p.region && p.region === sReg) {
+                if (p.segment && p.segment !== sSeg) continue;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ==========================================
+    // REVISED ROBUST LOCK CHECK
+    // ==========================================
+    var _lockMap = null;
+    function getLockedGPMap() {
+        if (_lockMap) return _lockMap;
+        _lockMap = {};
+
+        // 1. Check Pending Limit Swap Requests
+        var swapTable = getSwapTableName();
+        if (swapTable && gs.tableExists(swapTable)) {
+            var swGr = new GlideRecord(swapTable);
+            if (swGr.isValidField('grandparent_code')) {
+                swGr.addEncodedQuery('approval=requested^ORapproval=not_yet_requested^stateNOT IN3,4,7');
+                swGr.addNotNullQuery('grandparent_code');
+                swGr.query();
+                while (swGr.next()) {
+                    var swGp = (swGr.getDisplayValue('grandparent_code') || swGr.getValue('grandparent_code') || '').trim().toUpperCase();
+                    if (swGp && !_lockMap[swGp]) {
+                        _lockMap[swGp] = 'An active Limit Swap request is already in-flight for this Grandparent Code.';
+                    }
+                }
+            }
+        }
+
+        // 2. Check Pending CRM Staging Header Requests 
+        if (gs.tableExists(CONFIG.TABLES.CRM_GP_REQ)) {
+            var crmGr = new GlideRecord(CONFIG.TABLES.CRM_GP_REQ);
+            if (crmGr.isValidField('grandparent_code')) {
+                crmGr.addEncodedQuery('stateNOT IN3,4,7,Approved,Processed,Closed,Rejected,Cancelled^approvalNOT INapproved,rejected,cancelled');
+                crmGr.addNotNullQuery('grandparent_code');
+                crmGr.query();
+                while (crmGr.next()) {
+                    var crmGp = (crmGr.getDisplayValue('grandparent_code') || crmGr.getValue('grandparent_code') || '').trim().toUpperCase();
+                    if (crmGp && !_lockMap[crmGp]) {
+                        _lockMap[crmGp] = 'A CRM Credit Limit request is pending for this Grandparent Code. Swapping is locked.';
+                    }
+                }
+            }
+        }
+
+        // 3. Check Pending Central SPOC Requests 
+        if (gs.tableExists(CONFIG.TABLES.GROUP_REQ)) {
+            var spocGr = new GlideRecord(CONFIG.TABLES.GROUP_REQ);
+            if (spocGr.isValidField('grandparent_code')) {
+                spocGr.addEncodedQuery('approval=requested^ORapproval=not_yet_requested^stateNOT IN3,4,7,Approved,Closed,Rejected,Cancelled');
+                spocGr.query();
+                while (spocGr.next()) {
+                    var spocGp = (spocGr.getDisplayValue('grandparent_code') || spocGr.getValue('grandparent_code') || '').trim().toUpperCase();
+                    if (spocGp && !_lockMap[spocGp]) {
+                        _lockMap[spocGp] = 'A Central SPOC Credit Limit request is currently under approval for this Grandparent Code. Swapping is locked.';
+                    }
+                }
+            }
+        }
+
+        return _lockMap;
+    }
+
+    function hasOngoingGPRequest(gpCode) {
+        if (!gpCode) return { blocked: false };
+        var m = getLockedGPMap();
+        var normalizedGP = (gpCode + '').trim().toUpperCase();
+        if (m[normalizedGP]) {
+            return { blocked: true, reason: m[normalizedGP] };
+        }
+        return { blocked: false };
+    }
+
+    function calculateSwapType(donee, donor) {
+        if (donee.segment !== donor.segment) return 'Inter-Segment';
+        if (donee.zone !== donor.zone) return 'Inter-Zone';
+        if (donee.region !== donor.region) return 'Inter-Region';
+        return 'Intra-Region';
+    }
+
+    var authData = getUserPermissions(userId);
+    var userPermissions = authData.permissions;
+    var userRegions = authData.regions;
+
+    // =========================================================================
+    // ACTION: INITIAL LOAD / LOAD GP CODES
+    // =========================================================================
+    if (!action || action === 'load_initial_gps') {
+        data.distinctGPCodes = [];
+        data.userRegions = userRegions;
+
+        var custGr = new GlideRecord(CONFIG.TABLES.CUSTOMER);
+        custGr.addQuery('cg1', 'N00');
+
+        if (!gs.hasRole('x_birl3_clm.admin') && !gs.hasRole('admin')) {
+            if (userRegions.length > 0) {
+                custGr.addQuery('region', 'IN', userRegions.join(','));
+            } else {
+                data.isInitialized = true;
+                return;
+            }
+        }
+
+        custGr.orderBy('grandparent_code');
+        custGr.query();
+
+        var addedGPs = {};
+        while (custGr.next()) {
+            var gCode = custGr.getValue('grandparent_code') || custGr.getValue('grand_parent');
+            var gName = custGr.getValue('customer_name') || custGr.getValue('name') || '';
+
+            if (gCode && !addedGPs[gCode]) {
+                data.distinctGPCodes.push({
+                    code: gCode,
+                    name: gName
+                });
+                addedGPs[gCode] = true;
+            }
+        }
+
+        data.isInitialized = true;
+        if (!action) return;
+    }
+
+    // =========================================================================
+    // ACTION: 'fetch_groups_for_gp'
+    // =========================================================================
+    if (action === 'fetch_groups_for_gp') {
+        data.distinctGroupCodes = [];
+        var targetGP = input.selectedGP;
+
+        var gpLock = hasOngoingGPRequest(targetGP);
+        if (gpLock.blocked) {
+            data.gpBlocked = true;
+            data.gpBlockReason = gpLock.reason;
+            return;
+        }
+
+        var grpGr = new GlideRecord(CONFIG.TABLES.CUSTOMER);
+        grpGr.addQuery('cg1', 'N00');
+
+        var gpQuery = grpGr.addQuery('grandparent_code', targetGP);
+        gpQuery.addOrCondition('grand_parent', targetGP);
+
+        if (!gs.hasRole('x_birl3_clm.admin') && !gs.hasRole('admin') && userRegions.length > 0) {
+            grpGr.addQuery('region', 'IN', userRegions.join(','));
+        }
+
+        grpGr.orderBy('group_code');
+        grpGr.query();
+
+        var addedGroups = {};
+        while (grpGr.next()) {
+            var gc = grpGr.getValue('group_code') || grpGr.getValue('groupcode');
+            if (gc && !addedGroups[gc]) {
+                data.distinctGroupCodes.push(gc);
+                addedGroups[gc] = true;
+            }
+        }
+        return;
+    }
+
+    // =========================================================================
+    // ACTION: 'fetch_all_sites'
+    // =========================================================================
+    if (action === 'fetch_all_sites') {
+        data.allSites = [];
+        var gp = input.selectedGP;
+
+        var checkLock = hasOngoingGPRequest(gp);
+        if (checkLock.blocked) {
+            data.gpBlocked = true;
+            data.gpBlockReason = checkLock.reason;
+            return;
+        }
+
+        var siteGr = new GlideRecord(CONFIG.TABLES.CUSTOMER);
+        siteGr.addQuery('cg1', 'N00');
+        var gqc = siteGr.addQuery('grandparent_code', gp);
+        gqc.addOrCondition('grand_parent', gp);
+        siteGr.orderBy('customer_code_sap');
+        siteGr.query();
+
+        while (siteGr.next()) {
+            var siteSysId  = siteGr.getUniqueValue();
+            var custCode   = siteGr.getValue('customer_code_sap') || siteGr.getValue('customer_code') || '';
+            var salesOrg   = siteGr.getValue('salesorg');
+            var segDisplay = siteGr.getDisplayValue('segment') || siteGr.getValue('segment') || '';
+            var segValue   = siteGr.getValue('segment') || '';
+            var zoneCode   = siteGr.getValue('zonalparentcode') || siteGr.getValue('zone') || '';
+            var regCode    = siteGr.getValue('region') || '';
+            var grpCode    = siteGr.getValue('group_code') || siteGr.getValue('groupcode') || '';
+
+            var liveLimit = parseFloat(siteGr.getValue('credit_limit')) || 0;
+            var liveOutstanding = parseFloat(siteGr.getValue('outstanding')) || 0;
+
+            try {
+                var wsdl = new x_birl3_clm.CLM_NEW_WSDL1();
+                var res = wsdl.getCreditDetails(custCode, salesOrg);
+                if (res) {
+                    var parsed = JSON.parse(res);
+                    liveLimit = parseFloat(parsed.creditLimit) || liveLimit;
+                    liveOutstanding = parseFloat(parsed.outstandingAmount) || liveOutstanding;
+                }
+            } catch (e) {
+                // Ignore API error and fallback to DB
+            }
+
+            var isAllowedDonee = isUserAuthorizedForSite(segValue, zoneCode, regCode, userPermissions);
+
+            data.allSites.push({
+                sys_id: siteSysId,
+                customer_code: custCode,
+                name: siteGr.getValue('customer_name') || siteGr.getValue('name') || '',
+                group_code: grpCode,
+                segment: segDisplay,
+                segmentValue: segValue,
+                zone: zoneCode,
+                region: regCode,
+                credit_limit: liveLimit,
+                outstanding: liveOutstanding,
+                available: Math.max(0, liveLimit - liveOutstanding),
+                is_allowed_donee: isAllowedDonee,
+                has_ongoing_request: false
+            });
+        }
+        return;
+    }
+
+    // =========================================================================
+    // ACTION: 'submitSwap'
+    // =========================================================================
+    if (action === 'submitSwap') {
+        var p = input.payload;
+
+        var finalLockCheck = hasOngoingGPRequest(p.gpCode);
+        if (finalLockCheck.blocked) {
+            data.serverError = finalLockCheck.reason;
+            return;
+        }
+
+        var donorRec = new GlideRecord(CONFIG.TABLES.CUSTOMER);
+        var doneeRec = new GlideRecord(CONFIG.TABLES.CUSTOMER);
+
+        if (!donorRec.get(p.donorSite) || !doneeRec.get(p.doneeSite)) {
+            data.serverError = 'Unable to locate donor or donee site records.';
+            return;
+        }
+
+        var doneeSegVal = doneeRec.getValue('segment') || '';
+        var doneeZone   = doneeRec.getValue('zonalparentcode') || doneeRec.getValue('zone') || '';
+        var doneeReg    = doneeRec.getValue('region') || '';
+
+        if (!isUserAuthorizedForSite(doneeSegVal, doneeZone, doneeReg, userPermissions)) {
+            data.serverError = 'Security Violation: You are not authorized to enhance this Donee Site.';
+            return;
+        }
+
+        var donorSalesOrg = donorRec.getValue('salesorg');
+        var donorCode     = donorRec.getValue('customer_code_sap') || donorRec.getValue('customer_code');
+        var doneeCode     = doneeRec.getValue('customer_code_sap') || doneeRec.getValue('customer_code');
+        var donorLimit = 0, donorOutstanding = 0;
+
+        try {
+            var dw = new x_birl3_clm.CLM_NEW_WSDL1();
+            var dres = dw.getCreditDetails(donorCode, donorSalesOrg);
+            if (dres) {
+                var dParsed = JSON.parse(dres);
+                donorLimit = parseFloat(dParsed.creditLimit) || 0;
+                donorOutstanding = parseFloat(dParsed.outstandingAmount) || 0;
+            }
+        } catch (e) {
+            donorLimit = parseFloat(donorRec.getValue('credit_limit')) || 0;
+        }
+
+        var donorAvailable = Math.max(0, donorLimit - donorOutstanding);
+        var requestedAmt = parseFloat(p.doneeAmount) || 0;
+
+        if (donorAvailable < requestedAmt) {
+            data.serverError = 'Donor site balance is insufficient. Live Available: ₹' + donorAvailable.toFixed(2);
+            return;
+        }
+
+        var doneeObj = { segment: doneeSegVal, zone: doneeZone, region: doneeReg };
+        var donorObj = { segment: donorRec.getValue('segment'), zone: donorRec.getValue('zonalparentcode') || donorRec.getValue('zone'), region: donorRec.getValue('region') };
+        var swapType = calculateSwapType(doneeObj, donorObj);
+
+        var targetTable = getSwapTableName();
+        if (!targetTable) {
+            data.serverError = 'Key limit swap request table (' + CONFIG.TABLES.SWAP_REQUEST + ') is not configured in this instance.';
+            return;
+        }
+
+        var swapGr = new GlideRecord(targetTable);
+        swapGr.initialize();
+
+        swapGr.setValue('grandparent_code',      p.gpCode);
+        swapGr.setValue('group_code',            p.groupCode);
+        swapGr.setValue('donee',                 p.doneeSite);
+        swapGr.setValue('donor',                 p.donorSite);
+        swapGr.setValue('donee_segment',         doneeRec.getDisplayValue('segment'));
+        swapGr.setValue('donee_current_limit',   doneeRec.getValue('credit_limit'));
+        swapGr.setValue('donor_segment',         donorRec.getDisplayValue('segment'));
+        swapGr.setValue('donor_current_limit',   donorLimit);
+        swapGr.setValue('donor_outstanding',     donorOutstanding);
+        swapGr.setValue('donor_available_limit', donorAvailable);
+        swapGr.setValue('requested_amount',      requestedAmt);
+        swapGr.setValue('swap_type',             swapType);
+        swapGr.setValue('approval',              'requested');
+        swapGr.setValue('state',                 1);
+        swapGr.setValue('description',           p.comments);
+
+        swapGr.comments = [
+            "=== KEY CUSTOMER LIMIT SWAP INITIATED ===",
+            "Grandparent Code: " + p.gpCode,
+            "Group Code: " + p.groupCode,
+            "Swap Type: " + swapType,
+            "Transfer Amount: ₹" + requestedAmt.toFixed(2),
+            "",
+            "DONEE SITE: " + doneeCode,
+            "DONOR SITE: " + donorCode,
+            "RATIONALE: " + (p.comments || 'No comments provided.')
+        ].join('\n');
+
+        var swapSysId = swapGr.insert();
+        if (swapSysId) {
+            var created = new GlideRecord(targetTable);
+            if (created.get(swapSysId)) {
+                data.swapNumber = created.getValue('number') || created.getDisplayValue();
+            }
+        } else {
+            data.serverError = 'Failed to create limit swap record.';
+        }
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gayatri.bhandge@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-26 10:04:57</sys_created_on>
+        <sys_id>07f2b8af97845350be31fa17f053afc4</sys_id>
+        <sys_mod_count>10</sys_mod_count>
+        <sys_name>CLM Key Limit Swap Request</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_07f2b8af97845350be31fa17f053afc4</sys_update_name>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-27 05:22:51</sys_updated_on>
+        <template><![CDATA[<div class="abg-widget-container">
+  <div ng-if="!c.data.isInitialized" class="text-center p-xl">
+    <i class="fa fa-spinner fa-spin fa-2x abg-text-red"></i>
+  </div>
+
+  <div ng-if="c.data.isInitialized">
+
+    <!-- =======================================================
+         STEP 1: GRANDPARENT, GROUP, DONEE, DONOR
+         ======================================================= -->
+    <div class="slide-down" ng-if="c.data.currentStep == 1">
+      <div class="abg-header section-spacing-sm">
+        <h2>Initiate Key Limit Swap Request</h2>
+        <p class="m-b-none text-muted">Select your Grandparent Code and Group Code to load managed customer sites.</p>
+      </div>
+
+      <!-- SCOPE SELECTION -->
+      <div class="panel panel-default shadow-sm section-spacing-sm bg-light-panel">
+        <div class="panel-body p-md">
+          <div class="row">
+            <div class="col-xs-12 col-md-6 form-group abg-input-group">
+              <label>Select Grandparent Code <span class="text-danger">*</span></label>
+              <select class="form-control"
+                      ng-model="c.selected.gpCode"
+                      ng-change="c.onGrandparentChange()"
+                      ng-disabled="c.data.isFetching">
+                <option value="">-- Select Grandparent Code --</option>
+                <option ng-repeat="gp in c.data.distinctGPCodes" value="{{gp.code}}" ng-disabled="gp.locked">
+                  {{gp.code}} - {{gp.name}}{{gp.locked ? ' (Locked - request in progress)' : ''}}
+                </option>
+              </select>
+            </div>
+
+            <div class="col-xs-12 col-md-6 form-group abg-input-group">
+              <label>Select Group Code <span class="text-danger">*</span></label>
+              <select class="form-control"
+                      ng-model="c.selected.groupCode"
+                      ng-change="c.onGroupChange()"
+                      ng-disabled="!c.selected.gpCode || c.data.distinctGroupCodes.length === 0 || c.data.isFetching">
+                <option value="">-- Select Group Code --</option>
+                <option ng-repeat="gc in c.data.distinctGroupCodes" value="{{gc}}">{{gc}}</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- LOADER -->
+      <div ng-if="c.data.isFetching" class="text-center p-xl section-spacing-md slide-down">
+        <i class="fa fa-spinner fa-spin fa-3x text-primary m-b-md abg-text-red"></i>
+        <h4>Fetching Sites &amp; Syncing Live SAP Limits...</h4>
+        <p class="text-muted m-b-none">Retrieving comprehensive site limits and balances from SAP.</p>
+      </div>
+
+      <!-- GP LOCK BANNER -->
+      <div class="alert alert-danger shadow-sm section-spacing-sm slide-down" ng-if="c.data.gpBlocked && !c.data.isFetching">
+        <i class="fa fa-ban fa-lg m-r-xs"></i>
+        <strong>Limit Swap Blocked for Grandparent Code:</strong> {{c.data.gpBlockReason}}
+      </div>
+
+      <!-- NO SITES -->
+      <div class="alert alert-warning shadow-sm slide-down"
+           ng-if="c.selected.groupCode && !c.data.isFetching && !c.data.gpBlocked && c.data.allSites.length === 0">
+        No Key sites were found under this Grandparent Code.
+      </div>
+
+      <!-- WRAPPER -->
+      <div class="slide-down" ng-if="c.selected.gpCode && c.selected.groupCode && c.data.allSites.length > 0 && !c.data.gpBlocked && !c.data.isFetching">
+
+        <!-- STEP 1.1: DONEE -->
+        <div class="section-spacing-md p-t-md border-top-dashed">
+          <h4 class="m-b-md text-donee-heading">
+            <i class="fa fa-arrow-circle-down m-r-xs"></i> 1. Select Donee Site (Receiving Limit)
+          </h4>
+
+          <div class="alert alert-warning shadow-sm" ng-if="!c.hasAnyAllowedDonee()">
+            You do not manage any site under this Group Code, so you cannot raise a swap for it.
+          </div>
+
+          <div class="row">
+            <div class="col-xs-12 col-md-8 form-group abg-input-group">
+              <label>Donee Site <span class="text-danger">*</span></label>
+              <div class="abg-custom-select" ng-class="{'open': c.showDoneeDropdown}">
+                <div class="abg-select-display" ng-click="c.toggleDoneeDropdown($event)">
+                  <span class="text-muted" ng-if="!c.selected.doneeSite">-- Select Donee Site --</span>
+                  <span ng-if="c.selected.doneeSite"><strong>{{c.selected.doneeSiteDisplayCode}}</strong> — {{c.selected.doneeSiteDisplayName}}</span>
+                  <i class="fa fa-chevron-down pull-right m-t-xs text-muted"></i>
+                </div>
+
+                <div class="abg-select-dropdown" ng-show="c.showDoneeDropdown">
+                  <div class="dropdown-search-wrapper" ng-click="$event.stopPropagation()">
+                    <div class="input-group">
+                      <span class="input-group-addon"><i class="fa fa-search text-muted"></i></span>
+                      <input type="text" class="form-control input-sm"
+                             ng-model="c.doneeSearch"
+                             placeholder="Search site code, name, zone..."
+                             ng-click="$event.stopPropagation()">
+                      <span class="input-group-btn" ng-if="c.doneeSearch">
+                        <button class="btn btn-default btn-sm" type="button" ng-click="c.doneeSearch = ''">
+                          <i class="fa fa-times text-muted"></i>
+                        </button>
+                      </span>
+                    </div>
+                  </div>
+
+                  <div class="select-options-scroll">
+                    <div class="abg-select-option" ng-repeat="site in c.getFilteredDoneeSites()"
+                         ng-class="{'disabled-option': !site.is_allowed_donee, 'selected-option': c.selected.doneeSite === site.sys_id}"
+                         ng-click="site.is_allowed_donee && c.selectDonee(site)">
+                      <div class="clearfix m-b-xs">
+                        <strong class="pull-left site-code">{{site.customer_code}}</strong>
+                        <span class="pull-left m-l-sm site-name">{{site.name}}</span>
+                        <div class="pull-right">
+                          <span class="badge abg-limit-badge m-r-xs" title="Live Credit Limit">
+                            <i class="fa fa-credit-card m-r-xxs"></i> ₹ {{c.formatINR(site.credit_limit)}}
+                          </span>
+                          <span class="badge badge-danger abg-badge-unauth" ng-if="!site.is_allowed_donee">]]>🚫<![CDATA[ Unauthorized</span>
+                        </div>
+                      </div>
+                      <div class="text-muted site-meta">
+                        <strong class="text-primary">Seg: {{site.segment}}</strong> | Group: {{site.group_code}} | Zone: {{site.zone}} | Reg: {{site.region}}
+                      </div>
+                    </div>
+                    <div class="text-center text-muted p-md" ng-if="c.getFilteredDoneeSites().length === 0">
+                      No customer sites found matching "{{c.doneeSearch}}".
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-xs-12 col-md-4 form-group abg-input-group">
+              <label>Enhancement Amount (₹) <span class="text-danger">*</span></label>
+              <input type="number" class="form-control font-weight-bold text-danger"
+                     ng-model="c.selected.doneeAmount"
+                     ng-model-options="{ debounce: 300 }"
+                     ng-change="c.clearDonor()"
+                     placeholder="e.g. 500000" min="1">
+            </div>
+          </div>
+        </div>
+
+        <!-- STEP 1.2: DONOR -->
+        <div ng-if="c.selected.doneeSite" class="section-spacing-md p-t-md border-top-dashed slide-down">
+          <h4 class="m-b-md text-donor-heading">
+            <i class="fa fa-arrow-circle-up m-r-xs"></i> 2. Select Donor Site (Deducting Limit)
+          </h4>
+
+          <div class="alert alert-info shadow-sm" ng-if="!(c.selected.doneeAmount > 0)">
+            <i class="fa fa-info-circle"></i> Enter the <strong>Enhancement Amount</strong> above to see eligible donor sites.
+          </div>
+
+          <div ng-if="c.selected.doneeAmount > 0">
+
+            <div class="alert alert-warning shadow-sm" ng-if="c.getDonorSites().length === 0">
+              <span class="glyphicon glyphicon-exclamation-sign"></span>
+              <strong>No donor sites available:</strong> This Grandparent Code has no other Key site to take limit from.
+            </div>
+
+            <div class="alert alert-warning shadow-sm" ng-if="c.getDonorSites().length > 0 && c.hasOnlyInsufficientSites()">
+              <span class="glyphicon glyphicon-exclamation-sign"></span>
+              <strong>No eligible donor:</strong> None of the {{c.getDonorSites().length}} other sites under this Grandparent Code has ₹ {{c.formatINR(c.selected.doneeAmount)}} available.
+            </div>
+
+            <!-- ADMIN DIAGNOSTICS -->
+            <div class="diag-box" ng-if="c.data.isAdmin && c.data.debug">
+              <strong>Diagnostics</strong> —
+              sites loaded: {{c.data.debug.total}} |
+              SAP ok: {{c.data.debug.sapOk}} | SAP failed (DB fallback): {{c.data.debug.sapFail}} |
+              zero available: {{c.data.debug.zeroAvailable}} |
+              segments: {{c.data.debug.segments | json}} |
+              fields: {{c.data.debug.fields | json}}
+            </div>
+
+            <div ng-if="c.getDonorSites().length > 0">
+              <div class="row flex-align-center section-spacing-sm">
+                <div class="col-xs-12 col-sm-6 m-b-sm-mobile">
+                  <div class="input-group">
+                    <span class="input-group-addon bg-light"><i class="fa fa-search text-muted"></i></span>
+                    <input type="text" class="form-control" ng-model="c.donorSearch" ng-change="c.donorCurrentPage = 1" placeholder="Search donor site code, group, segment...">
+                  </div>
+                </div>
+                <div class="col-xs-12 col-sm-6 text-right mobile-left text-muted font-weight-bold" style="font-size: 13px;">
+                  <span ng-if="c.getFilteredDonors().length > 0">
+                    Showing {{ (c.donorCurrentPage - 1) * c.donorItemsPerPage + 1 }} to {{ c.getMathMin(c.donorCurrentPage * c.donorItemsPerPage, c.getFilteredDonors().length) }} of {{ c.getFilteredDonors().length }} Total Sites
+                  </span>
+                  <span ng-if="c.getFilteredDonors().length === 0">No matching sites</span>
+                </div>
+              </div>
+
+              <div class="table-responsive widget-table-wrapper shadow-sm section-spacing-sm">
+                <table class="table abg-table table-hover m-b-none">
+                  <thead>
+                    <tr>
+                      <th width="4%" class="text-center">Select</th>
+                      <th width="9%">Site Code</th>
+                      <th width="15%">Site Name</th>
+                      <th width="8%">Group</th>
+                      <th width="9%">Zone</th>
+                      <th width="9%">Region</th>
+                      <th width="7%">Segment</th>
+                      <th width="9%">Swap Type</th>
+                      <th width="10%" class="text-right">Limit</th>
+                      <th width="10%" class="text-right">Outstanding</th>
+                      <th width="10%" class="text-right">Available</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr ng-repeat="site in c.getPaginatedDonors()"
+                        ng-click="c.selectDonor(site)"
+                        ng-class="{'selected-row': c.selected.donorSite === site.sys_id, 'disabled-row': !c.isDonorEligible(site)}"
+                        style="cursor: pointer;">
+                      <td class="text-center vertical-middle">
+                        <input type="radio" name="donorSelection"
+                               ng-checked="c.selected.donorSite === site.sys_id"
+                               ng-disabled="!c.isDonorEligible(site)"
+                               ng-click="$event.stopPropagation(); c.selectDonor(site)">
+                      </td>
+                      <td class="vertical-middle"><strong class="text-dark">{{site.customer_code}}</strong></td>
+                      <td class="vertical-middle">{{site.name}}</td>
+                      <td class="vertical-middle">{{site.group_code}}</td>
+                      <td class="vertical-middle">{{site.zone}}</td>
+                      <td class="vertical-middle">{{site.region}}</td>
+                      <td class="vertical-middle"><span class="badge bg-dark-gray">{{site.segment}}</span></td>
+                      <td class="vertical-middle"><span class="swap-type-badge">{{c.swapTypeFor(c.selected.doneeObj, site)}}</span></td>
+                      <td class="vertical-middle text-right font-weight-bold">₹ {{c.formatINR(site.credit_limit)}}</td>
+                      <td class="vertical-middle text-right text-danger font-weight-bold">₹ {{c.formatINR(site.outstanding)}}</td>
+                      <td class="vertical-middle text-right font-weight-bold">
+                        <strong ng-class="site.available >= c.selected.doneeAmount ? 'text-success' : 'text-danger'">
+                          ₹ {{c.formatINR(site.available)}}
+                        </strong>
+                      </td>
+                    </tr>
+                    <tr ng-if="c.getPaginatedDonors().length === 0">
+                      <td colspan="11" class="text-center text-muted p-md">No donor sites match your search criteria.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="row flex-align-center section-spacing-sm">
+                <div class="col-xs-12 col-sm-6 m-b-sm-mobile">
+                  <div class="input-group page-size-box">
+                    <span class="input-group-addon bg-light">Show</span>
+                    <select class="form-control" ng-model="c.donorItemsPerPage" ng-change="c.donorCurrentPage = 1" ng-options="size for size in [5, 25, 50, 100]"></select>
+                  </div>
+                </div>
+                <div class="col-xs-12 col-sm-6 text-right mobile-left text-center-mobile m-t-sm-mobile">
+                  <button class="btn btn-default btn-sm" ng-click="c.donorCurrentPage = c.donorCurrentPage - 1" ng-disabled="c.donorCurrentPage == 1">
+                    <i class="fa fa-chevron-left"></i> Prev
+                  </button>
+                  <span class="m-l-sm m-r-sm font-weight-bold" style="font-size: 13px;">Page {{c.donorCurrentPage}} / {{c.totalDonorPages()}}</span>
+                  <button class="btn btn-default btn-sm" ng-click="c.donorCurrentPage = c.donorCurrentPage + 1" ng-disabled="c.donorCurrentPage >= c.totalDonorPages()">
+                    Next <i class="fa fa-chevron-right"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="text-right section-spacing-md border-top p-t-md">
+          <button class="btn btn-default m-r-sm font-weight-bold" ng-click="c.resetForm()">Reset Form</button>
+          <button class="btn abg-btn-primary" ng-disabled="!c.isStep1Valid()" ng-click="c.goToReview()">
+            Proceed to Request Review
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- =======================================================
+         STEP 2: REVIEW & SUBMIT
+         ======================================================= -->
+    <div class="slide-down p-md" ng-if="c.data.currentStep == 2">
+      <div class="abg-header section-spacing-sm">
+        <button class="btn btn-link text-muted p-l-0 m-b-sm hover-red font-weight-bold" ng-click="c.data.currentStep = 1">
+          ← Back to Site Selection
+        </button>
+        <h2 class="m-t-xs">Review &amp; Submit Key Limit Swap</h2>
+        <p class="m-b-none text-muted">Please confirm the reallocation details before submitting the request.</p>
+      </div>
+
+      <div class="panel panel-default shadow-sm section-spacing-md abg-border-top-red">
+        <div class="panel-body p-md">
+          <h4 class="abg-text-red m-t-none m-b-md font-weight-bold">
+            <i class="fa fa-exchange m-r-xs"></i> Reallocation Summary
+          </h4>
+
+          <div class="row m-b-sm flex-align-center">
+            <div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label">Grandparent Code</div>
+            <div class="col-xs-8"><strong>{{c.selected.gpCode}}</strong></div>
+          </div>
+          <hr class="m-t-xs m-b-xs">
+          <div class="row m-b-sm flex-align-center">
+            <div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label">Group Code</div>
+            <div class="col-xs-8"><strong>{{c.selected.groupCode}}</strong></div>
+          </div>
+          <hr class="m-t-xs m-b-xs">
+          <div class="row m-b-sm flex-align-center">
+            <div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label">Donee Site (Receiving)</div>
+            <div class="col-xs-8">
+              <strong class="text-primary">{{c.selected.doneeSiteName}}</strong>
+              <div class="text-muted small">Limit ₹ {{c.formatINR(c.selected.doneeObj.credit_limit)}} → <strong class="text-success">₹ {{c.formatINR(c.selected.doneeObj.credit_limit + c.selected.doneeAmount)}}</strong></div>
+            </div>
+          </div>
+          <hr class="m-t-xs m-b-xs">
+          <div class="row m-b-sm flex-align-center">
+            <div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label">Amount Requested</div>
+            <div class="col-xs-8"><strong class="text-danger amount-display font-weight-bold">₹ {{c.formatINR(c.selected.doneeAmount)}}</strong></div>
+          </div>
+          <hr class="m-t-xs m-b-xs">
+          <div class="row m-b-sm flex-align-center">
+            <div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label">Donor Site (Deducting)</div>
+            <div class="col-xs-8">
+              <strong>{{c.selected.donorSiteName}}</strong>
+              <div class="text-muted small">Limit ₹ {{c.formatINR(c.selected.donorObj.credit_limit)}} → <strong class="text-danger">₹ {{c.formatINR(c.selected.donorObj.credit_limit - c.selected.doneeAmount)}}</strong></div>
+            </div>
+          </div>
+          <hr class="m-t-xs m-b-xs">
+          <div class="row m-b-sm flex-align-center">
+            <div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label">Donor Available Limit</div>
+            <div class="col-xs-8"><strong class="text-success font-weight-bold">₹ {{c.formatINR(c.selected.donorAvailable)}}</strong></div>
+          </div>
+          <hr class="m-t-xs m-b-xs">
+          <div class="row flex-align-center">
+            <div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label">Swap Type &amp; Approval Path</div>
+            <div class="col-xs-8">
+              <span class="swap-type-badge m-r-sm">{{c.getPreviewType()}}</span>
+              <div class="abg-chain m-t-sm">
+                <span ng-repeat="step in c.getPreviewChain() track by $index">
+                  <span class="chain-step">{{step}}</span><span class="chain-arrow" ng-if="!$last">→</span>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-group abg-input-group section-spacing-sm">
+        <label>Business Comments <span class="text-danger">*</span></label>
+        <textarea class="form-control" rows="3" ng-model="c.selected.comments" placeholder="State justification for this swap request..."></textarea>
+      </div>
+
+      <div class="text-right section-spacing-md border-top p-t-md">
+        <span class="text-muted m-r-md display-block-mobile m-b-sm-mobile" ng-if="c.data.isSubmitting">
+          <i class="fa fa-spinner fa-spin"></i> Processing Request &amp; Logging Activity Trail...
+        </span>
+        <button class="btn btn-default m-r-sm m-b-sm-mobile w-100-mobile font-weight-bold" ng-click="c.data.currentStep = 1" ng-disabled="c.data.isSubmitting">Back</button>
+        <button class="btn abg-btn-primary m-b-sm-mobile w-100-mobile" ng-click="c.submitSwap()" ng-disabled="c.data.isSubmitting || !c.selected.comments.trim()">
+          Confirm &amp; Submit Request
+        </button>
+      </div>
+    </div>
+
+    <!-- =======================================================
+         STEP 3: SUCCESS
+         ======================================================= -->
+    <div class="slide-down text-center p-xl section-spacing-md" ng-if="c.data.currentStep == 3">
+      <div class="success-icon m-b-md">✓</div>
+      <h2 class="m-t-none m-b-sm">Swap Request Submitted Successfully!</h2>
+      <p class="text-muted m-b-lg">
+        Your Key limit swap request <strong>{{c.data.swapNumber}}</strong> has been created and routed through the escalation workflow.
+      </p>
+      <div class="section-spacing-md">
+        <button class="btn abg-btn-outline m-r-sm m-b-sm-mobile w-100-mobile" ng-click="c.resetForm()">
+          <i class="fa fa-refresh m-r-xs"></i> Raise Another Swap
+        </button>
+        <button class="btn abg-btn-outline m-r-sm m-b-sm-mobile w-100-mobile" ng-click="c.goToDashboard()">
+          <i class="fa fa-list-alt m-r-xs"></i> Back to Dashboard
+        </button>
+      </div>
+    </div>
+
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>07f2b8af97845350be31fa17f053afc4</id>
+        <sys_created_by>gayatri.bhandge@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-26 10:04:57</sys_created_on>
+        <sys_id>8bf2b8af97845350be31fa17f053afca</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-26 10:04:57</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

@@ -1,0 +1,2862 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, spUtil, $location, $timeout, $filter) {
+    var c = this;
+
+    // View States
+    c.data.selectedSwap = null;
+    c.data.swapDetails = null;
+    c.data.isLoadingDetails = false;
+    c.data.ticketWidget = null;
+    c.data.isLoadingWidget = false;
+    c.showConversationStream = true;
+
+    // Filter & Pagination
+    c.searchSwap = '';
+    c.listFilter = 'pending'; // Default tab: Open / Pending
+    c.currentPage = 1;
+    c.itemsPerPage = 10;
+    c.pendingCount = 0;
+    c.historyCount = 0;
+
+    // @Mention System State
+    c.newComment = '';
+    c.isPostingComment = false;
+    c.showMentionDropdown = false;
+    c.userSuggestions = [];
+    c.mentionedUsers = [];
+
+    // File Upload State
+    c.commentFileName = '';
+    c.commentFileType = '';
+    c.commentFileData = null;
+    c.isUploadingFile = false;
+
+    // INR Currency Formatter
+    c.formatINR = function(val) {
+        if (val === undefined || val === null || val === '') return '0.00';
+        var num = parseFloat(val);
+        if (isNaN(num)) return '0.00';
+        return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+
+    c.updateCounts = function() {
+        var arr = c.data.list || [];
+        c.pendingCount = arr.filter(function(b) { 
+            return b.internalState === 'pending' || b.internalState === 'work'; 
+        }).length;
+        c.historyCount = arr.filter(function(b) { 
+            return b.internalState === 'approved' || b.internalState === 'rejected' || b.internalState === 'cancelled'; 
+        }).length;
+    };
+
+    c.setFilter = function(filterType) {
+        c.listFilter = filterType;
+        c.currentPage = 1;
+    };
+
+    // Filter Logic: Pending shows Open items only; History shows Approved/Closed
+    c.getFilteredSwaps = function() {
+        var arr = c.data.list || [];
+        if (c.listFilter === 'pending') {
+            arr = arr.filter(function(b) { 
+                return b.internalState === 'pending' || b.internalState === 'work'; 
+            });
+        } else if (c.listFilter === 'completed') {
+            arr = arr.filter(function(b) { 
+                return b.internalState === 'approved' || b.internalState === 'rejected' || b.internalState === 'cancelled'; 
+            });
+        }
+        
+        if (c.searchSwap) {
+            var s = c.searchSwap.toLowerCase();
+            arr = arr.filter(function(b) {
+                return (b.number && b.number.toLowerCase().indexOf(s) > -1) ||
+                       (b.pan && b.pan.toLowerCase().indexOf(s) > -1) ||
+                       (b.donee_name && b.donee_name.toLowerCase().indexOf(s) > -1) ||
+                       (b.donor_name && b.donor_name.toLowerCase().indexOf(s) > -1) ||
+                       (b.requested_by && b.requested_by.toLowerCase().indexOf(s) > -1);
+            });
+        }
+        return arr;
+    };
+
+    c.getPaginatedSwaps = function() {
+        var filtered = c.getFilteredSwaps();
+        var startIndex = (c.currentPage - 1) * c.itemsPerPage;
+        return filtered.slice(startIndex, startIndex + c.itemsPerPage);
+    };
+
+    c.totalPages = function() {
+        return Math.ceil(c.getFilteredSwaps().length / c.itemsPerPage) || 1;
+    };
+
+    c.getMathMin = function(a, b) {
+        return Math.min(a, b);
+    };
+
+    // Load Watched Requests
+    c.fetchWatchedList = function() {
+        c.data.isFetchingSwaps = true;
+        c.server.get({ action: 'fetch_watched_swaps' }).then(function(r) {
+            c.data.isFetchingSwaps = false;
+            c.data.list = (r.data && r.data.list) ? r.data.list : [];
+            c.updateCounts();
+
+            var reqNum = $location.search().number;
+            if (reqNum && !c.data.selectedSwap) {
+                var target = c.data.list.find(function(s) { return s.number === reqNum; });
+                if (target) c.viewDetails(target);
+            }
+        });
+    };
+
+    // View Details Definition
+    c.viewDetails = function(swap) {
+        if (!swap) return;
+
+        c.data.selectedSwap = swap;
+        c.data.isLoadingDetails = true;
+        c.data.isLoadingWidget = true;
+        c.showConversationStream = true;
+        c.newComment = '';
+        c.mentionedUsers = [];
+        c.removeCommentFile();
+
+        $location.search('number', swap.number);
+
+        c.server.get({
+            action: 'get_swap_details',
+            swapSysId: swap.sys_id
+        }).then(function(res) {
+            c.data.swapDetails = {
+                approvals: (res.data && res.data.approvalData) ? res.data.approvalData : [],
+                extended: (res.data && res.data.extendedDetails) ? res.data.extendedDetails : {},
+                justification: (res.data && res.data.justification) ? res.data.justification : '',
+                description: (res.data && res.data.description) ? res.data.description : '',
+                attachments: (res.data && res.data.attachments) ? res.data.attachments : []
+            };
+            c.data.ticketWidget = res.data.ticketWidgetObj;
+            c.data.isLoadingDetails = false;
+            c.data.isLoadingWidget = false;
+        });
+    };
+
+    // User Mention Key Listener
+    c.handleCommentKeyUp = function(e) {
+        var text = c.newComment || '';
+        var cursorPos = e.target.selectionStart;
+        var textBeforeCursor = text.substring(0, cursorPos);
+        var atIndex = textBeforeCursor.lastIndexOf('@');
+
+        if (atIndex !== -1 && atIndex === textBeforeCursor.length - 1) {
+            c.showMentionDropdown = true;
+            c.queryUsers('');
+        } else if (atIndex !== -1 && atIndex < textBeforeCursor.length) {
+            var query = textBeforeCursor.substring(atIndex + 1);
+            if (!/\s/.test(query)) {
+                c.showMentionDropdown = true;
+                c.queryUsers(query);
+            } else {
+                c.showMentionDropdown = false;
+            }
+        } else {
+            c.showMentionDropdown = false;
+        }
+    };
+
+    c.queryUsers = function(q) {
+        c.server.get({ action: 'search_mention_users', query: q }).then(function(res) {
+            c.userSuggestions = res.data.mentionUsers || [];
+        });
+    };
+
+    c.selectMentionUser = function(user) {
+        var text = c.newComment || '';
+        var atIndex = text.lastIndexOf('@');
+        var userIdentifier = (user.email || user.name || '').trim();
+        var mentionFormattedTag = '@[' + userIdentifier + ']' + user.name + ' ';
+
+        if (atIndex !== -1) {
+            c.newComment = text.substring(0, atIndex) + mentionFormattedTag;
+        } else {
+            c.newComment += mentionFormattedTag;
+        }
+
+        if (!c.mentionedUsers.some(function(u) { return u.sys_id === user.sys_id; })) {
+            c.mentionedUsers.push(user);
+        }
+
+        c.showMentionDropdown = false;
+        $timeout(function() {
+            var el = document.getElementById('swapActivityInput');
+            if (el) el.focus();
+        });
+    };
+
+    // Direct Supporting Document Upload
+    c.uploadDirectAttachment = function(element) {
+        var file = element.files[0];
+        if (!file) return;
+
+        if (file.size > 5 * 1024 * 1024) {
+            spUtil.addErrorMessage("File size exceeds 5MB limit.");
+            element.value = '';
+            return;
+        }
+
+        c.isUploadingFile = true;
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            var base64Data = e.target.result.split(',')[1];
+            c.server.get({
+                action: 'upload_document',
+                swapSysId: c.data.selectedSwap.sys_id,
+                fileName: file.name,
+                fileType: file.type,
+                fileData: base64Data
+            }).then(function(res) {
+                c.isUploadingFile = false;
+                element.value = '';
+                spUtil.addInfoMessage("Document uploaded successfully.");
+                c.data.swapDetails.attachments = res.data.attachments || [];
+            }).catch(function() {
+                c.isUploadingFile = false;
+                element.value = '';
+                spUtil.addErrorMessage("Failed to upload document.");
+            });
+        };
+        reader.readAsDataURL(file);
+    };
+
+    // Inline Comment File Attachment
+    c.handleCommentFileUpload = function(element) {
+        var file = element.files[0];
+        if (!file) return;
+
+        if (file.size > 5 * 1024 * 1024) {
+            spUtil.addErrorMessage("File size exceeds 5MB limit.");
+            element.value = '';
+            return;
+        }
+
+        c.commentFileName = file.name;
+        c.commentFileType = file.type;
+
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            $timeout(function() {
+                c.commentFileData = e.target.result.split(',')[1];
+            });
+        };
+        reader.readAsDataURL(file);
+    };
+
+    c.removeCommentFile = function() {
+        c.commentFileName = '';
+        c.commentFileType = '';
+        c.commentFileData = null;
+        var el = document.getElementById('commentFileUpload');
+        if (el) el.value = '';
+    };
+
+    // Submit Collaborator Input
+    c.postCommentWithMentions = function() {
+        if (!c.newComment.trim() && !c.commentFileData) return;
+
+        c.isPostingComment = true;
+        c.server.get({
+            action: 'post_rfi_comment',
+            swapSysId: c.data.selectedSwap.sys_id,
+            commentText: c.newComment,
+            mentionedUserIds: c.mentionedUsers.map(function(u) { return u.sys_id; }),
+            commentFileName: c.commentFileName,
+            commentFileType: c.commentFileType,
+            commentFileData: c.commentFileData
+        }).then(function(res) {
+            c.isPostingComment = false;
+            c.newComment = '';
+            c.mentionedUsers = [];
+            c.removeCommentFile();
+            spUtil.addInfoMessage("Your input has been recorded in the activity stream.");
+
+            if (res.data.attachments) {
+                c.data.swapDetails.attachments = res.data.attachments;
+            }
+
+            c.showConversationStream = false;
+            c.data.ticketWidget = res.data.ticketWidgetObj;
+            $timeout(function() {
+                c.showConversationStream = true;
+            }, 50);
+        }).catch(function() {
+            c.isPostingComment = false;
+            spUtil.addErrorMessage("Failed to record entry.");
+        });
+    };
+
+    c.goBack = function() {
+        c.data.selectedSwap = null;
+        c.data.swapDetails = null;
+        c.data.ticketWidget = null;
+        c.newComment = '';
+        c.mentionedUsers = [];
+        c.removeCommentFile();
+        $location.search('number', null);
+    };
+
+    c.$onInit = function() {
+        c.fetchWatchedList();
+    };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>$abg-red: #C8102E;
+$abg-red-hover: #A00D25;
+$abg-red-light: #FCE8EA;
+$text-main: #2D3748;
+$text-muted: #718096;
+$border-light: #E2E8F0;
+
+.abg-widget-container {
+  background-color: #FFFFFF;
+  padding: 24px;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
+  font-family: 'Oxygen', Arial, sans-serif;
+  color: $text-main;
+}
+
+/* Distinct Vertical Margins */
+.section-spacing-sm { margin-top: 12px; margin-bottom: 20px; }
+.section-spacing-md { margin-top: 24px; margin-bottom: 28px; }
+
+.m-t-xxs { margin-top: 2px; }
+.gap-10 { gap: 10px; }
+.font-14 { font-size: 14px; }
+.d-flex { display: flex; }
+.justify-content-between { justify-content: space-between; }
+.align-items-center { align-items: center; }
+.border-top { border-top: 1px solid $border-light; }
+
+.m-b-none { margin-bottom: 0 !important; }
+.m-b-xs { margin-bottom: 6px !important; }
+.m-b-sm { margin-bottom: 10px !important; }
+.m-b-md { margin-bottom: 20px !important; }
+.m-b-lg { margin-bottom: 28px !important; }
+.m-t-none { margin-top: 0 !important; }
+.m-t-xs { margin-top: 6px !important; }
+.m-t-sm { margin-top: 10px !important; }
+.m-t-md { margin-top: 20px !important; }
+.m-l-xs { margin-left: 6px !important; }
+.m-l-sm { margin-left: 10px !important; }
+.m-r-xs { margin-right: 5px !important; }
+.m-r-sm { margin-right: 10px !important; }
+.p-n { padding: 0 !important; }
+.p-sm { padding: 14px !important; }
+.p-md { padding: 18px !important; }
+.p-xl { padding: 40px !important; }
+.p-l-0 { padding-left: 0 !important; }
+
+.font-weight-bold { font-weight: 700 !important; }
+.vertical-middle { vertical-align: middle !important; }
+.text-muted { color: $text-muted !important; }
+.text-success { color: #2E7D32 !important; }
+.text-danger { color: $abg-red !important; }
+.abg-text-red { color: $abg-red !important; }
+.text-xs { font-size: 11.5px !important; letter-spacing: 0.3px; }
+.display-block { display: block; }
+
+/* Dashboard PAN Styling */
+.corporate-pan-clean {
+  font-size: 13px;
+  font-weight: 700;
+  color: #C8102E;
+  display: inline-flex;
+  align-items: center;
+}
+.corporate-pan-clean i { color: #888; margin-right: 5px; }
+
+/* Header Tags &amp; Badges */
+.corporate-display-name {
+  font-size: 20px;
+  font-weight: 700;
+  color: #1A202C;
+  line-height: 1.3;
+}
+.pan-prominent-badge {
+  background-color: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #333333;
+}
+.request-number-pill {
+  background-color: #E2E8F0;
+  color: #475569;
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.abg-header h2 { color: #333333; font-weight: 700; margin-top: 0; margin-bottom: 8px; font-size: 24px; }
+.hover-red:hover { color: $abg-red !important; text-decoration: none; }
+.section-title { font-size: 12px; color: #4A5568; letter-spacing: 0.8px; margin-bottom: 14px; font-weight: 700; }
+.remarks-content { white-space: pre-wrap; font-family: inherit; font-size: 13px; line-height: 1.6; color: #2D3748; }
+
+.segment-badge { background-color: #4A5568; padding: 2px 7px; font-size: 10.5px; border-radius: 3px; display: inline-block; margin-top: 4px; color: #FFFFFF; }
+.abg-bg-gray-dark { background-color: #4A5568 !important; color: #FFFFFF !important; font-size: 11px; padding: 3px 8px; border-radius: 4px; }
+.admin-badge { font-size: 11.5px; background-color: #2B6CB0; vertical-align: middle; margin-left: 8px; font-weight: 600; }
+
+.flex-align-center { display: flex; flex-wrap: wrap; align-items: center; }
+.flex-cards { display: flex; flex-wrap: wrap; margin-left: -12px; margin-right: -12px; }
+.flex-cards &gt; div { display: flex; flex-direction: column; margin-bottom: 24px; padding-left: 12px; padding-right: 12px; }
+
+.header-actions-panel { display: flex; justify-content: flex-end; align-items: center; gap: 15px; flex-wrap: wrap; }
+.header-actions-panel .abg-pills { margin: 0; padding: 0; display: flex; }
+.header-actions-panel .search-box { width: 250px; margin: 0; }
+.abg-pills &gt; li &gt; a { border-radius: 20px; color: #666666; font-weight: 600; padding: 6px 16px; margin-left: 5px; border: 1px solid transparent; }
+.abg-pills &gt; li &gt; a:hover { background-color: #F0F0F0; }
+.abg-pills &gt; li.active &gt; a { background-color: $abg-red !important; color: #FFFFFF !important; box-shadow: 0 2px 4px rgba(200,16,46,0.3); }
+
+/* Buttons */
+.abg-btn-outline { background: transparent; border: 1px solid $abg-red; color: $abg-red; font-weight: 600; border-radius: 4px; padding: 6px 14px; white-space: nowrap; transition: all 0.2s; }
+.abg-btn-outline:hover:not([disabled]) { background: $abg-red; color: #FFFFFF; }
+.abg-btn-primary { background-color: $abg-red; border-color: $abg-red; color: #FFFFFF; font-weight: 600; border-radius: 4px; padding: 7px 18px; border: none; }
+.abg-btn-primary:hover:not([disabled]) { background-color: $abg-red-hover; color: #FFFFFF; }
+.abg-btn-primary[disabled] { background-color: #E0E0E0; color: #9E9E9E; cursor: not-allowed; }
+
+/* Status Badges */
+.status-pill { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; display: inline-block; white-space: nowrap; text-transform: uppercase; }
+.status-pending { background-color: #FEF3C7; color: #856404; border: 1px solid #FFEEDB; }
+.status-approved { background-color: #D1FAE5; color: #155724; border: 1px solid #C3E6CB; }
+.status-rejected { background-color: #FEE2E2; color: #721C24; border: 1px solid #F5C6CB; }
+.status-cancelled { background-color: #F3F4F6; color: #383D41; border: 1px solid #D6D8DB; }
+.status-work { background-color: #DBEAFE; color: #004085; border: 1px solid #B8DAFF; }
+
+/* Attachments */
+.attachment-tags-container { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.attachment-chip { background: #F1F5F9; border: 1px solid #CBD5E1; padding: 4px 10px; border-radius: 16px; font-size: 12px; display: inline-flex; align-items: center; }
+.attachment-chip a { color: #1E293B; text-decoration: none; }
+.attachment-chip a:hover { text-decoration: underline; color: #1782C5; }
+
+/* Grids &amp; Tables */
+.widget-table-wrapper { border: 1px solid #EAEAEA; border-radius: 6px; overflow-x: auto; background: #FFFFFF; }
+.abg-table thead th { background-color: #F8F9FA; color: #333333; font-weight: 600; border-bottom: 2px solid #DDDDDD; text-transform: uppercase; font-size: 11px; vertical-align: middle; padding: 13px 12px; }
+.abg-table tbody tr:hover { background-color: #FFF8F8 !important; }
+
+/* Profiles &amp; Aging */
+.abg-profile-panel { background: #FFFFFF; border: 1px solid $border-light; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.02); width: 100%; display: flex; flex-direction: column; }
+.border-top-success { border-top: 4px solid #2E7D32; }
+.border-top-danger { border-top: 4px solid $abg-red; }
+.panel-profile-header { padding: 15px 20px; border-bottom: 1px solid #EDF2F7; background: #FCFDFD; }
+.panel-profile-header .indicator-marker { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; margin-bottom: 4px; }
+.panel-profile-header h3 { margin: 0; font-size: 16.5px; font-weight: 700; color: #1A202C; }
+
+.abg-profile-table tbody tr td, .abg-profile-table tbody tr th { padding: 9px 18px !important; border-top: 1px solid #F0F4F8; font-size: 13px; }
+.highlight-row-success { background-color: #F4FBF6; }
+.highlight-row-danger { background-color: #FFF5F5; }
+.highlight-total-success { background-color: #E6F4EA; border-top: 1px dashed #2E7D32 !important; }
+.highlight-total-danger { background-color: #FCE8EA; border-top: 1px dashed $abg-red !important; }
+
+.aging-table-wrapper { background: #FFFFFF; border-radius: 4px; border: 1px solid $border-light; padding: 2px; }
+.abg-history-table { width: 100%; margin-bottom: 0; }
+.abg-history-table th { background-color: #F8FAFC; color: #4A5568; font-size: 11px; font-weight: 700; text-transform: uppercase; padding: 9px 8px !important; border: 1px solid #E2E8F0; }
+.abg-history-table td { padding: 8px 8px !important; font-size: 12.5px; border: 1px solid #E2E8F0; white-space: nowrap; color: #2D3748; }
+.cell-warning { color: #C05621 !important; font-weight: 700; background-color: #FFFAF0; }
+.cell-danger { color: #C53030 !important; font-weight: 700; background-color: #FFF5F5; }
+.cell-toxic { color: #9B1C1C !important; font-weight: 700; background-color: #FDF2F2; }
+.cell-total { background-color: #F8FAFC !important; color: #1A202C !important; }
+
+/* Approval Stepper */
+.approval-stepper-wrapper { background: #FDFDFD; border: 1px solid #E2E8F0; border-radius: 6px; padding: 18px 20px; }
+.approval-stepper { display: flex; align-items: flex-start; position: relative; overflow-x: auto; padding-top: 15px; padding-bottom: 10px; width: 100%; }
+.approval-stepper::before { content: ''; position: absolute; top: 29px; left: 4%; right: 4%; height: 2px; background: #E2E8F0; z-index: 1; }
+.stepper-item { flex: 1; min-width: 140px; text-align: center; position: relative; z-index: 2; padding: 0 8px; }
+.stepper-icon {
+  width: 30px; height: 30px; border-radius: 50%; background: #FFFFFF; border: 2px solid #CBD5E1;
+  margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; color: #94A3B8;
+}
+.stepper-item.completed .stepper-icon { background: #22C55E; border-color: #22C55E; color: #FFFFFF; }
+.stepper-item.current .stepper-icon { background: #FFFFFF; border-color: #EAB308; color: #EAB308; box-shadow: 0 0 0 4px rgba(234, 179, 8, 0.2); }
+.stepper-item.rejected .stepper-icon { background: #EF4444; border-color: #EF4444; color: #FFFFFF; }
+.stepper-label { font-size: 12px; font-weight: 700; color: #1E293B; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stepper-role { font-size: 10px; text-transform: uppercase; color: #64748B; margin-bottom: 2px; }
+.stepper-sub { font-size: 10px; font-weight: 700; text-transform: uppercase; }
+
+/* Activity Stream &amp; Ticket Panel */
+.ticket-panel { border: 1px solid $abg-red; border-radius: 6px; overflow: hidden; }
+.ticket-panel .panel-heading { background-color: #FCE8EA; border-bottom: 1px solid #F9CCD1; padding: 12px 15px; }
+.ticket-body { min-height: 280px; background-color: #FFFFFF; padding: 15px; }
+.sn-activity-composer { background: #FDFDFD; border: 1px solid #E2E8F0; border-radius: 6px; padding: 14px; }
+.sn-journal-input { resize: vertical; font-size: 13px; border-radius: 4px; }
+.mention-input-wrapper { position: relative; width: 100%; }
+.mention-dropdown {
+  position: absolute; top: 100%; left: 0; z-index: 1060; width: 100%; max-height: 180px;
+  overflow-y: auto; background: #FFFFFF; border: 1px solid #CED4DA; border-radius: 0 0 4px 4px;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.12); list-style: none; margin: 0; padding: 0;
+}
+.mention-dropdown li { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #F1F1F1; }
+.mention-dropdown li:hover { background-color: #FCE8EA; }
+.mention-user-item { font-size: 12px; color: #333333; }
+
+/* Suppress Duplicate Composer Controls from Native ServiceNow Conversation Widget */
+.native-sn-stream-wrapper .panel-heading,
+.native-sn-stream-wrapper .panel-footer,
+.native-sn-stream-wrapper .timeline-input-container,
+.native-sn-stream-wrapper .ticket-conversation-composer,
+.native-sn-stream-wrapper form[name="ticket_conversation_form"],
+.native-sn-stream-wrapper .post-btn,
+.native-sn-stream-wrapper .btn-file-upload,
+.native-sn-stream-wrapper input[type="file"],
+.native-sn-stream-wrapper [ng-if*="canWrite"],
+.native-sn-stream-wrapper .input-group {
+  display: none !important;
+}
+.native-sn-stream-wrapper .panel { border: none !important; box-shadow: none !important; background: transparent !important; }
+
+.slide-down { animation: slideDownFade 0.25s ease-out; }
+@keyframes slideDownFade { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.page-size-box { width: 110px; }
+.page-size-box .form-control { height: 32px; font-size: 12px; }
+
+@media (max-width: 991px) {
+  .header-actions-panel { flex-direction: column; align-items: stretch; margin-top: 15px; }
+  .header-actions-panel .abg-pills, .header-actions-panel .search-box { width: 100%; }
+}
+@media (max-width: 767px) {
+  .abg-widget-container { padding: 12px; }
+  .mobile-left { text-align: left !important; }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>false</has_preview>
+        <id>uclm_limit_swap_rfi</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Limit Swap RFI</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    var CONFIG = {
+        TABLES: {
+            SWAP_REQUEST: 'x_birl3_clm_nt_limit_swap_request',
+            CUSTOMER: 'x_birl3_clm_clm_customer_master1',
+            OUTSTANDING_SNAPSHOT: 'x_birl3_clm_clm_aging_snapshot',
+            APPROVER: 'sysapproval_approver'
+        }
+    };
+
+    var userId = gs.getUserID();
+    var userName = gs.getUserName();
+    var isAdmin = gs.hasRole('x_birl3_clm.admin') || gs.hasRole('admin');
+    data.isAdmin = isAdmin;
+
+    function getInternalState(stateStr) {
+        var s = (stateStr || '').toLowerCase();
+        if (s.indexOf('pending') > -1 || s.indexOf('requested') > -1) return 'pending';
+        if (s.indexOf('approved') > -1 || s.indexOf('complete') > -1 || s.indexOf('3') > -1) return 'approved';
+        if (s.indexOf('reject') > -1 || s.indexOf('cancel') > -1 || s.indexOf('4') > -1) return 'rejected';
+        return 'work';
+    }
+
+    function formatGeo(code, name) {
+        if (code && name) return code + ' - ' + name;
+        if (code) return code;
+        if (name) return name;
+        return 'N/A';
+    }
+
+    function formatBytes(bytes) {
+        var b = parseInt(bytes, 10);
+        if (isNaN(b) || b <= 0) return '0 B';
+        var k = 1024;
+        var sizes = ['B', 'KB', 'MB', 'GB'];
+        var i = Math.floor(Math.log(b) / Math.log(k));
+        return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    }
+
+    function getApproverRole(appGr) {
+        if (appGr.isValidField('approval_reason') && appGr.getValue('approval_reason')) {
+            return appGr.getValue('approval_reason');
+        }
+        if (appGr.isValidField('u_role') && appGr.getValue('u_role')) {
+            return appGr.getValue('u_role');
+        }
+        if (appGr.isValidField('u_approval_level') && appGr.getValue('u_approval_level')) {
+            return appGr.getValue('u_approval_level');
+        }
+        return 'Approver';
+    }
+
+    function getAttachmentsForRecord(recordSysId) {
+        var attList = [];
+        var attGr = new GlideRecord('sys_attachment');
+        attGr.addQuery('table_name', CONFIG.TABLES.SWAP_REQUEST);
+        attGr.addQuery('table_sys_id', recordSysId);
+        attGr.orderByDesc('sys_created_on');
+        attGr.query();
+        while (attGr.next()) {
+            var fName = attGr.getValue('file_name') || '';
+            var ext = fName.split('.').pop().toLowerCase();
+            attList.push({
+                sys_id: attGr.getUniqueValue(),
+                name: fName,
+                size: formatBytes(attGr.getValue('size_bytes')),
+                ext: ext,
+                url: '/sys_attachment.do?sys_id=' + attGr.getUniqueValue()
+            });
+        }
+        return attList;
+    }
+
+    // =========================================================================
+    // 1. DIRECT ATTACHMENT UPLOAD
+    // =========================================================================
+    if (input && input.action == 'upload_document') {
+        var targetSwapRec = new GlideRecord(CONFIG.TABLES.SWAP_REQUEST);
+        if (targetSwapRec.get(input.swapSysId)) {
+            if (input.fileData && input.fileName && input.fileType) {
+                new GlideSysAttachment().writeBase64(targetSwapRec, input.fileName, input.fileType, input.fileData);
+            }
+        }
+        data.attachments = getAttachmentsForRecord(input.swapSysId);
+        return;
+    }
+
+    // =========================================================================
+    // 2. SEARCH USERS FOR @MENTION POPUP
+    // =========================================================================
+    if (input && input.action == 'search_mention_users') {
+        data.mentionUsers = [];
+        var uGr = new GlideRecord('sys_user');
+        uGr.addActiveQuery();
+        if (input.query) {
+            var q = (input.query || '').trim();
+            var qc = uGr.addQuery('name', 'CONTAINS', q);
+            qc.addOrCondition('first_name', 'CONTAINS', q);
+            qc.addOrCondition('last_name', 'CONTAINS', q);
+            qc.addOrCondition('email', 'CONTAINS', q);
+        }
+        uGr.orderBy('name');
+        uGr.setLimit(8);
+        uGr.query();
+        while (uGr.next()) {
+            data.mentionUsers.push({
+                sys_id: uGr.getUniqueValue(),
+                name: uGr.getValue('name') || '',
+                email: uGr.getValue('email') || ''
+            });
+        }
+        return;
+    }
+
+    // =========================================================================
+    // 3. POST COLLABORATIVE COMMENT (EVENT TRIGGER + AUTO WATCH_LIST SYNC)
+    // =========================================================================
+    if (input && input.action == 'post_rfi_comment') {
+        var targetRecord = new GlideRecord(CONFIG.TABLES.SWAP_REQUEST);
+        if (targetRecord.get(input.swapSysId)) {
+            var rawComment = (input.commentText || '').trim();
+
+            if (rawComment) {
+                targetRecord.comments = rawComment;
+            }
+
+            if (input.commentFileData && input.commentFileName && input.commentFileType) {
+                new GlideSysAttachment().writeBase64(targetRecord, input.commentFileName, input.commentFileType, input.commentFileData);
+            }
+
+            var targetUsers = input.mentionedUserIds || [];
+
+            // Extract any raw @[email] patterns
+            var mentionRegex = /@\[(.*?)\]/g;
+            var match;
+            while ((match = mentionRegex.exec(rawComment)) !== null) {
+                var extractedEmail = match[1];
+                if (extractedEmail) {
+                    var uCheck = new GlideRecord('sys_user');
+                    uCheck.addQuery('email', extractedEmail);
+                    uCheck.setLimit(1);
+                    uCheck.query();
+                    if (uCheck.next()) {
+                        var uSysId = uCheck.getUniqueValue();
+                        if (targetUsers.indexOf(uSysId) === -1) {
+                            targetUsers.push(uSysId);
+                        }
+                    }
+                }
+            }
+
+            // Step A: Trigger Email Notification Event
+            for (var m = 0; m < targetUsers.length; m++) {
+                gs.eventQueue('x_birl3_clm.swap_rfi_mention', targetRecord, targetUsers[m], gs.getUserID());
+            }
+
+            // Step B: Auto-sync any newly tagged users directly into watch_list
+            if (targetUsers.length > 0 && targetRecord.isValidField('watch_list')) {
+                var currentWatchList = targetRecord.getValue('watch_list') || '';
+                var watchListArray = currentWatchList ? currentWatchList.split(',') : [];
+
+                for (var w = 0; w < targetUsers.length; w++) {
+                    if (watchListArray.indexOf(targetUsers[w]) === -1) {
+                        watchListArray.push(targetUsers[w]);
+                    }
+                }
+                targetRecord.setValue('watch_list', watchListArray.join(','));
+            }
+
+            targetRecord.update();
+        }
+
+        data.attachments = getAttachmentsForRecord(input.swapSysId);
+
+        var reloadOptions = {
+            sys_id: input.swapSysId.toString(),
+            table: CONFIG.TABLES.SWAP_REQUEST,
+            readonly: true,
+            title: ''
+        };
+        data.ticketWidgetObj = $sp.getWidget('widget-ticket-conversation', reloadOptions);
+        return;
+    }
+
+    // =========================================================================
+    // 4. FETCH ONLY WATCH-LISTED USERS' REQUESTS
+    // =========================================================================
+    if (input && input.action == 'fetch_watched_swaps') {
+        data.list = [];
+        var swapList = new GlideRecord(CONFIG.TABLES.SWAP_REQUEST);
+
+        // STRICT FILTER: Showcase records ONLY where the user is in watch_list
+        if (!isAdmin) {
+            swapList.addQuery('watch_list', 'CONTAINS', userId);
+        }
+
+        swapList.orderByDesc('sys_created_on');
+        swapList.query();
+
+        while (swapList.next()) {
+            var stateDisplay = swapList.getDisplayValue('approval') || swapList.getDisplayValue('state') || 'Pending';
+
+            var doneeCode = swapList.donee.customer_code_sap ? swapList.donee.customer_code_sap.toString() : '';
+            var doneeName = swapList.donee.customer_name ? swapList.donee.customer_name.toString() : '';
+            var donorCode = swapList.donor.customer_code_sap ? swapList.donor.customer_code_sap.toString() : '';
+            var donorName = swapList.donor.customer_name ? swapList.donor.customer_name.toString() : '';
+
+            var doneeZone = formatGeo(swapList.donee.zone.toString(), swapList.donee.zone_name.toString());
+            var doneeReg  = formatGeo(swapList.donee.region.toString(), swapList.donee.region_name.toString());
+            var doneeDep  = formatGeo(swapList.donee.depot.toString(), swapList.donee.depot_name.toString());
+
+            var donorZone = formatGeo(swapList.donor.zone.toString(), swapList.donor.zone_name.toString());
+            var donorReg  = formatGeo(swapList.donor.region.toString(), swapList.donor.region_name.toString());
+            var donorDep  = formatGeo(swapList.donor.depot.toString(), swapList.donor.depot_name.toString());
+
+            data.list.push({
+                sys_id: swapList.getUniqueValue(),
+                number: swapList.getValue('number') || '',
+                pan: swapList.getValue('pan') || (swapList.donee.pan ? swapList.donee.pan.toString() : 'N/A'),
+                requested_by: swapList.getDisplayValue('opened_by') || swapList.getDisplayValue('sys_created_by') || '',
+
+                donee_code: doneeCode,
+                donee_name: doneeName,
+                donee_segment: swapList.getDisplayValue('donee_segment') || swapList.donee.getDisplayValue('segment') || '',
+                donee_zone: doneeZone,
+                donee_region: doneeReg,
+                donee_depot: doneeDep,
+
+                donor_code: donorCode,
+                donor_name: donorName,
+                donor_segment: swapList.getDisplayValue('donor_segment') || swapList.donor.getDisplayValue('segment') || '',
+                donor_zone: donorZone,
+                donor_region: donorReg,
+                donor_depot: donorDep,
+
+                amount: parseFloat(swapList.getValue('requested_amount') || 0),
+                state: stateDisplay,
+                internalState: getInternalState(stateDisplay), // maps 'approved', 'rejected', 'pending'
+                created_on: (swapList.getDisplayValue('sys_created_on') || '').split(' ')[0],
+                sys_created_on: swapList.getDisplayValue('sys_created_on') || ''
+            });
+        }
+        return;
+    }
+
+    // =========================================================================
+    // 5. DRILLDOWN DETAILS LOOKUP
+    // =========================================================================
+    if (input && input.action == 'get_swap_details') {
+        data.approvalData = [];
+        data.extendedDetails = {};
+        data.justification = '';
+        data.description = '';
+
+        // Approvals Chain
+        var grApp = new GlideRecord(CONFIG.TABLES.APPROVER);
+        var qApp = grApp.addQuery('sysapproval', input.swapSysId);
+        qApp.addOrCondition('document_id', input.swapSysId);
+        grApp.orderBy('sys_created_on');
+        grApp.query();
+
+        while (grApp.next()) {
+            data.approvalData.push({
+                approver: grApp.getDisplayValue('approver') || 'System Approver',
+                state: grApp.getDisplayValue('state') || 'Requested',
+                role: getApproverRole(grApp),
+                updated: grApp.getValue('sys_updated_on') || ''
+            });
+        }
+
+        // Swap Request Record
+        var swapGr = new GlideRecord(CONFIG.TABLES.SWAP_REQUEST);
+        if (swapGr.get(input.swapSysId)) {
+            data.justification = swapGr.getValue('justification') || swapGr.getValue('u_justification') || '';
+            data.description   = swapGr.getValue('description') || swapGr.getValue('u_description') || '';
+
+            var doneeSysId = swapGr.getValue('donee');
+            var donorSysId = swapGr.getValue('donor');
+
+            function getCustomerSnapshot(custSysId, fallbackLimit, fallbackOutstanding) {
+                var d = {
+                    name: 'N/A', code: 'N/A', zone: 'N/A', region: 'N/A', depot: 'N/A',
+                    segment: 'N/A', limit: fallbackLimit, outstanding: fallbackOutstanding,
+                    history: []
+                };
+
+                if (custSysId) {
+                    var cGr = new GlideRecord(CONFIG.TABLES.CUSTOMER);
+                    if (cGr.get(custSysId)) {
+                        d.name = cGr.getValue('customer_name') || 'N/A';
+                        d.code = cGr.getValue('customer_code_sap') || 'N/A';
+                        d.segment = cGr.getDisplayValue('segment') || cGr.getValue('segment') || 'N/A';
+                        d.zone = formatGeo(cGr.getValue('zone'), cGr.getValue('zone_name'));
+                        d.region = formatGeo(cGr.getValue('region'), cGr.getValue('region_name'));
+                        d.depot = formatGeo(cGr.getValue('depot'), cGr.getValue('depot_name'));
+                    }
+
+                    var outGr = new GlideRecord(CONFIG.TABLES.OUTSTANDING_SNAPSHOT);
+                    outGr.addQuery('customer', custSysId);
+                    outGr.orderByDesc('sys_created_on');
+                    outGr.setLimit(6);
+                    outGr.query();
+
+                    while (outGr.next()) {
+                        d.history.push({
+                            date: (outGr.getDisplayValue('sys_created_on') || '').split(' ')[0],
+                            total: parseFloat(outGr.getValue('total_outstanding') || 0),
+                            b0_30: parseFloat(outGr.getValue('b0_30') || outGr.getValue('bucket_0_30_days') || 0),
+                            b31_45: parseFloat(outGr.getValue('b31_45') || outGr.getValue('bucket_31_45_days') || 0),
+                            b46_60: parseFloat(outGr.getValue('b46_60') || outGr.getValue('bucket_46_60_days') || 0),
+                            b61_75: parseFloat(outGr.getValue('b61_75') || outGr.getValue('bucket_61_75_days') || 0),
+                            b76_90: parseFloat(outGr.getValue('b76_90') || outGr.getValue('bucket_76_90_days') || 0),
+                            b_gt90: parseFloat(outGr.getValue('b_gt90') || outGr.getValue('bucket_91_120_days') || 0)
+                        });
+                    }
+                }
+                return d;
+            }
+
+            data.extendedDetails.donee = getCustomerSnapshot(
+                doneeSysId,
+                parseFloat(swapGr.getValue('donee_current_limit') || 0),
+                parseFloat(swapGr.getValue('donee_outstanding') || 0)
+            );
+
+            data.extendedDetails.donor = getCustomerSnapshot(
+                donorSysId,
+                parseFloat(swapGr.getValue('donor_current_limit') || 0),
+                parseFloat(swapGr.getValue('donor_outstanding') || 0)
+            );
+        }
+
+        data.attachments = getAttachmentsForRecord(input.swapSysId);
+
+        var ticketOptions = {
+            sys_id: input.swapSysId.toString(),
+            table: CONFIG.TABLES.SWAP_REQUEST,
+            readonly: true,
+            title: ''
+        };
+        data.ticketWidgetObj = $sp.getWidget('widget-ticket-conversation', ticketOptions);
+        return;
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-11 17:57:34</sys_created_on>
+        <sys_id>c85f85f62bb7cb104572f3745e91bf18</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>UCLM Limit Swap RFI</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_c85f85f62bb7cb104572f3745e91bf18</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-11 18:30:56</sys_updated_on>
+        <template><![CDATA[<div class="abg-widget-container">
+
+  <!-- =======================================================
+       VIEW 1: WATCHED & MENTIONED REQUESTS QUEUE
+       ======================================================= -->
+  <div ng-if="!c.data.selectedSwap">
+    
+    <div class="abg-header row flex-align-center section-spacing-sm">
+      <div class="col-xs-12 col-md-6 m-b-sm-mobile">
+        <h2>
+          {{c.data.isAdmin ? 'Limit Swap Watchlist & RFI (Admin)' : 'Limit Swaps (Mentioned & Watchlist)'}}
+        </h2>
+        <p class="m-b-none text-muted">Track and respond to Limit Swap requests where you are tagged in the watchlist. Open items require input; approved/closed items archive to History.</p>
+      </div>
+
+      <div class="col-xs-12 col-md-6">
+        <div class="header-actions-panel">
+          <ul class="nav nav-pills abg-pills filter-pills">
+            <li ng-class="{'active': c.listFilter == 'pending'}">
+              <a href="javascript:void(0)" ng-click="c.setFilter('pending')">
+                Open Requests <span class="badge badge-danger m-l-xs" ng-if="c.pendingCount > 0">{{c.pendingCount}}</span>
+              </a>
+            </li>
+            <li ng-class="{'active': c.listFilter == 'completed'}">
+              <a href="javascript:void(0)" ng-click="c.setFilter('completed')">
+                History <span class="badge badge-default m-l-xs" ng-if="c.historyCount > 0">{{c.historyCount}}</span>
+              </a>
+            </li>
+            <li ng-class="{'active': c.listFilter == 'all'}">
+              <a href="javascript:void(0)" ng-click="c.setFilter('all')">All</a>
+            </li>
+          </ul>
+
+          <div class="input-group search-box">
+            <span class="input-group-addon"><i class="fa fa-search text-muted"></i></span>
+            <input type="text" class="form-control" ng-model="c.searchSwap" ng-change="c.currentPage = 1" placeholder="Search PAN, Request No, or Submitter...">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Spinner Loading List -->
+    <div class="text-center p-xl section-spacing-md" ng-if="c.data.isFetchingSwaps">
+      <i class="fa fa-spinner fa-spin fa-3x abg-text-red m-b-md"></i>
+      <p class="text-muted">Loading your watched requests...</p>
+    </div>
+
+    <!-- Requests Table -->
+    <div class="table-responsive shadow-sm widget-table-wrapper section-spacing-md" ng-if="!c.data.isFetchingSwaps">
+      <table class="table abg-table table-hover m-b-none">
+        <thead>
+          <tr>
+            <th width="16%">Request No</th>
+            <th width="24%">Donee (Receiving Unit)</th>
+            <th width="24%">Donor (Deducting Unit)</th>
+            <th width="14%" class="text-right">Transfer Amount</th>
+            <th width="11%" class="text-center">Status</th>
+            <th width="11%" class="text-center">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr ng-if="c.getFilteredSwaps().length == 0">
+            <td colspan="6" class="text-center text-muted p-xl">
+              <i class="fa fa-eye-slash fa-3x m-b-sm" style="color:#CBD5E0;"></i><br>
+              <span ng-if="c.listFilter == 'pending'">No open limit swap requests currently require your attention or input.</span>
+              <span ng-if="c.listFilter == 'completed'">No historical or approved limit swap requests found on your watchlist.</span>
+              <span ng-if="c.listFilter == 'all'">No limit swap requests found matching your filter criteria.</span>
+            </td>
+          </tr>
+          <tr ng-repeat="swap in c.getPaginatedSwaps()">
+            <td class="vertical-middle">
+              <strong class="text-dark font-14">{{::swap.number}}</strong>
+              <div class="corporate-pan-clean m-t-xxs">
+                <i class="fa fa-id-card-o m-r-xs"></i>
+                <span>{{::swap.pan}}</span>
+              </div>
+              <small class="text-muted display-block m-t-xxs"><i class="fa fa-calendar m-r-xs"></i> {{::swap.created_on}}</small>
+              <div class="text-xs text-primary font-weight-bold m-t-xxs">
+                <i class="fa fa-user m-r-xs"></i> Submitter: {{::swap.requested_by}}
+              </div>
+            </td>
+            <td class="vertical-middle">
+              <strong class="text-success" style="font-size:13.5px;">{{::swap.donee_code}} — {{::swap.donee_name}}</strong>
+              <div class="text-xs text-muted m-t-xxs">
+                <i class="fa fa-map-marker text-success m-r-xs"></i> {{::swap.donee_zone}} | {{::swap.donee_region}} | {{::swap.donee_depot}}
+              </div>
+              <span class="badge segment-badge" ng-if="swap.donee_segment">{{::swap.donee_segment}}</span>
+            </td>
+            <td class="vertical-middle">
+              <strong class="text-danger" style="font-size:13.5px;">{{::swap.donor_code}} — {{::swap.donor_name}}</strong>
+              <div class="text-xs text-muted m-t-xxs">
+                <i class="fa fa-map-marker text-danger m-r-xs"></i> {{::swap.donor_zone}} | {{::swap.donor_region}} | {{::swap.donor_depot}}
+              </div>
+              <span class="badge segment-badge" ng-if="swap.donor_segment">{{::swap.donor_segment}}</span>
+            </td>
+            <td class="vertical-middle text-right">
+              <strong style="font-size: 14.5px; color:#1A202C;">₹ {{c.formatINR(swap.amount)}}</strong>
+            </td>
+            <td class="vertical-middle text-center">
+              <span class="status-pill status-{{swap.internalState}}">{{::swap.state}}</span>
+            </td>
+            <td class="vertical-middle text-center">
+              <button class="btn abg-btn-outline btn-sm" ng-click="c.viewDetails(swap)">
+                <i class="fa fa-comments-o m-r-xs"></i> {{swap.internalState == 'approved' ? 'View Details' : 'Collaborate / RFI'}}
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Pagination -->
+    <div class="row flex-align-center section-spacing-sm" ng-if="c.getFilteredSwaps().length > 0 && !c.data.isFetchingSwaps">
+      <div class="col-xs-12 col-sm-4 m-b-sm-mobile">
+        <div class="input-group page-size-box">
+          <span class="input-group-addon bg-light">Show</span>
+          <select class="form-control" ng-model="c.itemsPerPage" ng-change="c.currentPage = 1" ng-options="size for size in [5, 10, 25, 50]"></select>
+        </div>
+      </div>
+      <div class="col-xs-12 col-sm-4 text-center text-muted hidden-xs">
+        Showing {{ (c.currentPage - 1) * c.itemsPerPage + 1 }} to 
+        {{ c.getMathMin(c.currentPage * c.itemsPerPage, c.getFilteredSwaps().length) }} 
+        of {{ c.getFilteredSwaps().length }} entries
+      </div>
+      <div class="col-xs-12 col-sm-4 text-right text-center-mobile m-t-sm-mobile">
+        <button class="btn btn-default btn-sm" ng-click="c.currentPage = c.currentPage - 1" ng-disabled="c.currentPage == 1">
+          <i class="fa fa-chevron-left"></i> Prev
+        </button>
+        <span class="m-l-sm m-r-sm font-weight-bold">Page {{c.currentPage}} / {{c.totalPages()}}</span>
+        <button class="btn btn-default btn-sm" ng-click="c.currentPage = c.currentPage + 1" ng-disabled="c.currentPage == c.totalPages()">
+          Next <i class="fa fa-chevron-right"></i>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =======================================================
+       VIEW 2: DRILLDOWN, CONTEXT & COLLABORATION WORKSPACE
+       ======================================================= -->
+  <div class="slide-down" ng-if="c.data.selectedSwap">
+    
+    <!-- Top Action Bar -->
+    <div class="row section-spacing-sm flex-align-center">
+      <div class="col-xs-12">
+        <button class="btn btn-link text-muted p-l-0 hover-red font-weight-bold" ng-click="c.goBack()">
+          &#8592; Back to Watched Requests
+        </button>
+      </div>
+    </div>
+
+    <!-- Corporate PAN Header Card -->
+    <div class="panel panel-default shadow-sm section-spacing-md" style="border-left: 4px solid #C8102E;">
+      <div class="panel-body p-md">
+        <div class="row flex-align-center">
+          <div class="col-xs-12 col-md-8">
+            <div class="flex-align-center gap-10">
+              <h3 class="corporate-display-name m-n">Limit Swap Reallocation</h3>
+              <span class="pan-prominent-badge">
+                PAN: <strong>{{c.data.selectedSwap.pan}}</strong>
+              </span>
+              <span class="request-number-pill">
+                {{c.data.selectedSwap.number}}
+              </span>
+            </div>
+            <div class="flex-align-center gap-10 m-t-xs text-muted" style="font-size: 13px;">
+              <span>Submitted On: <strong class="text-dark">{{c.data.selectedSwap.sys_created_on}}</strong></span>
+              <span>| Initiator: <strong class="text-dark">{{c.data.selectedSwap.requested_by}}</strong></span>
+              <span>| Reallocation Amount: <strong class="text-danger font-weight-bold">₹ {{c.formatINR(c.data.selectedSwap.amount)}}</strong></span>
+            </div>
+          </div>
+          <div class="col-xs-12 col-md-4 text-right mobile-left m-t-sm-mobile">
+            <span class="badge" style="background:#2B6CB0; color:#FFF; padding: 7px 14px; font-size: 12px; font-weight: 600; margin-right: 6px;">
+              <i class="fa fa-eye m-r-xs"></i> Watcher / RFI View
+            </span>
+            <span class="status-pill status-{{c.data.selectedSwap.internalState}}" style="padding: 7px 18px; font-size: 13px;">
+              Status: {{c.data.selectedSwap.state}}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Spinner Loading Details -->
+    <div class="text-center p-xl section-spacing-md" ng-if="c.data.isLoadingDetails">
+      <i class="fa fa-spinner fa-spin fa-3x abg-text-red m-b-sm"></i>
+      <p class="text-muted font-weight-bold">Resolving operational site profiles & authorization traces...</p>
+    </div>
+
+    <div ng-if="!c.data.isLoadingDetails">
+
+      <!-- Remarks / Description Container -->
+      <div class="section-spacing-md" ng-if="c.data.swapDetails.description">
+        <div class="panel panel-default shadow-sm m-b-none" style="border-left: 4px solid #f0ad4e;">
+          <div class="panel-body p-sm">
+            <h5 class="m-t-none font-weight-bold text-uppercase" style="font-size:12px; color:#b7791f;">
+              <i class="fa fa-commenting-o text-warning m-r-xs"></i> Remarks / Description
+            </h5>
+            <p class="m-b-none remarks-content">{{c.data.swapDetails.description}}</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Business Justification / Strategic Rationale -->
+      <div class="section-spacing-md" ng-if="c.data.swapDetails.justification">
+        <div class="panel panel-default shadow-sm m-b-none" style="border-left: 4px solid #C8102E;">
+          <div class="panel-body p-sm">
+            <h5 class="m-t-none font-weight-bold text-uppercase section-title">
+              <i class="fa fa-file-text-o text-danger m-r-xs"></i> Business Justification / Comments
+            </h5>
+            <p class="m-b-none remarks-content">{{c.data.swapDetails.justification}}</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Attachments & Documents Container with Direct Upload Drawer -->
+      <div class="panel panel-default shadow-sm section-spacing-md" style="border-left: 4px solid #1782c5;">
+        <div class="panel-body p-sm">
+          <div class="row flex-align-center">
+            <div class="col-xs-12 col-sm-8">
+              <h5 class="m-t-none font-weight-bold text-uppercase" style="font-size:12px; color:#1782c5;">
+                <i class="fa fa-paperclip m-r-xs"></i> Attached Documents & Supporting Approvals ({{c.data.swapDetails.attachments.length || 0}})
+              </h5>
+              <div class="attachment-tags-container" ng-if="c.data.swapDetails.attachments.length > 0">
+                <span class="attachment-chip" ng-repeat="att in c.data.swapDetails.attachments">
+                  <i class="fa fa-file-pdf-o text-danger m-r-xs" ng-if="att.ext == 'pdf'"></i>
+                  <i class="fa fa-file-text-o text-muted m-r-xs" ng-if="att.ext != 'pdf'"></i>
+                  <a href="{{att.url}}" target="_blank" title="Click to view/download {{att.name}}">
+                    <strong>{{att.name}}</strong> ({{att.size}})
+                  </a>
+                </span>
+              </div>
+              <div class="text-muted small" ng-if="!c.data.swapDetails.attachments || c.data.swapDetails.attachments.length === 0">
+                No supporting attachments found for this request.
+              </div>
+            </div>
+            <div class="col-xs-12 col-sm-4 text-right mobile-left m-t-sm-mobile">
+              <input type="file" id="collabAttachmentUpload" style="display:none;" onchange="angular.element(this).scope().c.uploadDirectAttachment(this)">
+              <button class="btn btn-default btn-sm" onclick="document.getElementById('collabAttachmentUpload').click()" ng-disabled="c.isUploadingFile">
+                <i class="fa fa-spinner fa-spin" ng-if="c.isUploadingFile"></i>
+                <i class="fa fa-upload" ng-if="!c.isUploadingFile"></i> Upload Document (PDF)
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Authorization Pipeline Stepper -->
+      <div class="approval-stepper-wrapper section-spacing-md">
+        <div class="row flex-align-center m-b-sm">
+          <div class="col-sm-8">
+            <h4 class="font-weight-bold m-n text-uppercase section-title">
+              <i class="fa fa-sitemap text-danger m-r-xs"></i> Authorization Pipeline
+            </h4>
+          </div>
+          <div class="col-sm-4 text-right mobile-left m-t-xs-mobile">
+            <small class="text-muted"><i class="fa fa-info-circle"></i> Sourced from approval workflow</small>
+          </div>
+        </div>
+
+        <div class="text-center text-muted p-md" ng-if="!c.data.swapDetails.approvals || c.data.swapDetails.approvals.length === 0">
+          <i class="fa fa-clock-o"></i> Systemic approval workflows are either routing or not required for this request.
+        </div>
+
+        <div class="approval-stepper" ng-if="c.data.swapDetails.approvals.length > 0">
+          <div class="stepper-item" 
+               ng-repeat="app in c.data.swapDetails.approvals"
+               ng-class="{
+                 'completed': app.state == 'Approved', 
+                 'current': app.state == 'Requested', 
+                 'rejected': app.state == 'Rejected' || app.state == 'Cancelled',
+                 'pending': app.state != 'Approved' && app.state != 'Requested' && app.state != 'Rejected' && app.state != 'Cancelled'
+               }">
+            <div class="stepper-icon">
+              <i class="fa fa-check" ng-if="app.state == 'Approved'"></i>
+              <i class="fa fa-spinner fa-spin" ng-if="app.state == 'Requested'"></i>
+              <i class="fa fa-times" ng-if="app.state == 'Rejected' || app.state == 'Cancelled'"></i>
+              <i class="fa fa-circle-o" ng-if="app.state != 'Approved' && app.state != 'Requested' && app.state != 'Rejected' && app.state != 'Cancelled'"></i>
+            </div>
+            <div class="stepper-label" title="{{app.approver}}">{{app.approver}}</div>
+            <div class="stepper-role" title="{{app.role}}">{{app.role}}</div>
+            <div class="stepper-sub" ng-class="{
+              'text-success': app.state == 'Approved', 
+              'text-warning': app.state == 'Requested', 
+              'text-danger': app.state == 'Rejected' || app.state == 'Cancelled',
+              'text-muted': app.state != 'Approved' && app.state != 'Requested' && app.state != 'Rejected' && app.state != 'Cancelled'
+            }">
+              {{app.state == 'Requested' ? 'Pending Action' : app.state}}
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Customer Entity Profile Matrix -->
+      <h4 class="font-weight-bold m-b-md text-uppercase section-title slide-down">
+        <i class="fa fa-database text-danger m-r-xs"></i> Customer Entity Profile Matrix
+      </h4>
+      
+      <div class="row flex-cards section-spacing-md slide-down">
+        
+        <!-- Donee Unit (Receiving Site) -->
+        <div class="col-xs-12 col-sm-6">
+          <div class="abg-profile-panel border-top-success">
+            <div class="panel-profile-header">
+               <span class="indicator-marker text-success"><i class="fa fa-arrow-circle-down"></i> Receiving Unit (Donee Site)</span>
+               <div class="d-flex justify-content-between align-items-center">
+                 <h3>{{c.data.swapDetails.extended.donee.code || 'N/A'}} — {{c.data.swapDetails.extended.donee.name}}</h3>
+                 <span class="badge abg-bg-gray-dark" ng-if="c.data.swapDetails.extended.donee.segment">{{c.data.swapDetails.extended.donee.segment}}</span>
+               </div>
+            </div>
+            <div class="panel-profile-body">
+              <table class="table abg-profile-table">
+                <tbody>
+                  <tr><th width="38%">Zone</th><td>{{c.data.swapDetails.extended.donee.zone}}</td></tr>
+                  <tr><th>Region</th><td>{{c.data.swapDetails.extended.donee.region}}</td></tr>
+                  <tr><th>Depot</th><td>{{c.data.swapDetails.extended.donee.depot}}</td></tr>
+                  <tr class="highlight-row-success"><th>Current Limit</th><td><strong>₹ {{c.formatINR(c.data.swapDetails.extended.donee.limit)}}</strong></td></tr>
+                  <tr class="highlight-row-success"><th>Total Outstanding</th><td><strong class="text-danger">₹ {{c.formatINR(c.data.swapDetails.extended.donee.outstanding)}}</strong></td></tr>
+                  <tr class="highlight-total-success">
+                     <th>Allocation Impact</th>
+                     <td><span class="text-success font-weight-bold">+ ₹ {{c.formatINR(c.data.selectedSwap.amount)}}</span></td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <!-- 6-Month Bucket Matrix -->
+              <div class="bg-light p-sm border-top">
+                 <div class="text-xs text-uppercase font-weight-bold text-muted m-b-sm m-l-xs">
+                    <i class="fa fa-history text-success m-r-xs"></i> 6-Month Bucket-Wise Aging Trend
+                 </div>
+                 <div class="table-responsive aging-table-wrapper">
+                   <table class="table table-bordered abg-history-table m-b-none text-center" ng-if="c.data.swapDetails.extended.donee.history.length > 0">
+                     <thead>
+                       <tr>
+                         <th class="text-left" style="min-width: 85px;">Date</th>
+                         <th>0-30 D</th>
+                         <th>31-45 D</th>
+                         <th>46-60 D</th>
+                         <th>61-75 D</th>
+                         <th>76-90 D</th>
+                         <th>&gt;90 D</th>
+                         <th class="text-right">Total Out.</th>
+                       </tr>
+                     </thead>
+                     <tbody>
+                       <tr ng-repeat="hist in c.data.swapDetails.extended.donee.history">
+                         <td class="text-left font-weight-bold">{{::hist.date}}</td>
+                         <td ng-class="{'text-muted': hist.b0_30 == 0}">{{c.formatINR(hist.b0_30)}}</td>
+                         <td ng-class="{'text-muted': hist.b31_45 == 0}">{{c.formatINR(hist.b31_45)}}</td>
+                         <td ng-class="{'text-muted': hist.b46_60 == 0}">{{c.formatINR(hist.b46_60)}}</td>
+                         <td ng-class="{'cell-warning': hist.b61_75 > 0, 'text-muted': hist.b61_75 == 0}">{{c.formatINR(hist.b61_75)}}</td>
+                         <td ng-class="{'cell-danger': hist.b76_90 > 0, 'text-muted': hist.b76_90 == 0}">{{c.formatINR(hist.b76_90)}}</td>
+                         <td ng-class="{'cell-toxic': hist.b_gt90 > 0, 'text-muted': hist.b_gt90 == 0}">{{c.formatINR(hist.b_gt90)}}</td>
+                         <td class="text-right font-weight-bold cell-total">₹ {{c.formatINR(hist.total)}}</td>
+                       </tr>
+                     </tbody>
+                   </table>
+                   <div ng-if="c.data.swapDetails.extended.donee.history.length == 0" class="text-muted text-xs p-t-xs p-l-xs">
+                      No historical snapshot outstanding data available.
+                   </div>
+                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Donor Unit (Deducting Site) -->
+        <div class="col-xs-12 col-sm-6">
+          <div class="abg-profile-panel border-top-danger">
+            <div class="panel-profile-header">
+               <span class="indicator-marker text-danger"><i class="fa fa-arrow-circle-up"></i> Deducting Unit (Donor Site)</span>
+               <div class="d-flex justify-content-between align-items-center">
+                 <h3>{{c.data.swapDetails.extended.donor.code || 'N/A'}} — {{c.data.swapDetails.extended.donor.name}}</h3>
+                 <span class="badge abg-bg-gray-dark" ng-if="c.data.swapDetails.extended.donor.segment">{{c.data.swapDetails.extended.donor.segment}}</span>
+               </div>
+            </div>
+            <div class="panel-profile-body">
+              <table class="table abg-profile-table">
+                <tbody>
+                  <tr><th width="38%">Zone</th><td>{{c.data.swapDetails.extended.donor.zone}}</td></tr>
+                  <tr><th>Region</th><td>{{c.data.swapDetails.extended.donor.region}}</td></tr>
+                  <tr><th>Depot</th><td>{{c.data.swapDetails.extended.donor.depot}}</td></tr>
+                  <tr class="highlight-row-danger"><th>Current Limit</th><td><strong>₹ {{c.formatINR(c.data.swapDetails.extended.donor.limit)}}</strong></td></tr>
+                  <tr class="highlight-row-danger"><th>Total Outstanding</th><td><strong class="text-danger">₹ {{c.formatINR(c.data.swapDetails.extended.donor.outstanding)}}</strong></td></tr>
+                  <tr class="highlight-total-danger">
+                     <th>Allocation Impact</th>
+                     <td><span class="text-danger font-weight-bold">- ₹ {{c.formatINR(c.data.selectedSwap.amount)}}</span></td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <!-- 6-Month Bucket Matrix -->
+              <div class="bg-light p-sm border-top">
+                 <div class="text-xs text-uppercase font-weight-bold text-muted m-b-sm m-l-xs">
+                    <i class="fa fa-history text-danger m-r-xs"></i> 6-Month Bucket-Wise Aging Trend
+                 </div>
+                 <div class="table-responsive aging-table-wrapper">
+                   <table class="table table-bordered abg-history-table m-b-none text-center" ng-if="c.data.swapDetails.extended.donor.history.length > 0">
+                     <thead>
+                       <tr>
+                         <th class="text-left" style="min-width: 85px;">Date</th>
+                         <th>0-30 D</th>
+                         <th>31-45 D</th>
+                         <th>46-60 D</th>
+                         <th>61-75 D</th>
+                         <th>76-90 D</th>
+                         <th>&gt;90 D</th>
+                         <th class="text-right">Total Out.</th>
+                       </tr>
+                     </thead>
+                     <tbody>
+                       <tr ng-repeat="hist in c.data.swapDetails.extended.donor.history">
+                         <td class="text-left font-weight-bold">{{::hist.date}}</td>
+                         <td ng-class="{'text-muted': hist.b0_30 == 0}">{{c.formatINR(hist.b0_30)}}</td>
+                         <td ng-class="{'text-muted': hist.b31_45 == 0}">{{c.formatINR(hist.b31_45)}}</td>
+                         <td ng-class="{'text-muted': hist.b46_60 == 0}">{{c.formatINR(hist.b46_60)}}</td>
+                         <td ng-class="{'cell-warning': hist.b61_75 > 0, 'text-muted': hist.b61_75 == 0}">{{c.formatINR(hist.b61_75)}}</td>
+                         <td ng-class="{'cell-danger': hist.b76_90 > 0, 'text-muted': hist.b76_90 == 0}">{{c.formatINR(hist.b76_90)}}</td>
+                         <td ng-class="{'cell-toxic': hist.b_gt90 > 0, 'text-muted': hist.b_gt90 == 0}">{{c.formatINR(hist.b_gt90)}}</td>
+                         <td class="text-right font-weight-bold cell-total">₹ {{c.formatINR(hist.total)}}</td>
+                       </tr>
+                     </tbody>
+                   </table>
+                   <div ng-if="c.data.swapDetails.extended.donor.history.length == 0" class="text-muted text-xs p-t-xs p-l-xs">
+                      No historical snapshot outstanding data available.
+                   </div>
+                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- =======================================================
+           COLLABORATIVE ACTIVITY STREAM: COMPOSER & TIMELINE
+           ======================================================= -->
+      <div class="panel panel-default shadow-sm ticket-panel section-spacing-md slide-down">
+        <div class="panel-heading bg-light flex-align-center">
+          <div class="col-sm-8 p-n">
+            <h4 class="panel-title font-weight-bold" style="color: #C8102E;">
+              <i class="fa fa-comments m-r-xs"></i> Activity Stream & RFI Collaboration
+            </h4>
+          </div>
+          <div class="col-sm-4 p-n text-right mobile-left">
+            <small class="text-muted"><i class="fa fa-at"></i> Type <strong>@name</strong> to mention and notify users</small>
+          </div>
+        </div>
+
+        <div class="panel-body ticket-body p-md">
+          
+          <!-- Activity Composer Box -->
+          <div class="sn-activity-composer m-b-md">
+            <div class="mention-input-wrapper position-relative">
+              <textarea id="swapActivityInput"
+                        class="form-control sn-journal-input"
+                        rows="3"
+                        ng-model="c.newComment"
+                        ng-keyup="c.handleCommentKeyUp($event)"
+                        placeholder="Provide your input, response to RFI, or use @ to mention teammates..."></textarea>
+
+              <ul class="mention-dropdown shadow-sm" ng-if="c.showMentionDropdown && c.userSuggestions.length > 0">
+                <li ng-repeat="user in c.userSuggestions" ng-click="c.selectMentionUser(user)">
+                  <div class="mention-user-item">
+                    <i class="fa fa-user-circle text-primary m-r-xs"></i>
+                    <strong>{{user.name}}</strong>
+                    <small class="text-muted">&lt;{{user.email}}&gt;</small>
+                  </div>
+                </li>
+              </ul>
+            </div>
+
+            <div class="row flex-align-center m-t-sm">
+              <div class="col-xs-8">
+                <input type="file" id="commentFileUpload" style="display:none;" onchange="angular.element(this).scope().c.handleCommentFileUpload(this)">
+                <button type="button" class="btn btn-link text-muted p-l-0" onclick="document.getElementById('commentFileUpload').click()">
+                  <i class="fa fa-paperclip"></i> Attach File
+                </button>
+                <span class="text-primary small m-l-xs" ng-if="c.commentFileName">
+                  <i class="fa fa-file-text-o text-danger"></i> <strong>{{c.commentFileName}}</strong>
+                  <a href="javascript:void(0)" class="text-danger m-l-xs" ng-click="c.removeCommentFile()">&times;</a>
+                </span>
+
+                <div ng-if="c.mentionedUsers.length > 0" class="m-t-xs">
+                  <span class="text-muted small">
+                    <i class="fa fa-bell text-success m-r-xs"></i> Tagged for Notification:
+                    <span class="badge badge-info m-r-xs" ng-repeat="u in c.mentionedUsers">@{{u.name}}</span>
+                  </span>
+                </div>
+              </div>
+              <div class="col-xs-4 text-right">
+                <button class="btn abg-btn-primary btn-sm"
+                        ng-click="c.postCommentWithMentions()"
+                        ng-disabled="(!c.newComment.trim() && !c.commentFileData) || c.isPostingComment">
+                  <i class="fa fa-spinner fa-spin" ng-if="c.isPostingComment"></i>
+                  <i class="fa fa-paper-plane" ng-if="!c.isPostingComment"></i> Send Input
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Embedded Native ServiceNow Conversation Timeline -->
+          <div class="native-sn-stream-wrapper" ng-if="c.data.ticketWidget && !c.data.isLoadingWidget && c.showConversationStream">
+            <sp-widget widget="c.data.ticketWidget"></sp-widget>
+          </div>
+
+          <div class="text-center p-xl text-muted" ng-if="c.data.isLoadingWidget">
+            <i class="fa fa-spinner fa-spin fa-2x abg-text-red"></i>
+            <p class="m-t-sm">Syncing ServiceNow activity stream...</p>
+          </div>
+
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>c85f85f62bb7cb104572f3745e91bf18</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-11 17:57:34</sys_created_on>
+        <sys_id>c45fc5f62bb7cb104572f3745e91bf87</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-11 17:57:34</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_c85f85f62bb7cb104572f3745e91bf18</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function($scope, spUtil, $location, $timeout, $filter) {
+    var c = this;
+
+    // View States
+    c.data.selectedSwap = null;
+    c.data.swapDetails = null;
+    c.data.isLoadingDetails = false;
+    c.data.ticketWidget = null;
+    c.data.isLoadingWidget = false;
+    c.showConversationStream = true;
+
+    // Filter &amp; Pagination
+    c.searchSwap = '';
+    c.listFilter = 'pending'; // Default tab: Open / Pending
+    c.currentPage = 1;
+    c.itemsPerPage = 10;
+    c.pendingCount = 0;
+    c.historyCount = 0;
+
+    // @Mention System State
+    c.newComment = '';
+    c.isPostingComment = false;
+    c.showMentionDropdown = false;
+    c.userSuggestions = [];
+    c.mentionedUsers = [];
+
+    // File Upload State
+    c.commentFileName = '';
+    c.commentFileType = '';
+    c.commentFileData = null;
+    c.isUploadingFile = false;
+
+    // INR Currency Formatter
+    c.formatINR = function(val) {
+        if (val === undefined || val === null || val === '') return '0.00';
+        var num = parseFloat(val);
+        if (isNaN(num)) return '0.00';
+        return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+
+    c.updateCounts = function() {
+        var arr = c.data.list || [];
+        c.pendingCount = arr.filter(function(b) { 
+            return b.internalState === 'pending' || b.internalState === 'work'; 
+        }).length;
+        c.historyCount = arr.filter(function(b) { 
+            return b.internalState === 'approved' || b.internalState === 'rejected' || b.internalState === 'cancelled'; 
+        }).length;
+    };
+
+    c.setFilter = function(filterType) {
+        c.listFilter = filterType;
+        c.currentPage = 1;
+    };
+
+    // Filter Logic: Pending shows Open items only; History shows Approved/Closed
+    c.getFilteredSwaps = function() {
+        var arr = c.data.list || [];
+        if (c.listFilter === 'pending') {
+            arr = arr.filter(function(b) { 
+                return b.internalState === 'pending' || b.internalState === 'work'; 
+            });
+        } else if (c.listFilter === 'completed') {
+            arr = arr.filter(function(b) { 
+                return b.internalState === 'approved' || b.internalState === 'rejected' || b.internalState === 'cancelled'; 
+            });
+        }
+        
+        if (c.searchSwap) {
+            var s = c.searchSwap.toLowerCase();
+            arr = arr.filter(function(b) {
+                return (b.number &amp;&amp; b.number.toLowerCase().indexOf(s) &gt; -1) ||
+                       (b.pan &amp;&amp; b.pan.toLowerCase().indexOf(s) &gt; -1) ||
+                       (b.donee_name &amp;&amp; b.donee_name.toLowerCase().indexOf(s) &gt; -1) ||
+                       (b.donor_name &amp;&amp; b.donor_name.toLowerCase().indexOf(s) &gt; -1) ||
+                       (b.requested_by &amp;&amp; b.requested_by.toLowerCase().indexOf(s) &gt; -1);
+            });
+        }
+        return arr;
+    };
+
+    c.getPaginatedSwaps = function() {
+        var filtered = c.getFilteredSwaps();
+        var startIndex = (c.currentPage - 1) * c.itemsPerPage;
+        return filtered.slice(startIndex, startIndex + c.itemsPerPage);
+    };
+
+    c.totalPages = function() {
+        return Math.ceil(c.getFilteredSwaps().length / c.itemsPerPage) || 1;
+    };
+
+    c.getMathMin = function(a, b) {
+        return Math.min(a, b);
+    };
+
+    // Load Watched Requests
+    c.fetchWatchedList = function() {
+        c.data.isFetchingSwaps = true;
+        c.server.get({ action: 'fetch_watched_swaps' }).then(function(r) {
+            c.data.isFetchingSwaps = false;
+            c.data.list = (r.data &amp;&amp; r.data.list) ? r.data.list : [];
+            c.updateCounts();
+
+            var reqNum = $location.search().number;
+            if (reqNum &amp;&amp; !c.data.selectedSwap) {
+                var target = c.data.list.find(function(s) { return s.number === reqNum; });
+                if (target) c.viewDetails(target);
+            }
+        });
+    };
+
+    // View Details Definition
+    c.viewDetails = function(swap) {
+        if (!swap) return;
+
+        c.data.selectedSwap = swap;
+        c.data.isLoadingDetails = true;
+        c.data.isLoadingWidget = true;
+        c.showConversationStream = true;
+        c.newComment = '';
+        c.mentionedUsers = [];
+        c.removeCommentFile();
+
+        $location.search('number', swap.number);
+
+        c.server.get({
+            action: 'get_swap_details',
+            swapSysId: swap.sys_id
+        }).then(function(res) {
+            c.data.swapDetails = {
+                approvals: (res.data &amp;&amp; res.data.approvalData) ? res.data.approvalData : [],
+                extended: (res.data &amp;&amp; res.data.extendedDetails) ? res.data.extendedDetails : {},
+                justification: (res.data &amp;&amp; res.data.justification) ? res.data.justification : '',
+                description: (res.data &amp;&amp; res.data.description) ? res.data.description : '',
+                attachments: (res.data &amp;&amp; res.data.attachments) ? res.data.attachments : []
+            };
+            c.data.ticketWidget = res.data.ticketWidgetObj;
+            c.data.isLoadingDetails = false;
+            c.data.isLoadingWidget = false;
+        });
+    };
+
+    // User Mention Key Listener
+    c.handleCommentKeyUp = function(e) {
+        var text = c.newComment || '';
+        var cursorPos = e.target.selectionStart;
+        var textBeforeCursor = text.substring(0, cursorPos);
+        var atIndex = textBeforeCursor.lastIndexOf('@');
+
+        if (atIndex !== -1 &amp;&amp; atIndex === textBeforeCursor.length - 1) {
+            c.showMentionDropdown = true;
+            c.queryUsers('');
+        } else if (atIndex !== -1 &amp;&amp; atIndex &lt; textBeforeCursor.length) {
+            var query = textBeforeCursor.substring(atIndex + 1);
+            if (!/\s/.test(query)) {
+                c.showMentionDropdown = true;
+                c.queryUsers(query);
+            } else {
+                c.showMentionDropdown = false;
+            }
+        } else {
+            c.showMentionDropdown = false;
+        }
+    };
+
+    c.queryUsers = function(q) {
+        c.server.get({ action: 'search_mention_users', query: q }).then(function(res) {
+            c.userSuggestions = res.data.mentionUsers || [];
+        });
+    };
+
+    c.selectMentionUser = function(user) {
+        var text = c.newComment || '';
+        var atIndex = text.lastIndexOf('@');
+        var userIdentifier = (user.email || user.name || '').trim();
+        var mentionFormattedTag = '@[' + userIdentifier + ']' + user.name + ' ';
+
+        if (atIndex !== -1) {
+            c.newComment = text.substring(0, atIndex) + mentionFormattedTag;
+        } else {
+            c.newComment += mentionFormattedTag;
+        }
+
+        if (!c.mentionedUsers.some(function(u) { return u.sys_id === user.sys_id; })) {
+            c.mentionedUsers.push(user);
+        }
+
+        c.showMentionDropdown = false;
+        $timeout(function() {
+            var el = document.getElementById('swapActivityInput');
+            if (el) el.focus();
+        });
+    };
+
+    // Direct Supporting Document Upload
+    c.uploadDirectAttachment = function(element) {
+        var file = element.files[0];
+        if (!file) return;
+
+        if (file.size &gt; 5 * 1024 * 1024) {
+            spUtil.addErrorMessage("File size exceeds 5MB limit.");
+            element.value = '';
+            return;
+        }
+
+        c.isUploadingFile = true;
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            var base64Data = e.target.result.split(',')[1];
+            c.server.get({
+                action: 'upload_document',
+                swapSysId: c.data.selectedSwap.sys_id,
+                fileName: file.name,
+                fileType: file.type,
+                fileData: base64Data
+            }).then(function(res) {
+                c.isUploadingFile = false;
+                element.value = '';
+                spUtil.addInfoMessage("Document uploaded successfully.");
+                c.data.swapDetails.attachments = res.data.attachments || [];
+            }).catch(function() {
+                c.isUploadingFile = false;
+                element.value = '';
+                spUtil.addErrorMessage("Failed to upload document.");
+            });
+        };
+        reader.readAsDataURL(file);
+    };
+
+    // Inline Comment File Attachment
+    c.handleCommentFileUpload = function(element) {
+        var file = element.files[0];
+        if (!file) return;
+
+        if (file.size &gt; 5 * 1024 * 1024) {
+            spUtil.addErrorMessage("File size exceeds 5MB limit.");
+            element.value = '';
+            return;
+        }
+
+        c.commentFileName = file.name;
+        c.commentFileType = file.type;
+
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            $timeout(function() {
+                c.commentFileData = e.target.result.split(',')[1];
+            });
+        };
+        reader.readAsDataURL(file);
+    };
+
+    c.removeCommentFile = function() {
+        c.commentFileName = '';
+        c.commentFileType = '';
+        c.commentFileData = null;
+        var el = document.getElementById('commentFileUpload');
+        if (el) el.value = '';
+    };
+
+    // Submit Collaborator Input
+    c.postCommentWithMentions = function() {
+        if (!c.newComment.trim() &amp;&amp; !c.commentFileData) return;
+
+        c.isPostingComment = true;
+        c.server.get({
+            action: 'post_rfi_comment',
+            swapSysId: c.data.selectedSwap.sys_id,
+            commentText: c.newComment,
+            mentionedUserIds: c.mentionedUsers.map(function(u) { return u.sys_id; }),
+            commentFileName: c.commentFileName,
+            commentFileType: c.commentFileType,
+            commentFileData: c.commentFileData
+        }).then(function(res) {
+            c.isPostingComment = false;
+            c.newComment = '';
+            c.mentionedUsers = [];
+            c.removeCommentFile();
+            spUtil.addInfoMessage("Your input has been recorded in the activity stream.");
+
+            if (res.data.attachments) {
+                c.data.swapDetails.attachments = res.data.attachments;
+            }
+
+            c.showConversationStream = false;
+            c.data.ticketWidget = res.data.ticketWidgetObj;
+            $timeout(function() {
+                c.showConversationStream = true;
+            }, 50);
+        }).catch(function() {
+            c.isPostingComment = false;
+            spUtil.addErrorMessage("Failed to record entry.");
+        });
+    };
+
+    c.goBack = function() {
+        c.data.selectedSwap = null;
+        c.data.swapDetails = null;
+        c.data.ticketWidget = null;
+        c.newComment = '';
+        c.mentionedUsers = [];
+        c.removeCommentFile();
+        $location.search('number', null);
+    };
+
+    c.$onInit = function() {
+        c.fetchWatchedList();
+    };
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;$abg-red: #C8102E;
+$abg-red-hover: #A00D25;
+$abg-red-light: #FCE8EA;
+$text-main: #2D3748;
+$text-muted: #718096;
+$border-light: #E2E8F0;
+
+.abg-widget-container {
+  background-color: #FFFFFF;
+  padding: 24px;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
+  font-family: 'Oxygen', Arial, sans-serif;
+  color: $text-main;
+}
+
+/* Distinct Vertical Margins */
+.section-spacing-sm { margin-top: 12px; margin-bottom: 20px; }
+.section-spacing-md { margin-top: 24px; margin-bottom: 28px; }
+
+.m-t-xxs { margin-top: 2px; }
+.gap-10 { gap: 10px; }
+.font-14 { font-size: 14px; }
+.d-flex { display: flex; }
+.justify-content-between { justify-content: space-between; }
+.align-items-center { align-items: center; }
+.border-top { border-top: 1px solid $border-light; }
+
+.m-b-none { margin-bottom: 0 !important; }
+.m-b-xs { margin-bottom: 6px !important; }
+.m-b-sm { margin-bottom: 10px !important; }
+.m-b-md { margin-bottom: 20px !important; }
+.m-b-lg { margin-bottom: 28px !important; }
+.m-t-none { margin-top: 0 !important; }
+.m-t-xs { margin-top: 6px !important; }
+.m-t-sm { margin-top: 10px !important; }
+.m-t-md { margin-top: 20px !important; }
+.m-l-xs { margin-left: 6px !important; }
+.m-l-sm { margin-left: 10px !important; }
+.m-r-xs { margin-right: 5px !important; }
+.m-r-sm { margin-right: 10px !important; }
+.p-n { padding: 0 !important; }
+.p-sm { padding: 14px !important; }
+.p-md { padding: 18px !important; }
+.p-xl { padding: 40px !important; }
+.p-l-0 { padding-left: 0 !important; }
+
+.font-weight-bold { font-weight: 700 !important; }
+.vertical-middle { vertical-align: middle !important; }
+.text-muted { color: $text-muted !important; }
+.text-success { color: #2E7D32 !important; }
+.text-danger { color: $abg-red !important; }
+.abg-text-red { color: $abg-red !important; }
+.text-xs { font-size: 11.5px !important; letter-spacing: 0.3px; }
+.display-block { display: block; }
+
+/* Dashboard PAN Styling */
+.corporate-pan-clean {
+  font-size: 13px;
+  font-weight: 700;
+  color: #C8102E;
+  display: inline-flex;
+  align-items: center;
+}
+.corporate-pan-clean i { color: #888; margin-right: 5px; }
+
+/* Header Tags &amp;amp; Badges */
+.corporate-display-name {
+  font-size: 20px;
+  font-weight: 700;
+  color: #1A202C;
+  line-height: 1.3;
+}
+.pan-prominent-badge {
+  background-color: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #333333;
+}
+.request-number-pill {
+  background-color: #E2E8F0;
+  color: #475569;
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.abg-header h2 { color: #333333; font-weight: 700; margin-top: 0; margin-bottom: 8px; font-size: 24px; }
+.hover-red:hover { color: $abg-red !important; text-decoration: none; }
+.section-title { font-size: 12px; color: #4A5568; letter-spacing: 0.8px; margin-bottom: 14px; font-weight: 700; }
+.remarks-content { white-space: pre-wrap; font-family: inherit; font-size: 13px; line-height: 1.6; color: #2D3748; }
+
+.segment-badge { background-color: #4A5568; padding: 2px 7px; font-size: 10.5px; border-radius: 3px; display: inline-block; margin-top: 4px; color: #FFFFFF; }
+.abg-bg-gray-dark { background-color: #4A5568 !important; color: #FFFFFF !important; font-size: 11px; padding: 3px 8px; border-radius: 4px; }
+.admin-badge { font-size: 11.5px; background-color: #2B6CB0; vertical-align: middle; margin-left: 8px; font-weight: 600; }
+
+.flex-align-center { display: flex; flex-wrap: wrap; align-items: center; }
+.flex-cards { display: flex; flex-wrap: wrap; margin-left: -12px; margin-right: -12px; }
+.flex-cards &amp;gt; div { display: flex; flex-direction: column; margin-bottom: 24px; padding-left: 12px; padding-right: 12px; }
+
+.header-actions-panel { display: flex; justify-content: flex-end; align-items: center; gap: 15px; flex-wrap: wrap; }
+.header-actions-panel .abg-pills { margin: 0; padding: 0; display: flex; }
+.header-actions-panel .search-box { width: 250px; margin: 0; }
+.abg-pills &amp;gt; li &amp;gt; a { border-radius: 20px; color: #666666; font-weight: 600; padding: 6px 16px; margin-left: 5px; border: 1px solid transparent; }
+.abg-pills &amp;gt; li &amp;gt; a:hover { background-color: #F0F0F0; }
+.abg-pills &amp;gt; li.active &amp;gt; a { background-color: $abg-red !important; color: #FFFFFF !important; box-shadow: 0 2px 4px rgba(200,16,46,0.3); }
+
+/* Buttons */
+.abg-btn-outline { background: transparent; border: 1px solid $abg-red; color: $abg-red; font-weight: 600; border-radius: 4px; padding: 6px 14px; white-space: nowrap; transition: all 0.2s; }
+.abg-btn-outline:hover:not([disabled]) { background: $abg-red; color: #FFFFFF; }
+.abg-btn-primary { background-color: $abg-red; border-color: $abg-red; color: #FFFFFF; font-weight: 600; border-radius: 4px; padding: 7px 18px; border: none; }
+.abg-btn-primary:hover:not([disabled]) { background-color: $abg-red-hover; color: #FFFFFF; }
+.abg-btn-primary[disabled] { background-color: #E0E0E0; color: #9E9E9E; cursor: not-allowed; }
+
+/* Status Badges */
+.status-pill { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; display: inline-block; white-space: nowrap; text-transform: uppercase; }
+.status-pending { background-color: #FEF3C7; color: #856404; border: 1px solid #FFEEDB; }
+.status-approved { background-color: #D1FAE5; color: #155724; border: 1px solid #C3E6CB; }
+.status-rejected { background-color: #FEE2E2; color: #721C24; border: 1px solid #F5C6CB; }
+.status-cancelled { background-color: #F3F4F6; color: #383D41; border: 1px solid #D6D8DB; }
+.status-work { background-color: #DBEAFE; color: #004085; border: 1px solid #B8DAFF; }
+
+/* Attachments */
+.attachment-tags-container { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.attachment-chip { background: #F1F5F9; border: 1px solid #CBD5E1; padding: 4px 10px; border-radius: 16px; font-size: 12px; display: inline-flex; align-items: center; }
+.attachment-chip a { color: #1E293B; text-decoration: none; }
+.attachment-chip a:hover { text-decoration: underline; color: #1782C5; }
+
+/* Grids &amp;amp; Tables */
+.widget-table-wrapper { border: 1px solid #EAEAEA; border-radius: 6px; overflow-x: auto; background: #FFFFFF; }
+.abg-table thead th { background-color: #F8F9FA; color: #333333; font-weight: 600; border-bottom: 2px solid #DDDDDD; text-transform: uppercase; font-size: 11px; vertical-align: middle; padding: 13px 12px; }
+.abg-table tbody tr:hover { background-color: #FFF8F8 !important; }
+
+/* Profiles &amp;amp; Aging */
+.abg-profile-panel { background: #FFFFFF; border: 1px solid $border-light; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.02); width: 100%; display: flex; flex-direction: column; }
+.border-top-success { border-top: 4px solid #2E7D32; }
+.border-top-danger { border-top: 4px solid $abg-red; }
+.panel-profile-header { padding: 15px 20px; border-bottom: 1px solid #EDF2F7; background: #FCFDFD; }
+.panel-profile-header .indicator-marker { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; margin-bottom: 4px; }
+.panel-profile-header h3 { margin: 0; font-size: 16.5px; font-weight: 700; color: #1A202C; }
+
+.abg-profile-table tbody tr td, .abg-profile-table tbody tr th { padding: 9px 18px !important; border-top: 1px solid #F0F4F8; font-size: 13px; }
+.highlight-row-success { background-color: #F4FBF6; }
+.highlight-row-danger { background-color: #FFF5F5; }
+.highlight-total-success { background-color: #E6F4EA; border-top: 1px dashed #2E7D32 !important; }
+.highlight-total-danger { background-color: #FCE8EA; border-top: 1px dashed $abg-red !important; }
+
+.aging-table-wrapper { background: #FFFFFF; border-radius: 4px; border: 1px solid $border-light; padding: 2px; }
+.abg-history-table { width: 100%; margin-bottom: 0; }
+.abg-history-table th { background-color: #F8FAFC; color: #4A5568; font-size: 11px; font-weight: 700; text-transform: uppercase; padding: 9px 8px !important; border: 1px solid #E2E8F0; }
+.abg-history-table td { padding: 8px 8px !important; font-size: 12.5px; border: 1px solid #E2E8F0; white-space: nowrap; color: #2D3748; }
+.cell-warning { color: #C05621 !important; font-weight: 700; background-color: #FFFAF0; }
+.cell-danger { color: #C53030 !important; font-weight: 700; background-color: #FFF5F5; }
+.cell-toxic { color: #9B1C1C !important; font-weight: 700; background-color: #FDF2F2; }
+.cell-total { background-color: #F8FAFC !important; color: #1A202C !important; }
+
+/* Approval Stepper */
+.approval-stepper-wrapper { background: #FDFDFD; border: 1px solid #E2E8F0; border-radius: 6px; padding: 18px 20px; }
+.approval-stepper { display: flex; align-items: flex-start; position: relative; overflow-x: auto; padding-top: 15px; padding-bottom: 10px; width: 100%; }
+.approval-stepper::before { content: ''; position: absolute; top: 29px; left: 4%; right: 4%; height: 2px; background: #E2E8F0; z-index: 1; }
+.stepper-item { flex: 1; min-width: 140px; text-align: center; position: relative; z-index: 2; padding: 0 8px; }
+.stepper-icon {
+  width: 30px; height: 30px; border-radius: 50%; background: #FFFFFF; border: 2px solid #CBD5E1;
+  margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; color: #94A3B8;
+}
+.stepper-item.completed .stepper-icon { background: #22C55E; border-color: #22C55E; color: #FFFFFF; }
+.stepper-item.current .stepper-icon { background: #FFFFFF; border-color: #EAB308; color: #EAB308; box-shadow: 0 0 0 4px rgba(234, 179, 8, 0.2); }
+.stepper-item.rejected .stepper-icon { background: #EF4444; border-color: #EF4444; color: #FFFFFF; }
+.stepper-label { font-size: 12px; font-weight: 700; color: #1E293B; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stepper-role { font-size: 10px; text-transform: uppercase; color: #64748B; margin-bottom: 2px; }
+.stepper-sub { font-size: 10px; font-weight: 700; text-transform: uppercase; }
+
+/* Activity Stream &amp;amp; Ticket Panel */
+.ticket-panel { border: 1px solid $abg-red; border-radius: 6px; overflow: hidden; }
+.ticket-panel .panel-heading { background-color: #FCE8EA; border-bottom: 1px solid #F9CCD1; padding: 12px 15px; }
+.ticket-body { min-height: 280px; background-color: #FFFFFF; padding: 15px; }
+.sn-activity-composer { background: #FDFDFD; border: 1px solid #E2E8F0; border-radius: 6px; padding: 14px; }
+.sn-journal-input { resize: vertical; font-size: 13px; border-radius: 4px; }
+.mention-input-wrapper { position: relative; width: 100%; }
+.mention-dropdown {
+  position: absolute; top: 100%; left: 0; z-index: 1060; width: 100%; max-height: 180px;
+  overflow-y: auto; background: #FFFFFF; border: 1px solid #CED4DA; border-radius: 0 0 4px 4px;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.12); list-style: none; margin: 0; padding: 0;
+}
+.mention-dropdown li { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #F1F1F1; }
+.mention-dropdown li:hover { background-color: #FCE8EA; }
+.mention-user-item { font-size: 12px; color: #333333; }
+
+/* Suppress Duplicate Composer Controls from Native ServiceNow Conversation Widget */
+.native-sn-stream-wrapper .panel-heading,
+.native-sn-stream-wrapper .panel-footer,
+.native-sn-stream-wrapper .timeline-input-container,
+.native-sn-stream-wrapper .ticket-conversation-composer,
+.native-sn-stream-wrapper form[name="ticket_conversation_form"],
+.native-sn-stream-wrapper .post-btn,
+.native-sn-stream-wrapper .btn-file-upload,
+.native-sn-stream-wrapper input[type="file"],
+.native-sn-stream-wrapper [ng-if*="canWrite"],
+.native-sn-stream-wrapper .input-group {
+  display: none !important;
+}
+.native-sn-stream-wrapper .panel { border: none !important; box-shadow: none !important; background: transparent !important; }
+
+.slide-down { animation: slideDownFade 0.25s ease-out; }
+@keyframes slideDownFade { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.page-size-box { width: 110px; }
+.page-size-box .form-control { height: 32px; font-size: 12px; }
+
+@media (max-width: 991px) {
+  .header-actions-panel { flex-direction: column; align-items: stretch; margin-top: 15px; }
+  .header-actions-panel .abg-pills, .header-actions-panel .search-box { width: 100%; }
+}
+@media (max-width: 767px) {
+  .abg-widget-container { padding: 12px; }
+  .mobile-left { text-align: left !important; }
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;false&lt;/has_preview&gt;&lt;id&gt;uclm_limit_swap_rfi&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;UCLM Limit Swap RFI&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+    var CONFIG = {
+        TABLES: {
+            SWAP_REQUEST: 'x_birl3_clm_nt_limit_swap_request',
+            CUSTOMER: 'x_birl3_clm_clm_customer_master1',
+            OUTSTANDING_SNAPSHOT: 'x_birl3_clm_clm_aging_snapshot',
+            APPROVER: 'sysapproval_approver'
+        }
+    };
+
+    var userId = gs.getUserID();
+    var userName = gs.getUserName();
+    var isAdmin = gs.hasRole('x_birl3_clm.admin') || gs.hasRole('admin');
+    data.isAdmin = isAdmin;
+
+    function getInternalState(stateStr) {
+        var s = (stateStr || '').toLowerCase();
+        if (s.indexOf('pending') &gt; -1 || s.indexOf('requested') &gt; -1) return 'pending';
+        if (s.indexOf('approved') &gt; -1 || s.indexOf('complete') &gt; -1 || s.indexOf('3') &gt; -1) return 'approved';
+        if (s.indexOf('reject') &gt; -1 || s.indexOf('cancel') &gt; -1 || s.indexOf('4') &gt; -1) return 'rejected';
+        return 'work';
+    }
+
+    function formatGeo(code, name) {
+        if (code &amp;&amp; name) return code + ' - ' + name;
+        if (code) return code;
+        if (name) return name;
+        return 'N/A';
+    }
+
+    function formatBytes(bytes) {
+        var b = parseInt(bytes, 10);
+        if (isNaN(b) || b &lt;= 0) return '0 B';
+        var k = 1024;
+        var sizes = ['B', 'KB', 'MB', 'GB'];
+        var i = Math.floor(Math.log(b) / Math.log(k));
+        return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    }
+
+    function getApproverRole(appGr) {
+        if (appGr.isValidField('approval_reason') &amp;&amp; appGr.getValue('approval_reason')) {
+            return appGr.getValue('approval_reason');
+        }
+        if (appGr.isValidField('u_role') &amp;&amp; appGr.getValue('u_role')) {
+            return appGr.getValue('u_role');
+        }
+        if (appGr.isValidField('u_approval_level') &amp;&amp; appGr.getValue('u_approval_level')) {
+            return appGr.getValue('u_approval_level');
+        }
+        return 'Approver';
+    }
+
+    function getAttachmentsForRecord(recordSysId) {
+        var attList = [];
+        var attGr = new GlideRecord('sys_attachment');
+        attGr.addQuery('table_name', CONFIG.TABLES.SWAP_REQUEST);
+        attGr.addQuery('table_sys_id', recordSysId);
+        attGr.orderByDesc('sys_created_on');
+        attGr.query();
+        while (attGr.next()) {
+            var fName = attGr.getValue('file_name') || '';
+            var ext = fName.split('.').pop().toLowerCase();
+            attList.push({
+                sys_id: attGr.getUniqueValue(),
+                name: fName,
+                size: formatBytes(attGr.getValue('size_bytes')),
+                ext: ext,
+                url: '/sys_attachment.do?sys_id=' + attGr.getUniqueValue()
+            });
+        }
+        return attList;
+    }
+
+    // =========================================================================
+    // 1. DIRECT ATTACHMENT UPLOAD
+    // =========================================================================
+    if (input &amp;&amp; input.action == 'upload_document') {
+        var targetSwapRec = new GlideRecord(CONFIG.TABLES.SWAP_REQUEST);
+        if (targetSwapRec.get(input.swapSysId)) {
+            if (input.fileData &amp;&amp; input.fileName &amp;&amp; input.fileType) {
+                new GlideSysAttachment().writeBase64(targetSwapRec, input.fileName, input.fileType, input.fileData);
+            }
+        }
+        data.attachments = getAttachmentsForRecord(input.swapSysId);
+        return;
+    }
+
+    // =========================================================================
+    // 2. SEARCH USERS FOR @MENTION POPUP
+    // =========================================================================
+    if (input &amp;&amp; input.action == 'search_mention_users') {
+        data.mentionUsers = [];
+        var uGr = new GlideRecord('sys_user');
+        uGr.addActiveQuery();
+        if (input.query) {
+            var q = (input.query || '').trim();
+            var qc = uGr.addQuery('name', 'CONTAINS', q);
+            qc.addOrCondition('first_name', 'CONTAINS', q);
+            qc.addOrCondition('last_name', 'CONTAINS', q);
+            qc.addOrCondition('email', 'CONTAINS', q);
+        }
+        uGr.orderBy('name');
+        uGr.setLimit(8);
+        uGr.query();
+        while (uGr.next()) {
+            data.mentionUsers.push({
+                sys_id: uGr.getUniqueValue(),
+                name: uGr.getValue('name') || '',
+                email: uGr.getValue('email') || ''
+            });
+        }
+        return;
+    }
+
+    // =========================================================================
+    // 3. POST COLLABORATIVE COMMENT (EVENT TRIGGER + AUTO WATCH_LIST SYNC)
+    // =========================================================================
+    if (input &amp;&amp; input.action == 'post_rfi_comment') {
+        var targetRecord = new GlideRecord(CONFIG.TABLES.SWAP_REQUEST);
+        if (targetRecord.get(input.swapSysId)) {
+            var rawComment = (input.commentText || '').trim();
+
+            if (rawComment) {
+                targetRecord.comments = rawComment;
+            }
+
+            if (input.commentFileData &amp;&amp; input.commentFileName &amp;&amp; input.commentFileType) {
+                new GlideSysAttachment().writeBase64(targetRecord, input.commentFileName, input.commentFileType, input.commentFileData);
+            }
+
+            var targetUsers = input.mentionedUserIds || [];
+
+            // Extract any raw @[email] patterns
+            var mentionRegex = /@\[(.*?)\]/g;
+            var match;
+            while ((match = mentionRegex.exec(rawComment)) !== null) {
+                var extractedEmail = match[1];
+                if (extractedEmail) {
+                    var uCheck = new GlideRecord('sys_user');
+                    uCheck.addQuery('email', extractedEmail);
+                    uCheck.setLimit(1);
+                    uCheck.query();
+                    if (uCheck.next()) {
+                        var uSysId = uCheck.getUniqueValue();
+                        if (targetUsers.indexOf(uSysId) === -1) {
+                            targetUsers.push(uSysId);
+                        }
+                    }
+                }
+            }
+
+            // Step A: Trigger Email Notification Event
+            for (var m = 0; m &lt; targetUsers.length; m++) {
+                gs.eventQueue('x_birl3_clm.swap_rfi_mention', targetRecord, targetUsers[m], gs.getUserID());
+            }
+
+            // Step B: Auto-sync any newly tagged users directly into watch_list
+            if (targetUsers.length &gt; 0 &amp;&amp; targetRecord.isValidField('watch_list')) {
+                var currentWatchList = targetRecord.getValue('watch_list') || '';
+                var watchListArray = currentWatchList ? currentWatchList.split(',') : [];
+
+                for (var w = 0; w &lt; targetUsers.length; w++) {
+                    if (watchListArray.indexOf(targetUsers[w]) === -1) {
+                        watchListArray.push(targetUsers[w]);
+                    }
+                }
+                targetRecord.setValue('watch_list', watchListArray.join(','));
+            }
+
+            targetRecord.update();
+        }
+
+        data.attachments = getAttachmentsForRecord(input.swapSysId);
+
+        var reloadOptions = {
+            sys_id: input.swapSysId.toString(),
+            table: CONFIG.TABLES.SWAP_REQUEST,
+            readonly: true,
+            title: ''
+        };
+        data.ticketWidgetObj = $sp.getWidget('widget-ticket-conversation', reloadOptions);
+        return;
+    }
+
+    // =========================================================================
+    // 4. FETCH ONLY WATCH-LISTED USERS' REQUESTS
+    // =========================================================================
+    if (input &amp;&amp; input.action == 'fetch_watched_swaps') {
+        data.list = [];
+        var swapList = new GlideRecord(CONFIG.TABLES.SWAP_REQUEST);
+
+        // STRICT FILTER: Showcase records ONLY where the user is in watch_list
+        if (!isAdmin) {
+            swapList.addQuery('watch_list', 'CONTAINS', userId);
+        }
+
+        swapList.orderByDesc('sys_created_on');
+        swapList.query();
+
+        while (swapList.next()) {
+            var stateDisplay = swapList.getDisplayValue('approval') || swapList.getDisplayValue('state') || 'Pending';
+
+            var doneeCode = swapList.donee.customer_code_sap ? swapList.donee.customer_code_sap.toString() : '';
+            var doneeName = swapList.donee.customer_name ? swapList.donee.customer_name.toString() : '';
+            var donorCode = swapList.donor.customer_code_sap ? swapList.donor.customer_code_sap.toString() : '';
+            var donorName = swapList.donor.customer_name ? swapList.donor.customer_name.toString() : '';
+
+            var doneeZone = formatGeo(swapList.donee.zone.toString(), swapList.donee.zone_name.toString());
+            var doneeReg  = formatGeo(swapList.donee.region.toString(), swapList.donee.region_name.toString());
+            var doneeDep  = formatGeo(swapList.donee.depot.toString(), swapList.donee.depot_name.toString());
+
+            var donorZone = formatGeo(swapList.donor.zone.toString(), swapList.donor.zone_name.toString());
+            var donorReg  = formatGeo(swapList.donor.region.toString(), swapList.donor.region_name.toString());
+            var donorDep  = formatGeo(swapList.donor.depot.toString(), swapList.donor.depot_name.toString());
+
+            data.list.push({
+                sys_id: swapList.getUniqueValue(),
+                number: swapList.getValue('number') || '',
+                pan: swapList.getValue('pan') || (swapList.donee.pan ? swapList.donee.pan.toString() : 'N/A'),
+                requested_by: swapList.getDisplayValue('opened_by') || swapList.getDisplayValue('sys_created_by') || '',
+
+                donee_code: doneeCode,
+                donee_name: doneeName,
+                donee_segment: swapList.getDisplayValue('donee_segment') || swapList.donee.getDisplayValue('segment') || '',
+                donee_zone: doneeZone,
+                donee_region: doneeReg,
+                donee_depot: doneeDep,
+
+                donor_code: donorCode,
+                donor_name: donorName,
+                donor_segment: swapList.getDisplayValue('donor_segment') || swapList.donor.getDisplayValue('segment') || '',
+                donor_zone: donorZone,
+                donor_region: donorReg,
+                donor_depot: donorDep,
+
+                amount: parseFloat(swapList.getValue('requested_amount') || 0),
+                state: stateDisplay,
+                internalState: getInternalState(stateDisplay), // maps 'approved', 'rejected', 'pending'
+                created_on: (swapList.getDisplayValue('sys_created_on') || '').split(' ')[0],
+                sys_created_on: swapList.getDisplayValue('sys_created_on') || ''
+            });
+        }
+        return;
+    }
+
+    // =========================================================================
+    // 5. DRILLDOWN DETAILS LOOKUP
+    // =========================================================================
+    if (input &amp;&amp; input.action == 'get_swap_details') {
+        data.approvalData = [];
+        data.extendedDetails = {};
+        data.justification = '';
+        data.description = '';
+
+        // Approvals Chain
+        var grApp = new GlideRecord(CONFIG.TABLES.APPROVER);
+        var qApp = grApp.addQuery('sysapproval', input.swapSysId);
+        qApp.addOrCondition('document_id', input.swapSysId);
+        grApp.orderBy('sys_created_on');
+        grApp.query();
+
+        while (grApp.next()) {
+            data.approvalData.push({
+                approver: grApp.getDisplayValue('approver') || 'System Approver',
+                state: grApp.getDisplayValue('state') || 'Requested',
+                role: getApproverRole(grApp),
+                updated: grApp.getValue('sys_updated_on') || ''
+            });
+        }
+
+        // Swap Request Record
+        var swapGr = new GlideRecord(CONFIG.TABLES.SWAP_REQUEST);
+        if (swapGr.get(input.swapSysId)) {
+            data.justification = swapGr.getValue('justification') || swapGr.getValue('u_justification') || '';
+            data.description   = swapGr.getValue('description') || swapGr.getValue('u_description') || '';
+
+            var doneeSysId = swapGr.getValue('donee');
+            var donorSysId = swapGr.getValue('donor');
+
+            function getCustomerSnapshot(custSysId, fallbackLimit, fallbackOutstanding) {
+                var d = {
+                    name: 'N/A', code: 'N/A', zone: 'N/A', region: 'N/A', depot: 'N/A',
+                    segment: 'N/A', limit: fallbackLimit, outstanding: fallbackOutstanding,
+                    history: []
+                };
+
+                if (custSysId) {
+                    var cGr = new GlideRecord(CONFIG.TABLES.CUSTOMER);
+                    if (cGr.get(custSysId)) {
+                        d.name = cGr.getValue('customer_name') || 'N/A';
+                        d.code = cGr.getValue('customer_code_sap') || 'N/A';
+                        d.segment = cGr.getDisplayValue('segment') || cGr.getValue('segment') || 'N/A';
+                        d.zone = formatGeo(cGr.getValue('zone'), cGr.getValue('zone_name'));
+                        d.region = formatGeo(cGr.getValue('region'), cGr.getValue('region_name'));
+                        d.depot = formatGeo(cGr.getValue('depot'), cGr.getValue('depot_name'));
+                    }
+
+                    var outGr = new GlideRecord(CONFIG.TABLES.OUTSTANDING_SNAPSHOT);
+                    outGr.addQuery('customer', custSysId);
+                    outGr.orderByDesc('sys_created_on');
+                    outGr.setLimit(6);
+                    outGr.query();
+
+                    while (outGr.next()) {
+                        d.history.push({
+                            date: (outGr.getDisplayValue('sys_created_on') || '').split(' ')[0],
+                            total: parseFloat(outGr.getValue('total_outstanding') || 0),
+                            b0_30: parseFloat(outGr.getValue('b0_30') || outGr.getValue('bucket_0_30_days') || 0),
+                            b31_45: parseFloat(outGr.getValue('b31_45') || outGr.getValue('bucket_31_45_days') || 0),
+                            b46_60: parseFloat(outGr.getValue('b46_60') || outGr.getValue('bucket_46_60_days') || 0),
+                            b61_75: parseFloat(outGr.getValue('b61_75') || outGr.getValue('bucket_61_75_days') || 0),
+                            b76_90: parseFloat(outGr.getValue('b76_90') || outGr.getValue('bucket_76_90_days') || 0),
+                            b_gt90: parseFloat(outGr.getValue('b_gt90') || outGr.getValue('bucket_91_120_days') || 0)
+                        });
+                    }
+                }
+                return d;
+            }
+
+            data.extendedDetails.donee = getCustomerSnapshot(
+                doneeSysId,
+                parseFloat(swapGr.getValue('donee_current_limit') || 0),
+                parseFloat(swapGr.getValue('donee_outstanding') || 0)
+            );
+
+            data.extendedDetails.donor = getCustomerSnapshot(
+                donorSysId,
+                parseFloat(swapGr.getValue('donor_current_limit') || 0),
+                parseFloat(swapGr.getValue('donor_outstanding') || 0)
+            );
+        }
+
+        data.attachments = getAttachmentsForRecord(input.swapSysId);
+
+        var ticketOptions = {
+            sys_id: input.swapSysId.toString(),
+            table: CONFIG.TABLES.SWAP_REQUEST,
+            readonly: true,
+            title: ''
+        };
+        data.ticketWidgetObj = $sp.getWidget('widget-ticket-conversation', ticketOptions);
+        return;
+    }
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-10-11 17:57:34&lt;/sys_created_on&gt;&lt;sys_id&gt;c85f85f62bb7cb104572f3745e91bf18&lt;/sys_id&gt;&lt;sys_mod_count&gt;5&lt;/sys_mod_count&gt;&lt;sys_name&gt;UCLM Limit Swap RFI&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_c85f85f62bb7cb104572f3745e91bf18&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-10-11 18:30:56&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="abg-widget-container"&gt;
+
+  &lt;!-- =======================================================
+       VIEW 1: WATCHED &amp; MENTIONED REQUESTS QUEUE
+       ======================================================= --&gt;
+  &lt;div ng-if="!c.data.selectedSwap"&gt;
+    
+    &lt;div class="abg-header row flex-align-center section-spacing-sm"&gt;
+      &lt;div class="col-xs-12 col-md-6 m-b-sm-mobile"&gt;
+        &lt;h2&gt;
+          {{c.data.isAdmin ? 'Limit Swap Watchlist &amp; RFI (Admin)' : 'Limit Swaps (Mentioned &amp; Watchlist)'}}
+        &lt;/h2&gt;
+        &lt;p class="m-b-none text-muted"&gt;Track and respond to Limit Swap requests where you are tagged in the watchlist. Open items require input; approved/closed items archive to History.&lt;/p&gt;
+      &lt;/div&gt;
+
+      &lt;div class="col-xs-12 col-md-6"&gt;
+        &lt;div class="header-actions-panel"&gt;
+          &lt;ul class="nav nav-pills abg-pills filter-pills"&gt;
+            &lt;li ng-class="{'active': c.listFilter == 'pending'}"&gt;
+              &lt;a href="javascript:void(0)" ng-click="c.setFilter('pending')"&gt;
+                Open Requests &lt;span class="badge badge-danger m-l-xs" ng-if="c.pendingCount &gt; 0"&gt;{{c.pendingCount}}&lt;/span&gt;
+              &lt;/a&gt;
+            &lt;/li&gt;
+            &lt;li ng-class="{'active': c.listFilter == 'completed'}"&gt;
+              &lt;a href="javascript:void(0)" ng-click="c.setFilter('completed')"&gt;
+                History &lt;span class="badge badge-default m-l-xs" ng-if="c.historyCount &gt; 0"&gt;{{c.historyCount}}&lt;/span&gt;
+              &lt;/a&gt;
+            &lt;/li&gt;
+            &lt;li ng-class="{'active': c.listFilter == 'all'}"&gt;
+              &lt;a href="javascript:void(0)" ng-click="c.setFilter('all')"&gt;All&lt;/a&gt;
+            &lt;/li&gt;
+          &lt;/ul&gt;
+
+          &lt;div class="input-group search-box"&gt;
+            &lt;span class="input-group-addon"&gt;&lt;i class="fa fa-search text-muted"&gt;&lt;/i&gt;&lt;/span&gt;
+            &lt;input type="text" class="form-control" ng-model="c.searchSwap" ng-change="c.currentPage = 1" placeholder="Search PAN, Request No, or Submitter..."&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- Spinner Loading List --&gt;
+    &lt;div class="text-center p-xl section-spacing-md" ng-if="c.data.isFetchingSwaps"&gt;
+      &lt;i class="fa fa-spinner fa-spin fa-3x abg-text-red m-b-md"&gt;&lt;/i&gt;
+      &lt;p class="text-muted"&gt;Loading your watched requests...&lt;/p&gt;
+    &lt;/div&gt;
+
+    &lt;!-- Requests Table --&gt;
+    &lt;div class="table-responsive shadow-sm widget-table-wrapper section-spacing-md" ng-if="!c.data.isFetchingSwaps"&gt;
+      &lt;table class="table abg-table table-hover m-b-none"&gt;
+        &lt;thead&gt;
+          &lt;tr&gt;
+            &lt;th width="16%"&gt;Request No&lt;/th&gt;
+            &lt;th width="24%"&gt;Donee (Receiving Unit)&lt;/th&gt;
+            &lt;th width="24%"&gt;Donor (Deducting Unit)&lt;/th&gt;
+            &lt;th width="14%" class="text-right"&gt;Transfer Amount&lt;/th&gt;
+            &lt;th width="11%" class="text-center"&gt;Status&lt;/th&gt;
+            &lt;th width="11%" class="text-center"&gt;Action&lt;/th&gt;
+          &lt;/tr&gt;
+        &lt;/thead&gt;
+        &lt;tbody&gt;
+          &lt;tr ng-if="c.getFilteredSwaps().length == 0"&gt;
+            &lt;td colspan="6" class="text-center text-muted p-xl"&gt;
+              &lt;i class="fa fa-eye-slash fa-3x m-b-sm" style="color:#CBD5E0;"&gt;&lt;/i&gt;&lt;br&gt;
+              &lt;span ng-if="c.listFilter == 'pending'"&gt;No open limit swap requests currently require your attention or input.&lt;/span&gt;
+              &lt;span ng-if="c.listFilter == 'completed'"&gt;No historical or approved limit swap requests found on your watchlist.&lt;/span&gt;
+              &lt;span ng-if="c.listFilter == 'all'"&gt;No limit swap requests found matching your filter criteria.&lt;/span&gt;
+            &lt;/td&gt;
+          &lt;/tr&gt;
+          &lt;tr ng-repeat="swap in c.getPaginatedSwaps()"&gt;
+            &lt;td class="vertical-middle"&gt;
+              &lt;strong class="text-dark font-14"&gt;{{::swap.number}}&lt;/strong&gt;
+              &lt;div class="corporate-pan-clean m-t-xxs"&gt;
+                &lt;i class="fa fa-id-card-o m-r-xs"&gt;&lt;/i&gt;
+                &lt;span&gt;{{::swap.pan}}&lt;/span&gt;
+              &lt;/div&gt;
+              &lt;small class="text-muted display-block m-t-xxs"&gt;&lt;i class="fa fa-calendar m-r-xs"&gt;&lt;/i&gt; {{::swap.created_on}}&lt;/small&gt;
+              &lt;div class="text-xs text-primary font-weight-bold m-t-xxs"&gt;
+                &lt;i class="fa fa-user m-r-xs"&gt;&lt;/i&gt; Submitter: {{::swap.requested_by}}
+              &lt;/div&gt;
+            &lt;/td&gt;
+            &lt;td class="vertical-middle"&gt;
+              &lt;strong class="text-success" style="font-size:13.5px;"&gt;{{::swap.donee_code}} — {{::swap.donee_name}}&lt;/strong&gt;
+              &lt;div class="text-xs text-muted m-t-xxs"&gt;
+                &lt;i class="fa fa-map-marker text-success m-r-xs"&gt;&lt;/i&gt; {{::swap.donee_zone}} | {{::swap.donee_region}} | {{::swap.donee_depot}}
+              &lt;/div&gt;
+              &lt;span class="badge segment-badge" ng-if="swap.donee_segment"&gt;{{::swap.donee_segment}}&lt;/span&gt;
+            &lt;/td&gt;
+            &lt;td class="vertical-middle"&gt;
+              &lt;strong class="text-danger" style="font-size:13.5px;"&gt;{{::swap.donor_code}} — {{::swap.donor_name}}&lt;/strong&gt;
+              &lt;div class="text-xs text-muted m-t-xxs"&gt;
+                &lt;i class="fa fa-map-marker text-danger m-r-xs"&gt;&lt;/i&gt; {{::swap.donor_zone}} | {{::swap.donor_region}} | {{::swap.donor_depot}}
+              &lt;/div&gt;
+              &lt;span class="badge segment-badge" ng-if="swap.donor_segment"&gt;{{::swap.donor_segment}}&lt;/span&gt;
+            &lt;/td&gt;
+            &lt;td class="vertical-middle text-right"&gt;
+              &lt;strong style="font-size: 14.5px; color:#1A202C;"&gt;₹ {{c.formatINR(swap.amount)}}&lt;/strong&gt;
+            &lt;/td&gt;
+            &lt;td class="vertical-middle text-center"&gt;
+              &lt;span class="status-pill status-{{swap.internalState}}"&gt;{{::swap.state}}&lt;/span&gt;
+            &lt;/td&gt;
+            &lt;td class="vertical-middle text-center"&gt;
+              &lt;button class="btn abg-btn-outline btn-sm" ng-click="c.viewDetails(swap)"&gt;
+                &lt;i class="fa fa-comments-o m-r-xs"&gt;&lt;/i&gt; {{swap.internalState == 'approved' ? 'View Details' : 'Collaborate / RFI'}}
+              &lt;/button&gt;
+            &lt;/td&gt;
+          &lt;/tr&gt;
+        &lt;/tbody&gt;
+      &lt;/table&gt;
+    &lt;/div&gt;
+
+    &lt;!-- Pagination --&gt;
+    &lt;div class="row flex-align-center section-spacing-sm" ng-if="c.getFilteredSwaps().length &gt; 0 &amp;&amp; !c.data.isFetchingSwaps"&gt;
+      &lt;div class="col-xs-12 col-sm-4 m-b-sm-mobile"&gt;
+        &lt;div class="input-group page-size-box"&gt;
+          &lt;span class="input-group-addon bg-light"&gt;Show&lt;/span&gt;
+          &lt;select class="form-control" ng-model="c.itemsPerPage" ng-change="c.currentPage = 1" ng-options="size for size in [5, 10, 25, 50]"&gt;&lt;/select&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="col-xs-12 col-sm-4 text-center text-muted hidden-xs"&gt;
+        Showing {{ (c.currentPage - 1) * c.itemsPerPage + 1 }} to 
+        {{ c.getMathMin(c.currentPage * c.itemsPerPage, c.getFilteredSwaps().length) }} 
+        of {{ c.getFilteredSwaps().length }} entries
+      &lt;/div&gt;
+      &lt;div class="col-xs-12 col-sm-4 text-right text-center-mobile m-t-sm-mobile"&gt;
+        &lt;button class="btn btn-default btn-sm" ng-click="c.currentPage = c.currentPage - 1" ng-disabled="c.currentPage == 1"&gt;
+          &lt;i class="fa fa-chevron-left"&gt;&lt;/i&gt; Prev
+        &lt;/button&gt;
+        &lt;span class="m-l-sm m-r-sm font-weight-bold"&gt;Page {{c.currentPage}} / {{c.totalPages()}}&lt;/span&gt;
+        &lt;button class="btn btn-default btn-sm" ng-click="c.currentPage = c.currentPage + 1" ng-disabled="c.currentPage == c.totalPages()"&gt;
+          Next &lt;i class="fa fa-chevron-right"&gt;&lt;/i&gt;
+        &lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;!-- =======================================================
+       VIEW 2: DRILLDOWN, CONTEXT &amp; COLLABORATION WORKSPACE
+       ======================================================= --&gt;
+  &lt;div class="slide-down" ng-if="c.data.selectedSwap"&gt;
+    
+    &lt;!-- Top Action Bar --&gt;
+    &lt;div class="row section-spacing-sm flex-align-center"&gt;
+      &lt;div class="col-xs-12"&gt;
+        &lt;button class="btn btn-link text-muted p-l-0 hover-red font-weight-bold" ng-click="c.goBack()"&gt;
+          &amp;#8592; Back to Watched Requests
+        &lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- Corporate PAN Header Card --&gt;
+    &lt;div class="panel panel-default shadow-sm section-spacing-md" style="border-left: 4px solid #C8102E;"&gt;
+      &lt;div class="panel-body p-md"&gt;
+        &lt;div class="row flex-align-center"&gt;
+          &lt;div class="col-xs-12 col-md-8"&gt;
+            &lt;div class="flex-align-center gap-10"&gt;
+              &lt;h3 class="corporate-display-name m-n"&gt;Limit Swap Reallocation&lt;/h3&gt;
+              &lt;span class="pan-prominent-badge"&gt;
+                PAN: &lt;strong&gt;{{c.data.selectedSwap.pan}}&lt;/strong&gt;
+              &lt;/span&gt;
+              &lt;span class="request-number-pill"&gt;
+                {{c.data.selectedSwap.number}}
+              &lt;/span&gt;
+            &lt;/div&gt;
+            &lt;div class="flex-align-center gap-10 m-t-xs text-muted" style="font-size: 13px;"&gt;
+              &lt;span&gt;Submitted On: &lt;strong class="text-dark"&gt;{{c.data.selectedSwap.sys_created_on}}&lt;/strong&gt;&lt;/span&gt;
+              &lt;span&gt;| Initiator: &lt;strong class="text-dark"&gt;{{c.data.selectedSwap.requested_by}}&lt;/strong&gt;&lt;/span&gt;
+              &lt;span&gt;| Reallocation Amount: &lt;strong class="text-danger font-weight-bold"&gt;₹ {{c.formatINR(c.data.selectedSwap.amount)}}&lt;/strong&gt;&lt;/span&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+          &lt;div class="col-xs-12 col-md-4 text-right mobile-left m-t-sm-mobile"&gt;
+            &lt;span class="badge" style="background:#2B6CB0; color:#FFF; padding: 7px 14px; font-size: 12px; font-weight: 600; margin-right: 6px;"&gt;
+              &lt;i class="fa fa-eye m-r-xs"&gt;&lt;/i&gt; Watcher / RFI View
+            &lt;/span&gt;
+            &lt;span class="status-pill status-{{c.data.selectedSwap.internalState}}" style="padding: 7px 18px; font-size: 13px;"&gt;
+              Status: {{c.data.selectedSwap.state}}
+            &lt;/span&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- Spinner Loading Details --&gt;
+    &lt;div class="text-center p-xl section-spacing-md" ng-if="c.data.isLoadingDetails"&gt;
+      &lt;i class="fa fa-spinner fa-spin fa-3x abg-text-red m-b-sm"&gt;&lt;/i&gt;
+      &lt;p class="text-muted font-weight-bold"&gt;Resolving operational site profiles &amp; authorization traces...&lt;/p&gt;
+    &lt;/div&gt;
+
+    &lt;div ng-if="!c.data.isLoadingDetails"&gt;
+
+      &lt;!-- Remarks / Description Container --&gt;
+      &lt;div class="section-spacing-md" ng-if="c.data.swapDetails.description"&gt;
+        &lt;div class="panel panel-default shadow-sm m-b-none" style="border-left: 4px solid #f0ad4e;"&gt;
+          &lt;div class="panel-body p-sm"&gt;
+            &lt;h5 class="m-t-none font-weight-bold text-uppercase" style="font-size:12px; color:#b7791f;"&gt;
+              &lt;i class="fa fa-commenting-o text-warning m-r-xs"&gt;&lt;/i&gt; Remarks / Description
+            &lt;/h5&gt;
+            &lt;p class="m-b-none remarks-content"&gt;{{c.data.swapDetails.description}}&lt;/p&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;!-- Business Justification / Strategic Rationale --&gt;
+      &lt;div class="section-spacing-md" ng-if="c.data.swapDetails.justification"&gt;
+        &lt;div class="panel panel-default shadow-sm m-b-none" style="border-left: 4px solid #C8102E;"&gt;
+          &lt;div class="panel-body p-sm"&gt;
+            &lt;h5 class="m-t-none font-weight-bold text-uppercase section-title"&gt;
+              &lt;i class="fa fa-file-text-o text-danger m-r-xs"&gt;&lt;/i&gt; Business Justification / Comments
+            &lt;/h5&gt;
+            &lt;p class="m-b-none remarks-content"&gt;{{c.data.swapDetails.justification}}&lt;/p&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;!-- Attachments &amp; Documents Container with Direct Upload Drawer --&gt;
+      &lt;div class="panel panel-default shadow-sm section-spacing-md" style="border-left: 4px solid #1782c5;"&gt;
+        &lt;div class="panel-body p-sm"&gt;
+          &lt;div class="row flex-align-center"&gt;
+            &lt;div class="col-xs-12 col-sm-8"&gt;
+              &lt;h5 class="m-t-none font-weight-bold text-uppercase" style="font-size:12px; color:#1782c5;"&gt;
+                &lt;i class="fa fa-paperclip m-r-xs"&gt;&lt;/i&gt; Attached Documents &amp; Supporting Approvals ({{c.data.swapDetails.attachments.length || 0}})
+              &lt;/h5&gt;
+              &lt;div class="attachment-tags-container" ng-if="c.data.swapDetails.attachments.length &gt; 0"&gt;
+                &lt;span class="attachment-chip" ng-repeat="att in c.data.swapDetails.attachments"&gt;
+                  &lt;i class="fa fa-file-pdf-o text-danger m-r-xs" ng-if="att.ext == 'pdf'"&gt;&lt;/i&gt;
+                  &lt;i class="fa fa-file-text-o text-muted m-r-xs" ng-if="att.ext != 'pdf'"&gt;&lt;/i&gt;
+                  &lt;a href="{{att.url}}" target="_blank" title="Click to view/download {{att.name}}"&gt;
+                    &lt;strong&gt;{{att.name}}&lt;/strong&gt; ({{att.size}})
+                  &lt;/a&gt;
+                &lt;/span&gt;
+              &lt;/div&gt;
+              &lt;div class="text-muted small" ng-if="!c.data.swapDetails.attachments || c.data.swapDetails.attachments.length === 0"&gt;
+                No supporting attachments found for this request.
+              &lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class="col-xs-12 col-sm-4 text-right mobile-left m-t-sm-mobile"&gt;
+              &lt;input type="file" id="collabAttachmentUpload" style="display:none;" onchange="angular.element(this).scope().c.uploadDirectAttachment(this)"&gt;
+              &lt;button class="btn btn-default btn-sm" onclick="document.getElementById('collabAttachmentUpload').click()" ng-disabled="c.isUploadingFile"&gt;
+                &lt;i class="fa fa-spinner fa-spin" ng-if="c.isUploadingFile"&gt;&lt;/i&gt;
+                &lt;i class="fa fa-upload" ng-if="!c.isUploadingFile"&gt;&lt;/i&gt; Upload Document (PDF)
+              &lt;/button&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;!-- Authorization Pipeline Stepper --&gt;
+      &lt;div class="approval-stepper-wrapper section-spacing-md"&gt;
+        &lt;div class="row flex-align-center m-b-sm"&gt;
+          &lt;div class="col-sm-8"&gt;
+            &lt;h4 class="font-weight-bold m-n text-uppercase section-title"&gt;
+              &lt;i class="fa fa-sitemap text-danger m-r-xs"&gt;&lt;/i&gt; Authorization Pipeline
+            &lt;/h4&gt;
+          &lt;/div&gt;
+          &lt;div class="col-sm-4 text-right mobile-left m-t-xs-mobile"&gt;
+            &lt;small class="text-muted"&gt;&lt;i class="fa fa-info-circle"&gt;&lt;/i&gt; Sourced from approval workflow&lt;/small&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="text-center text-muted p-md" ng-if="!c.data.swapDetails.approvals || c.data.swapDetails.approvals.length === 0"&gt;
+          &lt;i class="fa fa-clock-o"&gt;&lt;/i&gt; Systemic approval workflows are either routing or not required for this request.
+        &lt;/div&gt;
+
+        &lt;div class="approval-stepper" ng-if="c.data.swapDetails.approvals.length &gt; 0"&gt;
+          &lt;div class="stepper-item" 
+               ng-repeat="app in c.data.swapDetails.approvals"
+               ng-class="{
+                 'completed': app.state == 'Approved', 
+                 'current': app.state == 'Requested', 
+                 'rejected': app.state == 'Rejected' || app.state == 'Cancelled',
+                 'pending': app.state != 'Approved' &amp;&amp; app.state != 'Requested' &amp;&amp; app.state != 'Rejected' &amp;&amp; app.state != 'Cancelled'
+               }"&gt;
+            &lt;div class="stepper-icon"&gt;
+              &lt;i class="fa fa-check" ng-if="app.state == 'Approved'"&gt;&lt;/i&gt;
+              &lt;i class="fa fa-spinner fa-spin" ng-if="app.state == 'Requested'"&gt;&lt;/i&gt;
+              &lt;i class="fa fa-times" ng-if="app.state == 'Rejected' || app.state == 'Cancelled'"&gt;&lt;/i&gt;
+              &lt;i class="fa fa-circle-o" ng-if="app.state != 'Approved' &amp;&amp; app.state != 'Requested' &amp;&amp; app.state != 'Rejected' &amp;&amp; app.state != 'Cancelled'"&gt;&lt;/i&gt;
+            &lt;/div&gt;
+            &lt;div class="stepper-label" title="{{app.approver}}"&gt;{{app.approver}}&lt;/div&gt;
+            &lt;div class="stepper-role" title="{{app.role}}"&gt;{{app.role}}&lt;/div&gt;
+            &lt;div class="stepper-sub" ng-class="{
+              'text-success': app.state == 'Approved', 
+              'text-warning': app.state == 'Requested', 
+              'text-danger': app.state == 'Rejected' || app.state == 'Cancelled',
+              'text-muted': app.state != 'Approved' &amp;&amp; app.state != 'Requested' &amp;&amp; app.state != 'Rejected' &amp;&amp; app.state != 'Cancelled'
+            }"&gt;
+              {{app.state == 'Requested' ? 'Pending Action' : app.state}}
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      
+      &lt;!-- Customer Entity Profile Matrix --&gt;
+      &lt;h4 class="font-weight-bold m-b-md text-uppercase section-title slide-down"&gt;
+        &lt;i class="fa fa-database text-danger m-r-xs"&gt;&lt;/i&gt; Customer Entity Profile Matrix
+      &lt;/h4&gt;
+      
+      &lt;div class="row flex-cards section-spacing-md slide-down"&gt;
+        
+        &lt;!-- Donee Unit (Receiving Site) --&gt;
+        &lt;div class="col-xs-12 col-sm-6"&gt;
+          &lt;div class="abg-profile-panel border-top-success"&gt;
+            &lt;div class="panel-profile-header"&gt;
+               &lt;span class="indicator-marker text-success"&gt;&lt;i class="fa fa-arrow-circle-down"&gt;&lt;/i&gt; Receiving Unit (Donee Site)&lt;/span&gt;
+               &lt;div class="d-flex justify-content-between align-items-center"&gt;
+                 &lt;h3&gt;{{c.data.swapDetails.extended.donee.code || 'N/A'}} — {{c.data.swapDetails.extended.donee.name}}&lt;/h3&gt;
+                 &lt;span class="badge abg-bg-gray-dark" ng-if="c.data.swapDetails.extended.donee.segment"&gt;{{c.data.swapDetails.extended.donee.segment}}&lt;/span&gt;
+               &lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class="panel-profile-body"&gt;
+              &lt;table class="table abg-profile-table"&gt;
+                &lt;tbody&gt;
+                  &lt;tr&gt;&lt;th width="38%"&gt;Zone&lt;/th&gt;&lt;td&gt;{{c.data.swapDetails.extended.donee.zone}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;th&gt;Region&lt;/th&gt;&lt;td&gt;{{c.data.swapDetails.extended.donee.region}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;th&gt;Depot&lt;/th&gt;&lt;td&gt;{{c.data.swapDetails.extended.donee.depot}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-row-success"&gt;&lt;th&gt;Current Limit&lt;/th&gt;&lt;td&gt;&lt;strong&gt;₹ {{c.formatINR(c.data.swapDetails.extended.donee.limit)}}&lt;/strong&gt;&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-row-success"&gt;&lt;th&gt;Total Outstanding&lt;/th&gt;&lt;td&gt;&lt;strong class="text-danger"&gt;₹ {{c.formatINR(c.data.swapDetails.extended.donee.outstanding)}}&lt;/strong&gt;&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-total-success"&gt;
+                     &lt;th&gt;Allocation Impact&lt;/th&gt;
+                     &lt;td&gt;&lt;span class="text-success font-weight-bold"&gt;+ ₹ {{c.formatINR(c.data.selectedSwap.amount)}}&lt;/span&gt;&lt;/td&gt;
+                  &lt;/tr&gt;
+                &lt;/tbody&gt;
+              &lt;/table&gt;
+
+              &lt;!-- 6-Month Bucket Matrix --&gt;
+              &lt;div class="bg-light p-sm border-top"&gt;
+                 &lt;div class="text-xs text-uppercase font-weight-bold text-muted m-b-sm m-l-xs"&gt;
+                    &lt;i class="fa fa-history text-success m-r-xs"&gt;&lt;/i&gt; 6-Month Bucket-Wise Aging Trend
+                 &lt;/div&gt;
+                 &lt;div class="table-responsive aging-table-wrapper"&gt;
+                   &lt;table class="table table-bordered abg-history-table m-b-none text-center" ng-if="c.data.swapDetails.extended.donee.history.length &gt; 0"&gt;
+                     &lt;thead&gt;
+                       &lt;tr&gt;
+                         &lt;th class="text-left" style="min-width: 85px;"&gt;Date&lt;/th&gt;
+                         &lt;th&gt;0-30 D&lt;/th&gt;
+                         &lt;th&gt;31-45 D&lt;/th&gt;
+                         &lt;th&gt;46-60 D&lt;/th&gt;
+                         &lt;th&gt;61-75 D&lt;/th&gt;
+                         &lt;th&gt;76-90 D&lt;/th&gt;
+                         &lt;th&gt;&amp;gt;90 D&lt;/th&gt;
+                         &lt;th class="text-right"&gt;Total Out.&lt;/th&gt;
+                       &lt;/tr&gt;
+                     &lt;/thead&gt;
+                     &lt;tbody&gt;
+                       &lt;tr ng-repeat="hist in c.data.swapDetails.extended.donee.history"&gt;
+                         &lt;td class="text-left font-weight-bold"&gt;{{::hist.date}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-muted': hist.b0_30 == 0}"&gt;{{c.formatINR(hist.b0_30)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-muted': hist.b31_45 == 0}"&gt;{{c.formatINR(hist.b31_45)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-muted': hist.b46_60 == 0}"&gt;{{c.formatINR(hist.b46_60)}}&lt;/td&gt;
+                         &lt;td ng-class="{'cell-warning': hist.b61_75 &gt; 0, 'text-muted': hist.b61_75 == 0}"&gt;{{c.formatINR(hist.b61_75)}}&lt;/td&gt;
+                         &lt;td ng-class="{'cell-danger': hist.b76_90 &gt; 0, 'text-muted': hist.b76_90 == 0}"&gt;{{c.formatINR(hist.b76_90)}}&lt;/td&gt;
+                         &lt;td ng-class="{'cell-toxic': hist.b_gt90 &gt; 0, 'text-muted': hist.b_gt90 == 0}"&gt;{{c.formatINR(hist.b_gt90)}}&lt;/td&gt;
+                         &lt;td class="text-right font-weight-bold cell-total"&gt;₹ {{c.formatINR(hist.total)}}&lt;/td&gt;
+                       &lt;/tr&gt;
+                     &lt;/tbody&gt;
+                   &lt;/table&gt;
+                   &lt;div ng-if="c.data.swapDetails.extended.donee.history.length == 0" class="text-muted text-xs p-t-xs p-l-xs"&gt;
+                      No historical snapshot outstanding data available.
+                   &lt;/div&gt;
+                 &lt;/div&gt;
+              &lt;/div&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;!-- Donor Unit (Deducting Site) --&gt;
+        &lt;div class="col-xs-12 col-sm-6"&gt;
+          &lt;div class="abg-profile-panel border-top-danger"&gt;
+            &lt;div class="panel-profile-header"&gt;
+               &lt;span class="indicator-marker text-danger"&gt;&lt;i class="fa fa-arrow-circle-up"&gt;&lt;/i&gt; Deducting Unit (Donor Site)&lt;/span&gt;
+               &lt;div class="d-flex justify-content-between align-items-center"&gt;
+                 &lt;h3&gt;{{c.data.swapDetails.extended.donor.code || 'N/A'}} — {{c.data.swapDetails.extended.donor.name}}&lt;/h3&gt;
+                 &lt;span class="badge abg-bg-gray-dark" ng-if="c.data.swapDetails.extended.donor.segment"&gt;{{c.data.swapDetails.extended.donor.segment}}&lt;/span&gt;
+               &lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class="panel-profile-body"&gt;
+              &lt;table class="table abg-profile-table"&gt;
+                &lt;tbody&gt;
+                  &lt;tr&gt;&lt;th width="38%"&gt;Zone&lt;/th&gt;&lt;td&gt;{{c.data.swapDetails.extended.donor.zone}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;th&gt;Region&lt;/th&gt;&lt;td&gt;{{c.data.swapDetails.extended.donor.region}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;th&gt;Depot&lt;/th&gt;&lt;td&gt;{{c.data.swapDetails.extended.donor.depot}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-row-danger"&gt;&lt;th&gt;Current Limit&lt;/th&gt;&lt;td&gt;&lt;strong&gt;₹ {{c.formatINR(c.data.swapDetails.extended.donor.limit)}}&lt;/strong&gt;&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-row-danger"&gt;&lt;th&gt;Total Outstanding&lt;/th&gt;&lt;td&gt;&lt;strong class="text-danger"&gt;₹ {{c.formatINR(c.data.swapDetails.extended.donor.outstanding)}}&lt;/strong&gt;&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-total-danger"&gt;
+                     &lt;th&gt;Allocation Impact&lt;/th&gt;
+                     &lt;td&gt;&lt;span class="text-danger font-weight-bold"&gt;- ₹ {{c.formatINR(c.data.selectedSwap.amount)}}&lt;/span&gt;&lt;/td&gt;
+                  &lt;/tr&gt;
+                &lt;/tbody&gt;
+              &lt;/table&gt;
+
+              &lt;!-- 6-Month Bucket Matrix --&gt;
+              &lt;div class="bg-light p-sm border-top"&gt;
+                 &lt;div class="text-xs text-uppercase font-weight-bold text-muted m-b-sm m-l-xs"&gt;
+                    &lt;i class="fa fa-history text-danger m-r-xs"&gt;&lt;/i&gt; 6-Month Bucket-Wise Aging Trend
+                 &lt;/div&gt;
+                 &lt;div class="table-responsive aging-table-wrapper"&gt;
+                   &lt;table class="table table-bordered abg-history-table m-b-none text-center" ng-if="c.data.swapDetails.extended.donor.history.length &gt; 0"&gt;
+                     &lt;thead&gt;
+                       &lt;tr&gt;
+                         &lt;th class="text-left" style="min-width: 85px;"&gt;Date&lt;/th&gt;
+                         &lt;th&gt;0-30 D&lt;/th&gt;
+                         &lt;th&gt;31-45 D&lt;/th&gt;
+                         &lt;th&gt;46-60 D&lt;/th&gt;
+                         &lt;th&gt;61-75 D&lt;/th&gt;
+                         &lt;th&gt;76-90 D&lt;/th&gt;
+                         &lt;th&gt;&amp;gt;90 D&lt;/th&gt;
+                         &lt;th class="text-right"&gt;Total Out.&lt;/th&gt;
+                       &lt;/tr&gt;
+                     &lt;/thead&gt;
+                     &lt;tbody&gt;
+                       &lt;tr ng-repeat="hist in c.data.swapDetails.extended.donor.history"&gt;
+                         &lt;td class="text-left font-weight-bold"&gt;{{::hist.date}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-muted': hist.b0_30 == 0}"&gt;{{c.formatINR(hist.b0_30)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-muted': hist.b31_45 == 0}"&gt;{{c.formatINR(hist.b31_45)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-muted': hist.b46_60 == 0}"&gt;{{c.formatINR(hist.b46_60)}}&lt;/td&gt;
+                         &lt;td ng-class="{'cell-warning': hist.b61_75 &gt; 0, 'text-muted': hist.b61_75 == 0}"&gt;{{c.formatINR(hist.b61_75)}}&lt;/td&gt;
+                         &lt;td ng-class="{'cell-danger': hist.b76_90 &gt; 0, 'text-muted': hist.b76_90 == 0}"&gt;{{c.formatINR(hist.b76_90)}}&lt;/td&gt;
+                         &lt;td ng-class="{'cell-toxic': hist.b_gt90 &gt; 0, 'text-muted': hist.b_gt90 == 0}"&gt;{{c.formatINR(hist.b_gt90)}}&lt;/td&gt;
+                         &lt;td class="text-right font-weight-bold cell-total"&gt;₹ {{c.formatINR(hist.total)}}&lt;/td&gt;
+                       &lt;/tr&gt;
+                     &lt;/tbody&gt;
+                   &lt;/table&gt;
+                   &lt;div ng-if="c.data.swapDetails.extended.donor.history.length == 0" class="text-muted text-xs p-t-xs p-l-xs"&gt;
+                      No historical snapshot outstanding data available.
+                   &lt;/div&gt;
+                 &lt;/div&gt;
+              &lt;/div&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+      &lt;/div&gt;
+
+      &lt;!-- =======================================================
+           COLLABORATIVE ACTIVITY STREAM: COMPOSER &amp; TIMELINE
+           ======================================================= --&gt;
+      &lt;div class="panel panel-default shadow-sm ticket-panel section-spacing-md slide-down"&gt;
+        &lt;div class="panel-heading bg-light flex-align-center"&gt;
+          &lt;div class="col-sm-8 p-n"&gt;
+            &lt;h4 class="panel-title font-weight-bold" style="color: #C8102E;"&gt;
+              &lt;i class="fa fa-comments m-r-xs"&gt;&lt;/i&gt; Activity Stream &amp; RFI Collaboration
+            &lt;/h4&gt;
+          &lt;/div&gt;
+          &lt;div class="col-sm-4 p-n text-right mobile-left"&gt;
+            &lt;small class="text-muted"&gt;&lt;i class="fa fa-at"&gt;&lt;/i&gt; Type &lt;strong&gt;@name&lt;/strong&gt; to mention and notify users&lt;/small&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="panel-body ticket-body p-md"&gt;
+          
+          &lt;!-- Activity Composer Box --&gt;
+          &lt;div class="sn-activity-composer m-b-md"&gt;
+            &lt;div class="mention-input-wrapper position-relative"&gt;
+              &lt;textarea id="swapActivityInput"
+                        class="form-control sn-journal-input"
+                        rows="3"
+                        ng-model="c.newComment"
+                        ng-keyup="c.handleCommentKeyUp($event)"
+                        placeholder="Provide your input, response to RFI, or use @ to mention teammates..."&gt;&lt;/textarea&gt;
+
+              &lt;ul class="mention-dropdown shadow-sm" ng-if="c.showMentionDropdown &amp;&amp; c.userSuggestions.length &gt; 0"&gt;
+                &lt;li ng-repeat="user in c.userSuggestions" ng-click="c.selectMentionUser(user)"&gt;
+                  &lt;div class="mention-user-item"&gt;
+                    &lt;i class="fa fa-user-circle text-primary m-r-xs"&gt;&lt;/i&gt;
+                    &lt;strong&gt;{{user.name}}&lt;/strong&gt;
+                    &lt;small class="text-muted"&gt;&amp;lt;{{user.email}}&amp;gt;&lt;/small&gt;
+                  &lt;/div&gt;
+                &lt;/li&gt;
+              &lt;/ul&gt;
+            &lt;/div&gt;
+
+            &lt;div class="row flex-align-center m-t-sm"&gt;
+              &lt;div class="col-xs-8"&gt;
+                &lt;input type="file" id="commentFileUpload" style="display:none;" onchange="angular.element(this).scope().c.handleCommentFileUpload(this)"&gt;
+                &lt;button type="button" class="btn btn-link text-muted p-l-0" onclick="document.getElementById('commentFileUpload').click()"&gt;
+                  &lt;i class="fa fa-paperclip"&gt;&lt;/i&gt; Attach File
+                &lt;/button&gt;
+                &lt;span class="text-primary small m-l-xs" ng-if="c.commentFileName"&gt;
+                  &lt;i class="fa fa-file-text-o text-danger"&gt;&lt;/i&gt; &lt;strong&gt;{{c.commentFileName}}&lt;/strong&gt;
+                  &lt;a href="javascript:void(0)" class="text-danger m-l-xs" ng-click="c.removeCommentFile()"&gt;&amp;times;&lt;/a&gt;
+                &lt;/span&gt;
+
+                &lt;div ng-if="c.mentionedUsers.length &gt; 0" class="m-t-xs"&gt;
+                  &lt;span class="text-muted small"&gt;
+                    &lt;i class="fa fa-bell text-success m-r-xs"&gt;&lt;/i&gt; Tagged for Notification:
+                    &lt;span class="badge badge-info m-r-xs" ng-repeat="u in c.mentionedUsers"&gt;@{{u.name}}&lt;/span&gt;
+                  &lt;/span&gt;
+                &lt;/div&gt;
+              &lt;/div&gt;
+              &lt;div class="col-xs-4 text-right"&gt;
+                &lt;button class="btn abg-btn-primary btn-sm"
+                        ng-click="c.postCommentWithMentions()"
+                        ng-disabled="(!c.newComment.trim() &amp;&amp; !c.commentFileData) || c.isPostingComment"&gt;
+                  &lt;i class="fa fa-spinner fa-spin" ng-if="c.isPostingComment"&gt;&lt;/i&gt;
+                  &lt;i class="fa fa-paper-plane" ng-if="!c.isPostingComment"&gt;&lt;/i&gt; Send Input
+                &lt;/button&gt;
+              &lt;/div&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+
+          &lt;!-- Embedded Native ServiceNow Conversation Timeline --&gt;
+          &lt;div class="native-sn-stream-wrapper" ng-if="c.data.ticketWidget &amp;&amp; !c.data.isLoadingWidget &amp;&amp; c.showConversationStream"&gt;
+            &lt;sp-widget widget="c.data.ticketWidget"&gt;&lt;/sp-widget&gt;
+          &lt;/div&gt;
+
+          &lt;div class="text-center p-xl text-muted" ng-if="c.data.isLoadingWidget"&gt;
+            &lt;i class="fa fa-spinner fa-spin fa-2x abg-text-red"&gt;&lt;/i&gt;
+            &lt;p class="m-t-sm"&gt;Syncing ServiceNow activity stream...&lt;/p&gt;
+          &lt;/div&gt;
+
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;c85f85f62bb7cb104572f3745e91bf18&lt;/id&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-10-11 17:57:34&lt;/sys_created_on&gt;&lt;sys_id&gt;c45fc5f62bb7cb104572f3745e91bf87&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-10-11 17:57:34&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>-706223536</payload_hash>
+        <record_name>UCLM Limit Swap RFI</record_name>
+        <reverted_from/>
+        <source>d386fafb973acb106bf93da0f053af20</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-11 18:30:56</sys_created_on>
+        <sys_id>f0f6d9ba2bf7cb104572f3745e91bf16</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a12c3b757b0000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-11 18:30:56</sys_updated_on>
+        <type>Widget</type>
+        <update_guid>34f6d9ba7ff7cb102979eadbade14715</update_guid>
+        <update_guid_history>34f6d9ba7ff7cb102979eadbade14715:-706223536,ecc6d17a7cf7cb10da3516aa3764f10c:-739025288,dd0611f6f7f7cb1022c470082e488a30:-1996001171,4d20d57a35b7cb10a5fd1069be645c56:-1311338482,40cfc53a55b7cb1071273b2c3a291012:1106179011,085fc5f686b7cb106855c791c8c7c485:1129173751</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="UCLM Limit Swap RFI">e34d4b7c2b5057104572f3745e91bf8a</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-30 18:31:35</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>4a6f37872dac4f108ddb36c152143900</sys_id>
+        <sys_metadata>c85f85f62bb7cb104572f3745e91bf18</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>UCLM Limit Swap RFI</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_c85f85f62bb7cb104572f3745e91bf18</sys_update_name>
+        <sys_update_version display_value="sp_widget_c85f85f62bb7cb104572f3745e91bf18">f0f6d9ba2bf7cb104572f3745e91bf16</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-30 18:31:35</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

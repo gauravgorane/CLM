@@ -1,0 +1,338 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $window, $sce) {
+    var c = this;
+
+    var LIB = {
+        new:      { bg: 'yellow', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F57C00" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>' },
+        view:     { bg: 'blue',   icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1565C0" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h8"/></svg>' },
+        approval: { bg: 'orange', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F57C00" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg>' }
+    };
+
+    // Key access (server-computed from the approval matrix and approval records)
+    var perm = c.data.perm || {};
+
+    var CONFIG = [
+        {
+            key: 'key',
+            badge: 'KEY',
+            cards: [
+                { id: 'new',      type: 'initiator', label: 'New Limit Swap Request', desc: 'Raise a new Limit Swap request between sites under the same Grandparent Code.', page: 'uclm_key_limit_swap_request' },
+                { id: 'view',     type: 'initiator', label: 'View Requests',          desc: 'Track and monitor the status of your submitted key swap requests.',            page: 'uclm_key_limit_swap_view_request' },
+                { id: 'approval', type: 'approver',  label: 'Pending Approvals',      desc: 'Review and act on key limit swap requests waiting for your donor-side approval.', page: 'uclm_key_limit_swap_approval', count: c.data.keySwapPending }
+            ]
+        }
+    ];
+
+    c.segments = [];
+
+    CONFIG.forEach(function(seg) {
+        var visibleCards = [];
+
+        seg.cards.forEach(function(card) {
+            var canSee = (card.type === 'initiator' && perm.initiator) ||
+                         (card.type === 'approver'  && perm.approver);
+
+            if (canSee) {
+                visibleCards.push({
+                    id: card.id,
+                    label: card.label,
+                    desc: card.desc,
+                    page: card.page,
+                    pendingCount: card.count || 0,
+                    iconHtml: $sce.trustAsHtml(LIB[card.id].icon),
+                    iconBg: LIB[card.id].bg
+                });
+            }
+        });
+
+        if (visibleCards.length > 0) {
+            c.segments.push({ key: seg.key, badge: seg.badge, cards: visibleCards });
+        }
+    });
+
+    c.navigate = function(pageId) {
+        $window.location.href = pageId ? '/uclm?id=' + pageId : '/uclm';
+    };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Wrapper ── */
+.db-wrap {
+  width: 100%;
+  min-height: 90vh;
+  background: #F9FAFB;
+  font-family: 'Oxygen', "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  padding: clamp(16px, 3vw, 48px);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ── Content Container ── */
+.db-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* ── Section Structure ── */
+.clm-hb-section       { margin-bottom: 32px; flex-shrink: 0; }
+.clm-hb-section-head  { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
+.clm-hb-badge {
+  display: inline-flex; align-items: center; height: 30px; padding: 0 16px; border-radius: 15px;
+  background: #062a62; color: #FFE100; font-size: 12px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 1px; white-space: nowrap;
+}
+.clm-hb-line          { flex: 1; height: 1px; background: #dde3ea; }
+
+/* ── Standard Tile Grid ── */
+.clm-hb-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.clm-hb-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 196px;
+  padding: 18px 18px 16px;
+  background: #ffffff;
+  border: 1px solid #dde3ea;
+  border-top: 3px solid #FFE100;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.04);
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+}
+.clm-hb-tile:hover {
+  transform: translateY(-3px);
+  border-color: #F3D54E;
+  box-shadow: 0 0 0 2px rgba(243, 213, 78, .25), 0 10px 24px rgba(0,0,0,.08);
+  text-decoration: none;
+}
+.clm-hb-tile:focus {
+  outline: none;
+  border-color: #AF272F;
+  box-shadow: 0 0 0 3px rgba(175, 39, 47, .15);
+}
+
+/* Tile Icons */
+.clm-hb-icon {
+  width: 52px; height: 52px; border-radius: 50%; flex-shrink: 0; margin-bottom: 14px;
+  display: flex; align-items: center; justify-content: center;
+  transition: transform .2s ease;
+}
+.clm-hb-icon span { display: flex; }
+.clm-hb-icon svg  { width: 24px; height: 24px; }
+.clm-hb-tile:hover .clm-hb-icon { transform: scale(1.06); }
+
+.clm-hb-icon.yellow   { background: #fff6d6; color: #E87722; }
+.clm-hb-icon.blue     { background: #e3eefa; color: #0b5394; }
+.clm-hb-icon.orange   { background: #fde8dc; color: #E87722; }
+
+/* Tile Typography */
+.clm-hb-label { font-size: 15px; font-weight: 700; color: #1a1a1a; line-height: 1.35; }
+.clm-hb-desc  { margin-top: 6px; font-size: 13px; color: #5a6a7a; line-height: 1.5; }
+
+/* Tile Bottom Arrow */
+.clm-hb-foot  { margin-top: auto; padding-top: 14px; display: flex; justify-content: flex-end; }
+.clm-hb-arrow {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: #062a62; color: #ffffff;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: transform .2s ease, background .2s ease;
+}
+.clm-hb-tile:hover .clm-hb-arrow { transform: translateX(3px); }
+
+/* Tile Top-Right Pending Notification Pill */
+.clm-hb-pending {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 11px;
+  background: #E23D28;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 5px rgba(226, 61, 40, .3);
+  z-index: 2;
+}
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .clm-hb-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+}
+
+@media (max-width: 480px) {
+  .clm-hb-tiles { grid-template-columns: 1fr; }
+  .clm-hb-tile  { min-height: 0; padding: 14px 14px 12px; }
+  .clm-hb-icon  { width: 44px; height: 44px; margin-bottom: 10px; }
+  .clm-hb-label { font-size: 14px; }
+  .clm-hb-desc  { font-size: 12px; }
+  .clm-hb-badge { font-size: 11px; padding: 0 12px; height: 26px; }
+}
+
+/* Font Enforcement */
+.clm-widget, .clm-widget *, .clm-widget input, .clm-widget select,
+.clm-widget textarea, .clm-widget button, .clm-widget table {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>false</has_preview>
+        <id>clm_key_limit_swap</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>clm_key_limit_swap</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    var SWAP    = 'x_birl3_clm_key_limit_swap';
+    var MATRIX  = 'x_birl3_clm_approval_matrix';
+    var userId  = gs.getUserID();
+    var isAdmin = gs.hasRole('x_birl3_clm.admin') || gs.hasRole('admin');
+
+    // only CRM (Cement/BPD) and TSM (RMC) may raise a swap (admin too)
+    function canRaise() {
+        if (isAdmin) return true;
+        var mx = new GlideRecord(MATRIX);
+        if (!mx.isValid()) return false;
+        mx.addQuery('approver_user', userId);
+        mx.addQuery('customer_type', 'IN', 'Key,key,KEY,key_customer');
+        var r = mx.addQuery('role_name', 'CONTAINS', 'CRM');
+        r.addOrCondition('role_name', 'CONTAINS', 'TSM');
+        mx.setLimit(1);
+        mx.query();
+        return mx.hasNext();
+    }
+
+    // approvals on Key swaps only. states = optional filter, e.g. 'requested'
+    function approvalGR(states) {
+        var pa = new GlideRecord('sysapproval_approver');
+        pa.addQuery('approver', userId);
+        if (states) pa.addQuery('state', 'IN', states);
+        if (pa.isValidField('source_table')) {
+            var sq = pa.addQuery('source_table', SWAP);
+            sq.addOrCondition('sysapproval.sys_class_name', SWAP);
+        } else {
+            pa.addQuery('sysapproval.sys_class_name', SWAP);
+        }
+        return pa;
+    }
+
+    // pending count (state = requested)
+    var pending = approvalGR('requested');
+    pending.query();
+    data.keySwapPending = pending.getRowCount();
+
+    // approver access: admin, or at least one approval record on a Key swap
+    var isApprover = isAdmin;
+    if (!isApprover) {
+        var any = approvalGR('');
+        any.setLimit(1);
+        any.query();
+        isApprover = any.hasNext();
+    }
+
+    data.perm = {
+        initiator: canRaise(),
+        approver: isApprover
+    };
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-04 20:45:05</sys_created_on>
+        <sys_id>b3cb51ee2b18db10335bf9fe4e91bf7d</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>clm_key_limit_swap</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_b3cb51ee2b18db10335bf9fe4e91bf7d</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-09 17:39:16</sys_updated_on>
+        <template><![CDATA[<div class="db-wrap clm-widget">
+  <div class="db-content">
+
+    <!-- ── Key segment ── -->
+    <div class="clm-hb-section" ng-repeat="seg in c.segments">
+      <div class="clm-hb-section-head">
+        <span class="clm-hb-badge">{{seg.badge}}</span>
+        <div class="clm-hb-line"></div>
+      </div>
+
+      <div class="clm-hb-tiles">
+        <div class="clm-hb-tile"
+             ng-repeat="card in seg.cards"
+             ng-click="c.navigate(card.page)"
+             role="button"
+             tabindex="0">
+
+          <!-- Top-right red notification badge -->
+          <div class="clm-hb-pending" ng-if="card.pendingCount > 0">{{card.pendingCount}}</div>
+
+          <div class="clm-hb-icon {{card.iconBg}}">
+            <span ng-bind-html="card.iconHtml"></span>
+          </div>
+          <div class="clm-hb-label">{{card.label}}</div>
+          <div class="clm-hb-desc">{{card.desc}}</div>
+          <div class="clm-hb-foot">
+            <span class="clm-hb-arrow" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 12h14M13 6l6 6-6 6"/>
+              </svg>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- No access -->
+    <div class="clm-hb-section" ng-if="c.segments.length === 0">
+      <div class="clm-hb-section-head">
+        <span class="clm-hb-badge">KEY</span>
+        <div class="clm-hb-line"></div>
+      </div>
+      <div class="clm-hb-desc">
+        You do not have access to Key Limit Swap. Only a CRM (Cement / BPD), a TSM (RMC) or a Key swap approver can use this module.
+      </div>
+    </div>
+
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>b3cb51ee2b18db10335bf9fe4e91bf7d</id>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-04 20:45:05</sys_created_on>
+        <sys_id>b3cb51ee2b18db10335bf9fe4e91bf82</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-04 20:45:05</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

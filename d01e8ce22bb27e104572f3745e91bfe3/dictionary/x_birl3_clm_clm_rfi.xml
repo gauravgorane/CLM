@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?><database>
+    <element audit="true" db_object_id="02338c1a97f68750be31fa17f053afc6" label="CLM RFI" max_length="40" name="x_birl3_clm_clm_rfi" type="collection">
+        <element attributes="ignore_filter_on_new=true" default="javascript:global.getNextObjNumberPadded();" display="true" label="Number" max_length="40" name="number" type="string"/>
+        <element label="Response" max_length="4000" name="u_response" type="string"/>
+        <element default="!!!/!!(/" label="Domain Path" max_length="255" name="sys_domain_path" type="domain_path"/>
+        <element label="Raised By Role" max_length="100" name="u_raised_by_role" type="string"/>
+        <element label="Question" max_length="2000" name="u_question" type="string"/>
+        <element choice="1" default="open" label="Status" max_length="40" name="u_status" type="choice">
+            <choice>
+                <element inactive_on_update="false" label="Answered" value="answered"/>
+                <element inactive_on_update="false" label="Open" value="open"/>
+            </choice>
+        </element>
+        <element label="Responded on" max_length="40" name="u_responded_on" type="glide_date_time"/>
+        <element choice="3" label="Customer Type" max_length="40" name="customer_type" type="choice">
+            <choice>
+                <element inactive_on_update="false" label="Trade" sequence="0" value="trade"/>
+                <element inactive_on_update="false" label="Non-Trade" sequence="1" value="non_trade"/>
+                <element inactive_on_update="false" label="Key" sequence="2" value="key"/>
+            </choice>
+        </element>
+        <element label="NT Request" max_length="32" name="nt_request" reference="x_birl3_clm_nt_pan_request" type="reference"/>
+        <element label="Acknowledge By Raiser" max_length="40" name="u_acknowledged_by_raiser" type="boolean"/>
+        <element label="Raised By" max_length="32" name="u_raised_by" reference="sys_user" type="reference"/>
+        <element label="Request" max_length="32" name="u_request" reference="x_birl3_clm_clm_new_credit_request" type="reference"/>
+        <element label="Targeted Role" max_length="100" name="u_target_role" type="string"/>
+        <element label="Targeted User" max_length="32" name="u_target_user" reference="sys_user" type="reference"/>
+        <element label="Token" max_length="40" name="u_token" type="string"/>
+        <element default="cacbc7742bb676104572f3745e91bf5a" label="Domain" max_length="32" name="sys_domain" type="domain_id"/>
+        <index name="index">
+            <element name="u_request"/>
+        </index>
+        <index name="index2">
+            <element name="u_target_user"/>
+        </index>
+        <index name="index3">
+            <element name="u_raised_by"/>
+        </index>
+        <index name="index4">
+            <element name="sys_domain_path"/>
+        </index>
+        <index name="index5">
+            <element name="nt_request"/>
+        </index>
+        <index name="index6">
+            <element name="sys_domain"/>
+        </index>
+    </element>
+</database>

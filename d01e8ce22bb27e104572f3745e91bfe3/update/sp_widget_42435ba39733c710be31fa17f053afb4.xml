@@ -1,0 +1,2683 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $timeout, $q, $window, $document) {
+	var c = this;
+
+	// ════════════════════════════════════════════════════════
+	// 1. CONFIG
+	// ════════════════════════════════════════════════════════
+	var PORTAL_PATH  = '/uclm';
+	var DETAIL_PAGES = {                 // page id that shows one record, per section
+		pending:   { id: 'clmapprover',           param: 'request', key: 'number' },
+		processed: { id: 'uclm_approved_request', param: 'request', key: 'number' },
+		rfi:       { id: 'clm_rfi_inbox',         param: 'rfi',     key: 'token'  }   // token = x_birl3_clm_clm_rfi.u_token
+	};
+	var OPEN_IN_NEW_TAB = true;          // false = open in the same tab
+
+	c.views = [
+		{ id: 'pending',   title: 'Pending Approvals',  icon: 'fa-hourglass-half', tone: 'orange',
+		 desc: 'Review and action requests awaiting your approval', stat: 'Pending My Approval' },
+		{ id: 'processed', title: 'Processed Requests', icon: 'fa-check-square-o', tone: 'blue',
+		 desc: 'Requests you have approved, rejected or returned',  stat: 'Processed' },
+		{ id: 'rfi',       title: 'RFI',                icon: 'fa-comments-o',     tone: 'yellow',
+		 desc: 'Respond to information requests sent to you',       stat: 'Awaiting Response' }
+	];
+	var VIEW_IDS = ['pending', 'processed', 'rfi'];
+
+	// ════════════════════════════════════════════════════════
+	// 2. STATE
+	// ════════════════════════════════════════════════════════
+	var init = c.data.initial || {};
+	c.categories = c.data.categories || [];
+	c.counts     = c.data.counts || {};
+
+	c.ui = {
+		view:          VIEW_IDS.indexOf(init.view) !== -1 ? init.view : '',
+		loadingList:   false,
+		refreshing:    false,
+		lastRefreshed: '',
+		listError:     '',
+		linkError:     ''
+	};
+
+	function emptyLists() { return { pending: [], processed: [], rfi: [] }; }
+	c.list     = emptyLists();
+	c.base     = emptyLists();     // list after the Customer Type filter only (drives the tiles)
+	c.filtered = emptyLists();     // list after every filter (drives the cards)
+
+	// cats: [] = all customer types
+	c.f = {
+		pending:   { search: '', cats: [], segment: '', risk: '' },
+		processed: { search: '', cats: [], segment: '', status: '', sap: '', expanded: false },
+		rfi:       { search: '', cats: [] }
+	};
+	c.ms = { open: '' };            // which Customer Type dropdown is open
+	c.selectAll = { pending: false };
+	c.bulkBusy = false;
+
+	var listToken = 0;
+
+	// ════════════════════════════════════════════════════════
+	// 3. META HELPERS
+	// ════════════════════════════════════════════════════════
+	c.cat = function(id) {
+		for (var i = 0; i < c.categories.length; i++) if (c.categories[i].id === id) return c.categories[i];
+		return { id: id, label: id, configured: false };
+	};
+	c.viewMeta = function(id) {
+		id = id || c.ui.view;
+		for (var i = 0; i < c.views.length; i++) if (c.views[i].id === id) return c.views[i];
+		return { id: '', title: '', stat: '' };
+	};
+	// 'ok' | 'unconfigured' | 'noaccess'  (across all categories)
+	c.viewState = function(viewId) {
+		var configured = c.categories.filter(function(x) { return x.configured; });
+		if (!configured.length) return 'unconfigured';
+		if (viewId === 'rfi') return configured.some(function(x) { return x.rfi_enabled; }) ? 'ok' : 'unconfigured';
+		return configured.some(function(x) { return x.can_approve; }) ? 'ok' : 'noaccess';
+	};
+	// total across categories (null when nothing is countable)
+	c.viewCount = function(viewId) {
+		var total = null;
+		Object.keys(c.counts || {}).forEach(function(id) {
+			var v = c.counts[id] ? c.counts[id][viewId] : null;
+			if (v !== null && v !== undefined) total = (total || 0) + v;
+		});
+		return total;
+	};
+	c.heroSubtitle = function() {
+		if (!c.ui.view)                return 'Open Pending Approvals, Processed Requests or RFI — filter by customer type inside each section';
+		if (c.ui.view === 'pending')   return 'Credit limit requests awaiting your decision';
+		if (c.ui.view === 'processed') return 'Credit limit requests you have approved, rejected or returned';
+		return 'Information requests on credit limit requests that are waiting on you';
+	};
+	c.heroStat = function() {
+		if (!c.ui.view) return { value: (c.viewCount('pending') || 0) + (c.viewCount('rfi') || 0), label: 'Awaiting You' };
+		if (c.viewState(c.ui.view) !== 'ok') return { value: '—', label: c.viewMeta().stat };
+		var n = c.viewCount(c.ui.view);
+		if (c.ui.view === 'pending' && n === 0) return { value: '✓', label: 'All Clear' };
+		return { value: n === null ? '—' : n, label: c.viewMeta().stat };
+	};
+	c.pillClass = function(catId) {
+		return catId === 'nt' ? 'clm-pill-nontrade' : (catId === 'key' ? 'clm-pill-key' : 'clm-pill-trade');
+	};
+
+	// ════════════════════════════════════════════════════════
+	// 4. URL — read only. ?view=pending|processed|rfi is read by the server on page load
+	//    (deep link). The widget does not rewrite the URL: Service Portal's $location
+	//    reverts / reacts to history.replaceState, and every record opens on its own page.
+	// ════════════════════════════════════════════════════════
+
+	// ════════════════════════════════════════════════════════
+	// 5. NAVIGATION
+	// ════════════════════════════════════════════════════════
+	function scrollTop() { $timeout(function() { $window.scrollTo(0, 0); }, 0); }
+
+	c.selectView = function(id) {
+		c.ms.open = '';
+		c.ui.linkError = '';
+		if (c.ui.view === id) return;
+		c.ui.view = id;
+		c.selectAll.pending = false;
+		loadList();
+	};
+
+	c.goViewPicker = function() {
+		c.ui.view = '';
+		c.ms.open = '';
+		c.ui.linkError = '';
+		scrollTop();
+	};
+
+	c.goHome = function() { $window.location.href = PORTAL_PATH; };
+
+	// ════════════════════════════════════════════════════════
+	// 5. NAVIGATION & HYPERLINKS
+	// ════════════════════════════════════════════════════════
+	c.recordUrl = function(view, row) {
+		if (!row) return '';
+		var cat = row.category || 'trade';
+
+		// ── A. NON-TRADE ROUTING ──
+		if (cat === 'nt') {
+			if (view === 'rfi') {
+				// Non-Trade RFI opens uclm_nt_send_back with RFI number (e.g. RFI0001007)
+				var rfiNum = row.number || row.token;
+				return rfiNum ? (PORTAL_PATH + '?id=uclm_nt_send_back&number=' + encodeURIComponent(rfiNum)) : '';
+			}
+			// Pending and Processed both open uclm_non_trade_approval with Request number (e.g. NTPR0001025)
+			return row.number ? (PORTAL_PATH + '?id=uclm_non_trade_approval&number=' + encodeURIComponent(row.number)) : '';
+		}
+
+		// ── B. TRADE ROUTING (Default) ──
+		var page = DETAIL_PAGES[view];
+		if (!page || !row[page.key]) return '';
+		return PORTAL_PATH + '?id=' + encodeURIComponent(page.id) +
+			'&' + page.param + '=' + encodeURIComponent(row[page.key]);
+	};
+
+	// every section opens its record on the detail page
+	c.openItem = function(row) {
+		c.ui.linkError = '';
+		var url = c.recordUrl(c.ui.view, row);
+		if (!url) {
+			c.ui.linkError = (c.ui.view === 'rfi')
+				? 'This RFI (' + (row.request_number || '') + ') has no access token, so it cannot be opened. Please contact the admin support.'
+			: 'This request cannot be opened.';
+			return;
+		}
+		if (OPEN_IN_NEW_TAB) {
+			var w = $window.open(url, '_blank');
+			if (w) { try { w.opener = null; } catch (e) {} }
+			else   { $window.location.href = url; }            // popup blocked → same tab
+		} else {
+			$window.location.href = url;
+		}
+	};
+
+	// ════════════════════════════════════════════════════════
+	// 6. LOADING
+	// ════════════════════════════════════════════════════════
+	function stamp() { c.ui.lastRefreshed = new Date().toLocaleTimeString(); }
+
+	function loadList(silent) {
+		var view = c.ui.view;
+		c.ui.listError = '';
+		if (!view) return $q.when();
+		if (c.viewState(view) !== 'ok') { c.list[view] = []; c.applyFilters(view); return $q.when(); }
+
+		var token = ++listToken;
+		if (!silent) c.ui.loadingList = true;
+		return c.server.get({ action: 'list', view: view }).then(function(r) {
+			if (token !== listToken) return;
+			var d = r.data || {};
+			c.list[view] = d.list || [];
+			if (d.counts) c.counts = d.counts;
+			c.applyFilters(view);
+			stamp();
+		}, function() {
+			if (token !== listToken) return;
+			c.ui.listError = 'The list could not be loaded. Please use Refresh to try again.';
+		})['finally'](function() {
+			if (token === listToken) c.ui.loadingList = false;
+		});
+	}
+
+	c.refresh = function() {
+		if (c.ui.refreshing) return;
+		c.ui.refreshing = true;
+		var jobs = [];
+		if (!c.ui.view) {
+			jobs.push(c.server.get({ action: 'counts' }).then(function(r) {
+				if (r.data && r.data.counts) c.counts = r.data.counts;
+				stamp();
+			}));
+		} else {
+			jobs.push(loadList(true));
+		}
+		$q.all(jobs)['finally'](function() { c.ui.refreshing = false; });
+	};
+
+	// ════════════════════════════════════════════════════════
+	// 7. FILTERS (Customer Type multi-select + per-view filters)
+	// ════════════════════════════════════════════════════════
+	function allCatIds() { return c.categories.map(function(x) { return x.id; }); }
+	function catOk(view, row) {
+		var sel = c.f[view].cats;
+		return !sel.length || sel.indexOf(row.category) !== -1;
+	}
+	function matchesTerm(row, term, view) {
+		if (!term) return true;
+		var hay = [row.customer_name, row.number, row.request_number, view === 'rfi' ? row.question : '']
+		.join(' ').toLowerCase();
+		return hay.indexOf(term) !== -1;
+	}
+
+	c.applyFilters = function(view) {
+		view = view || c.ui.view;
+		if (!c.f[view]) return;
+		var f = c.f[view], term = (f.search || '').toLowerCase().trim();
+		var base = (c.list[view] || []).filter(function(r) { return catOk(view, r); });
+		c.base[view] = base;
+		c.filtered[view] = base.filter(function(r) {
+			if (view === 'pending') {
+				if (f.segment && r.segment !== f.segment) return false;
+				if (f.risk === 'deviation' && !r.is_deviation) return false;
+				if (f.risk === 'standard'  &&  r.is_deviation) return false;
+			} else if (view === 'processed') {
+				if (f.segment && r.segment !== f.segment) return false;
+				if (f.status && r.final_status !== f.status) return false;
+				if (f.sap && (r.sap_status || 'na') !== f.sap) return false;
+			}
+			return matchesTerm(r, term, view);
+		});
+		// rows hidden by a filter cannot stay selected for bulk actions
+		if (view === 'pending') {
+			var shown = {};
+			c.filtered.pending.forEach(function(r) { shown[r.sys_id] = true; });
+			(c.list.pending || []).forEach(function(r) { if (!shown[r.sys_id]) r.selected = false; });
+		}
+	};
+
+	$scope.$watch(function() { return c.f; }, function() {
+		VIEW_IDS.forEach(function(v) { c.applyFilters(v); });
+	}, true);
+
+	// ── Customer Type multi-select ──
+	c.toggleMs = function(view, $event) {
+		if ($event) $event.stopPropagation();
+		c.ms.open = (c.ms.open === view) ? '' : view;
+	};
+	c.isCatOn = function(view, id) {
+		var sel = c.f[view].cats;
+		return !sel.length || sel.indexOf(id) !== -1;
+	};
+	c.allCatsOn = function(view) { return !c.f[view].cats.length; };
+	c.toggleCat = function(view, id) {
+		var sel = c.f[view].cats.length ? c.f[view].cats.slice() : allCatIds();
+		var i = sel.indexOf(id);
+		if (i === -1) sel.push(id);
+		else if (sel.length > 1) sel.splice(i, 1);           // at least one type stays selected
+		else return;
+		c.f[view].cats = (sel.length === c.categories.length) ? [] : sel;
+	};
+	c.selectOnlyCat = function(view, id, $event) {
+		if ($event) { $event.preventDefault(); $event.stopPropagation(); }
+		c.f[view].cats = (c.categories.length === 1) ? [] : [id];
+	};
+	c.setAllCats = function(view) { c.f[view].cats = []; };
+	c.catSummary = function(view) {
+		var sel = c.f[view].cats;
+		if (!sel.length) return 'All customer types';
+		return sel.map(function(id) { return c.cat(id).label; }).join(', ');
+	};
+	c.catRowCount = function(view, id) {
+		return (c.list[view] || []).filter(function(r) { return r.category === id; }).length;
+	};
+	// selected types that are not set up yet (info strip)
+	c.unconfiguredSelected = function(view) {
+		return c.categories.filter(function(x) { return !x.configured && c.isCatOn(view, x.id); })
+			.map(function(x) { return x.label; });
+	};
+
+	// close the dropdown on any outside click
+	function onDocClick(e) {
+		if (!c.ms.open) return;
+		var t = e.target;
+		while (t && t !== $document[0]) {
+			if (t.classList && t.classList.contains('clm-ms')) return;
+			t = t.parentNode;
+		}
+		$scope.$apply(function() { c.ms.open = ''; });
+	}
+	$document[0].addEventListener('click', onDocClick);
+
+	// ── other list helpers ──
+	c.countWhere = function(view, key, value) {
+		return (c.base[view] || []).filter(function(r) { return r[key] === value; }).length;
+	};
+	c.setPendingRisk     = function(v) { c.f.pending.risk = v; };
+	c.setProcessedStatus = function(v) { c.f.processed.status = v; };
+	c.setSapFilter = function(s) { c.f.processed.sap = (c.f.processed.sap === s) ? '' : s; };
+	c.countBySap   = function(s) { return c.countWhere('processed', 'sap_status', s); };
+	c.hasSapStats  = function() {
+		return (c.base.processed || []).some(function(r) { return r.sap_status && r.sap_status !== 'na'; });
+	};
+	c.activeFilterCount = function(view) {
+		var f = c.f[view], n = 0;
+		if (!f) return 0;
+		['search', 'segment', 'risk', 'status', 'sap'].forEach(function(k) { if (f[k]) n++; });
+		if (f.cats && f.cats.length) n++;
+		return n;
+	};
+	c.clearFilters = function(view) {
+		var f = c.f[view];
+		['search', 'segment', 'risk', 'status', 'sap'].forEach(function(k) { if (f.hasOwnProperty(k)) f[k] = ''; });
+		f.cats = [];
+	};
+	c.toggleProcessedFilters = function() { c.f.processed.expanded = !c.f.processed.expanded; };
+
+	c.stepSummary = function(r) {
+		var s = (r.approval_steps || []).filter(function(x) { return x.label !== 'Submitted' && x.label !== 'Completed'; });
+		var done = s.filter(function(x) { return x.state === 'approved'; }).length;
+		if (r.final_status === 'Rejected') return 'Rejected · ' + done + ' of ' + s.length + ' approved';
+		if (r.final_status === 'Returned') return 'Returned to initiator · ' + done + ' of ' + s.length + ' approved';
+		if (r.final_status === 'Approved') return 'Fully approved · ' + s.length + ' of ' + s.length;
+		var next = s.filter(function(x) { return x.state === 'pending'; })[0];
+		return done + ' of ' + s.length + ' approved' + (next ? ' · Awaiting: ' + next.label : '');
+	};
+
+	// ════════════════════════════════════════════════════════
+	// 8. PENDING — bulk approve / reject
+	// ════════════════════════════════════════════════════════
+	c.toggleSelectAll = function() {
+		(c.filtered.pending || []).forEach(function(r) { r.selected = c.selectAll.pending; });
+	};
+	c.selectedCount = function() {
+		return (c.filtered.pending || []).filter(function(r) { return r.selected; }).length;
+	};
+
+	c.bulkAction = function(action) {
+		var selected = (c.filtered.pending || []).filter(function(r) { return r.selected; });
+		if (!selected.length) { alert('Please select at least one request.'); return; }
+		if (!confirm((action === 'approve' ? 'Approve ' : 'Reject ') + selected.length + ' selected request(s)?')) return;
+
+		c.bulkBusy = true;
+		$q.all(selected.map(function(req) {
+			return c.server.get({
+				action: 'decide', category: req.category, sys_id: req.sys_id, decision: action,
+				comments: action === 'approve' ? 'Approved via dashboard' : 'Rejected via dashboard',
+				approved_limit: 0
+			}).then(function(r) { return { req: req, data: r.data || {} }; },
+							function()  { return { req: req, data: { success: false, error: 'Server error' } }; });
+		})).then(function(results) {
+			var failed = results.filter(function(x) { return !x.data.success; });
+			if (failed.length) {
+				alert(failed.length + ' of ' + selected.length + ' request(s) could not be processed:\n' +
+							failed.map(function(x) { return x.req.number + ' — ' + (x.data.error || 'Unknown error'); }).join('\n'));
+			}
+		})['finally'](function() {
+			c.bulkBusy = false;
+			c.selectAll.pending = false;
+			loadList();
+		});
+	};
+
+	// ════════════════════════════════════════════════════════
+	// 9. FORMATTERS (list tiles)
+	// ════════════════════════════════════════════════════════
+	c.formatIndianCurrency = function(v) {
+		if (v === null || v === undefined || v === '') return '0';
+		return parseFloat(v).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+	};
+	c.formatSigned = function(v) {
+		var n = parseFloat(v) || 0;
+		return (n > 0 ? '+' : (n < 0 ? '-' : '')) + '₹' + c.formatIndianCurrency(Math.abs(n));
+	};
+
+	// ════════════════════════════════════════════════════════
+	// 10. CLEANUP + INITIAL LOAD (keep LAST)
+	// ════════════════════════════════════════════════════════
+	$scope.$on('$destroy', function() {
+		$document[0].removeEventListener('click', onDocClick);
+	});
+
+	if (c.ui.view) {
+		if (angular.isArray(c.data.list)) {
+			c.list[c.ui.view] = c.data.list;
+			c.applyFilters(c.ui.view);
+			stamp();
+		} else {
+			loadList();
+		}
+	} else {
+		stamp();
+	}
+};
+]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+/* page container — kept from the original widgets so the page is full width */
+.sn-widget-content, .sn-widget-content &gt; div, .container, .container-fluid { width: 100% !important; max-width: 100% !important; padding-left: 0 !important; padding-right: 0 !important; }
+html, body { width: 100%; }
+
+.clm-approver { font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif; width: 100%; max-width: none; margin: 0; padding: 24px 32px; color: #1a1a1a; background-color: #eff3f7; box-sizing: border-box; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+
+/* ============================================================
+   PAGE HEADER BANNER (red/orange theme)
+   ============================================================ */
+.clm-hero {
+  position: relative; overflow: hidden;
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 20px 32px; padding: 28px 32px; margin-bottom: 20px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #9b1111 0%, #b81e1e 45%, #e0301e 100%);
+  color: #ffffff; box-shadow: 0 10px 28px rgba(120, 20, 15, 0.28); box-sizing: border-box;
+}
+.clm-hero::before, .clm-hero::after { content: ""; position: absolute; border-radius: 50%; pointer-events: none; }
+.clm-hero::before { width: 360px; height: 360px; right: -110px; top: -190px; background: rgba(244, 123, 48, 0.55); }
+.clm-hero::after  { width: 260px; height: 260px; right: 160px; bottom: -200px; background: rgba(120, 15, 15, 0.45); }
+.clm-hero-left, .clm-hero-right { position: relative; z-index: 1; }
+.clm-hero-left { flex: 1 1 380px; min-width: 0; }
+
+.clm-hero-crumb { margin-bottom: 14px; font-size: 12px; font-weight: 700; color: #ffd9cf; }
+.clm-hero-crumb-link { color: #fff200; cursor: pointer; text-decoration: none; }
+.clm-hero-crumb-link:hover, .clm-hero-crumb-link:focus { color: #fff200; text-decoration: underline; }
+.clm-hero-crumb-sep { margin: 0 8px; color: #ffb9a8; }
+.clm-hero-crumb-current { color: #ffeae4; }
+
+.clm-hero-bar { width: 44px; height: 6px; margin-bottom: 12px; border-radius: 3px; background: #fff200; }
+.clm-hero-title { margin: 0; font-size: 26px; font-weight: 700; line-height: 1.25; color: #ffffff; }
+.clm-hero-accent { color: #fff200; }
+.clm-hero-sub { max-width: 720px; margin-top: 6px; font-size: 15px; font-weight: 400; line-height: 1.5; color: #ffeae4; }
+
+.clm-hero-right { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+.clm-hero-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.clm-hero-btn {
+  display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px;
+  background: #fff200; color: #8f1d16; border: none; border-radius: 8px;
+  font-family: inherit; font-size: 14px; font-weight: 700; white-space: nowrap; cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+  transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
+}
+.clm-hero-btn:hover:not(:disabled) { background: #fff566; transform: translateY(-1px); box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22); }
+.clm-hero-btn:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
+.clm-hero-refreshed { font-size: 12px; font-weight: 400; color: #ffd9cf; white-space: nowrap; }
+
+.clm-hero-stat { padding-left: 24px; border-left: 1px solid rgba(255, 255, 255, 0.3); text-align: right; }
+.clm-hero-stat-v { font-size: 34px; font-weight: 700; line-height: 1.1; letter-spacing: 1px; color: #fff200; white-space: nowrap; text-shadow: 0 1px 3px rgba(80, 10, 10, 0.35); }
+.clm-hero-stat-k { margin-top: 6px; font-size: 12px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; color: #ffd9cf; white-space: nowrap; }
+/* ============================================================
+   REQUESTS SHELL — section cards, notes, alerts
+   ============================================================ */
+.clm-rq-cat-soon {
+  padding: 2px 8px; border-radius: 10px; background: #ffffff; border: 1px solid #dde3ea;
+  font-size: 10px; font-weight: 700; color: #7f8c9a; text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap;
+}
+
+/* view cards */
+.clm-rq-views { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; }
+.clm-rq-view {
+  position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 14px;
+  min-height: 190px; padding: 22px 22px 18px; text-align: left;
+  background: #ffffff; border: 1px solid #dde3ea; border-radius: 10px; cursor: pointer;
+  font-family: inherit; color: #1a1a1a;
+  transition: box-shadow .15s ease, transform .15s ease, border-color .15s ease;
+}
+.clm-rq-view:hover { border-color: #c3ccd6; box-shadow: 0 6px 16px rgba(0,0,0,0.08); transform: translateY(-1px); }
+.clm-rq-view-ico {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 46px; height: 46px; border-radius: 10px; font-size: 20px; border: 1px solid transparent;
+}
+.clm-rq-view.tone-orange .clm-rq-view-ico { background: #fdf0e6; border-color: #f8d3b5; color: #E87722; }
+.clm-rq-view.tone-blue   .clm-rq-view-ico { background: #e8f1fa; border-color: #c3dbf1; color: #2e86c1; }
+.clm-rq-view.tone-yellow .clm-rq-view-ico { background: #fff8e1; border-color: #f3e3a0; color: #b58105; }
+.clm-rq-view-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.clm-rq-view-title { font-size: 17px; font-weight: 700; color: #1a1a1a; }
+.clm-rq-view-desc  { font-size: 13px; line-height: 1.5; color: #5a6a7a; }
+.clm-rq-view-note {
+  align-self: flex-start; margin-top: 2px; padding: 2px 8px; border-radius: 10px;
+  background: #f0f4f8; border: 1px solid #dde3ea; font-size: 11px; font-weight: 700; color: #5a6a7a;
+}
+.clm-rq-view-count {
+  position: absolute; top: 14px; right: 14px;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 24px; height: 24px; padding: 0 8px; border-radius: 12px;
+  background: #eef1f5; border: 1px solid #dde3ea; color: #2b3440; font-size: 12px; font-weight: 700;
+}
+.clm-rq-view-count.is-alert { background: #E23D28; border-color: #E23D28; color: #ffffff; }
+.clm-rq-view-arrow { margin-top: auto; font-size: 18px; color: #aab4be; transition: color .15s ease, transform .15s ease; }
+.clm-rq-view:hover .clm-rq-view-arrow { color: #1a1a1a; transform: translateX(3px); }
+.clm-rq-view.is-locked { background: #fafbfc; }
+.clm-rq-view.is-locked .clm-rq-view-ico { filter: grayscale(0.6); opacity: 0.7; }
+.clm-rq-view.is-active { border-color: #8f1d16; box-shadow: 0 0 0 2px rgba(143, 29, 22, 0.18); }
+
+/* compact tab row once a view is open */
+.clm-rq-views.is-compact { gap: 10px; margin-bottom: 16px; }
+.clm-rq-views.is-compact .clm-rq-view { flex-direction: row; align-items: center; gap: 12px; min-height: 0; padding: 12px 16px; }
+.clm-rq-views.is-compact .clm-rq-view-ico { width: 36px; height: 36px; font-size: 16px; flex-shrink: 0; }
+.clm-rq-views.is-compact .clm-rq-view-title { font-size: 14px; }
+.clm-rq-views.is-compact .clm-rq-view-desc,
+.clm-rq-views.is-compact .clm-rq-view-arrow { display: none; }
+.clm-rq-views.is-compact .clm-rq-view-note { font-size: 10px; }
+.clm-rq-views.is-compact .clm-rq-view-count { position: static; margin-left: auto; }
+.clm-rq-views.is-compact .clm-rq-view.is-active { background: #8f1d16; border-color: #8f1d16; box-shadow: 0 4px 12px rgba(120, 20, 15, 0.25); }
+.clm-rq-views.is-compact .clm-rq-view.is-active .clm-rq-view-title { color: #ffffff; }
+.clm-rq-views.is-compact .clm-rq-view.is-active .clm-rq-view-note { background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); color: #dbe4f0; }
+.clm-rq-views.is-compact .clm-rq-view.is-active .clm-rq-view-ico { background: #fff200; border-color: #fff200; color: #8f1d16; filter: none; opacity: 1; }
+
+.clm-rq-hint { padding: 14px 18px; background: #ffffff; border: 1px dashed #cdd4dc; border-radius: 8px; font-size: 13px; color: #5a6a7a; text-align: center; }
+
+.clm-rq-alert { margin-bottom: 12px; padding: 12px 16px; background: #fff8e1; border: 1px solid #f3d54e; border-left: 4px solid #E87722; border-radius: 6px; font-size: 13px; font-weight: 600; color: #7a4100; }
+.clm-rq-alert.is-err { background: #fef5f4; border-color: #f5c2bc; border-left-color: #E23D28; color: #c0392b; }
+.clm-rq-state .clm-ap-empty-icon .fa { color: #aab4be; }
+
+/* ============================================================
+   STATE PANELS (loading / empty)
+   ============================================================ */
+.clm-ap-loading { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 80px 32px; margin-bottom: 16px; background: #ffffff; border: 1px solid #e0e6ed; border-radius: 8px; color: #5a6a7a; font-weight: 600; }
+.clm-spinner { width: 24px; height: 24px; border: 3px solid #e0e6ed; border-top-color: #AF272F; border-radius: 50%; animation: clm-spin 0.8s cubic-bezier(0.5, 0, 0.5, 1) infinite; }
+@keyframes clm-spin { to { transform: rotate(360deg); } }
+
+.clm-ap-empty { text-align: center; padding: 80px 32px; background: #ffffff; border: 1px solid #e0e6ed; border-radius: 8px; }
+.clm-ap-empty-icon { font-size: 48px; color: #F3D54E; margin-bottom: 16px; opacity: 0.8; }
+.clm-ap-empty-title { font-size: 20px; font-weight: 700; color: #1a1a1a; margin-bottom: 8px; }
+.clm-ap-empty-sub { color: #7f8c9a; font-size: 14px; max-width: 560px; margin: 0 auto; line-height: 1.5; }
+
+
+/* ============================================================
+   FORM CONTROLS, BADGES, BUTTONS
+   ============================================================ */
+.clm-ap-select { width: 100%; padding: 10px 14px; border: 1px solid #cdd4dc; border-radius: 6px; font-size: 14px; background: #f9f9f9; color: #1a1a1a; font-weight: 600; box-sizing: border-box; transition: all 0.2s ease; }
+.clm-ap-select:focus { outline: none; border-color: #E87722; background: #ffffff; box-shadow: 0 0 0 3px rgba(232, 119, 34, 0.15); }
+.clm-search-input { padding-left: 36px !important; background: url('data:image/svg+xml;utf8,&lt;svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="%237f8c9a" viewBox="0 0 16 16"&gt;&lt;path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/&gt;&lt;/svg&gt;') no-repeat 12px center #ffffff !important; }
+
+
+.clm-badge { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; }
+.clm-badge-segment { background: #f0f4f8; color: #1a1a1a; border: 1px solid #cdd4dc; }
+.clm-badge-dev { background: #E23D28; color: #ffffff; border: 1px solid #b82b1c; }
+.clm-badge-std { background: #eafaf1; color: #1e8449; border: 1px solid #a9dfbf; }
+.clm-badge-resubmitted { background: #fff3cd; color: #856404; border: 1px solid #ffe69c; }
+.clm-badge-final { background: #27ae60; color: #fff; border: 1px solid #1e8449; }
+.clm-badge-inprog { background: #E87722; color: #fff; border: 1px solid #d35400; }
+.clm-badge-rej { background: #E23D28; color: #fff; border: 1px solid #b82b1c; }
+.clm-badge-ret { background: #7f8c9a; color: #fff; border: 1px solid #5a6a7a; }
+
+.clm-type-pill { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; margin-left: 6px; vertical-align: middle; }
+.clm-pill-trade { background: #f0f4f8; color: #1a1a1a; border: 1px solid #cdd4dc; }
+.clm-pill-nontrade { background: #F3D54E; color: #1a1a1a; }
+.clm-pill-key { background: #1a1a1a; color: #F3D54E; }
+
+.clm-btn {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  height: 42px; padding: 0 12px; border: none; border-radius: 4px; cursor: pointer;
+  font-family: inherit; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+  transition: all 0.2s ease;
+}
+.clm-btn i { font-size: 14px; }
+.clm-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none !important; }
+.clm-btn-approve { background: #27ae60; color: #ffffff; box-shadow: 0 2px 4px rgba(39, 174, 96, 0.2); }
+.clm-btn-approve:hover:not(:disabled) { background: #219653; transform: translateY(-1px); }
+.clm-btn-reject { background: #E23D28; color: #ffffff; box-shadow: 0 2px 4px rgba(226, 61, 40, 0.2); }
+.clm-btn-reject:hover:not(:disabled) { background: #c0392b; transform: translateY(-1px); }
+
+.clm-val-warn { color: #E87722 !important; }
+
+/* ============================================================
+   LIST VIEW (status tiles, search &amp; filter, request cards)
+   ============================================================ */
+.clm-mr-wrap { padding: 20px 28px 28px; background: #F9FAFB; border: 1px solid #e0e6ed; border-radius: 8px; }
+
+.clm-block { margin-top: 16px; background: #ffffff; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden; }
+.clm-block.clm-block-first { margin-top: 0; }
+.clm-block-head { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; padding: 14px 20px; background: #fafbfc; border-bottom: 1px solid #dde3ea; }
+.clm-block-heading { min-width: 0; }
+.clm-block-title { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; letter-spacing: 0.8px; }
+.clm-block-title::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: #F3D54E; flex-shrink: 0; }
+.clm-block-sub { margin: 4px 0 0 14px; font-size: 12px; color: #5a6a7a; }
+.clm-block-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.clm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: #ffffff; border: 1px solid #dde3ea; border-radius: 12px; font-size: 12px; font-weight: 700; color: #1a1a1a; white-space: nowrap; }
+.clm-chip-k { font-weight: 400; color: #5a6a7a; }
+
+.clm-mr-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.clm-mr-stats.clm-mr-stats-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.clm-mr-stat { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px 16px; background: #ffffff; border: 1px solid #dde3ea; border-top: 4px solid #cdd4dc; border-radius: 8px; cursor: pointer; text-align: left; font-family: inherit; transition: box-shadow .15s ease, transform .15s ease, background .15s ease; }
+.clm-mr-stat:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-1px); }
+.clm-mr-stat-k { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: 0.6px; }
+.clm-mr-stat-v { font-size: 26px; font-weight: 700; color: #1a1a1a; line-height: 1.1; }
+.clm-mr-stat.s-all      { border-top-color: #1a1a1a; }
+.clm-mr-stat.s-pending  { border-top-color: #2e86c1; }
+.clm-mr-stat.s-approved { border-top-color: #27ae60; }
+.clm-mr-stat.s-returned { border-top-color: #E87722; }
+.clm-mr-stat.s-rejected { border-top-color: #E23D28; }
+.clm-mr-stat.s-pending  .clm-mr-stat-v { color: #1a5276; }
+.clm-mr-stat.s-approved .clm-mr-stat-v { color: #1e8449; }
+.clm-mr-stat.s-returned .clm-mr-stat-v { color: #b9650f; }
+.clm-mr-stat.s-rejected .clm-mr-stat-v { color: #c0392b; }
+.clm-mr-stat.is-active { background: #fffcf0; border-color: #F3D54E; box-shadow: 0 0 0 2px rgba(243,213,78,.35); }
+.clm-mr-stat.is-active.s-all { border-top-color: #1a1a1a; }
+
+.clm-mr-filters { display: grid; gap: 16px; padding: 16px 20px 18px; align-items: end; }
+.clm-mr-filters.clm-mr-filters-3 { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr); }
+.clm-mr-filters.clm-mr-filters-2 { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+.clm-mr-filters.clm-mr-filters-4 { grid-template-columns: minmax(0, 2fr) minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); }
+.clm-mr-filters.clm-mr-filters-5 { grid-template-columns: minmax(0, 1.8fr) minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); }
+.clm-mr-field label { display: block; margin-bottom: 6px; font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: 0.6px; }
+.clm-mr-field .clm-ap-select { font-size: 13px; font-weight: 400; height: 40px; background-color: #ffffff; }
+.clm-mr-clear { padding: 4px 10px; border: 1px solid #cdd4dc; border-radius: 12px; background: #ffffff; color: #c0392b; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
+.clm-mr-clear:hover { background: #fef5f4; border-color: #f5c2bc; }
+.clm-mr-filters-toggle {
+  display: none; align-items: center; justify-content: space-between;
+  padding: 12px 16px; background: #f7f8fa; border-bottom: 1px solid #e6eaef;
+  font-size: 13px; font-weight: 700; color: #3a4451; cursor: pointer;
+  user-select: none; -webkit-tap-highlight-color: transparent;
+}
+.clm-mr-filters-toggle:active { background: #f0f3f6; }
+.clm-mr-filters-count { background: #1a1a1a; color: #F3D54E; padding: 2px 8px; border-radius: 10px; font-size: 10px; letter-spacing: 0.5px; text-transform: uppercase; }
+
+.clm-mr-list { display: flex; flex-direction: column; gap: 14px; padding: 16px; background: #f4f5f7; }
+.clm-mr-item { position: relative; padding: 16px 20px 14px 24px; background: #ffffff; border: 1px solid #dde3ea; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); overflow: hidden; cursor: pointer; transition: box-shadow .15s ease, transform .15s ease, border-color .15s ease; }
+.clm-mr-item::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px; background: #cdd4dc; }
+.clm-mr-item.s-pending::before  { background: #2e86c1; }
+.clm-mr-item.s-approved::before { background: #27ae60; }
+.clm-mr-item.s-returned::before { background: #E87722; }
+.clm-mr-item.s-rejected::before { background: #E23D28; }
+.clm-mr-item.is-dev::before     { background: #E23D28; }
+.clm-mr-item.is-selected { border-color: #F3D54E; box-shadow: 0 0 0 2px rgba(243,213,78,.45); background: #fffdf5; }
+.clm-mr-item:hover { border-color: #c3ccd6; box-shadow: 0 6px 16px rgba(0,0,0,0.08); transform: translateY(-1px); }
+.clm-mr-item:hover .clm-mr-cta { background: #1a1a1a; color: #F3D54E; border-color: #1a1a1a; }
+
+.clm-mr-item-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.clm-mr-id { display: flex; align-items: center; gap: 4px; }
+.clm-mr-num { font-size: 13px; font-weight: 700; color: #5a6a7a; letter-spacing: 0.3px; }
+.clm-mr-badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.clm-mr-name { margin: 6px 0 12px; font-size: 17px; font-weight: 700; color: #1a1a1a; }
+.clm-mr-name-code { font-size: 14px; font-weight: 600; color: #5a6a7a; }
+.clm-mr-check { width: 16px; height: 16px; margin: 0 8px 0 0; cursor: pointer; }
+.clm-mr-selall { display: inline-flex; align-items: center; gap: 6px; margin: 0 6px 0 0; font-size: 13px; font-weight: 700; color: #3a4451; cursor: pointer; }
+.clm-mr-selall input { margin: 0; width: 16px; height: 16px; }
+.clm-btn.clm-mr-bulk { height: 32px; padding: 0 14px; font-size: 12px; }
+
+.clm-mr-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.clm-mr-tiles.clm-mr-tiles-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.clm-mr-tile { padding: 12px 14px; border: 1px solid #e6eaef; border-radius: 6px; background: #fafbfc; min-width: 0; }
+.clm-mr-tile-k { font-size: 11.5px; color: #5a6a7a; margin-bottom: 3px; }
+.clm-mr-tile-v { font-size: 18px; font-weight: 700; color: #1a1a1a; white-space: nowrap; }
+.clm-mr-tile-s { margin-top: 3px; font-size: 11px; font-weight: 700; color: #c0392b; }
+.clm-mr-tile.is-ok  { background: #f4fbf6; border-color: #cfead8; }
+.clm-mr-tile.is-ok  .clm-mr-tile-v { color: #1e8449; }
+.clm-mr-tile.is-bad { background: #fef5f4; border-color: #f5c2bc; }
+.clm-mr-tile.is-bad .clm-mr-tile-v { color: #c0392b; }
+
+.clm-mr-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 12px; padding-top: 10px; border-top: 1px dashed #e6eaef; }
+.clm-mr-meta { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 12.5px; color: #1a1a1a; }
+.clm-mr-meta .k { color: #7f8c9a; margin-right: 4px; }
+.clm-mr-cta { padding: 6px 14px; border: 1px solid #cdd4dc; border-radius: 6px; font-size: 12px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; letter-spacing: 0.5px; background: #ffffff; transition: all .15s ease; white-space: nowrap; }
+.clm-mr-none { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; padding: 32px 20px; font-size: 14px; font-weight: 600; color: #5a6a7a; }
+
+/* SAP sync tiles + badges (Processed) */
+.clm-mr-sap-stats { margin-top: 12px; padding: 14px 16px; background: #ffffff; border: 1px solid #dde3ea; border-radius: 8px; }
+.clm-mr-sap-title { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 10px; }
+.clm-mr-sap-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.clm-mr-sap-tile { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; background: #ffffff; border: 1px solid #dde3ea; border-left: 4px solid #cdd4dc; border-radius: 6px; cursor: pointer; font-family: inherit; text-align: left; transition: box-shadow .15s ease, transform .15s ease, background .15s ease; }
+.clm-mr-sap-tile:hover { box-shadow: 0 4px 10px rgba(0,0,0,0.05); transform: translateY(-1px); }
+.clm-mr-sap-tile.is-active { background: #fffcf0; border-color: #F3D54E; box-shadow: 0 0 0 2px rgba(243,213,78,.35); }
+.clm-mr-sap-tile.sap-success { border-left-color: #27ae60; }
+.clm-mr-sap-tile.sap-pending { border-left-color: #E87722; }
+.clm-mr-sap-tile.sap-failed  { border-left-color: #E23D28; }
+.clm-mr-sap-tile.sap-queued  { border-left-color: #8a6100; }
+.clm-mr-sap-k { font-size: 11px; font-weight: 700; color: #5a6a7a; text-transform: uppercase; letter-spacing: 0.5px; }
+.clm-mr-sap-v { font-size: 20px; font-weight: 700; color: #1a1a1a; line-height: 1.1; }
+.clm-mr-sap-tile.sap-success .clm-mr-sap-v { color: #1e8449; }
+.clm-mr-sap-tile.sap-pending .clm-mr-sap-v { color: #b9650f; }
+.clm-mr-sap-tile.sap-failed  .clm-mr-sap-v { color: #c0392b; }
+.clm-mr-sap-tile.sap-queued  .clm-mr-sap-v { color: #8a6100; }
+.clm-sap { border: 1px solid transparent; }
+.clm-sap-clickable { cursor: pointer; transition: transform .15s ease, box-shadow .15s ease; }
+.clm-sap-clickable:hover { transform: translateY(-1px); box-shadow: 0 2px 6px rgba(0,0,0,0.08); }
+.clm-sap.sap-success { background:#eafaf1; color:#1e8449; border-color:#a9dfbf; }
+.clm-sap.sap-failed  { background:#fef5f4; color:#c0392b; border-color:#f5c2bc; }
+.clm-sap.sap-pending,
+.clm-sap.sap-queued  { background:#fffcf0; color:#8a6100; border-color:#F9E79F; }
+
+/* RFI list preview */
+.clm-rfi-q-preview { margin: 4px 0 12px; font-style: italic; color: #1a1a1a; line-height: 1.6; }
+
+/* ============================================================
+   RESPONSIVE — page, shell, lists
+   ============================================================ */
+@media (max-width: 1024px) {
+  .clm-approver { padding: 20px 24px; }
+  .clm-hero { padding: 24px 26px; }
+  .clm-mr-filters.clm-mr-filters-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .clm-mr-filters.clm-mr-filters-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .clm-mr-filters.clm-mr-filters-5 .clm-mr-field:first-child { grid-column: 1 / -1; }
+  .clm-rq-view { min-height: 170px; padding: 18px; }
+}
+
+@media (max-width: 768px) {
+  .clm-approver { padding: 16px; }
+  .clm-hero { padding: 22px 20px; margin-bottom: 16px; }
+  .clm-hero::before { width: 260px; height: 260px; right: -110px; top: -150px; }
+  .clm-hero::after  { display: none; }
+  .clm-hero-title { font-size: 22px; }
+  .clm-hero-sub { font-size: 14px; }
+  .clm-hero-stat-v { font-size: 28px; }
+
+  /* shell */
+  .clm-rq-views { grid-template-columns: 1fr; gap: 10px; }
+  .clm-rq-view { flex-direction: row; align-items: center; min-height: 0; padding: 14px 16px; gap: 12px; }
+  .clm-rq-view-ico { width: 40px; height: 40px; font-size: 18px; flex-shrink: 0; }
+  .clm-rq-view-count { position: static; margin-left: auto; }
+  .clm-rq-view-arrow { margin-top: 0; }
+  .clm-rq-views.is-compact { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .clm-rq-views.is-compact .clm-rq-view { flex-direction: column; align-items: center; gap: 6px; padding: 10px 6px; text-align: center; }
+  .clm-rq-views.is-compact .clm-rq-view-body { align-items: center; }
+  .clm-rq-views.is-compact .clm-rq-view-title { font-size: 12px; }
+  .clm-rq-views.is-compact .clm-rq-view-note { display: none; }
+  .clm-rq-views.is-compact .clm-rq-view-count { position: absolute; top: 6px; right: 6px; min-width: 20px; height: 20px; font-size: 11px; padding: 0 6px; }
+
+  /* lists */
+  .clm-mr-wrap { padding: 12px; }
+  .clm-mr-stats, .clm-mr-stats.clm-mr-stats-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .clm-mr-stats.clm-mr-stats-3 .s-all { grid-column: 1 / -1; }
+  .clm-mr-stat { padding: 10px 12px; }
+  .clm-mr-stat-v { font-size: 22px; }
+  .clm-mr-filters.clm-mr-filters-2,
+  .clm-mr-filters.clm-mr-filters-3,
+  .clm-mr-filters.clm-mr-filters-4,
+  .clm-mr-filters.clm-mr-filters-5 { grid-template-columns: 1fr; padding: 12px 14px 14px; gap: 12px; }
+  .clm-mr-filters.clm-mr-filters-5 .clm-mr-field:first-child { grid-column: auto; }
+  .clm-ms-menu { min-width: 0; }
+  .clm-mr-filters-toggle { display: flex; }
+  .clm-mr-filters.is-collapsed-mob { display: none; }
+  .clm-block-head { padding: 12px 14px; }
+  .clm-block-sub { margin-left: 0; }
+  .clm-mr-item { padding: 14px 14px 12px 18px; }
+  .clm-mr-list { padding: 10px; gap: 10px; }
+  .clm-mr-name { font-size: 15px; }
+  .clm-mr-tiles, .clm-mr-tiles.clm-mr-tiles-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .clm-mr-tile-v { font-size: 15px; }
+  .clm-mr-badges { justify-content: flex-start; }
+  .clm-mr-foot { flex-direction: column; align-items: flex-start; }
+  .clm-mr-sap-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .clm-mr-sap-tile { padding: 10px; }
+  .clm-mr-sap-v { font-size: 18px; }
+  .clm-sap-clickable { padding: 6px 12px !important; font-size: 11px !important; }
+
+  .clm-ap-empty { padding: 48px 20px; }
+}
+
+@media (max-width: 640px) {
+  .clm-hero { flex-direction: column; align-items: stretch; gap: 16px; }
+  .clm-hero-left { flex-basis: auto; width: 100%; }
+  .clm-hero-title { font-size: 20px; }
+  .clm-hero-sub { font-size: 13px; }
+  .clm-hero-right { width: 100%; justify-content: space-between; align-items: center; padding-top: 14px; border-top: 1px solid rgba(255, 255, 255, 0.22); }
+  .clm-hero-actions { align-items: flex-start; }
+  .clm-hero-stat { padding-left: 0; border-left: 0; }
+  .clm-hero-stat-v { font-size: 26px; }
+}
+
+@media (max-width: 480px) {
+  .clm-approver { padding: 12px 10px; }
+  .clm-hero { padding: 18px 16px; border-radius: 10px; margin-bottom: 12px; }
+  .clm-hero-crumb { font-size: 11px; margin-bottom: 12px; }
+  .clm-hero-bar { width: 36px; height: 5px; margin-bottom: 10px; }
+  .clm-hero-btn { padding: 9px 16px; font-size: 13px; }
+  .clm-hero-refreshed { font-size: 11px; }
+  .clm-hero-stat-k { font-size: 11px; }
+  .clm-ap-select { font-size: 12px; padding: 8px 10px; }
+  .clm-badge { padding: 2px 6px; font-size: 10px; }
+  .clm-type-pill { padding: 1px 5px; font-size: 9px; margin-left: 3px; }
+  .clm-ap-empty-icon { font-size: 32px; margin-bottom: 10px; }
+  .clm-ap-empty-title { font-size: 16px; }
+  .clm-ap-empty-sub { font-size: 12px; }
+}
+
+@media (max-width: 360px) {
+  .clm-hero { padding: 16px 14px; }
+  .clm-hero-title { font-size: 18px; }
+  .clm-hero-sub { font-size: 12px; }
+  .clm-hero-stat-v { font-size: 22px; }
+}
+
+/* ============================================================
+   CUSTOMER TYPE MULTI-SELECT (v1.1)
+   ============================================================ */
+.clm-block.clm-block-filters { overflow: visible; }
+.clm-block.clm-block-filters &gt; .clm-block-head { border-radius: 8px 8px 0 0; }
+.clm-ms { position: relative; }
+.clm-ms-btn {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  height: 40px; padding: 0 12px; text-align: left; cursor: pointer;
+  font-family: inherit; font-size: 13px !important; font-weight: 400 !important; background-color: #ffffff !important;
+}
+.clm-ms.is-open .clm-ms-btn { border-color: #E87722; box-shadow: 0 0 0 3px rgba(232, 119, 34, 0.15); }
+.clm-ms-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clm-ms-caret { flex-shrink: 0; color: #7f8c9a; font-size: 12px; transition: transform .15s ease; }
+.clm-ms.is-open .clm-ms-caret { transform: rotate(180deg); }
+.clm-ms-menu {
+  position: absolute; z-index: 50; top: calc(100% + 6px); left: 0; right: 0; min-width: 240px;
+  padding: 6px; background: #ffffff; border: 1px solid #dde3ea; border-radius: 8px;
+  box-shadow: 0 10px 24px rgba(9, 33, 73, 0.14);
+}
+.clm-ms-sep { height: 1px; margin: 4px 2px; background: #eef1f5; }
+.clm-ms-row { display: flex; align-items: center; gap: 4px; border-radius: 6px; }
+.clm-ms-row:hover { background: #f5f8fb; }
+.clm-ms-opt {
+  flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 9px 10px; border: 0; border-radius: 6px; background: transparent; cursor: pointer;
+  font-family: inherit; font-size: 13px; font-weight: 600; color: #1a1a1a; text-align: left;
+}
+.clm-ms-opt.clm-ms-all { width: 100%; }
+.clm-ms-opt.clm-ms-all:hover { background: #f5f8fb; }
+.clm-ms-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clm-ms-box {
+  position: relative; flex-shrink: 0; width: 16px; height: 16px;
+  border: 1.5px solid #aab4be; border-radius: 4px; background: #ffffff;
+}
+.clm-ms-box.is-on { background: #8f1d16; border-color: #8f1d16; }
+.clm-ms-box.is-on::after {
+  content: ""; position: absolute; left: 4px; top: 1px; width: 5px; height: 9px;
+  border: solid #FFE600; border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.clm-ms-count {
+  min-width: 22px; height: 20px; padding: 0 7px; border-radius: 10px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: #eef1f5; border: 1px solid #dde3ea; font-size: 11px; font-weight: 700; color: #2b3440;
+}
+.clm-ms-only {
+  flex-shrink: 0; padding: 4px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent;
+  font-family: inherit; font-size: 11px; font-weight: 700; color: #1782c5; cursor: pointer; visibility: hidden;
+}
+.clm-ms-row:hover .clm-ms-only, .clm-ms-only:focus { visibility: visible; }
+.clm-ms-only:hover { border-color: #c3dbf1; background: #e8f1fa; }
+@media (hover: none) { .clm-ms-only { visibility: visible; } }
+
+.clm-rq-note { margin: 0 20px 16px; padding: 10px 14px; background: #f4f8fc; border: 1px solid #d6e4f2; border-radius: 6px; font-size: 12.5px; font-weight: 600; color: #1a5276; }
+@media (max-width: 768px) { .clm-rq-note { margin: 0 14px 14px; } }
+
+/* ============================================================
+   ONE FONT FAMILY (keep LAST)
+   ============================================================ */
+.clm-approver, .clm-approver *, .clm-approver input, .clm-approver select,
+.clm-approver textarea, .clm-approver button, .clm-approver table {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}
+.clm-approver .fa { font-family: FontAwesome !important; }
+</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>uclm_credit_limit_request</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Credit Limit Request</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+	// ════════════════════════════════════════════════════════════
+	// 1. CATEGORY CONFIG
+	// ════════════════════════════════════════════════════════════
+	var CATEGORY_CONFIG = {
+		trade: {
+			label:              'Trade',
+			customer_type:      'Trade',
+			builder:            'trade',
+			approver_group:     'CLM: Trade Approver',
+			request_table:      'x_birl3_clm_clm_new_credit_request',
+			request_filter:     'customer_type=Trade^ORcustomer_type=trade',
+			customer_table:     'x_birl3_clm_clm_customer_master1',
+			aging_table:        'x_birl3_clm_clm_aging_snapshot',
+			rfi_table:          'x_birl3_clm_clm_rfi',
+			rfi_request_field:  'u_request',
+			rfi_token_field:    'u_token',
+			rfi_filter:         'customer_type=trade^ORcustomer_type=Trade^ORcustomer_typeISEMPTY',
+			sap_sendback_table: 'x_birl3_clm_clm_servicenow_to_sap_send_back'
+		},
+		nt: {
+			label:              'Non-Trade (NT)',
+			customer_type:      'Non-Trade',
+			builder:            'nt',
+			approver_group:     'CLM: NON-TRADE APPROVER',
+			request_table:      'x_birl3_clm_nt_pan_request',
+			request_filter:     '',
+			customer_table:     'x_birl3_clm_clm_customer_master1',
+			aging_table:        'x_birl3_clm_nt_pan_request_outstanding',
+			rfi_table:          'x_birl3_clm_clm_rfi',
+			rfi_request_field:  'nt_request',
+			rfi_token_field:    'number',
+			rfi_filter:         'customer_type=non_trade',
+			sap_sendback_table: 'x_birl3_clm_clm_servicenow_to_sap_send_back'
+		},
+		key: {
+			label:              'Key',
+			customer_type:      'Key',
+			builder:            '',
+			approver_group:     'CLM: KEY APPROVER',
+			request_table:      '',
+			request_filter:     '',
+			customer_table:     '',
+			aging_table:        '',
+			rfi_table:          '',
+			rfi_request_field:  'u_request',
+			rfi_token_field:    'u_token',
+			rfi_filter:         'customer_type=key',
+			sap_sendback_table: ''
+		}
+	};
+	var CATEGORY_ORDER = ['trade', 'nt', 'key'];
+	var VIEW_IDS       = ['pending', 'processed', 'rfi'];
+
+	var PROCESSED_LOOKBACK_DAYS = 0;
+	var PROCESSED_MAX_ROWS      = 300;
+
+	var uid     = gs.getUserID();
+	var isAdmin = gs.hasRole('admin');
+	var action  = (input && input.action) ? (input.action + '') : '';
+
+	// ════════════════════════════════════════════════════════════
+	// 2. SMALL HELPERS
+	// ════════════════════════════════════════════════════════════
+	function grNum(rec, f) { return parseFloat(rec.getValue(f)) || 0; }
+	function isTrue(v) { v = v + ''; return v === 'true' || v === '1'; }
+	function str(v) { return (v === null || v === undefined) ? '' : (v + ''); }
+	function fmtWhole(n) { return Math.round(n).toString(); }
+
+	function normalizeState(raw) {
+		var s = (raw + '').toLowerCase().trim();
+		if (s === 'approved' || s === '3') return 'Approved';
+		if (s === 'rejected' || s === '4') return 'Rejected';
+		if (s === 'returned' || s === 'not requested' || s === '5') return 'Returned';
+		return 'Submitted';
+	}
+
+	function getCfg(id) { return CATEGORY_CONFIG.hasOwnProperty(id) ? CATEGORY_CONFIG[id] : null; }
+	function isConfigured(cfg) { return !!(cfg && cfg.request_table && cfg.builder && BUILDERS[cfg.builder]); }
+	function rfiConfigured(cfg) { return isConfigured(cfg) && !!cfg.rfi_table; }
+	function sapConfigured(cfg) { return isConfigured(cfg) && !!cfg.sap_sendback_table; }
+
+	var _approverCache = {};
+	function canApprove(cfg) {
+		if (!isConfigured(cfg)) return false;
+		if (isAdmin) return true;
+		if (!cfg.approver_group) return false;
+		if (!_approverCache.hasOwnProperty(cfg.approver_group)) {
+			_approverCache[cfg.approver_group] = gs.getUser().isMemberOf(cfg.approver_group);
+		}
+		return _approverCache[cfg.approver_group];
+	}
+
+	function applyRequestFilter(gr, cfg) { if (cfg.request_filter) gr.addEncodedQuery(cfg.request_filter); }
+
+	function hasMyApproval(cfg, docId, states) {
+		var sa = new GlideRecord('sysapproval_approver');
+		if (cfg.builder === 'nt') {
+			var tblQ = sa.addQuery('sysapproval.sys_class_name', cfg.request_table);
+			tblQ.addOrCondition('source_table', cfg.request_table);
+			var q = sa.addQuery('sysapproval', docId);
+			q.addOrCondition('document_id', docId);
+		} else {
+			sa.addQuery('source_table', cfg.request_table);
+			sa.addQuery('document_id', docId);
+		}
+		sa.addQuery('approver', uid);
+		sa.addQuery('state', 'IN', states);
+		sa.setLimit(1);
+		sa.query();
+		return sa.hasNext();
+	}
+
+	function pendingDocIds(cfg) {
+		var ids = [], seen = {};
+		var sa = new GlideRecord('sysapproval_approver');
+		if (cfg.builder === 'nt') {
+			var tblQ = sa.addQuery('sysapproval.sys_class_name', cfg.request_table);
+			tblQ.addOrCondition('source_table', cfg.request_table);
+		} else {
+			sa.addQuery('source_table', cfg.request_table);
+		}
+		sa.addQuery('approver', uid);
+		sa.addQuery('state', 'requested');
+		sa.query();
+		while (sa.next()) {
+			var d = (cfg.builder === 'nt')
+				? (str(sa.getValue('sysapproval')) || str(sa.getValue('document_id')))
+				: str(sa.getValue('document_id'));
+			if (d && !seen[d]) { seen[d] = true; ids.push(d); }
+		}
+		return ids;
+	}
+
+	function processedQuery(cfg) {
+		var sa = new GlideRecord('sysapproval_approver');
+		if (cfg.builder === 'nt') {
+			var tblQ = sa.addQuery('sysapproval.sys_class_name', cfg.request_table);
+			tblQ.addOrCondition('source_table', cfg.request_table);
+		} else {
+			sa.addQuery('source_table', cfg.request_table);
+		}
+		sa.addQuery('approver', uid);
+		sa.addQuery('state', 'IN', 'approved,rejected,cancelled');
+		if (PROCESSED_LOOKBACK_DAYS > 0) sa.addQuery('sys_updated_on', '>=', gs.daysAgoStart(PROCESSED_LOOKBACK_DAYS));
+		sa.orderByDesc('sys_updated_on');
+		sa.query();
+		return sa;
+	}
+
+	function processedDocIds(cfg) {
+		var ids = [], seen = {};
+		var sa = processedQuery(cfg);
+		while (sa.next() && ids.length < PROCESSED_MAX_ROWS) {
+			var d = (cfg.builder === 'nt')
+				? (str(sa.getValue('sysapproval')) || str(sa.getValue('document_id')))
+				: str(sa.getValue('document_id'));
+			if (d && !seen[d]) { seen[d] = true; ids.push(d); }
+		}
+		return ids;
+	}
+
+	function countRequests(cfg, ids, state) {
+		if (!ids.length) return 0;
+		var ga = new GlideAggregate(cfg.request_table);
+		ga.addQuery('sys_id', 'IN', ids.join(','));
+		if (state) ga.addQuery('state', state);
+		applyRequestFilter(ga, cfg);
+		ga.addAggregate('COUNT');
+		ga.query();
+		return ga.next() ? (parseInt(ga.getAggregate('COUNT'), 10) || 0) : 0;
+	}
+
+	function countRfi(cfg) {
+		var ga = new GlideAggregate(cfg.rfi_table);
+		ga.addQuery('u_target_user', uid);
+		ga.addQuery('u_status', 'open');
+		if (cfg.rfi_filter) ga.addEncodedQuery(cfg.rfi_filter);
+		ga.addAggregate('COUNT');
+		ga.query();
+		return ga.next() ? (parseInt(ga.getAggregate('COUNT'), 10) || 0) : 0;
+	}
+
+	function countsFor(cfg, catId) {
+		var o = { pending: null, processed: null, rfi: null };
+		if (!isConfigured(cfg)) return o;
+		try {
+			if (canApprove(cfg)) {
+				if (catId === 'nt') {
+					// Direct Aggregate calculation for Task table
+					var gaNt = new GlideAggregate('sysapproval_approver');
+					gaNt.addQuery('approver', uid);
+					gaNt.addQuery('state', 'requested');
+					var qcNt = gaNt.addQuery('sysapproval.sys_class_name', cfg.request_table);
+					qcNt.addOrCondition('source_table', cfg.request_table);
+					gaNt.addAggregate('COUNT');
+					gaNt.query();
+					o.pending = gaNt.next() ? (parseInt(gaNt.getAggregate('COUNT'), 10) || 0) : 0;
+				} else {
+					o.pending = countRequests(cfg, pendingDocIds(cfg), catId === 'trade' ? 'Submitted' : '');
+				}
+				o.processed = countRequests(cfg, processedDocIds(cfg), '');
+			}
+			if (rfiConfigured(cfg)) o.rfi = countRfi(cfg);
+		} catch (e) {
+			gs.error('CLM Requests: count error for ' + cfg.label + ': ' + e.message);
+		}
+		return o;
+	}
+
+	function allCounts() {
+		var o = {};
+		CATEGORY_ORDER.forEach(function(id) { o[id] = countsFor(CATEGORY_CONFIG[id], id); });
+		return o;
+	}
+
+	function categoryMeta() {
+		return CATEGORY_ORDER.map(function(id) {
+			var cfg = CATEGORY_CONFIG[id];
+			return {
+				id:          id,
+				label:       cfg.label,
+				configured:  isConfigured(cfg),
+				can_approve: canApprove(cfg),
+				rfi_enabled: rfiConfigured(cfg),
+				sap_enabled: sapConfigured(cfg)
+			};
+		});
+	}
+
+	// ════════════════════════════════════════════════════════════
+	// 3. DATA LAYERS (Trade & Non-Trade)
+	// ════════════════════════════════════════════════════════════
+	function tradeSteps(gr) {
+		var segment        = (gr.segment + '').toLowerCase().trim().split('|')[0].trim();
+		var targetApprover = (gr.getValue('required_approver_level') || '').trim();
+
+		var isCementBpd = isTrue(gr.getValue('cement_bpd'));
+		if (!isCementBpd && segment === 'bpd') {
+			var hasTshBpd = (gr.getValue('u_approver_tsh_bpd') || '').trim() !== '';
+			var hasRhm    = (gr.getValue('u_approver_rhm')     || '').trim() !== '';
+			if (hasTshBpd && hasRhm) isCementBpd = true;
+		}
+
+		var cementCCHAndAbove    = ['NSH_CCH', 'CMO', 'CMO_CFO', 'MD'];
+		var rmcCCHAndAbove       = ['HEAD_KEY_CCH', 'BH', 'BH_CFO', 'MD'];
+		var bpdCCHAndAbove       = ['CCH_HBPD', 'BH', 'CFO', 'MD'];
+		var cementBpdCCHAndAbove = ['NSH_CCH', 'CMO', 'CMO_CFO', 'MD'];
+
+		var showZchHo;
+		if      (segment === 'rmc')                 showZchHo = rmcCCHAndAbove.indexOf(targetApprover)       !== -1;
+		else if (segment === 'bpd' && isCementBpd) showZchHo = cementBpdCCHAndAbove.indexOf(targetApprover) !== -1;
+		else if (segment === 'bpd')                 showZchHo = bpdCCHAndAbove.indexOf(targetApprover)       !== -1;
+		else                                       showZchHo = cementCCHAndAbove.indexOf(targetApprover)    !== -1;
+
+		var CEMENT_CHAIN = [{ label: 'TSH', field: 'u_approver_tsh' }, { label: 'RHM', field: 'u_approver_rhm' }];
+		if (showZchHo) CEMENT_CHAIN.push({ label: 'ZCH', field: 'u_approver_zch' });
+		CEMENT_CHAIN.push({ label: 'ZHM', field: 'u_approver_zhm' });
+		if (showZchHo) CEMENT_CHAIN.push({ label: 'HO', field: 'u_approver_ho' });
+		CEMENT_CHAIN = CEMENT_CHAIN.concat([
+			{ label: 'NSH', field: 'u_approver_nsh'     }, { label: 'CCH', field: 'u_approver_nsh_cch' },
+			{ label: 'CMO', field: 'u_approver_cmo'     }, { label: 'CFO', field: 'u_approver_cmo_cfo' },
+			{ label: 'MD',  field: 'u_approver_md'      }
+		]);
+
+		var RMC_CHAIN = [{ label: 'TSM', field: 'u_approver_tsm' }, { label: 'RH CH RMC', field: 'u_approver_rh_ch_rmc' }];
+		if (showZchHo) RMC_CHAIN.push({ label: 'ZCH', field: 'u_approver_zch' });
+		RMC_CHAIN = RMC_CHAIN.concat([
+			{ label: 'ZH RMC',         field: 'u_approver_zh_rmc'          },
+			{ label: 'HEAD RMC',       field: 'u_approver_head_rmc'        },
+			{ label: 'HEAD KEY & RMC', field: 'u_approver_head_key_ch_rmc' },
+			{ label: 'CH RMC',         field: 'u_approver_ch_rmc'          }
+		]);
+		if (showZchHo) RMC_CHAIN.push({ label: 'HO', field: 'u_approver_ho' });
+		RMC_CHAIN = RMC_CHAIN.concat([
+			{ label: 'CCH', field: 'u_approver_head_key_cch' }, { label: 'BH',  field: 'u_approver_bh' },
+			{ label: 'CFO', field: 'u_approver_bh_cfo'       }, { label: 'MD',  field: 'u_approver_md' }
+		]);
+
+		var BPD_CHAIN = [{ label: 'TSH BPD', field: 'u_approver_tsh_bpd' }];
+		if (showZchHo) BPD_CHAIN.push({ label: 'ZCH', field: 'u_approver_zch' });
+		BPD_CHAIN = BPD_CHAIN.concat([
+			{ label: 'ZH BPD', field: 'u_approver_zh_bpd' }, { label: 'HSBPD', field: 'u_approver_hsbpd' },
+			{ label: 'HBPD',   field: 'u_approver_hbpd'   }
+		]);
+		if (showZchHo) BPD_CHAIN.push({ label: 'HO', field: 'u_approver_ho' });
+		BPD_CHAIN = BPD_CHAIN.concat([
+			{ label: 'CCH', field: 'u_approver_cch_hbpd' }, { label: 'BH', field: 'u_approver_bh' },
+			{ label: 'CFO', field: 'u_approver_cfo'      }, { label: 'MD', field: 'u_approver_md' }
+		]);
+
+		var CEMENT_BPD_CHAIN = [
+			{ label: 'TSH BPD',    field: 'u_approver_tsh_bpd' },
+			{ label: 'ZH BPD',     field: 'u_approver_zh_bpd'  },
+			{ label: 'RHM Cement', field: 'u_approver_rhm'     }
+		];
+		if (showZchHo) CEMENT_BPD_CHAIN.push({ label: 'ZCH', field: 'u_approver_zch' });
+		CEMENT_BPD_CHAIN.push({ label: 'ZHM Cement', field: 'u_approver_zhm' });
+		if (showZchHo) CEMENT_BPD_CHAIN.push({ label: 'HO', field: 'u_approver_ho' });
+		CEMENT_BPD_CHAIN = CEMENT_BPD_CHAIN.concat([
+			{ label: 'NSH', field: 'u_approver_nsh'     }, { label: 'CCH', field: 'u_approver_nsh_cch' },
+			{ label: 'CMO', field: 'u_approver_cmo'     }, { label: 'CFO', field: 'u_approver_cmo_cfo' },
+			{ label: 'MD',  field: 'u_approver_md'      }
+		]);
+
+		var chain = (segment === 'rmc')                 ? RMC_CHAIN
+		: (segment === 'bpd' && isCementBpd) ? CEMENT_BPD_CHAIN
+		: (segment === 'bpd')                 ? BPD_CHAIN
+		: CEMENT_CHAIN;
+
+		if (isTrue(gr.getValue('is_downgrade'))) {
+			if (segment === 'rmc') {
+				chain = [{ label: 'TSM', field: 'u_approver_tsm' }, { label: 'RH/CH', field: 'u_approver_rh_ch_rmc' }];
+			} else if (segment === 'bpd') {
+				chain = [{ label: 'TSH BPD', field: 'u_approver_tsh_bpd' }, { label: 'ZH BPD', field: 'u_approver_zh_bpd' }];
+			} else {
+				chain = [{ label: 'TSH', field: 'u_approver_tsh' }, { label: 'RHM', field: 'u_approver_rhm' }];
+			}
+		}
+
+		var mapBySysId = {};
+		var saGR = new GlideRecord('sysapproval_approver');
+		saGR.addQuery('source_table', 'x_birl3_clm_clm_new_credit_request');
+		saGR.addQuery('document_id', gr.getUniqueValue());
+		saGR.addQuery('state', '!=', 'cancelled');
+		var lastSubmitted = gr.getValue('u_last_submitted_on');
+		if (lastSubmitted) saGR.addQuery('sys_created_on', '>=', lastSubmitted);
+		saGR.orderByDesc('sys_created_on');
+		saGR.query();
+		while (saGR.next()) {
+			var aId = saGR.getValue('approver') + '';
+			if (mapBySysId[aId]) continue;
+			var st = (saGR.getValue('state') + '').toLowerCase();
+			mapBySysId[aId] = (st === 'approved') ? 'approved' : (st === 'rejected') ? 'rejected' : 'pending';
+		}
+
+		var steps = [{ label: 'Submitted', state: 'approved' }];
+		for (var i = 0; i < chain.length; i++) {
+			var approverId = gr.getValue(chain[i].field);
+			if (!approverId) continue;
+			var approverName = '';
+			try { approverName = gr[chain[i].field].getDisplayValue() + ''; } catch (e) {}
+			steps.push({
+				label:           chain[i].label,
+				state:           mapBySysId[approverId] || 'pending',
+				approver_name:   approverName,
+				approver_sys_id: approverId
+			});
+		}
+		var overall = normalizeState(gr.getValue('state'));
+		steps.push({ label: 'Completed', state: overall === 'Approved' ? 'approved' : 'pending' });
+
+		var found = false;
+		for (var k = 0; k < steps.length; k++) {
+			steps[k].is_current = false;
+			if (overall === 'Submitted' && !found && steps[k].state === 'pending') {
+				steps[k].is_current = true;
+				found = true;
+			}
+		}
+		return steps;
+	}
+
+	function readCustomer(gr, cfg) {
+		var o = { sys_id: str(gr.getValue('customer')), name: '', code: '', pan: '',
+				 depot: '', depot_name: '', zone: '', zone_name: '', region: '', region_name: '' };
+		if (o.sys_id && cfg.customer_table) {
+			var cGr = new GlideRecord(cfg.customer_table);
+			if (cGr.get(o.sys_id)) {
+				o.name = str(cGr.getValue('customer_name'));     o.code = str(cGr.getValue('customer_code_sap'));
+				o.pan = str(cGr.getValue('pan'));                 o.depot = str(cGr.getValue('depot'));
+				o.depot_name = str(cGr.getValue('depot_name'));   o.zone = str(cGr.getValue('zone'));
+				o.zone_name = str(cGr.getValue('zone_name'));     o.region = str(cGr.getValue('region'));
+				o.region_name = str(cGr.getValue('region_name'));
+			}
+		}
+		if (!o.name) {
+			o.name = gr.customer.getDisplayValue() || 'Unknown';
+			o.code = o.code || 'N/A';
+		}
+		return o;
+	}
+
+	function tradeSummary(gr, cfg, cust, includeSteps) {
+		cust = cust || readCustomer(gr, cfg);
+		var codeTotal = grNum(gr, 'u_code_level_total_requested');
+		return {
+			sys_id:                          gr.getUniqueValue(),
+			number:                          str(gr.getValue('number')),
+			category:                        'trade',
+			customer_name:                   cust.name,
+			customer_code:                   cust.code,
+			customer_type:                   str(gr.getValue('customer_type')),
+			segment:                         str(gr.getValue('segment')),
+			state:                           normalizeState(gr.getValue('state')),
+			is_deviation:                    isTrue(gr.getValue('is_deviation')),
+			is_downgrade:                    isTrue(gr.getValue('is_downgrade')),
+			is_resubmitted:                  (parseInt(gr.getValue('u_resubmission_count'), 10) || 0) > 0,
+			code_level_requested_additional: grNum(gr, 'u_requested_additional_limit'),
+			code_level_total_requested:      codeTotal,
+			code_level_total_requested_l:    codeTotal / 100000,
+			net_exposure:                    grNum(gr, 'net_exposure') / 100000,
+			max_allowable:                   grNum(gr, 'max_allowable_limit') / 100000,
+			system_mult:                     str(gr.getValue('system_multiplier')),
+			implied_mult:                    grNum(gr, 'implied_multiplier'),
+			initiator:                       gr.initiator.getDisplayValue() || 'Unknown',
+			created:                         gr.getDisplayValue('sys_created_on'),
+			created_raw:                     str(gr.getValue('sys_created_on')),
+			approval_steps:                  includeSteps ? tradeSteps(gr) : []
+		};
+	}
+
+	// ── Non-Trade PAN-level helpers (aligned with uclm_non_trade_approval) ──
+	function ntSegKey(t) {
+		t = (t || '').toString().toLowerCase();
+		if (t.indexOf('cement') !== -1) return 'Cement';
+		if (t.indexOf('rmc') !== -1) return 'RMC';
+		if (t.indexOf('bpd') !== -1) return 'BPD';
+		return '';
+	}
+
+	function ntGetSiteCode(sGr) {
+		var code = str(sGr.getValue('customer_code'));
+		if (!code && sGr.isValidField('customer_site_code') && sGr.customer_site_code) {
+			code = sGr.customer_site_code.customer_code_sap ? str(sGr.customer_site_code.customer_code_sap) : '';
+		}
+		return code;
+	}
+
+	function getNtPanLimitContext(panSysId, panVal) {
+		var reqMap = {};
+		var sGr = new GlideRecord('x_birl3_clm_nt_site_request');
+		sGr.addQuery('pan_request', panSysId);
+		sGr.query();
+		while (sGr.next()) {
+			var code = ntGetSiteCode(sGr);
+			var seg = sGr.isValidField('segment') ? ntSegKey(sGr.getDisplayValue('segment')) : '';
+			reqMap[code + '|' + seg] = parseFloat(sGr.getValue('requested_limit') || sGr.getValue('site_desired_limit')) || 0;
+		}
+
+		var other = 0, matched = 0;
+		var seen = {}, claimed = {};
+		var cGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+		cGr.addQuery('pan', panVal);
+		cGr.addQuery('cg1', 'N01');
+		cGr.query();
+		while (cGr.next()) {
+			var cCode = str(cGr.getValue('customer_code_sap'));
+			var cSeg = ntSegKey(cGr.getDisplayValue('segment'));
+			var dedupe = cCode ? (cCode + '|' + cSeg) : cGr.getUniqueValue();
+			if (seen[dedupe]) continue;
+			seen[dedupe] = true;
+
+			var key = cCode + '|' + cSeg;
+			if (reqMap[key] === undefined && reqMap[cCode + '|'] !== undefined) key = cCode + '|';
+			var isReq = (reqMap[key] !== undefined && !claimed[key]);
+
+			if (isReq) {
+				claimed[key] = true;
+				matched += reqMap[key];
+			} else {
+				other += parseFloat(cGr.getValue('cr_limit') || cGr.getValue('credit_limit')) || 0;
+			}
+		}
+
+		return {
+			other: other,
+			matched: matched,
+			minLimit: Math.round(other),
+			maxLimit: Math.round(other + matched)
+		};
+	}
+
+	function ntAllocateInteger(items, pool) {
+		var n = items.length;
+		if (!n) return [];
+		var totReq = 0;
+		items.forEach(function(it) { totReq += it.req; });
+
+		var rows = items.map(function(it, i) {
+			var share = totReq > 0 ? it.req / totReq : 1 / n;
+			var raw = pool * share;
+			var base = Math.floor(raw);
+			return { i: i, base: base, frac: raw - base, req: it.req, code: it.code || '' };
+		});
+
+		var used = 0;
+		rows.forEach(function(r) { used += r.base; });
+		var left = pool - used;
+
+		var order = rows.slice().sort(function(a, b) {
+			if (Math.abs(a.frac - b.frac) > 1e-9) return b.frac - a.frac;
+			if (a.req !== b.req) return b.req - a.req;
+			return a.code < b.code ? -1 : (a.code > b.code ? 1 : 0);
+		});
+		for (var k = 0; k < left && k < order.length; k++) order[k].base += 1;
+
+		return rows.map(function(r) { return r.base; });
+	}
+
+	function distributeNtApprovedLimitToSites(panSysId, panApprovedVal, minLimit) {
+		var pool = Math.max(0, Math.round(panApprovedVal - minLimit));
+
+		var siteList = [];
+		var sGr = new GlideRecord('x_birl3_clm_nt_site_request');
+		sGr.addQuery('pan_request', panSysId);
+		sGr.query();
+		while (sGr.next()) {
+			var reqLim = parseFloat(sGr.getValue('requested_limit') || sGr.getValue('site_desired_limit')) || 0;
+			siteList.push({
+				sys_id: sGr.getUniqueValue(),
+				req: Math.max(0, reqLim),
+				code: ntGetSiteCode(sGr)
+			});
+		}
+
+		var alloc = ntAllocateInteger(siteList, pool);
+
+		for (var i = 0; i < siteList.length; i++) {
+			var siteUpd = new GlideRecord('x_birl3_clm_nt_site_request');
+			if (siteUpd.get(siteList[i].sys_id)) {
+				siteUpd.setValue('approved_limit', alloc[i]);
+				siteUpd.update();
+			}
+		}
+	}
+
+	function readNtCustomer(gr, cfg) {
+		var pan = str(gr.getValue('pan'));
+		var name = 'Corporate Group';
+		if (pan && cfg.customer_table) {
+			var cGr = new GlideRecord(cfg.customer_table);
+			cGr.addQuery('pan', pan);
+			cGr.setLimit(1);
+			cGr.query();
+			if (cGr.next()) {
+				name = str(cGr.getValue('group_customer_name') || cGr.getValue('customer_name') || cGr.getValue('name')) || name;
+			}
+		}
+		return { name: name, pan: pan };
+	}
+
+	function getNtPanFigures(panSysId, panVal) {
+		var reqMap = {};
+		var sGr = new GlideRecord('x_birl3_clm_nt_site_request');
+		sGr.addQuery('pan_request', panSysId);
+		sGr.query();
+		while (sGr.next()) {
+			var code = ntGetSiteCode(sGr);
+			var seg = sGr.isValidField('segment') ? ntSegKey(sGr.getDisplayValue('segment')) : '';
+			reqMap[code + '|' + seg] = {
+				requested: parseFloat(sGr.getValue('requested_limit') || sGr.getValue('site_desired_limit')) || 0,
+				os: parseFloat(sGr.getValue('existing_outstanding')) || 0
+			};
+		}
+
+		var snapOs = {};
+		var snGr = new GlideRecord('x_birl3_clm_nt_pan_request_outstanding');
+		snGr.addQuery('pan_request', panSysId);
+		snGr.orderByDesc('snapshot_month');
+		snGr.orderByDesc('sys_created_on');
+		snGr.query();
+		while (snGr.next()) {
+			var sk = str(snGr.getValue('customer_site_code') || snGr.getValue('customer'));
+			var ck = str(snGr.getValue('customer_code'));
+			var isLeg = snGr.isValidField('bucket_0_21_days') && snGr.getValue('bucket_0_21_days') !== null;
+			var b03  = parseFloat(isLeg ? snGr.getValue('bucket_0_21_days')  : snGr.getValue('bucket_0_30_days'))  || 0;
+			var b47  = parseFloat(isLeg ? snGr.getValue('bucket_22_30_days') : snGr.getValue('bucket_31_45_days')) || 0;
+			var b821 = parseFloat(isLeg ? snGr.getValue('bucket_31_45_days') : snGr.getValue('bucket_46_60_days')) || 0;
+			var b22  = parseFloat(isLeg ? snGr.getValue('bucket_46_60_days') : snGr.getValue('bucket_61_75_days')) || 0;
+			var b31  = parseFloat(isLeg ? snGr.getValue('bucket_61_75_days') : snGr.getValue('bucket_76_90_days')) || 0;
+			var bgt  = (parseFloat(snGr.getValue('bucket_gt120_days')) || 0) + (parseFloat(snGr.getValue('bucket_91_120_days')) || 0);
+			var tot  = parseFloat(snGr.getValue('total_outstanding')) || (b03 + b47 + b821 + b22 + b31 + bgt);
+			if (sk && snapOs[sk] === undefined) snapOs[sk] = tot;
+			if (ck && snapOs[ck] === undefined) snapOs[ck] = tot;
+		}
+
+		var requestedPan = 0, outstanding = 0;
+		var seen = {}, claimed = {};
+		var cGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+		cGr.addQuery('pan', panVal);
+		cGr.addQuery('cg1', 'N01');
+		cGr.query();
+		while (cGr.next()) {
+			var cId = cGr.getUniqueValue();
+			var cCode = str(cGr.getValue('customer_code_sap'));
+			var cSeg = ntSegKey(cGr.getDisplayValue('segment'));
+			var dedupe = cCode ? (cCode + '|' + cSeg) : cId;
+			if (seen[dedupe]) continue;
+			seen[dedupe] = true;
+
+			var key = cCode + '|' + cSeg;
+			if (reqMap[key] === undefined && reqMap[cCode + '|'] !== undefined) key = cCode + '|';
+			var line = (reqMap[key] !== undefined && !claimed[key]) ? reqMap[key] : null;
+			if (line) claimed[key] = true;
+
+			var curCl = parseFloat(cGr.getValue('cr_limit') || cGr.getValue('credit_limit')) || 0;
+			requestedPan += line ? line.requested : curCl;
+
+			if (snapOs[cId] !== undefined) outstanding += snapOs[cId];
+			else if (cCode && snapOs[cCode] !== undefined) outstanding += snapOs[cCode];
+			else outstanding += line ? line.os : (parseFloat(cGr.getValue('outstanding')) || 0);
+		}
+		return { requestedPan: requestedPan, outstanding: outstanding };
+	}
+
+	function ntSteps(gr) {
+		var steps = [{ label: 'Submitted', state: 'approved' }];
+		var saGR = new GlideRecord('sysapproval_approver');
+		var tblQ = saGR.addQuery('sysapproval.sys_class_name', 'x_birl3_clm_nt_pan_request');
+		tblQ.addOrCondition('source_table', 'x_birl3_clm_nt_pan_request');
+		var q = saGR.addQuery('sysapproval', gr.getUniqueValue());
+		q.addOrCondition('document_id', gr.getUniqueValue());
+		saGR.orderBy('sys_created_on');
+		saGR.query();
+		while (saGR.next()) {
+			var st = (saGR.getValue('state') + '').toLowerCase();
+			var role = saGR.getValue('approval_reason') || 'Approver';
+			steps.push({
+				label:           role,
+				state:           (st === 'approved') ? 'approved' : (st === 'rejected' ? 'rejected' : 'pending'),
+				approver_name:   saGR.getDisplayValue('approver') || '',
+				approver_sys_id: str(saGR.getValue('approver'))
+			});
+		}
+		var overall = normalizeState(gr.getDisplayValue('approval') || gr.getValue('state'));
+		steps.push({ label: 'Completed', state: overall === 'Approved' ? 'approved' : 'pending' });
+		return steps;
+	}
+
+	function ntSummary(gr, cfg, includeSteps) {
+		var cust = readNtCustomer(gr, cfg);
+		var figs = getNtPanFigures(gr.getUniqueValue(), cust.pan);
+		var totalDesired = grNum(gr, 'total_requested_limit') || grNum(gr, 'total_desired_limit');
+		var safeLimit = grNum(gr, 'total_safe_allowable_limit') || grNum(gr, 'safe_allowable_limit');
+		var totalApproved = grNum(gr, 'total_approved_limit');
+
+		return {
+			sys_id:                gr.getUniqueValue(),
+			number:                str(gr.getValue('number')),
+			category:              'nt',
+			customer_name:         cust.name,
+			customer_code:         cust.pan ? ('PAN: ' + cust.pan) : '',
+			customer_type:         'Non-Trade',
+			segment:               str(gr.getDisplayValue('segment') || gr.getValue('segment')),
+			state:                 normalizeState(gr.getDisplayValue('approval') || gr.getValue('state')),
+			is_deviation:          isTrue(gr.getValue('is_deviation')),
+			is_downgrade:          false,
+			is_resubmitted:        false,
+			total_desired:         totalDesired,
+			total_requested_pan:   figs.requestedPan || totalDesired,
+			safe_limit:            safeLimit,
+			total_approved_limit:  totalApproved,
+			total_outstanding_pan: figs.outstanding,
+			initiator:             gr.getDisplayValue('sys_created_by') || 'System',
+			created:               gr.getDisplayValue('sys_created_on'),
+			created_raw:           str(gr.getValue('sys_created_on')),
+			approval_steps:        includeSteps ? ntSteps(gr) : []
+		};
+	}
+
+	var BUILDERS = {
+		trade: { summary: tradeSummary, steps: tradeSteps },
+		nt:    { summary: ntSummary,    steps: ntSteps }
+	};
+	function B(cfg) { return BUILDERS[cfg.builder]; }
+
+	// ════════════════════════════════════════════════════════════
+	// 4. LIST EXTRAS (SAP status, decision, RFI rows)
+	// ════════════════════════════════════════════════════════════
+	function getSapStatus(cfg, reqSysId, reqState, reqNumber) {
+		var out = { sap_status: 'na', sap_label: '', sap_message: '', sap_on: '', sap_attempts: 0, sap_error: '', sap_can_retry: false };
+		if (!sapConfigured(cfg) || reqState !== 'Approved') return out;
+
+		var sb = new GlideRecord(cfg.sap_sendback_table);
+		if (cfg.builder === 'nt') {
+			var q = sb.addQuery('nt_request', reqSysId);
+			if (reqNumber) q.addOrCondition('u_request', reqNumber);
+			if (sb.isValidField('customer_type')) sb.addQuery('customer_type', 'non_trade');
+		} else {
+			sb.addQuery('u_request', reqSysId);
+		}
+		sb.orderByDesc('sys_created_on');
+		sb.query();
+
+		var latestBySeg = {};
+		while (sb.next()) {
+			var seg = sb.getValue('u_credit_segment') || 'ALL';
+			if (latestBySeg[seg]) continue;
+			latestBySeg[seg] = {
+				status:   (sb.getValue('u_status') || '').toLowerCase(),
+				on:       sb.getDisplayValue('u_processed_on') + '',
+				attempts: parseInt(sb.getValue('u_attempt_count'), 10) || 0,
+				error:    sb.getValue('u_last_error') || ''
+			};
+		}
+
+		var total = 0, failed = 0, pend = 0, lastOn = '', attempts = 0, err = '';
+		for (var k in latestBySeg) {
+			if (!latestBySeg.hasOwnProperty(k)) continue;
+			var r = latestBySeg[k];
+			total++;
+			attempts = Math.max(attempts, r.attempts);
+			if (r.status === 'success')     { if (r.on) lastOn = r.on; }
+			else if (r.status === 'failed') { failed++; err = r.error; }
+			else                            { pend++; }
+		}
+
+		if (total === 0) {
+			out.sap_status = 'queued';  out.sap_label = 'Queued';
+			out.sap_message = 'Approved. The credit limit is queued to be updated in SAP.';
+		} else if (failed > 0) {
+			out.sap_status = 'failed';  out.sap_label = 'Failed';
+			out.sap_message = 'The SAP update did not go through after ' + attempts + ' attempts.';
+			out.sap_error = err;
+		} else if (pend > 0) {
+			out.sap_status = 'pending'; out.sap_label = 'In progress';
+			out.sap_message = 'The credit limit is being updated in SAP.';
+		} else {
+			out.sap_status = 'success'; out.sap_label = 'Updated';
+			out.sap_message = 'Credit limit updated in SAP' + (lastOn ? ' on ' + lastOn : '') + '.';
+			out.sap_on = lastOn;
+		}
+		out.sap_attempts  = attempts;
+		out.sap_can_retry = (out.sap_status === 'failed');
+		return out;
+	}
+
+	function applySap(o, sap) { for (var k in sap) { if (sap.hasOwnProperty(k)) o[k] = sap[k]; } }
+
+	function decisionFromApproval(sa) {
+		var raw = '';
+		try { raw = sa.comments.getJournalEntry(1) + ''; } catch (e) { raw = ''; }
+		var clean = '';
+		if (raw) { var lines = raw.split('\n'); lines.shift(); clean = lines.join('\n').trim(); }
+		var lim = sa.getValue('u_approved_limit');
+		if (!lim && sa.isValidField('approval_journal_column')) {
+			var jRaw = '';
+			try {
+				var jEl = sa.getElement('approval_journal_column');
+				if (jEl) jRaw = jEl.getJournalEntry(1) || '';
+			} catch (e) { jRaw = ''; }
+			if (!jRaw) jRaw = sa.getValue('approval_journal_column') || '';
+			if (jRaw) {
+				var jLines = String(jRaw).split('\n');
+				if (jLines.length > 1 && /^\d{4}-\d{2}-\d{2}|^[^:]+:\s*\d{4}-\d{2}-\d{2}/.test(jLines[0])) jLines.shift();
+				var m = jLines.join(' ').replace(/[,₹\s]/g, '').match(/\d+(\.\d+)?/);
+				if (m) lim = parseFloat(m[0]);
+			}
+		}
+		return {
+			decision:       str(sa.getValue('state')),
+			decided_on:     sa.getDisplayValue('sys_updated_on'),
+			decided_on_raw: str(sa.getValue('sys_updated_on')),
+			comments:       clean,
+			approved_limit: lim ? parseFloat(lim) : null
+		};
+	}
+
+	function applyMyDecision(o, gr, my) {
+		var raw = my.approved_limit ? my.approved_limit : (grNum(gr, 'total_approved_limit') || grNum(gr, 'approved_limit') || o.total_requested_pan || o.code_level_total_requested);
+		o.my_decision              = my.decision;
+		o.my_approved_on           = my.decided_on;
+		o.my_decided_raw           = my.decided_on_raw;
+		o.my_comments              = my.comments;
+		o.my_approved_limit        = raw / 100000;
+		o.my_approved_limit_rupees = raw;
+		o.final_status             = normalizeState(gr.getDisplayValue('approval') || gr.getValue('state'));
+	}
+
+	function rfiSummary(r, cfg) {
+		var reqField = cfg.rfi_request_field || 'u_request';
+		var req = r[reqField] ? r[reqField].getRefRecord() : null;
+		if ((!req || !req.isValidRecord()) && r.getValue(reqField)) {
+			req = new GlideRecord(cfg.request_table);
+			req.get(r.getValue(reqField));
+		}
+		var ok = req && req.isValidRecord();
+		var custName = '';
+		if (ok) {
+			if (cfg.builder === 'nt') {
+				var panStr = str(req.getValue('pan'));
+				var cGr = new GlideRecord(cfg.customer_table);
+				cGr.addQuery('pan', panStr);
+				cGr.setLimit(1);
+				cGr.query();
+				if (cGr.next()) {
+					custName = str(cGr.getValue('group_customer_name') || cGr.getValue('customer_name') || cGr.getValue('name')) || '';
+				}
+				if (!custName) custName = panStr ? ('PAN: ' + panStr) : str(req.getValue('number'));
+			} else {
+				custName = req.getDisplayValue('customer') || '';
+			}
+		}
+
+		return {
+			sys_id:         r.getUniqueValue(),
+			number:         str(r.getValue('number')),
+			token:          str(r.getValue(cfg.rfi_token_field || 'u_token')),
+			question:       str(r.getValue('u_question')),
+			status:         str(r.getValue('u_status')),
+			raised_by_name: r.getDisplayValue('u_raised_by') || r.getDisplayValue('sys_created_by') || 'Approver',
+			raised_by_role: str(r.getValue('u_raised_by_role')),
+			target_role:    str(r.getValue('u_target_role')),
+			raised_on:      r.getDisplayValue('sys_created_on'),
+			raised_on_raw:  str(r.getValue('sys_created_on')),
+			request_sys_id: ok ? req.getUniqueValue() : '',
+			request_number: ok ? str(req.getValue('number')) : '',
+			customer_name:  custName,
+			segment:        ok ? str(req.getDisplayValue('segment') || req.getValue('segment')) : '',
+			customer_type:  cfg.label,
+			net_exposure:   ok ? (grNum(req, 'net_exposure') / 100000) : 0
+		};
+	}
+
+	// ════════════════════════════════════════════════════════════
+	// 5. LIST GENERATION
+	// ════════════════════════════════════════════════════════════
+	function tagRow(o, id, cfg) { o.category = id; o.category_label = cfg.label; return o; }
+
+	function pendingRows(id, cfg) {
+		var out = [];
+		if (!canApprove(cfg)) return out;
+		var ids = pendingDocIds(cfg);
+		if (!ids.length) return out;
+		var gr = new GlideRecord(cfg.request_table);
+		gr.addQuery('sys_id', 'IN', ids.join(','));
+		if (id === 'trade') {
+			gr.addQuery('state', 'Submitted');
+		}
+		applyRequestFilter(gr, cfg);
+		gr.orderByDesc('sys_created_on');
+		gr.query();
+		while (gr.next()) {
+			// includeSteps = true so Progress summary renders on pending cards
+			out.push(tagRow(B(cfg).summary(gr, cfg, null, true), id, cfg));
+		}
+		return out;
+	}
+
+	function processedRows(id, cfg) {
+		var out = [];
+		if (!canApprove(cfg)) return out;
+
+		var mine = {}, ids = [];
+		var sa = processedQuery(cfg);
+		while (sa.next() && ids.length < PROCESSED_MAX_ROWS) {
+			var d = (cfg.builder === 'nt')
+				? (str(sa.getValue('sysapproval')) || str(sa.getValue('document_id')))
+				: str(sa.getValue('document_id'));
+			if (!d || mine[d]) continue;
+			mine[d] = decisionFromApproval(sa);
+			ids.push(d);
+		}
+		if (!ids.length) return out;
+
+		var gr = new GlideRecord(cfg.request_table);
+		gr.addQuery('sys_id', 'IN', ids.join(','));
+		applyRequestFilter(gr, cfg);
+		gr.query();
+		while (gr.next()) {
+			// includeSteps = false because processed view does not display step progression
+			var o = B(cfg).summary(gr, cfg, null, false);
+			applyMyDecision(o, gr, mine[gr.getUniqueValue()]);
+			applySap(o, getSapStatus(cfg, gr.getUniqueValue(), o.final_status, o.number));
+			out.push(tagRow(o, id, cfg));
+		}
+		return out;
+	}
+
+	function rfiRows(id, cfg) {
+		var out = [];
+		if (!rfiConfigured(cfg)) return out;
+		var r = new GlideRecord(cfg.rfi_table);
+		r.addQuery('u_target_user', uid);
+		r.addQuery('u_status', 'open');
+		if (cfg.rfi_filter) r.addEncodedQuery(cfg.rfi_filter);
+		r.orderByDesc('sys_created_on');
+		r.query();
+		while (r.next()) out.push(tagRow(rfiSummary(r, cfg), id, cfg));
+		return out;
+	}
+
+	function byDesc(key) {
+		return function(a, b) { return a[key] < b[key] ? 1 : (a[key] > b[key] ? -1 : 0); };
+	}
+
+	function loadList(view) {
+		var rows = [];
+		CATEGORY_ORDER.forEach(function(id) {
+			var cfg = CATEGORY_CONFIG[id];
+			if (!isConfigured(cfg)) return;
+			try {
+				if (view === 'pending')   rows = rows.concat(pendingRows(id, cfg));
+				if (view === 'processed') rows = rows.concat(processedRows(id, cfg));
+				if (view === 'rfi')       rows = rows.concat(rfiRows(id, cfg));
+			} catch (e) {
+				gs.error('CLM Requests: ' + view + ' list error for ' + cfg.label + ': ' + e.message);
+			}
+		});
+		if (view === 'pending')   rows.sort(byDesc('created_raw'));
+		if (view === 'processed') rows.sort(byDesc('my_decided_raw'));
+		if (view === 'rfi')       rows.sort(byDesc('raised_on_raw'));
+		return rows;
+	}
+
+	// ════════════════════════════════════════════════════════════
+	// 6. ACTIONS & DECISIONS
+	// ════════════════════════════════════════════════════════════
+	function syncFlowApproval(cfg, requestSysId, decision, comments, approvedLimit) {
+		try {
+			var apGr = new GlideRecord('sysapproval_approver');
+			if (cfg.builder === 'nt') {
+				var tblQ = apGr.addQuery('sysapproval.sys_class_name', cfg.request_table);
+				tblQ.addOrCondition('source_table', cfg.request_table);
+				var q = apGr.addQuery('sysapproval', requestSysId);
+				q.addOrCondition('document_id', requestSysId);
+			} else {
+				apGr.addQuery('source_table', cfg.request_table);
+				apGr.addQuery('document_id', requestSysId);
+			}
+			apGr.addQuery('approver', uid);
+			apGr.addQuery('state', 'requested');
+			apGr.query();
+
+			while (apGr.next()) {
+				if (decision === 'approve') {
+					apGr.state    = 'approved';
+					apGr.comments = comments || 'Approved via CLM Dashboard';
+					if (cfg.builder === 'nt' && apGr.isValidField('approval_journal_column') && approvedLimit > 0) {
+						apGr.approval_journal_column = fmtWhole(approvedLimit);
+					}
+				} else if (decision === 'reject') {
+					apGr.state    = 'rejected';
+					apGr.comments = comments || 'Rejected via CLM Dashboard';
+				} else if (decision === 'return') {
+					apGr.state    = 'cancelled';
+					apGr.comments = 'Returned to initiator: ' + (comments || '');
+				}
+				apGr.update();
+				if (decision === 'approve' && approvedLimit && cfg.builder === 'trade') {
+					new CLMApprovalLimit().save(requestSysId, apGr.getUniqueValue(), approvedLimit);
+				}
+			}
+		} catch (e) {
+			gs.error('CLM Requests: syncFlowApproval error: ' + e.message);
+		}
+	}
+
+	function doDecide(cfg) {
+		data.success = false;
+		if (!canApprove(cfg)) { data.error = 'You do not have approver access for ' + cfg.label + '.'; return; }
+
+		var gr = new GlideRecord(cfg.request_table);
+		if (!input.sys_id || !gr.get(input.sys_id)) { data.error = 'Request not found.'; return; }
+		var requestNum = str(gr.getValue('number'));
+		if (!hasMyApproval(cfg, gr.getUniqueValue(), 'requested')) {
+			data.error = requestNum + ' is no longer pending your approval.';
+			return;
+		}
+
+		var comments = str(input.comments);
+		var decision = str(input.decision);
+
+		// ── Non-Trade Decisions (PAN-level approval matching uclm_non_trade_approval) ──
+		if (cfg.builder === 'nt') {
+			if (decision === 'approve') {
+				var panSysId    = gr.getUniqueValue();
+				var panCtx      = getNtPanLimitContext(panSysId, str(gr.getValue('pan')));
+				var panApproved = (panCtx && panCtx.maxLimit > 0)
+					? panCtx.maxLimit
+					: (grNum(gr, 'total_requested_limit') || grNum(gr, 'total_desired_limit'));
+				var panMinLimit = panCtx ? panCtx.minLimit : 0;
+
+				gr.setValue('total_approved_limit', panApproved);
+				var pNote = 'Bulk Approver Decision: Approved by ' + gs.getUserDisplayName();
+				pNote += '\nApproved PAN Limit: ₹ ' + fmtWhole(panApproved);
+				pNote += '\nAllocated to requested sites: ₹ ' + fmtWhole(Math.max(0, panApproved - panMinLimit));
+				if (comments) pNote += '\nComments: ' + comments;
+				gr.comments = pNote;
+				gr.update();
+
+				distributeNtApprovedLimitToSites(panSysId, panApproved, panMinLimit);
+				syncFlowApproval(cfg, panSysId, 'approve', comments, panApproved);
+
+				data.success = true;
+				data.message = requestNum + ' approved.';
+				return;
+			} else if (decision === 'reject') {
+				if (comments.trim().length < 5) { data.error = 'Please add comments before rejecting.'; return; }
+				var rejPanSysId = gr.getUniqueValue();
+
+				gr.setValue('total_approved_limit', 0);
+				var rejNote = 'Bulk Approver Decision: Rejected by ' + gs.getUserDisplayName() + '\nComments: ' + comments;
+				gr.comments = rejNote;
+				gr.update();
+
+				var sRejBulk = new GlideRecord('x_birl3_clm_nt_site_request');
+				sRejBulk.addQuery('pan_request', rejPanSysId);
+				sRejBulk.query();
+				while (sRejBulk.next()) {
+					sRejBulk.setValue('approved_limit', 0);
+					sRejBulk.update();
+				}
+
+				syncFlowApproval(cfg, rejPanSysId, 'reject', comments, 0);
+				data.success = true;
+				data.message = requestNum + ' rejected.';
+				return;
+			}
+		}
+
+		// ── Trade Decisions ──
+		var custName          = gr.customer.getDisplayValue();
+		var originalInitiator = gr.getValue('initiator');
+
+		if (decision === 'approve') {
+			var sequence = [];
+			try { sequence = JSON.parse(gr.getValue('u_approver_sequence') || '[]'); } catch (e) { sequence = []; }
+			var currentOrder = parseInt(gr.getValue('u_current_approver_order'), 10) || 1;
+
+			var approvedLimit = 0;
+			if (input.approved_limit) approvedLimit = parseFloat((input.approved_limit + '').replace(/,/g, '')) || 0;
+
+			var isTradeReq        = str(gr.getValue('customer_type')) === 'Trade';
+			var codeLevelTotalReq = grNum(gr, 'u_code_level_total_requested');
+			var cap = isTradeReq ? codeLevelTotalReq : grNum(gr, 'requested_limit');
+			if (approvedLimit > 0 && cap > 0 && approvedLimit > cap) {
+				data.error = 'Override Approved Limit cannot be greater than ' +
+					(isTradeReq ? 'the Code-Level Requested Limit.' : 'the Requested Limit.');
+				return;
+			}
+
+			var finalCodeLimit = approvedLimit > 0 ? approvedLimit : codeLevelTotalReq;
+			var finalPanLimit  = approvedLimit > 0 ? approvedLimit : (grNum(gr, 'approved_limit') || grNum(gr, 'requested_limit'));
+			var finalLimit     = isTradeReq ? finalCodeLimit : finalPanLimit;
+
+			if (isTradeReq) {
+				gr.setValue('u_approved_code_limit', finalCodeLimit);
+				gr.approved_limit = finalCodeLimit;
+			} else {
+				gr.approved_limit = finalPanLimit;
+			}
+
+			// B(cfg).steps(gr) executes tradeSteps() to safely determine next approver vs final step
+			var chainSteps = B(cfg).steps(gr).filter(function(st) { return st.label !== 'Submitted' && st.label !== 'Completed'; });
+			var pendingSteps = chainSteps.filter(function(st) { return st.state === 'pending'; });
+			var currentStep  = pendingSteps[0] || null;
+			var nextStep     = pendingSteps[1] || null;
+			var isFinalStep  = !nextStep;
+
+			for (var s = 0; s < sequence.length; s++) {
+				if (sequence[s].order === currentOrder) {
+					sequence[s].status           = 'approved';
+					sequence[s].approved_by      = uid;
+					sequence[s].approved_by_name = gs.getUserDisplayName();
+					sequence[s].approved_on      = new GlideDateTime().toString();
+					sequence[s].approved_limit   = finalLimit;
+					sequence[s].approver_role    = sequence[s].role || '';
+				}
+			}
+			gr.u_approver_sequence = JSON.stringify(sequence);
+
+			if (isFinalStep) {
+				gr.setValue('approver', uid);
+				gr.initiator = originalInitiator;
+				gr.setWorkflow(false);
+				gr.autoSysFields(false);
+				gr.update();
+				syncFlowApproval(cfg, gr.getUniqueValue(), 'approve', comments, finalLimit);
+
+				data.success          = true;
+				data.processed_sys_id = gr.getUniqueValue();
+				data.is_final         = true;
+				data.message          = requestNum + ' fully approved for ' + custName + '.';
+			} else {
+				gr.initiator = originalInitiator;
+				gr.setWorkflow(false);
+				gr.autoSysFields(false);
+				gr.update();
+				syncFlowApproval(cfg, gr.getUniqueValue(), 'approve', comments, finalLimit);
+
+				var approverName     = gs.getUserDisplayName();
+				var approverRole     = currentStep ? currentStep.label : '';
+				var nextApproverName = nextStep ? nextStep.approver_name : '';
+				var nextApproverRole = nextStep ? nextStep.label : '';
+
+				var stepInfo = JSON.stringify({
+					role:      approverRole,
+					next_role: nextApproverRole,
+					next_name: nextApproverName,
+					limit:     finalLimit,
+					comments:  comments.substring(0, 1500)
+				});
+				gs.eventQueue('x_birl3_clm.request_step_approved', gr, approverName, stepInfo);
+
+				data.success          = true;
+				data.processed_sys_id = gr.getUniqueValue();
+				data.is_final         = false;
+				data.message          = requestNum + ' approved by ' + approverRole +
+					'. Forwarded to: ' + (nextApproverName || 'next approver') + '.';
+			}
+			return;
+		}
+
+		if (decision === 'reject') {
+			if (comments.trim().length < 5) { data.error = 'Please add comments before rejecting.'; return; }
+
+			gr.state            = 'Rejected';
+			gr.rejection_reason = comments;
+			gr.comments         = 'Rejected via Approver Dashboard\nReason: ' + comments;
+			gr.setValue('approver', uid);
+			gr.initiator = originalInitiator;
+			gr.setWorkflow(false);
+			gr.autoSysFields(false);
+			gr.update();
+
+			syncFlowApproval(cfg, gr.getUniqueValue(), 'reject', comments);
+
+			try {
+				var flowGr = new GlideRecord('sys_flow_context');
+				flowGr.addQuery('source_record', gr.getUniqueValue());
+				flowGr.addQuery('state', 'IN', 'WAITING,IN_PROGRESS');
+				flowGr.query();
+				while (flowGr.next()) {
+					sn_fd.FlowAPI.cancel(flowGr.getUniqueValue(), 'Terminated: Request rejected via dashboard.');
+				}
+			} catch (e) {
+				gs.error('CLM Requests: flow cancel error: ' + e.message);
+			}
+
+			var rejInitGr = new GlideRecord('sys_user');
+			if (rejInitGr.get(originalInitiator)) {
+				var rejEmail = str(rejInitGr.getValue('email'));
+				if (rejEmail) {
+					gs.eventQueue('x_birl3_clm.request_rejected', gr, rejEmail, comments);
+				}
+			}
+			data.success          = true;
+			data.processed_sys_id = gr.getUniqueValue();
+			data.message          = requestNum + ' rejected.';
+			return;
+		}
+
+		data.error = 'Unknown decision.';
+	}
+
+	// ════════════════════════════════════════════════════════════
+	// 7. DISPATCH
+	// ════════════════════════════════════════════════════════════
+	if (action) {
+		if (action === 'counts') { data.counts = allCounts(); return; }
+
+		if (action === 'list') {
+			var v = str(input.view);
+			data.list   = (VIEW_IDS.indexOf(v) !== -1) ? loadList(v) : [];
+			data.counts = allCounts();
+			return;
+		}
+
+		var catId = str(input.category);
+		var cfg = getCfg(catId);
+		if (!cfg) { data.success = false; data.error = 'Unknown customer category.'; return; }
+		if (!isConfigured(cfg)) { data.success = false; data.error = cfg.label + ' is not set up yet.'; return; }
+
+		if (action === 'decide') { doDecide(cfg); return; }
+
+		data.error = 'Unknown action.';
+		return;
+	}
+
+	// ── Initial Page Load ──
+	data.categories = categoryMeta();
+	data.counts     = allCounts();
+
+	var pView = ($sp.getParameter('view') || '') + '';
+	if (VIEW_IDS.indexOf(pView) === -1) pView = '';
+
+	data.initial = { view: pView };
+	if (pView) data.list = loadList(pView);
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-14 11:29:36</sys_created_on>
+        <sys_id>42435ba39733c710be31fa17f053afb4</sys_id>
+        <sys_mod_count>16</sys_mod_count>
+        <sys_name>UCLM Credit Limit Request</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_42435ba39733c710be31fa17f053afb4</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-13 06:35:06</sys_updated_on>
+        <template><![CDATA[<div class="clm-approver clm-rq">
+
+  <!-- ══════════════════════════════════════════════════════
+       CUSTOMER TYPE MULTI-SELECT (used in all three sections; parent sets msView)
+  ══════════════════════════════════════════════════════ -->
+  <script type="text/ng-template" id="clm-rq-ms.html">
+    <div class="clm-ms" ng-class="{'is-open': c.ms.open == msView}">
+      <button type="button" class="clm-ap-select clm-ms-btn" ng-click="c.toggleMs(msView, $event)"
+              aria-haspopup="listbox" aria-expanded="{{c.ms.open == msView}}">
+        <span class="clm-ms-text">{{c.catSummary(msView)}}</span>
+        <span class="clm-ms-caret">▾</span>
+      </button>
+      <div class="clm-ms-menu" ng-if="c.ms.open == msView" role="listbox" aria-multiselectable="true">
+        <button type="button" class="clm-ms-opt clm-ms-all" ng-click="c.setAllCats(msView)">
+          <span class="clm-ms-box" ng-class="{'is-on': c.allCatsOn(msView)}"></span>
+          <span class="clm-ms-label">All customer types</span>
+        </button>
+        <div class="clm-ms-sep"></div>
+        <div class="clm-ms-row" ng-repeat="cat in c.categories">
+          <button type="button" class="clm-ms-opt" role="option" aria-selected="{{c.isCatOn(msView, cat.id)}}" ng-click="c.toggleCat(msView, cat.id)">
+            <span class="clm-ms-box" ng-class="{'is-on': c.isCatOn(msView, cat.id)}"></span>
+            <span class="clm-ms-label">{{cat.label}}</span>
+            <span class="clm-rq-cat-soon" ng-if="!cat.configured">Not set up</span>
+            <span class="clm-ms-count" ng-if="cat.configured">{{c.catRowCount(msView, cat.id)}}</span>
+          </button>
+          <button type="button" class="clm-ms-only" ng-click="c.selectOnlyCat(msView, cat.id, $event)" title="Show only {{cat.label}}">Only</button>
+        </div>
+      </div>
+    </div>
+  </script>
+
+
+
+  <!-- ══════════════════════════════════════════════════════
+       PAGE HEADER BANNER
+  ══════════════════════════════════════════════════════ -->
+  <div class="clm-hero">
+    <div class="clm-hero-left">
+      <div class="clm-hero-crumb">
+        <span class="clm-hero-crumb-link" ng-click="c.goHome()">Home</span>
+        <span class="clm-hero-crumb-sep">›</span>
+        <span class="clm-hero-crumb-current" ng-if="!c.ui.view">Requests</span>
+        <span class="clm-hero-crumb-link" ng-if="c.ui.view" ng-click="c.goViewPicker()">Requests</span>
+        <span ng-if="c.ui.view">
+          <span class="clm-hero-crumb-sep">›</span>
+          <span class="clm-hero-crumb-current">{{c.viewMeta().title}}</span>
+        </span>
+      </div>
+      <div class="clm-hero-bar"></div>
+      <div class="clm-hero-title" ng-if="!c.ui.view">Credit Limit <span class="clm-hero-accent">Requests</span></div>
+      <div class="clm-hero-title" ng-if="c.ui.view == 'pending'">Pending <span class="clm-hero-accent">Approvals</span></div>
+      <div class="clm-hero-title" ng-if="c.ui.view == 'processed'">Processed <span class="clm-hero-accent">Requests</span></div>
+      <div class="clm-hero-title" ng-if="c.ui.view == 'rfi'">Requests for <span class="clm-hero-accent">Information</span></div>
+      <div class="clm-hero-sub">{{c.heroSubtitle()}}</div>
+    </div>
+
+    <div class="clm-hero-right">
+      <div class="clm-hero-actions">
+        <button type="button" class="clm-hero-btn" ng-click="c.refresh()" ng-disabled="c.ui.refreshing || c.ui.loadingList">
+          <span ng-if="!c.ui.refreshing">↻ Refresh</span>
+          <span ng-if="c.ui.refreshing">↻ Refreshing...</span>
+        </button>
+        <div class="clm-hero-refreshed" ng-if="c.ui.lastRefreshed">Last refreshed {{c.ui.lastRefreshed}}</div>
+      </div>
+      <div class="clm-hero-stat">
+        <div class="clm-hero-stat-v">{{c.heroStat().value}}</div>
+        <div class="clm-hero-stat-k">{{c.heroStat().label}}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       SECTION CARDS (Pending / Processed / RFI)
+  ══════════════════════════════════════════════════════ -->
+  <div class="clm-rq-views" ng-class="{'is-compact': c.ui.view}">
+    <button type="button" class="clm-rq-view tone-{{v.tone}}" ng-repeat="v in c.views"
+            ng-class="{'is-active': c.ui.view == v.id, 'is-locked': c.viewState(v.id) != 'ok'}"
+            ng-click="c.selectView(v.id)">
+      <span class="clm-rq-view-ico"><i class="fa {{v.icon}}" aria-hidden="true"></i></span>
+      <span class="clm-rq-view-body">
+        <span class="clm-rq-view-title">{{v.title}}</span>
+        <span class="clm-rq-view-desc">{{v.desc}}</span>
+        <span class="clm-rq-view-note" ng-if="c.viewState(v.id) == 'unconfigured'">Not set up yet</span>
+        <span class="clm-rq-view-note" ng-if="c.viewState(v.id) == 'noaccess'">No approver access</span>
+      </span>
+      <span class="clm-rq-view-count" ng-if="c.viewCount(v.id) > 0" ng-class="{'is-alert': v.id != 'processed'}">{{c.viewCount(v.id)}}</span>
+      <span class="clm-rq-view-arrow">→</span>
+    </button>
+  </div>
+
+  <div class="clm-rq-hint" ng-if="!c.ui.view">
+    Select <b>Pending Approvals</b>, <b>Processed Requests</b> or <b>RFI</b> above to continue.
+    You can filter by customer type (Trade / NT / Key) inside each section.
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       SECTION BODY
+  ══════════════════════════════════════════════════════ -->
+  <div class="clm-rq-body" ng-if="c.ui.view">
+
+    <div class="clm-ap-empty clm-rq-state" ng-if="c.viewState(c.ui.view) == 'unconfigured'">
+      <div class="clm-ap-empty-icon"><i class="fa fa-cogs" aria-hidden="true"></i></div>
+      <div class="clm-ap-empty-title">Not set up yet</div>
+      <div class="clm-ap-empty-sub">{{c.viewMeta().title}} will appear here once the request details are configured.</div>
+    </div>
+
+    <div class="clm-ap-empty clm-rq-state" ng-if="c.viewState(c.ui.view) == 'noaccess'">
+      <div class="clm-ap-empty-icon"><i class="fa fa-lock" aria-hidden="true"></i></div>
+      <div class="clm-ap-empty-title">No approver access</div>
+      <div class="clm-ap-empty-sub">You don't have approver access for any customer type. Please contact the admin support if you need it.</div>
+    </div>
+
+    <div ng-if="c.viewState(c.ui.view) == 'ok'">
+
+      <div class="clm-rq-alert is-err" ng-if="c.ui.listError">{{c.ui.listError}}</div>
+      <div class="clm-rq-alert" ng-if="c.ui.linkError">{{c.ui.linkError}}</div>
+
+      <div class="clm-ap-loading" ng-if="c.ui.loadingList">
+        <span class="clm-spinner"></span> Loading {{c.viewMeta().title | lowercase}}…
+      </div>
+
+      <!-- ════════════════════════════════════════════════
+           SECTION A — PENDING APPROVALS (list only)
+      ════════════════════════════════════════════════ -->
+      <div ng-if="c.ui.view == 'pending' && !c.ui.loadingList">
+
+        <div class="clm-ap-empty" ng-if="!c.list.pending.length">
+          <div class="clm-ap-empty-icon">✓</div>
+          <div class="clm-ap-empty-title">All clear!</div>
+          <div class="clm-ap-empty-sub">No pending credit limit requests are assigned to you.</div>
+        </div>
+
+        <div class="clm-mr-wrap" ng-if="c.list.pending.length">
+          <div class="clm-mr-stats clm-mr-stats-3">
+            <button type="button" class="clm-mr-stat s-all" ng-class="{'is-active': !c.f.pending.risk}" ng-click="c.setPendingRisk('')">
+              <span class="clm-mr-stat-k">Pending My Approval</span>
+              <span class="clm-mr-stat-v">{{c.base.pending.length}}</span>
+            </button>
+            <button type="button" class="clm-mr-stat s-approved" ng-class="{'is-active': c.f.pending.risk == 'standard'}" ng-click="c.setPendingRisk('standard')">
+              <span class="clm-mr-stat-k">Standard</span>
+              <span class="clm-mr-stat-v">{{c.countWhere('pending', 'is_deviation', false)}}</span>
+            </button>
+            <button type="button" class="clm-mr-stat s-rejected" ng-class="{'is-active': c.f.pending.risk == 'deviation'}" ng-click="c.setPendingRisk('deviation')">
+              <span class="clm-mr-stat-k">Deviation</span>
+              <span class="clm-mr-stat-v">{{c.countWhere('pending', 'is_deviation', true)}}</span>
+            </button>
+          </div>
+
+          <div class="clm-block clm-block-filters">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Search &amp; Filter</div>
+                <div class="clm-block-sub">Find a request by customer name or request number, or narrow by customer type, segment and risk</div>
+              </div>
+              <div class="clm-block-meta">
+                <span class="clm-chip"><span class="clm-chip-k">Showing</span> {{c.filtered.pending.length}} of {{c.list.pending.length}}</span>
+                <button type="button" class="clm-mr-clear" ng-if="c.activeFilterCount('pending')" ng-click="c.clearFilters('pending')">✕ Clear filters</button>
+              </div>
+            </div>
+            <div class="clm-mr-filters clm-mr-filters-4">
+              <div class="clm-mr-field">
+                <label>Search</label>
+                <input type="text" class="clm-ap-select clm-search-input" placeholder="Customer name or request number (e.g. CLM1023)" ng-model="c.f.pending.search">
+              </div>
+              <div class="clm-mr-field">
+                <label>Customer Type</label>
+                <div ng-init="msView = 'pending'" ng-include="'clm-rq-ms.html'"></div>
+              </div>
+              <div class="clm-mr-field">
+                <label>Segment</label>
+                <select ng-model="c.f.pending.segment" class="clm-ap-select">
+                  <option value="">All Segments</option>
+                  <option value="Cement">Cement</option>
+                  <option value="RMC">RMC</option>
+                  <option value="BPD">BPD</option>
+                </select>
+              </div>
+              <div class="clm-mr-field">
+                <label>Risk</label>
+                <select ng-model="c.f.pending.risk" class="clm-ap-select">
+                  <option value="">All Requests</option>
+                  <option value="deviation">Deviations Only</option>
+                  <option value="standard">Standard Only</option>
+                </select>
+              </div>
+            </div>
+            <div class="clm-rq-note" ng-if="c.f.pending.cats.length && c.unconfiguredSelected('pending').length">
+              ⓘ {{c.unconfiguredSelected('pending').join(', ')}} not set up yet — no requests to show for {{c.unconfiguredSelected('pending').length > 1 ? 'these types' : 'this type'}}.
+            </div>
+          </div>
+
+          <div class="clm-block">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Requests Awaiting Decision</div>
+                <div class="clm-block-sub">Most recent first · open a request to review it in a new tab, or select several for a bulk decision</div>
+              </div>
+              <div class="clm-block-meta">
+                <label class="clm-mr-selall" ng-click="$event.stopPropagation()">
+                  <input type="checkbox" ng-model="c.selectAll.pending" ng-change="c.toggleSelectAll()"> Select all
+                </label>
+                <button type="button" class="clm-btn clm-btn-approve clm-mr-bulk" ng-click="c.bulkAction('approve')" ng-disabled="c.bulkBusy || !c.selectedCount()">✓ Approve</button>
+                <button type="button" class="clm-btn clm-btn-reject clm-mr-bulk" ng-click="c.bulkAction('reject')" ng-disabled="c.bulkBusy || !c.selectedCount()">✕ Reject</button>
+              </div>
+            </div>
+
+            <div class="clm-mr-list">
+              <div class="clm-mr-item s-pending" ng-repeat="req in c.filtered.pending track by req.sys_id" ng-click="c.openItem(req)"
+                   ng-class="{'is-dev': req.is_deviation, 'is-selected': req.selected}" title="Open {{req.number}} in a new tab">
+                <div class="clm-mr-item-top">
+                  <div class="clm-mr-id">
+                    <input type="checkbox" class="clm-mr-check" ng-model="req.selected" ng-click="$event.stopPropagation()">
+                    <span class="clm-mr-num">{{req.number}}</span>
+                    <span class="clm-type-pill" ng-class="c.pillClass(req.category)">{{req.category_label}}</span>
+                  </div>
+                  <div class="clm-mr-badges">
+                    <span class="clm-badge clm-badge-segment">{{req.segment}}</span>
+                    <span class="clm-badge clm-badge-dev" ng-if="req.is_deviation && !req.is_downgrade">Deviation</span>
+                    <span class="clm-badge clm-badge-std" ng-if="!req.is_deviation && !req.is_downgrade">Standard</span>
+                    <span class="clm-badge clm-badge-std" ng-if="req.is_downgrade">Downgrade</span>
+                    <span class="clm-badge clm-badge-resubmitted" ng-if="req.is_resubmitted">Resubmitted</span>
+                  </div>
+                </div>
+
+                <div class="clm-mr-name">{{req.customer_name}} <span class="clm-mr-name-code" ng-if="req.customer_code">({{req.customer_code}})</span></div>
+
+                <!-- TRADE tiles  (NT / KEY HOOK: add tiles with ng-if="req.category == 'nt'" / 'key') -->
+                <div class="clm-mr-tiles clm-mr-tiles-4" ng-if="req.category == 'trade'">
+                  <div class="clm-mr-tile" ng-class="req.code_level_requested_additional < 0 ? 'is-bad' : 'is-ok'">
+                    <div class="clm-mr-tile-k">Requested Change (+/-)</div>
+                    <div class="clm-mr-tile-v">{{c.formatSigned(req.code_level_requested_additional)}}</div>
+                  </div>
+                  <div class="clm-mr-tile" ng-if="req.is_downgrade">
+                    <div class="clm-mr-tile-k">New Code Limit</div>
+                    <div class="clm-mr-tile-v">₹{{c.formatIndianCurrency(req.code_level_total_requested)}}</div>
+                  </div>
+                  <div class="clm-mr-tile" ng-if="!req.is_downgrade">
+                    <div class="clm-mr-tile-k">Net Exposure</div>
+                    <div class="clm-mr-tile-v">₹{{req.net_exposure | number:2}}L</div>
+                  </div>
+                  <div class="clm-mr-tile" ng-if="!req.is_downgrade">
+                    <div class="clm-mr-tile-k">System Multiplier</div>
+                    <div class="clm-mr-tile-v">{{req.system_mult ? req.system_mult + 'x' : '—'}}</div>
+                  </div>
+                  <div class="clm-mr-tile" ng-if="!req.is_downgrade" ng-class="req.is_deviation ? 'is-bad' : 'is-ok'">
+                    <div class="clm-mr-tile-k">Implied Multiplier</div>
+                    <div class="clm-mr-tile-v">{{req.implied_mult | number:2}}x</div>
+                    <div class="clm-mr-tile-s" ng-if="req.is_deviation">⚠ Above system multiplier</div>
+                  </div>
+                </div>
+                
+                <!-- NON-TRADE (NT) tiles -->
+                <div class="clm-mr-tiles clm-mr-tiles-4" ng-if="req.category == 'nt'">
+                  <div class="clm-mr-tile" ng-class="req.is_deviation ? 'is-bad' : ''">
+                    <div class="clm-mr-tile-k">Total Requested PAN Limit</div>
+                    <div class="clm-mr-tile-v">₹{{c.formatIndianCurrency(req.total_requested_pan || req.total_desired)}}</div>
+                    <div class="clm-mr-tile-s" ng-if="req.is_deviation">⚠ Deviation request</div>
+                  </div>
+                  <div class="clm-mr-tile is-ok">
+                    <div class="clm-mr-tile-k">Safe Allowable Limit</div>
+                    <div class="clm-mr-tile-v">₹{{c.formatIndianCurrency(req.safe_limit)}}</div>
+                  </div>
+                  <div class="clm-mr-tile">
+                    <div class="clm-mr-tile-k">Recommended CL</div>
+                    <div class="clm-mr-tile-v">{{req.total_approved_limit > 0 ? '₹' + c.formatIndianCurrency(req.total_approved_limit) : '—'}}</div>
+                  </div>
+                  <div class="clm-mr-tile">
+                    <div class="clm-mr-tile-k">Total Outstanding (PAN)</div>
+                    <div class="clm-mr-tile-v">₹{{c.formatIndianCurrency(req.total_outstanding_pan)}}</div>
+                  </div>
+                </div>
+
+                <div class="clm-mr-foot">
+                  <div class="clm-mr-meta">
+                    <span><span class="k">Submitted by</span> <b>{{req.initiator}}</b></span>
+                    <span><span class="k">Submitted on</span> {{req.created}}</span>
+                    <span ng-if="req.approval_steps && req.approval_steps.length"><span class="k">Progress</span> {{c.stepSummary(req)}}</span>
+                  </div>
+                  <span class="clm-mr-cta">View &amp; Decide ↗</span>
+                </div>
+              </div>
+
+              <div class="clm-mr-none" ng-if="!c.filtered.pending.length">
+                No requests match your search or filters.
+                <button type="button" class="clm-mr-clear" ng-click="c.clearFilters('pending')">✕ Clear filters</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- /SECTION A -->
+
+      <!-- ════════════════════════════════════════════════
+           SECTION B — PROCESSED REQUESTS (list only)
+      ════════════════════════════════════════════════ -->
+      <div ng-if="c.ui.view == 'processed' && !c.ui.loadingList">
+
+        <div class="clm-ap-empty" ng-if="!c.list.processed.length">
+          <div class="clm-ap-empty-icon">✓</div>
+          <div class="clm-ap-empty-title">No processed requests yet.</div>
+          <div class="clm-ap-empty-sub">Requests you decide on will appear here.</div>
+        </div>
+
+        <div class="clm-mr-wrap" ng-if="c.list.processed.length">
+          <div class="clm-mr-stats clm-mr-stats-3">
+            <button type="button" class="clm-mr-stat s-all" ng-class="{'is-active': !c.f.processed.status}" ng-click="c.setProcessedStatus('')">
+              <span class="clm-mr-stat-k">All Processed</span>
+              <span class="clm-mr-stat-v">{{c.base.processed.length}}</span>
+            </button>
+            <button type="button" class="clm-mr-stat s-approved" ng-class="{'is-active': c.f.processed.status == 'Approved'}" ng-click="c.setProcessedStatus('Approved')">
+              <span class="clm-mr-stat-k">Fully Approved</span>
+              <span class="clm-mr-stat-v">{{c.countWhere('processed', 'final_status', 'Approved')}}</span>
+            </button>
+            <button type="button" class="clm-mr-stat s-rejected" ng-class="{'is-active': c.f.processed.status == 'Rejected'}" ng-click="c.setProcessedStatus('Rejected')">
+              <span class="clm-mr-stat-k">Rejected</span>
+              <span class="clm-mr-stat-v">{{c.countWhere('processed', 'final_status', 'Rejected')}}</span>
+            </button>
+          </div>
+
+          <div class="clm-mr-sap-stats" ng-if="c.hasSapStats()">
+            <div class="clm-mr-sap-title">SAP Sync Status</div>
+            <div class="clm-mr-sap-tiles">
+              <button type="button" class="clm-mr-sap-tile sap-success" ng-class="{'is-active': c.f.processed.sap == 'success'}" ng-click="c.setSapFilter('success')">
+                <span class="clm-mr-sap-k">Updated</span><span class="clm-mr-sap-v">{{c.countBySap('success')}}</span>
+              </button>
+              <button type="button" class="clm-mr-sap-tile sap-pending" ng-class="{'is-active': c.f.processed.sap == 'pending'}" ng-click="c.setSapFilter('pending')">
+                <span class="clm-mr-sap-k">In Progress</span><span class="clm-mr-sap-v">{{c.countBySap('pending')}}</span>
+              </button>
+              <button type="button" class="clm-mr-sap-tile sap-failed" ng-class="{'is-active': c.f.processed.sap == 'failed'}" ng-click="c.setSapFilter('failed')">
+                <span class="clm-mr-sap-k">Failed</span><span class="clm-mr-sap-v">{{c.countBySap('failed')}}</span>
+              </button>
+              <button type="button" class="clm-mr-sap-tile sap-queued" ng-class="{'is-active': c.f.processed.sap == 'queued'}" ng-click="c.setSapFilter('queued')">
+                <span class="clm-mr-sap-k">Queued</span><span class="clm-mr-sap-v">{{c.countBySap('queued')}}</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="clm-block clm-block-filters">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Search &amp; Filter</div>
+                <div class="clm-block-sub">Find a request by customer name or request number, or narrow by customer type, segment, status and SAP sync</div>
+              </div>
+              <div class="clm-block-meta">
+                <span class="clm-chip"><span class="clm-chip-k">Showing</span> {{c.filtered.processed.length}} of {{c.list.processed.length}}</span>
+                <button type="button" class="clm-mr-clear" ng-if="c.activeFilterCount('processed')" ng-click="c.clearFilters('processed')">✕ Clear filters</button>
+              </div>
+            </div>
+            <div class="clm-mr-filters-toggle" ng-click="c.toggleProcessedFilters()">
+              <span>{{c.f.processed.expanded ? 'Hide filters ▲' : 'Show filters ▼'}}</span>
+              <span class="clm-mr-filters-count" ng-if="c.activeFilterCount('processed') > 0">{{c.activeFilterCount('processed')}} active</span>
+            </div>
+            <div class="clm-mr-filters clm-mr-filters-5" ng-class="{'is-collapsed-mob': !c.f.processed.expanded}">
+              <div class="clm-mr-field">
+                <label>Search</label>
+                <input type="text" class="clm-ap-select clm-search-input" placeholder="Customer name or request number" ng-model="c.f.processed.search" ng-model-options="{debounce: 250}">
+              </div>
+              <div class="clm-mr-field">
+                <label>Customer Type</label>
+                <div ng-init="msView = 'processed'" ng-include="'clm-rq-ms.html'"></div>
+              </div>
+              <div class="clm-mr-field">
+                <label>Segment</label>
+                <select ng-model="c.f.processed.segment" class="clm-ap-select">
+                  <option value="">All Segments</option>
+                  <option value="Cement">Cement</option>
+                  <option value="RMC">RMC</option>
+                  <option value="BPD">BPD</option>
+                </select>
+              </div>
+              <div class="clm-mr-field">
+                <label>Final Status</label>
+                <select ng-model="c.f.processed.status" class="clm-ap-select">
+                  <option value="">All Statuses</option>
+                  <option value="Approved">Fully Approved</option>
+                  <option value="Submitted">Pending Further Approval</option>
+                  <option value="Rejected">Rejected</option>
+                  <option value="Returned">Returned</option>
+                </select>
+              </div>
+              <div class="clm-mr-field">
+                <label>SAP Sync</label>
+                <select ng-model="c.f.processed.sap" class="clm-ap-select">
+                  <option value="">All SAP Sync</option>
+                  <option value="success">Updated</option>
+                  <option value="pending">In Progress</option>
+                  <option value="queued">Queued</option>
+                  <option value="failed">Failed</option>
+                  <option value="na">Not Applicable</option>
+                </select>
+              </div>
+            </div>
+            <div class="clm-rq-note" ng-if="c.f.processed.cats.length && c.unconfiguredSelected('processed').length">
+              ⓘ {{c.unconfiguredSelected('processed').join(', ')}} not set up yet — no requests to show for {{c.unconfiguredSelected('processed').length > 1 ? 'these types' : 'this type'}}.
+            </div>
+          </div>
+
+          <div class="clm-block">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Processed Requests</div>
+                <div class="clm-block-sub">Most recent decision first · open a request to review your decision in a new tab</div>
+              </div>
+            </div>
+            <div class="clm-mr-list">
+              <div class="clm-mr-item" ng-repeat="req in c.filtered.processed track by req.sys_id" ng-click="c.openItem(req)" title="Open {{req.number}} in a new tab"
+                   ng-class="{'is-dev': req.is_deviation, 's-approved': req.my_decision == 'approved', 's-rejected': req.my_decision == 'rejected', 's-returned': req.my_decision == 'cancelled'}">
+                <div class="clm-mr-item-top">
+                  <div class="clm-mr-id">
+                    <span class="clm-mr-num">{{req.number}}</span>
+                    <span class="clm-type-pill" ng-class="c.pillClass(req.category)">{{req.category_label}}</span>
+                  </div>
+                  <div class="clm-mr-badges">
+                    <span class="clm-badge clm-badge-segment">{{req.segment}}</span>
+                    <span class="clm-badge clm-badge-dev" ng-if="req.is_deviation && !req.is_downgrade">DEVIATION</span>
+                    <span class="clm-badge clm-badge-std" ng-if="!req.is_deviation && !req.is_downgrade">STANDARD</span>
+                    <span class="clm-badge clm-badge-std" ng-if="req.is_downgrade">DOWNGRADE</span>
+                    <span class="clm-badge clm-badge-resubmitted" ng-if="req.is_resubmitted">Resubmitted</span>
+                    <span class="clm-badge clm-badge-final" ng-if="req.final_status == 'Approved'">Fully Approved</span>
+                    <span class="clm-badge clm-badge-inprog" ng-if="req.final_status == 'Submitted'">In Progress</span>
+                    <span class="clm-badge clm-badge-rej" ng-if="req.final_status == 'Rejected'">Rejected</span>
+                    <span class="clm-badge clm-badge-ret" ng-if="req.final_status == 'Returned'">Returned</span>
+                    <span class="clm-badge clm-sap sap-{{req.sap_status}} clm-sap-clickable" ng-if="req.sap_status && req.sap_status != 'na'"
+                          ng-click="c.setSapFilter(req.sap_status); $event.stopPropagation();" title="Filter by this SAP status">SAP: {{req.sap_label}}</span>
+                  </div>
+                </div>
+
+                <div class="clm-mr-name">{{req.customer_name}} <span class="clm-mr-name-code" ng-if="req.customer_code">({{req.customer_code}})</span></div>
+
+                <!-- TRADE tiles  (NT / KEY HOOK) -->
+                <div class="clm-mr-tiles clm-mr-tiles-4" ng-if="req.category == 'trade'">
+                  <div class="clm-mr-tile" ng-if="!req.is_downgrade">
+                    <div class="clm-mr-tile-k">Requested (Code)</div>
+                    <div class="clm-mr-tile-v">₹{{req.code_level_total_requested_l | number:2}}L</div>
+                  </div>
+                  <div class="clm-mr-tile" ng-if="req.is_downgrade">
+                    <div class="clm-mr-tile-k">New Code Limit</div>
+                    <div class="clm-mr-tile-v">₹{{c.formatIndianCurrency(req.code_level_total_requested)}}</div>
+                  </div>
+                  <div class="clm-mr-tile is-ok" ng-if="req.my_decision == 'approved'">
+                    <div class="clm-mr-tile-k">My Approved Limit</div>
+                    <div class="clm-mr-tile-v">₹{{req.my_approved_limit | number:2}}L</div>
+                  </div>
+                  <div class="clm-mr-tile is-bad" ng-if="req.my_decision == 'rejected'">
+                    <div class="clm-mr-tile-k">My Decision</div>
+                    <div class="clm-mr-tile-v">Rejected</div>
+                  </div>
+                  <div class="clm-mr-tile" ng-if="req.my_decision == 'cancelled'">
+                    <div class="clm-mr-tile-k">My Decision</div>
+                    <div class="clm-mr-tile-v clm-val-warn">Returned</div>
+                  </div>
+                  <div class="clm-mr-tile" ng-if="!req.is_downgrade">
+                    <div class="clm-mr-tile-k">Net Exposure</div>
+                    <div class="clm-mr-tile-v">₹{{req.net_exposure | number:2}}L</div>
+                  </div>
+                  <div class="clm-mr-tile" ng-if="!req.is_downgrade">
+                    <div class="clm-mr-tile-k">Max Allowable</div>
+                    <div class="clm-mr-tile-v">₹{{req.max_allowable | number:2}}L</div>
+                  </div>
+                </div>
+                
+                <!-- NON-TRADE (NT) tiles -->
+                <div class="clm-mr-tiles clm-mr-tiles-4" ng-if="req.category == 'nt'">
+                  <div class="clm-mr-tile">
+                    <div class="clm-mr-tile-k">Total Requested PAN Limit</div>
+                    <div class="clm-mr-tile-v">₹{{c.formatIndianCurrency(req.total_requested_pan || req.total_desired)}}</div>
+                  </div>
+                  <div class="clm-mr-tile is-ok" ng-if="req.my_decision == 'approved'">
+                    <div class="clm-mr-tile-k">My Approved Limit</div>
+                    <div class="clm-mr-tile-v">₹{{c.formatIndianCurrency(req.my_approved_limit_rupees || req.total_approved_limit)}}</div>
+                  </div>
+                  <div class="clm-mr-tile is-bad" ng-if="req.my_decision == 'rejected'">
+                    <div class="clm-mr-tile-k">My Decision</div>
+                    <div class="clm-mr-tile-v">Rejected</div>
+                  </div>
+                  <div class="clm-mr-tile" ng-if="req.my_decision == 'cancelled'">
+                    <div class="clm-mr-tile-k">My Decision</div>
+                    <div class="clm-mr-tile-v clm-val-warn">Returned</div>
+                  </div>
+                  <div class="clm-mr-tile is-ok">
+                    <div class="clm-mr-tile-k">Safe Allowable Limit</div>
+                    <div class="clm-mr-tile-v">₹{{c.formatIndianCurrency(req.safe_limit)}}</div>
+                  </div>
+                  <div class="clm-mr-tile">
+                    <div class="clm-mr-tile-k">Total Outstanding (PAN)</div>
+                    <div class="clm-mr-tile-v">₹{{c.formatIndianCurrency(req.total_outstanding_pan)}}</div>
+                  </div>
+                </div>
+
+                <div class="clm-mr-foot">
+                  <div class="clm-mr-meta">
+                    <span><span class="k">By</span> <b>{{req.initiator}}</b></span>
+                    <span><span class="k">Submitted</span> {{req.created}}</span>
+                    <span><span class="k">Decided by me</span> {{req.my_approved_on}}</span>
+                  </div>
+                  <span class="clm-mr-cta">View Details ↗</span>
+                </div>
+              </div>
+
+              <div class="clm-mr-none" ng-if="!c.filtered.processed.length">
+                No requests match your search or filters.
+                <button type="button" class="clm-mr-clear" ng-click="c.clearFilters('processed')">✕ Clear filters</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- /SECTION B -->
+
+      <!-- ════════════════════════════════════════════════
+           SECTION C — RFI (list only)
+      ════════════════════════════════════════════════ -->
+      <div ng-if="c.ui.view == 'rfi' && !c.ui.loadingList">
+
+        <div class="clm-ap-empty" ng-if="!c.list.rfi.length">
+          <div class="clm-ap-empty-icon">✓</div>
+          <div class="clm-ap-empty-title">All clear!</div>
+          <div class="clm-ap-empty-sub">No information requests are waiting on you.</div>
+        </div>
+
+        <div class="clm-mr-wrap" ng-if="c.list.rfi.length">
+          <div class="clm-block clm-block-first clm-block-filters">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Search &amp; Filter</div>
+                <div class="clm-block-sub">Find an RFI by customer name, request number or question, or narrow by customer type</div>
+              </div>
+              <div class="clm-block-meta">
+                <span class="clm-chip"><span class="clm-chip-k">Showing</span> {{c.filtered.rfi.length}} of {{c.list.rfi.length}}</span>
+                <button type="button" class="clm-mr-clear" ng-if="c.activeFilterCount('rfi')" ng-click="c.clearFilters('rfi')">✕ Clear filters</button>
+              </div>
+            </div>
+            <div class="clm-mr-filters clm-mr-filters-2">
+              <div class="clm-mr-field">
+                <label>Search</label>
+                <input type="text" class="clm-ap-select clm-search-input" placeholder="Customer, request number or question" ng-model="c.f.rfi.search">
+              </div>
+              <div class="clm-mr-field">
+                <label>Customer Type</label>
+                <div ng-init="msView = 'rfi'" ng-include="'clm-rq-ms.html'"></div>
+              </div>
+            </div>
+            <div class="clm-rq-note" ng-if="c.f.rfi.cats.length && c.unconfiguredSelected('rfi').length">
+              ⓘ {{c.unconfiguredSelected('rfi').join(', ')}} not set up yet — no RFIs to show for {{c.unconfiguredSelected('rfi').length > 1 ? 'these types' : 'this type'}}.
+            </div>
+          </div>
+
+          <div class="clm-block">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Awaiting Your Response</div>
+                <div class="clm-block-sub">Open an RFI to review the request and reply in a new tab</div>
+              </div>
+            </div>
+            <div class="clm-mr-list">
+              <div class="clm-mr-item s-returned" ng-repeat="rf in c.filtered.rfi track by rf.sys_id" ng-click="c.openItem(rf)" title="Open this RFI in a new tab">
+                <div class="clm-mr-item-top">
+                  <div class="clm-mr-id">
+                    <span class="clm-mr-num">{{rf.request_number}}</span>
+                    <span class="clm-type-pill" ng-class="c.pillClass(rf.category)">{{rf.category_label}}</span>
+                  </div>
+                  <div class="clm-mr-badges">
+                    <span class="clm-badge clm-badge-segment" ng-if="rf.segment">{{rf.segment}}</span>
+                  </div>
+                </div>
+                <div class="clm-mr-name">{{rf.customer_name}}</div>
+                <div class="clm-rfi-q-preview">“{{rf.question}}”</div>
+                <div class="clm-mr-foot">
+                  <div class="clm-mr-meta">
+                    <span><span class="k">Asked by</span> <b>{{rf.raised_by_name}}</b><span ng-if="rf.raised_by_role"> ({{rf.raised_by_role}})</span></span>
+                    <span><span class="k">On</span> {{rf.raised_on}}</span>
+                  </div>
+                  <span class="clm-mr-cta">Review &amp; Respond ↗</span>
+                </div>
+              </div>
+
+              <div class="clm-mr-none" ng-if="!c.filtered.rfi.length">
+                No RFIs match your search or filters.
+                <button type="button" class="clm-mr-clear" ng-click="c.clearFilters('rfi')">✕ Clear filters</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <!-- /SECTION C -->
+
+    </div>
+  </div>
+</div>
+]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>42435ba39733c710be31fa17f053afb4</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-14 11:29:36</sys_created_on>
+        <sys_id>8e439fa39733c710be31fa17f053af55</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-14 11:29:36</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

@@ -1,0 +1,858 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_header_footer">
+    <sp_header_footer action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $window, $timeout) {
+	var c = this;
+
+	c.userName = c.data.userName || 'User';
+	c.initials = c.data.initials || 'U';
+	c.menuOpen = false;
+
+	c.notifications      = c.data.notifications || [];
+	c.notificationCount  = c.data.notificationCount || 0;
+	c.notifOpen          = false;
+
+	c.goHome = function() {
+		$window.location.href = '/uclm';
+	};
+
+	c.toggleMenu = function() {
+		c.menuOpen = !c.menuOpen;
+		var ham = document.getElementById('clm-ham');
+		if (ham) ham.classList.toggle('open', c.menuOpen);
+	};
+
+	c.logout = function() {
+		$window.location.href = '/logout.do?sysparm_goto_url=/uclm';
+	};
+
+	// ── Notification bell ─────────────────────────────────────
+	c.toggleNotifications = function($event) {
+		if ($event) $event.stopPropagation();
+		c.notifOpen = !c.notifOpen;
+		if (c.notifOpen) c.menuOpen = false;   // don't fight the mobile menu
+	};
+
+	c.closeNotifications = function() {
+		c.notifOpen = false;
+	};
+
+	// Close the dropdown when clicking anywhere outside it
+	var onDocClick = function(e) {
+		if (!c.notifOpen) return;
+		var panel = document.getElementById('clm-notif-panel');
+		var bell  = document.getElementById('clm-notif-bell');
+		if (panel && panel.contains(e.target)) return;
+		if (bell && bell.contains(e.target))   return;
+		$scope.$apply(function() { c.notifOpen = false; });
+	};
+	document.addEventListener('click', onDocClick);
+	$scope.$on('$destroy', function() {
+		document.removeEventListener('click', onDocClick);
+	});
+
+	// Press Esc to close
+	var onKey = function(e) {
+		if (e.key === 'Escape' && c.notifOpen) {
+			$scope.$apply(function() { c.notifOpen = false; });
+		}
+	};
+	document.addEventListener('keydown', onKey);
+	$scope.$on('$destroy', function() {
+		document.removeEventListener('keydown', onKey);
+	});
+
+	// Clicking a notification: mark it acknowledged + jump to the request detail
+	c.openNotification = function(n) {
+		c.notifications = c.notifications.filter(function(x) {
+			return x.sys_id !== n.sys_id;
+		});
+		c.notificationCount = c.notifications.length;
+		c.notifOpen = false;
+
+		// Route dynamically based on customer_type
+		var target = '/uclm?id=clmapprover'; // Default Trade Approver
+		if (n.customer_type === 'non_trade') {
+			target = '/uclm?id=uclm_non_trade_approval&number=' + encodeURIComponent(n.request_number);
+		} else if (n.customer_type === 'key') {
+			target = '/uclm?id=uclm_key_approval&number=' + encodeURIComponent(n.request_number);
+		} else if (n.request_number) {
+			target += '&request=' + encodeURIComponent(n.request_number);
+		}
+
+		c.server.get({ action: 'ack', rfi_sys_id: n.sys_id }).then(function() {
+			$window.location.href = target;
+		}).catch(function() {
+			$window.location.href = target;
+		});
+	};
+
+	// Optional: relative "2 hrs ago" label
+	c.timeAgo = function(dateStr) {
+		if (!dateStr) return '';
+		var d = new Date(dateStr);
+		if (isNaN(d.getTime())) return dateStr;
+		var secs = Math.floor((new Date() - d) / 1000);
+		if (secs < 60)    return 'just now';
+		var mins = Math.floor(secs / 60);
+		if (mins < 60)    return mins + ' min' + (mins === 1 ? '' : 's') + ' ago';
+		var hrs = Math.floor(mins / 60);
+		if (hrs < 24)     return hrs + ' hr' + (hrs === 1 ? '' : 's') + ' ago';
+		var days = Math.floor(hrs / 24);
+		if (days < 7)     return days + ' day' + (days === 1 ? '' : 's') + ' ago';
+		return dateStr;
+	};
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* ============================================================
+   CLM HEADER WIDGET — CSS (UltraTech &amp; ABG Theme)
+   FULLY RESPONSIVE + MOBILE OPTIMIZED (BRAND GUIDELINES APPLIED)
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+.clm-header {
+  width: 100%;
+  background: #fff200; /* ABG Yellow */
+  font-family: 'Oxygen', "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  border-bottom: 4px solid #1a1a1a; /* Solid Charcoal base */
+  padding: 0 32px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: relative;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  z-index: 999;
+}
+
+/* Left */
+.clm-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.clm-header-left-logo{
+  justify-items: center;
+}
+.clm-header-logo-main {
+  font-size: 20px;
+  font-weight: 700; /* Oxygen max is 700 */
+  color: #1a1a1a;
+  line-height: 1;
+  letter-spacing: -0.5px;
+  font-family: inherit;
+}
+.clm-header-logo-cement {
+  background: #1a1a1a;
+  color: #fff200; /* ABG Yellow */
+  font-size: 8px;
+  font-weight: 700;
+  font-family: inherit;
+  letter-spacing: 4px;
+  padding: 3px 8px;
+  display: inline-block;
+  border-radius: 2px;
+}
+.clm-header-divider {
+  width: 1px;
+  height: 32px;
+  background: #1a1a1a;
+  opacity: 0.2;
+  margin: 0 8px;
+}
+
+/* App Name Styling */
+.clm-header-appname {
+  font-size: 14px;
+  color: #1a1a1a;
+  font-family: inherit;
+  letter-spacing: 0.5px;
+}
+
+.clm-appname-bold {
+  font-weight: 800; /* Bold */
+}
+
+.clm-appname-regular {
+  font-weight: 700; /* Regular / Less Bold */
+  opacity: 0.85; /* Slightly softens the color for better visual hierarchy */
+}
+
+/* Right — desktop */
+.clm-header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.clm-header-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.clm-header-avatar {
+  width: 36px;
+  height: 36px;
+  background: #1a1a1a;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff200; /* ABG Yellow */
+  font-family: inherit;
+  flex-shrink: 0;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+}
+.clm-header-username {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1a1a1a;
+  font-family: inherit;
+}
+.clm-header-logout {
+  background: transparent;
+  border: 2px solid #1a1a1a;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a1a1a;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.clm-header-logout:hover {
+  background: #1a1a1a;
+  color: #fff200; /* ABG Yellow */
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+.clm-header-logout:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(26, 26, 26, 0.2);
+}
+
+/* Hamburger — mobile only */
+.clm-hamburger {
+  display: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px;
+  flex-direction: column;
+  gap: 5px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+.clm-hamburger:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(26, 26, 26, 0.2);
+}
+.clm-hamburger span {
+  display: block;
+  width: 24px;
+  height: 3px;
+  background: #1a1a1a;
+  border-radius: 3px;
+  transition: all 0.3s ease-in-out;
+}
+.clm-hamburger.open span:nth-child(1) {
+  transform: translateY(8px) rotate(45deg);
+}
+.clm-hamburger.open span:nth-child(2) {
+  opacity: 0;
+}
+.clm-hamburger.open span:nth-child(3) {
+  transform: translateY(-8px) rotate(-45deg);
+}
+
+/* Mobile dropdown */
+.clm-mobile-menu {
+  display: none;
+  position: absolute;
+  top: 64px;
+  left: 0;
+  right: 0;
+  background: #fff200; /* ABG Yellow */
+  border-top: 1px solid rgba(0,0,0,0.05);
+  border-bottom: 4px solid #1a1a1a;
+  padding: 20px 24px;
+  flex-direction: column;
+  gap: 16px;
+  z-index: 100;
+  box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+}
+.clm-mobile-menu.open {
+  display: flex;
+}
+.clm-mobile-user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(26,26,26,0.1);
+}
+.clm-mobile-username {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1a1a1a;
+  font-family: inherit;
+}
+.clm-mobile-logout {
+  width: 100%;
+  height: 44px;
+  background: #1a1a1a;
+  color: #fff200; /* ABG Yellow */
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  font-family: inherit;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.clm-mobile-logout:hover { 
+  background: #333333; 
+  box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+}
+
+/* Tablet */
+@media (max-width: 768px) {
+  .clm-header { padding: 0 24px; }
+  .clm-header-appname { display: none; }
+  .clm-header-divider { display: none; }
+  .clm-header-username { display: none; }
+  .clm-header-logout { display: none; }
+  .clm-header-right { display: none; }
+  .clm-hamburger { display: flex; }
+}
+
+/* Mobile */
+@media (max-width: 480px) {
+  .clm-header { padding: 0 16px; height: 60px; }
+  .clm-mobile-menu { top: 60px; }
+  .clm-header-logo-main { font-size: 18px; }
+  .clm-header-logo-cement { font-size: 7px; letter-spacing: 3px; padding: 2px 6px; }
+}
+
+/* UltraTech Logo */
+.clm-header-logo-img {
+  height: 50px;
+  width: auto;
+  display: block;
+  object-fit: contain;
+}
+
+@media (max-width: 480px) {
+  .clm-header-logo-img {
+    height: 32px;
+  }
+}
+
+/* ============================================================
+   NOTIFICATION BELL + DROPDOWN
+   ============================================================ */
+
+.clm-notif-btn {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: transparent;
+  border: 2px solid #1a1a1a;
+  color: #1a1a1a;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  padding: 0;
+}
+.clm-notif-btn:hover {
+  background: #1a1a1a;
+  color: #fff200;
+}
+.clm-notif-btn.has-items {
+  color: #E23D28;
+  border-color: #E23D28;
+}
+.clm-notif-btn.has-items:hover {
+  background: #E23D28;
+  color: #ffffff;
+}
+.clm-notif-btn.open {
+  background: #1a1a1a;
+  color: #fff200;
+}
+
+/* Count badge */
+.clm-notif-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #E23D28;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+  border: 2px solid #fff200;
+  box-sizing: border-box;
+  line-height: 1;
+}
+
+/* ── Dropdown panel ── */
+.clm-notif-panel {
+  display: none;
+  position: absolute;
+  top: 62px;
+  right: 24px;
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  max-height: 520px;
+  background: #ffffff;
+  border: 1px solid #dde3ea;
+  border-top: 4px solid #FFE600;
+  border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(9, 33, 73, 0.18);
+  z-index: 1000;
+  overflow: hidden;
+  flex-direction: column;
+}
+.clm-notif-panel.open { display: flex; }
+
+.clm-notif-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #eef1f5;
+  background: #fafbfc;
+  flex-shrink: 0;
+}
+.clm-notif-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a1a1a;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.clm-notif-count-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: #E23D28;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+.clm-notif-x {
+  background: transparent;
+  border: none;
+  font-size: 16px;
+  color: #7f8c9a;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.clm-notif-x:hover { background: #eef1f5; color: #1a1a1a; }
+
+.clm-notif-body {
+  overflow-y: auto;
+  padding: 8px;
+  flex: 1;
+}
+.clm-notif-body::-webkit-scrollbar { width: 8px; }
+.clm-notif-body::-webkit-scrollbar-thumb { background: #cfd8dc; border-radius: 10px; }
+
+/* ── Item ── */
+.clm-notif-item {
+  padding: 12px 14px;
+  border: 1px solid #e6eaef;
+  border-left: 4px solid #3498db;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  background: #fbfcfd;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.clm-notif-item:last-child { margin-bottom: 0; }
+.clm-notif-item:hover {
+  background: #f4f9fb;
+  border-color: #c3ccd6;
+  border-left-color: #E87722;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(0,0,0,0.06);
+}
+.clm-notif-item:hover .clm-notif-cta { color: #E87722; }
+
+.clm-notif-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.clm-notif-req {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1a1a1a;
+  letter-spacing: 0.3px;
+}
+.clm-notif-time {
+  font-size: 11px;
+  color: #7f8c9a;
+  font-weight: 600;
+}
+
+.clm-notif-line {
+  font-size: 12.5px;
+  color: #3a4451;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+.clm-notif-who  { font-weight: 700; color: #1a1a1a; }
+.clm-notif-role { color: #7f8c9a; margin-left: 2px; }
+
+.clm-notif-q {
+  font-size: 12px;
+  color: #5a6a7a;
+  font-style: italic;
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+.clm-notif-a {
+  font-size: 12.5px;
+  color: #1a1a1a;
+  background: #eaf7ee;
+  border-left: 3px solid #27ae60;
+  padding: 6px 10px;
+  border-radius: 0 4px 4px 0;
+  line-height: 1.45;
+  word-wrap: break-word;
+}
+
+.clm-notif-cta {
+  margin-top: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #1a1a1a;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition: color 0.15s ease;
+}
+
+/* ── Empty state ── */
+.clm-notif-empty {
+  padding: 44px 20px;
+  text-align: center;
+}
+.clm-notif-empty-icon {
+  font-size: 32px;
+  color: #27ae60;
+  margin-bottom: 10px;
+  opacity: 0.85;
+}
+.clm-notif-empty-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1a1a1a;
+  margin-bottom: 4px;
+}
+.clm-notif-empty-sub {
+  font-size: 12px;
+  color: #7f8c9a;
+}
+
+/* Mobile-only bell — hidden on desktop */
+.clm-notif-btn-mob { display: none; }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .clm-header-right .clm-notif-btn { display: none; }   /* hide the desktop one */
+  .clm-notif-btn-mob {
+    display: inline-flex;
+    margin-left: auto;
+    margin-right: 8px;
+  }
+  .clm-notif-panel {
+    right: 12px;
+    left: 12px;
+    width: auto;
+    max-width: none;
+    top: 60px;
+    max-height: 70vh;
+  }
+}
+
+@media (max-width: 480px) {
+  .clm-notif-panel { top: 56px; }
+  .clm-notif-item  { padding: 10px 12px; }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id/>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {
+  
+}]]></link>
+        <name>UCLM Header</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+	var user = gs.getUser();
+	var userId = gs.getUserID();
+
+	var firstName = user.getFirstName() || '';
+	var lastName  = user.getLastName()  || '';
+
+	data.userName = (firstName + ' ' + lastName).trim();
+	data.initials = '';
+	if (firstName) data.initials += firstName.charAt(0).toUpperCase();
+	if (lastName)  data.initials += lastName.charAt(0).toUpperCase();
+	if (!data.userName) data.userName = gs.getUserName();
+	if (!data.initials) data.initials = gs.getUserName().charAt(0).toUpperCase();
+
+	// ────────────────────────────────────────────────
+	//  NOTIFICATIONS: RFIs I raised that got answered
+	//  and I haven't acknowledged yet.
+	// ────────────────────────────────────────────────
+	data.notifications = [];
+	data.notificationCount = 0;
+
+	var rfi = new GlideRecord('x_birl3_clm_clm_rfi');
+	rfi.addQuery('u_raised_by', userId);
+	rfi.addQuery('u_status', 'answered');
+	rfi.addQuery('u_acknowledged_by_raiser', false);
+	rfi.orderByDesc('u_responded_on');
+	rfi.setLimit(20);
+	rfi.query();
+
+	while (rfi.next()) {
+		var custType = (rfi.getValue('customer_type') || '').toLowerCase().trim();
+		var isNt = (custType === 'non_trade') || !rfi.nt_request.nil() || (rfi.isValidField('u_nt_request') && !rfi.u_nt_request.nil());
+		var isTrade = (custType === 'trade');
+		var isKey = (custType === 'key');
+
+		var req = null;
+		var reqNumber = '';
+		var custName = '';
+
+		if (isNt) {
+			var ntField = rfi.isValidField('nt_request') ? 'nt_request' : 'u_nt_request';
+			req = rfi[ntField].getRefRecord();
+			reqNumber = req.isValid() ? (req.getValue('number') + '') : (rfi.getDisplayValue(ntField) || '');
+			custName = req.isValid() ? (req.getDisplayValue('customer') || req.getDisplayValue('customer_site_code') || '') : '';
+		} else {
+			// Trade or standard request reference
+			req = rfi.u_request.getRefRecord();
+			reqNumber = req.isValid() ? (req.getValue('number') + '') : '';
+			custName = req.isValid() ? (req.getDisplayValue('customer') + '') : '';
+		}
+
+		var targetName = rfi.getDisplayValue('u_target_user') + '';
+		var targetRole = rfi.getValue('u_target_role') + '';
+		var response = rfi.getValue('u_response') + '';
+		if (response.length > 160) response = response.substring(0, 160) + '…';
+
+		data.notifications.push({
+			sys_id: rfi.getUniqueValue() + '',
+			rfi_number: rfi.getValue('number') + '',
+			customer_type: custType || (isNt ? 'non_trade' : 'trade'),
+			request_sys_id: req && req.isValid() ? (req.getUniqueValue() + '') : '',
+			request_number: reqNumber,
+			customer_name: custName,
+			target_name: targetName,
+			target_role: targetRole,
+			question: rfi.getValue('u_question') + '',
+			response: response,
+			responded_on: rfi.getDisplayValue('u_responded_on') || rfi.getDisplayValue('sys_updated_on')
+		});
+	}
+	data.notificationCount = data.notifications.length;
+
+	// ── "Acknowledge" action (called from the client when the user opens one) ──
+	if (input && input.action === 'ack') {
+		var ackGr = new GlideRecord('x_birl3_clm_clm_rfi');
+		if (ackGr.get(input.rfi_sys_id) && ackGr.getValue('u_raised_by') === userId) {
+			ackGr.setValue('u_acknowledged_by_raiser', true);
+			ackGr.setWorkflow(false);
+			ackGr.autoSysFields(false);
+			ackGr.update();
+			data.success = true;
+		} else {
+			data.success = false;
+			data.error   = 'Not allowed.';
+		}
+		return;
+	}
+})();]]></script>
+        <servicenow>false</servicenow>
+        <static>false</static>
+        <sys_class_name>sp_header_footer</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-20 10:02:15</sys_created_on>
+        <sys_id>8974f76097bb7e50be31fa17f053afff</sys_id>
+        <sys_mod_count>72</sys_mod_count>
+        <sys_name>UCLM Header</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_header_footer_8974f76097bb7e50be31fa17f053afff</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-29 12:44:50</sys_updated_on>
+        <template><![CDATA[<div class="clm-header" role="banner">
+
+  <div class="clm-header-left">
+    <a ng-click="c.goHome()"
+       style="display:flex; align-items:center; gap:10px; text-decoration:none; cursor:pointer;">
+
+      <div class="clm-header-left-logo">
+        <img src="https://abgdev.service-now.com/x_birl3_clm.AB_UltraTech.png"
+             alt="UltraTech Cement" class="clm-header-logo-img">
+      </div>
+
+      <div class="clm-header-left-logo">
+        <img src="https://abgdev.service-now.com/x_birl3_clm.UltraTech.png"
+             alt="UltraTech Cement" class="clm-header-logo-img">
+      </div>
+
+      <div class="clm-header-divider"></div>
+      <div class="clm-header-appname">
+        <span class="clm-appname-bold">CredX</span>
+        <span class="clm-appname-regular">- Credit Limit Management</span>
+      </div>
+    </a>
+  </div>
+
+  <div class="clm-header-right">
+    <div class="clm-header-user">
+      <div class="clm-header-avatar">{{c.initials}}</div>
+      <span class="clm-header-username">{{c.userName}}</span>
+    </div>
+
+    <!-- ── NOTIFICATION BELL (desktop) ── -->
+    <button class="clm-notif-btn"
+            id="clm-notif-bell"
+            ng-click="c.toggleNotifications($event)"
+            ng-class="{'has-items': c.notificationCount > 0, 'open': c.notifOpen}"
+            aria-label="Notifications">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+        <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+      </svg>
+      <span class="clm-notif-badge" ng-if="c.notificationCount > 0">{{c.notificationCount}}</span>
+    </button>
+
+    <button class="clm-header-logout" ng-click="c.logout()" aria-label="Logout">Logout</button>
+  </div>
+
+  <!-- ── NOTIFICATION BELL (mobile — always visible) ── -->
+  <button class="clm-notif-btn clm-notif-btn-mob"
+          ng-click="c.toggleNotifications($event)"
+          ng-class="{'has-items': c.notificationCount > 0, 'open': c.notifOpen}"
+          aria-label="Notifications">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+      <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+    </svg>
+    <span class="clm-notif-badge" ng-if="c.notificationCount > 0">{{c.notificationCount}}</span>
+  </button>
+
+  <button class="clm-hamburger" id="clm-ham"
+          ng-click="c.toggleMenu()"
+          aria-label="Open menu"
+          aria-expanded="{{c.menuOpen}}">
+    <span></span><span></span><span></span>
+  </button>
+
+  <div class="clm-mobile-menu"
+       ng-class="{'open': c.menuOpen}"
+       role="navigation"
+       aria-label="Mobile menu">
+    <div class="clm-mobile-user">
+      <div class="clm-header-avatar">{{c.initials}}</div>
+      <span class="clm-mobile-username">{{c.userName}}</span>
+    </div>
+    <button class="clm-mobile-logout" ng-click="c.logout()">Logout</button>
+  </div>
+
+  <!-- ── NOTIFICATIONS DROPDOWN ── -->
+  <div class="clm-notif-panel"
+       id="clm-notif-panel"
+       ng-class="{'open': c.notifOpen}">
+
+    <div class="clm-notif-head">
+      <div class="clm-notif-title">
+        RFI Responses
+        <span class="clm-notif-count-chip" ng-if="c.notificationCount > 0">{{c.notificationCount}}</span>
+      </div>
+      <button class="clm-notif-x" ng-click="c.closeNotifications()" aria-label="Close">✕</button>
+    </div>
+
+    <div class="clm-notif-body">
+      <!-- Items -->
+      <div class="clm-notif-item"
+           ng-repeat="n in c.notifications"
+           ng-click="c.openNotification(n)">
+
+        <div class="clm-notif-item-top">
+          <span class="clm-notif-req">{{n.request_number || 'Request'}}</span>
+          <span class="clm-notif-time">{{c.timeAgo(n.responded_on)}}</span>
+        </div>
+
+        <div class="clm-notif-line">
+          <span class="clm-notif-who">{{n.target_name}}</span>
+          <span class="clm-notif-role" ng-if="n.target_role">({{n.target_role}})</span>
+          responded to your RFI
+        </div>
+
+        <div class="clm-notif-q">"{{n.question}}"</div>
+        <div class="clm-notif-a">→ {{n.response}}</div>
+
+        <div class="clm-notif-cta">Review &amp; Approve →</div>
+      </div>
+
+      <!-- Empty -->
+      <div class="clm-notif-empty" ng-if="!c.notifications.length">
+        <div class="clm-notif-empty-icon">✓</div>
+        <div class="clm-notif-empty-title">You're all caught up</div>
+        <div class="clm-notif-empty-sub">No new RFI responses at the moment.</div>
+      </div>
+    </div>
+  </div>
+
+</div>]]></template>
+    </sp_header_footer>
+</record_update>

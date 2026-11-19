@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLMKeySapWriteback</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLMKeySapWriteback</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var CLMKeySapWriteback = Class.create();
+CLMKeySapWriteback.prototype = {
+    T: {
+        REQ:       'x_birl3_clm_key_group_code_request',
+        SEND_BACK: 'x_birl3_clm_clm_servicenow_to_sap_send_back',
+        KEY_SITE:  'x_birl3_clm_clm_key_site',
+        KEY_ZONAL: 'x_birl3_clm_uclm_key_zonal_parent',
+        MASTER:    'x_birl3_clm_clm_customer_master1'
+    },
+    F_SITE: 'site_approved_limit', F_ZONE: 'zone_approved_limit', F_GROUP: 'group_approved_limit', F_GP: 'gp_approved_limit',
+    REVIEW_FIELDS: ['proposed_next_review', 'next_review_date'],
+    MASTER_LIMIT_FIELDS: ['cr_limit', 'credit_limit'],
+
+    initialize: function() {},
+
+    _num: function(v) { var n = parseFloat(v); return isNaN(n) ? 0 : n; },
+    _r2: function(v) { return Math.round(v * 100) / 100; },
+    _has: function(gr, f) { var v = gr.getValue(f); return gr.isValidField(f) && v !== null && v !== '' && v !== undefined; },
+    _code: function(gr, f) {
+        if (!gr.isValidField(f)) return '';
+        var v = (gr.getValue(f) || '') + '';
+        if (/^[a-fA-F0-9]{32}$/.test(v)) v = (gr.getDisplayValue(f) || v) + '';
+        return v.trim();
+    },
+    _first: function(gr, fields) {
+        for (var i = 0; i < fields.length; i++) if (gr.isValidField(fields[i])) return fields[i];
+        return '';
+    },
+
+    // Creates the SAP send-back records (GP, group, zonal parent, site) and updates cr_limit on the master.
+    run: function(req) {
+        var res = { ok: false, count: 0, skipped: 0, message: '' };
+        var self = this, T = this.T;
+        try {
+            var stVal = ((req.getValue('state') || '') + '').toLowerCase();
+            var stDisp = ((req.getDisplayValue('state') || '') + '').toLowerCase();
+            if (stVal !== 'approved' && stDisp !== 'approved' && stVal !== '3') { res.message = 'Request is not approved.'; return res; }
+
+            var reqId = req.getUniqueValue(), reqNumber = (req.getValue('number') || '') + '';
+            var seg = ((req.getValue('segment') || '') + '').trim().toLowerCase();
+            var creditSegment = seg === 'cement' ? 'UTCL' : (seg === 'rmc' ? 'URMX' : (seg === 'bpd' ? 'GIL' : ''));
+            if (!creditSegment) { res.message = 'Unrecognized segment "' + seg + '".'; gs.error('CLM Key SAP Writeback: ' + res.message + ' ' + reqNumber); return res; }
+
+            // approved limits
+            var gpLimit = this._num(req.getValue(this.F_GP)) || this._num(req.getValue('approved_limit'));
+            var groupLimit = this._num(req.getValue(this.F_GROUP));
+            if (!(gpLimit > 0)) { res.message = this.F_GP + ' is empty.'; gs.error('CLM Key SAP Writeback: ' + res.message + ' ' + reqNumber); return res; }
+
+            // site rows of the request
+            var reqSites = {}, firstReview = '';
+            var ks = new GlideRecord(T.KEY_SITE);
+            var q = ks.addQuery('group_request', reqId);
+            q.addOrCondition('group_request', reqNumber);
+            ks.query();
+            var rf = ks.isValid() ? this._first(ks, this.REVIEW_FIELDS) : '';
+            var sf = ks.isValidField(this.F_SITE);
+            if (!sf) gs.error('CLM Key SAP Writeback: field ' + this.F_SITE + ' not found on ' + T.KEY_SITE);
+            while (ks.next()) {
+                var sc = this._code(ks, 'site_code');
+                if (!sc) continue;
+                var rv = rf ? (ks.getValue(rf) || '') : '';
+                reqSites[sc] = { limit: sf ? this._num(ks.getValue(this.F_SITE)) : 0, hasLimit: sf && this._has(ks, this.F_SITE), review: rv };
+                if (rv && (!firstReview || rv < firstReview)) firstReview = rv;
+            }
+            var siteCodes = Object.keys(reqSites);
+            if (!siteCodes.length) { res.message = 'No site rows found.'; gs.error('CLM Key SAP Writeback: ' + res.message + ' ' + reqNumber); return res; }
+
+            // master: grand_parent, groupcode, zonalparentcode, customer_code_sap
+            var gpCode = '', groupCode = '', masterRow = {};
+            var m = new GlideRecord(T.MASTER);
+            m.addQuery('customer_code_sap', 'IN', siteCodes.join(','));
+            m.addQuery('cg1', 'N00');
+            m.query();
+            while (m.next()) {
+                var code = (m.getValue('customer_code_sap') || '') + '';
+                if (!code || masterRow[code]) continue;
+                masterRow[code] = m.getUniqueValue();
+                if (!gpCode && m.getValue('grand_parent')) gpCode = m.getValue('grand_parent') + '';
+                if (!groupCode && m.getValue('groupcode')) groupCode = m.getValue('groupcode') + '';
+            }
+            if (!gpCode) gpCode = ((req.getValue('grandparent_code') || '') + '').trim();
+            if (!groupCode) groupCode = ((req.getValue('group_code') || '') + '').trim();
+
+            // zonal parent rows of the request
+            var zones = [];
+            var kz = new GlideRecord(T.KEY_ZONAL);
+            var qz = kz.addQuery('group_request', reqId);
+            qz.addOrCondition('group_request', reqNumber);
+            kz.query();
+            var zf = kz.isValidField(this.F_ZONE);
+            if (!zf) gs.error('CLM Key SAP Writeback: field ' + this.F_ZONE + ' not found on ' + T.KEY_ZONAL);
+            while (kz.next()) {
+                var zc = this._code(kz, 'zonal_code');
+                if (zc && zc !== '-') zones.push({ code: zc, limit: zf ? this._num(kz.getValue(this.F_ZONE)) : 0 });
+            }
+
+            // already queued records (so a second run never duplicates)
+            var probe = new GlideRecord(T.SEND_BACK);
+            var hasLevel = probe.isValidField('u_level'), hasKeyReq = probe.isValidField('key_request');
+            if (!hasKeyReq) { res.message = 'Field key_request not found on ' + T.SEND_BACK; gs.error('CLM Key SAP Writeback: ' + res.message); return res; }
+            var isRef = probe.getElement('key_request').getED().getInternalType() === 'reference';
+			            // u_customer_code may be a reference to the customer master (like Non-Trade) or a plain string
+            var ccED = probe.getElement('u_customer_code').getED();
+            var ccRefTable = '';
+            try { if (ccED.getInternalType() === 'reference') ccRefTable = ccED.getReference() + ''; } catch (e1) {}
+            var LEVEL_FIELD = { GP: 'grand_parent', GROUP: 'groupcode', ZONAL: 'zonalparentcode', SITE: 'customer_code_sap' };
+            function resolveCode(level, code) {
+                if (!ccRefTable) return code;                       // plain string field
+                var g = new GlideRecord(ccRefTable);
+                var f = LEVEL_FIELD[level];
+                if (f && g.isValidField(f)) {
+                    g.addQuery(f, code);
+                    g.setLimit(1);
+                    g.query();
+                    if (g.next()) return g.getUniqueValue();         // sys_id of the master record
+                }
+                return '';
+            }
+            // Next review date: the value on the site row, else end of this month + 1 year (FRS rule)
+            function defaultReview() {
+                var d = new GlideDateTime();
+                d.addYearsUTC(1);
+                d.addMonthsUTC(1);
+                d.addDaysUTC(-d.getDayOfMonthUTC());
+                return d.getDate().getValue();                       // yyyy-MM-dd
+            }
+            var reviewFallback = defaultReview();
+            var queued = {};
+            var ex = new GlideRecord(T.SEND_BACK);
+            var qe = ex.addQuery('key_request', reqId);
+            qe.addOrCondition('key_request', reqNumber);
+            ex.addQuery('customer_type', 'key');
+            ex.query();
+            while (ex.next()) { if (ex.getValue('u_customer_code')) queued[(ex.getDisplayValue('u_customer_code') || ex.getValue('u_customer_code')) + '|' + (hasLevel ? ex.getValue('u_level') : '')] = true; }
+
+            function queue(level, code, limit, review) {
+                if (!code) return;
+                if (queued[code + '|' + (hasLevel ? level : '')]) { res.skipped++; return; }
+                var ccValue = resolveCode(level, code);
+                if (!ccValue) {
+                    gs.error('CLM Key SAP Writeback: cannot store ' + level + ' code "' + code + '" in u_customer_code (' + (ccRefTable ? 'no record in ' + ccRefTable + ' matches' : 'string field') + ') for ' + reqNumber);
+                    return;
+                }
+                var r = new GlideRecord(T.SEND_BACK);
+                r.initialize();
+                r.setValue('customer_type', 'key');
+                r.setValue('key_request', isRef ? reqId : reqNumber);
+                r.setValue('u_customer_code', ccValue);
+                r.setValue('u_approved_code_limit', self._r2(limit));
+                r.setValue('u_credit_segment', creditSegment);
+                if (r.isValidField('u_next_review_date')) r.setValue('u_next_review_date', review || reviewFallback);
+                if (hasLevel) r.setValue('u_level', level);
+                r.setValue('u_status', 'Pending');
+                if (r.isValidField('u_attempt_count')) r.setValue('u_attempt_count', 0);
+                var id = r.insert();
+                if (!id) { gs.error('CLM Key SAP Writeback: insert failed (' + level + ' ' + code + ') for ' + reqNumber + ': ' + r.getLastErrorMessage()); return; }
+                // verify the customer code really saved
+                var chk = new GlideRecord(T.SEND_BACK);
+                if (chk.get(id) && !chk.getValue('u_customer_code')) {
+                    gs.error('CLM Key SAP Writeback: u_customer_code is still empty after insert (' + level + ' ' + code + ') for ' + reqNumber);
+                }
+                res.count++;
+            }
+
+            queue('GP', gpCode, gpLimit, firstReview);
+            if (groupLimit > 0) queue('GROUP', groupCode, groupLimit, firstReview);
+            else gs.warn('CLM Key SAP Writeback: ' + this.F_GROUP + ' is empty on ' + reqNumber + ', group record skipped.');
+            zones.forEach(function(z) {
+                if (z.limit > 0) queue('ZONAL', z.code, z.limit, firstReview);
+                else gs.warn('CLM Key SAP Writeback: ' + self.F_ZONE + ' is empty for zone ' + z.code + ' on ' + reqNumber);
+            });
+            siteCodes.forEach(function(s) {
+                if (reqSites[s].hasLimit) queue('SITE', s, reqSites[s].limit, reqSites[s].review);
+                else gs.warn('CLM Key SAP Writeback: ' + self.F_SITE + ' is empty for site ' + s + ' on ' + reqNumber);
+            });
+
+            // store the approved site limit in the master table (cr_limit) for each requested site
+            var mf = '';
+            siteCodes.forEach(function(s) {
+                if (!reqSites[s].hasLimit || !masterRow[s]) return;
+                var mg = new GlideRecord(T.MASTER);
+                if (!mg.get(masterRow[s])) return;
+                if (!mf) mf = self._first(mg, self.MASTER_LIMIT_FIELDS);
+                if (!mf) return;
+                mg.setValue(mf, self._r2(reqSites[s].limit));
+                mg.update();
+            });
+            if (!mf) gs.warn('CLM Key SAP Writeback: no limit field (cr_limit) found on the customer master.');
+
+            res.ok = true;
+            res.message = res.count + ' record(s) created, ' + res.skipped + ' already existed.';
+            gs.info('CLM Key SAP Writeback: ' + reqNumber + ' ' + res.message);
+        } catch (e) {
+            res.message = 'Error: ' + e.message;
+            gs.error('CLM Key SAP Writeback: failed for ' + req.getValue('number') + ': ' + e.message);
+        }
+        return res;
+    },
+
+    type: 'CLMKeySapWriteback'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>gayatri.bhandge@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-16 09:51:38</sys_created_on>
+        <sys_id>a439701a97e49710be31fa17f053afe2</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>CLMKeySapWriteback</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy>read</sys_policy>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_a439701a97e49710be31fa17f053afe2</sys_update_name>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 10:40:18</sys_updated_on>
+    </sys_script_include>
+</record_update>

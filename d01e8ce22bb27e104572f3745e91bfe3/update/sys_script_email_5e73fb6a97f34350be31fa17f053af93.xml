@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_trade_justification</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm_trade_justification
+// Table: x_birl3_clm_clm_new_credit_request
+(function runMailScript(current, template, email, email_action, event) {
+
+    function esc(s) { return GlideStringUtil.escapeHTML(s || ''); }
+
+    var isDev = (current.getValue('is_deviation') + '' === '1') || (current.getValue('is_deviation') + '' === 'true');
+    var biz = (current.getValue('business_justification') || '').trim();
+    var dev = (current.getValue('deviation_justification') || '').trim();
+
+    var LABEL = 'padding:4px 0; font-size:11px; color:#5a6a7a; text-transform:uppercase; letter-spacing:.5px; font-weight:700;';
+    var BOX = 'padding:10px 14px; color:#1a1a1a; font-size:14px; line-height:1.6; white-space:pre-wrap; word-wrap:break-word; word-break:break-word;';
+
+    var h = '';
+    h += '<h3 style="margin:24px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">Justification</h3>';
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody>';
+
+    h += '<tr><td style="' + LABEL + '">Business Justification</td></tr>';
+    h += '<tr><td style="' + BOX + ' background-color:#f9fafb; border-left:3px solid #1a1a1a;">' + (biz ? esc(biz) : 'Not provided') + '</td></tr>';
+
+    // Deviation block only when the request is a deviation
+    if (isDev) {
+        h += '<tr><td style="height:14px; font-size:0; line-height:14px;">&nbsp;</td></tr>';
+        h += '<tr><td style="' + LABEL + ' color:#b3261e;">&#9888; Deviation Justification</td></tr>';
+        h += '<tr><td style="' + BOX + ' background-color:#fffdf7; border-left:3px solid #E23D28;">' + (dev ? esc(dev) : 'Not provided') + '</td></tr>';
+    }
+
+    h += '</tbody></table>';
+    template.print(h);
+
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-11 11:16:18</sys_created_on>
+        <sys_id>5e73fb6a97f34350be31fa17f053af93</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_trade_justification</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_5e73fb6a97f34350be31fa17f053af93</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-11 11:16:18</sys_updated_on>
+    </sys_script_email>
+</record_update>

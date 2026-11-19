@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.NewsFetcherAjax</api_name>
+        <caller_access/>
+        <client_callable>true</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>NewsFetcherAjax</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var NewsFetcherAjax = Class.create();
+NewsFetcherAjax.prototype = Object.extendsObject(global.AbstractAjaxProcessor, {
+    
+    getNews: function() {
+        var companyName = this.getParameter('sysparm_company_name');
+        var apiKey = 'S1dIcJaB6_h75kivKUZXx_WyACYlIM9bJiBbc8hTNrFos5-P'; // Leave your existing key here
+        
+        try {
+            var r = new sn_ws.RESTMessageV2('Currents News API', 'Default GET');
+            r.setStringParameterNoEscape('company_name', companyName);
+            r.setStringParameterNoEscape('api_key', apiKey);
+            
+            var response = r.execute();
+            if (response.getStatusCode() === 200) {
+                var parsedResponse = JSON.parse(response.getBody());
+                var articles = parsedResponse.news || [];
+                var formattedNews = [];
+                for (var i = 0; i < articles.length && i < 3; i++) {
+                    formattedNews.push({ title: articles[i].title, url: articles[i].url });
+                }
+                return JSON.stringify({ success: true, data: formattedNews });
+            }
+            return JSON.stringify({ success: false, message: 'API Error' });
+        } catch(ex) {
+            return JSON.stringify({ success: false, message: ex.message });
+        }
+    },
+
+    // --- NEW STOCK FUNCTION ---
+    getStock: function() {
+        var ticker = this.getParameter('sysparm_ticker');
+        var apiKey = 'ql5SGIrPCxYbaA2diDEbuspaouXzvWoONtoCTdrl'; 
+        
+        try {
+            var r = new sn_ws.RESTMessageV2('API Ninjas Stock', 'Default GET');
+            r.setStringParameterNoEscape('ticker', ticker);
+            r.setStringParameterNoEscape('api_key', apiKey);
+            
+            var response = r.execute();
+            if (response.getStatusCode() === 200) {
+                var data = JSON.parse(response.getBody());
+                // API Ninjas returns price and currency
+                if (data && data.price) {
+                    return JSON.stringify({ success: true, price: data.price, name: data.name });
+                }
+            }
+            return JSON.stringify({ success: false });
+        } catch(ex) {
+            return JSON.stringify({ success: false });
+        }
+    },
+    
+    type: 'NewsFetcherAjax'
+});]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-05-25 18:19:07</sys_created_on>
+        <sys_id>4fde91c297050f10be31fa17f053af76</sys_id>
+        <sys_mod_count>6</sys_mod_count>
+        <sys_name>NewsFetcherAjax</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_4fde91c297050f10be31fa17f053af76</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-08 08:54:05</sys_updated_on>
+    </sys_script_include>
+</record_update>

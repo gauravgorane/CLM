@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script_client">
+    <sys_script_client action="DELETE">
+        <active>true</active>
+        <applies_extended>false</applies_extended>
+        <condition/>
+        <description/>
+        <field>role_name</field>
+        <global>true</global>
+        <isolate_script>true</isolate_script>
+        <messages/>
+        <name>Auto Approver Map</name>
+        <order/>
+        <script><![CDATA[function onChange(control, oldValue, newValue, isLoading, isTemplate) {
+    if (isLoading || newValue === '') {
+        return;
+    }
+
+    // Safely get the selected segment and force lowercase for JSON matching
+    var rawSegment = g_form.getValue('segment');
+    if (!rawSegment) {
+        g_form.addErrorMessage('Please select a Segment before choosing a Role.');
+        return;
+    }
+    var segment = rawSegment.toString().toLowerCase();
+
+    // Master mapping. The keys below MUST match the 'Value' column of your Choice List.
+    var matrixMap = {
+        'cement': {
+            'NT Cement RHM':              { min: 0, max: 2500000, nod: 30, pan_india: 'false', seq: 10 },
+            'NT Cement ZHM':              { min: 2500001, max: 7500000, nod: 45, pan_india: 'false', seq: 20 },
+            'NT Cement ZCH - Commercial': { min: 5000001, max: 999999999, nod: 0, pan_india: 'false', seq: 25 },
+            'NT Cement NSH':              { min: 7500001, max: 15000000, nod: 60, pan_india: 'true', seq: 30 },
+            'HO - Commercial':            { min: 15000001, max: 999999999, nod: 0, pan_india: 'true', seq: 40 },
+            'CCH - PAN':                  { min: 15000001, max: 20000000, nod: 0, pan_india: 'true', seq: 50 },
+            'CMO_BH - PAN':               { min: 20000001, max: 30000000, nod: 0, pan_india: 'true', seq: 60 },
+            'CFO - PAN':                  { min: 30000001, max: 50000000, nod: 0, pan_india: 'true', seq: 70 },
+            'MD - PAN':                   { min: 50000001, max: 999999999, nod: 0, pan_india: 'true', seq: 80 }
+        },
+        'rmc': {
+            'NT RMC TSM':                 { min: 0, max: 400000, nod: 0, pan_india: 'false', seq: 10 },
+            'NT RMC RH_CH':               { min: 400001, max: 1100000, nod: 0, pan_india: 'false', seq: 20 },
+            'NT RMC ZCH - Commercial':    { min: 2500000, max: 999999999, nod: 0, pan_india: 'false', seq: 25 },
+            'NT RMC ZH':                  { min: 1100001, max: 3200000, nod: 0, pan_india: 'false', seq: 30 },
+            'NT RMC Head_RMC':            { min: 3200001, max: 5300000, nod: 0, pan_india: 'true', seq: 40 },
+            'NT RMC Head_Key_RMC':        { min: 5300001, max: 7500000, nod: 0, pan_india: 'true', seq: 50 },
+            'HO - Commercial':            { min: 7500001, max: 999999999, nod: 0, pan_india: 'true', seq: 55 },
+            'CCH - PAN':                  { min: 7500001, max: 15000000, nod: 0, pan_india: 'true', seq: 60 },
+            'CMO_BH - PAN':               { min: 15000001, max: 25000000, nod: 0, pan_india: 'true', seq: 70 },
+            'CFO - PAN':                  { min: 25000001, max: 50000000, nod: 0, pan_india: 'true', seq: 80 },
+            'MD - PAN':                   { min: 50000001, max: 999999999, nod: 0, pan_india: 'true', seq: 90 }
+        },
+        'bpd': {
+            'NT BPD TSH':                 { min: 0, max: 250000, nod: 0, pan_india: 'false', seq: 10 },
+            'NT BPD ZH_BPD':              { min: 250001, max: 1200000, nod: 0, pan_india: 'false', seq: 20 },
+            'NT BPD HS_BPD':              { min: 1200001, max: 2000000, nod: 0, pan_india: 'true', seq: 30 },
+            'NT BPD ZCH - Commercial':    { min: 2500000, max: 999999999, nod: 0, pan_india: 'false', seq: 35 },
+            'NT BPD H_BPD':               { min: 2000001, max: 5000000, nod: 0, pan_india: 'true', seq: 40 },
+            'HO - Commercial':            { min: 5000001, max: 999999999, nod: 0, pan_india: 'true', seq: 45 },
+            'CCH - PAN':                  { min: 5000001, max: 10000000, nod: 0, pan_india: 'true', seq: 50 },
+            'CMO_BH - PAN':               { min: 10000001, max: 25000000, nod: 0, pan_india: 'true', seq: 60 },
+            'CFO - PAN':                  { min: 25000001, max: 50000000, nod: 0, pan_india: 'true', seq: 70 },
+            'MD - PAN':                   { min: 50000001, max: 999999999, nod: 0, pan_india: 'true', seq: 80 }
+        }
+    };
+
+    var roleData = matrixMap[segment] ? matrixMap[segment][newValue] : null;
+
+    if (roleData) {
+        g_form.setValue('min_amount', roleData.min);
+        g_form.setValue('max_amount', roleData.max);
+        g_form.setValue('sequence_order', roleData.seq);
+        g_form.setValue('pan_india', roleData.pan_india);
+
+        if (roleData.nod > 0) {
+            g_form.setValue('number_of_days', roleData.nod);
+        } else {
+            g_form.clearValue('number_of_days'); 
+        }
+    } else {
+        // Failsafe: clears fields if an unrecognized choice is selected
+        g_form.clearValue('min_amount');
+        g_form.clearValue('max_amount');
+        g_form.clearValue('sequence_order');
+        g_form.clearValue('pan_india');
+        g_form.clearValue('number_of_days');
+    }
+}]]></script>
+        <sys_class_name>sys_script_client</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-08-31 13:08:18</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!&amp;/</sys_domain_path>
+        <sys_id>b97345a997cb8710be31fa17f053af32</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_name>Auto Approver Map</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_client_b97345a997cb8710be31fa17f053af32</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-08-31 13:37:00</sys_updated_on>
+        <table>x_birl3_clm_approval_matrix</table>
+        <type>onChange</type>
+        <ui_type>10</ui_type>
+        <view/>
+    </sys_script_client>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sys_script_client_b97345a997cb8710be31fa17f053af32</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script_client"&gt;&lt;sys_script_client action="INSERT_OR_UPDATE"&gt;&lt;active&gt;true&lt;/active&gt;&lt;applies_extended&gt;false&lt;/applies_extended&gt;&lt;condition/&gt;&lt;description/&gt;&lt;field&gt;role_name&lt;/field&gt;&lt;global&gt;true&lt;/global&gt;&lt;isolate_script&gt;true&lt;/isolate_script&gt;&lt;messages/&gt;&lt;name&gt;Auto Approver Map&lt;/name&gt;&lt;order/&gt;&lt;script&gt;&lt;![CDATA[function onChange(control, oldValue, newValue, isLoading, isTemplate) {
+    if (isLoading || newValue === '') {
+        return;
+    }
+
+    // Safely get the selected segment and force lowercase for JSON matching
+    var rawSegment = g_form.getValue('segment');
+    if (!rawSegment) {
+        g_form.addErrorMessage('Please select a Segment before choosing a Role.');
+        return;
+    }
+    var segment = rawSegment.toString().toLowerCase();
+
+    // Master mapping. The keys below MUST match the 'Value' column of your Choice List.
+    var matrixMap = {
+        'cement': {
+            'NT Cement RHM':              { min: 0, max: 2500000, nod: 30, pan_india: 'false', seq: 10 },
+            'NT Cement ZHM':              { min: 2500001, max: 7500000, nod: 45, pan_india: 'false', seq: 20 },
+            'NT Cement ZCH - Commercial': { min: 5000001, max: 999999999, nod: 0, pan_india: 'false', seq: 25 },
+            'NT Cement NSH':              { min: 7500001, max: 15000000, nod: 60, pan_india: 'true', seq: 30 },
+            'HO - Commercial':            { min: 15000001, max: 999999999, nod: 0, pan_india: 'true', seq: 40 },
+            'CCH - PAN':                  { min: 15000001, max: 20000000, nod: 0, pan_india: 'true', seq: 50 },
+            'CMO_BH - PAN':               { min: 20000001, max: 30000000, nod: 0, pan_india: 'true', seq: 60 },
+            'CFO - PAN':                  { min: 30000001, max: 50000000, nod: 0, pan_india: 'true', seq: 70 },
+            'MD - PAN':                   { min: 50000001, max: 999999999, nod: 0, pan_india: 'true', seq: 80 }
+        },
+        'rmc': {
+            'NT RMC TSM':                 { min: 0, max: 400000, nod: 0, pan_india: 'false', seq: 10 },
+            'NT RMC RH_CH':               { min: 400001, max: 1100000, nod: 0, pan_india: 'false', seq: 20 },
+            'NT RMC ZCH - Commercial':    { min: 2500000, max: 999999999, nod: 0, pan_india: 'false', seq: 25 },
+            'NT RMC ZH':                  { min: 1100001, max: 3200000, nod: 0, pan_india: 'false', seq: 30 },
+            'NT RMC Head_RMC':            { min: 3200001, max: 5300000, nod: 0, pan_india: 'true', seq: 40 },
+            'NT RMC Head_Key_RMC':        { min: 5300001, max: 7500000, nod: 0, pan_india: 'true', seq: 50 },
+            'HO - Commercial':            { min: 7500001, max: 999999999, nod: 0, pan_india: 'true', seq: 55 },
+            'CCH - PAN':                  { min: 7500001, max: 15000000, nod: 0, pan_india: 'true', seq: 60 },
+            'CMO_BH - PAN':               { min: 15000001, max: 25000000, nod: 0, pan_india: 'true', seq: 70 },
+            'CFO - PAN':                  { min: 25000001, max: 50000000, nod: 0, pan_india: 'true', seq: 80 },
+            'MD - PAN':                   { min: 50000001, max: 999999999, nod: 0, pan_india: 'true', seq: 90 }
+        },
+        'bpd': {
+            'NT BPD TSH':                 { min: 0, max: 250000, nod: 0, pan_india: 'false', seq: 10 },
+            'NT BPD ZH_BPD':              { min: 250001, max: 1200000, nod: 0, pan_india: 'false', seq: 20 },
+            'NT BPD HS_BPD':              { min: 1200001, max: 2000000, nod: 0, pan_india: 'true', seq: 30 },
+            'NT BPD ZCH - Commercial':    { min: 2500000, max: 999999999, nod: 0, pan_india: 'false', seq: 35 },
+            'NT BPD H_BPD':               { min: 2000001, max: 5000000, nod: 0, pan_india: 'true', seq: 40 },
+            'HO - Commercial':            { min: 5000001, max: 999999999, nod: 0, pan_india: 'true', seq: 45 },
+            'CCH - PAN':                  { min: 5000001, max: 10000000, nod: 0, pan_india: 'true', seq: 50 },
+            'CMO_BH - PAN':               { min: 10000001, max: 25000000, nod: 0, pan_india: 'true', seq: 60 },
+            'CFO - PAN':                  { min: 25000001, max: 50000000, nod: 0, pan_india: 'true', seq: 70 },
+            'MD - PAN':                   { min: 50000001, max: 999999999, nod: 0, pan_india: 'true', seq: 80 }
+        }
+    };
+
+    var roleData = matrixMap[segment] ? matrixMap[segment][newValue] : null;
+
+    if (roleData) {
+        g_form.setValue('min_amount', roleData.min);
+        g_form.setValue('max_amount', roleData.max);
+        g_form.setValue('sequence_order', roleData.seq);
+        g_form.setValue('pan_india', roleData.pan_india);
+
+        if (roleData.nod &gt; 0) {
+            g_form.setValue('number_of_days', roleData.nod);
+        } else {
+            g_form.clearValue('number_of_days'); 
+        }
+    } else {
+        // Failsafe: clears fields if an unrecognized choice is selected
+        g_form.clearValue('min_amount');
+        g_form.clearValue('max_amount');
+        g_form.clearValue('sequence_order');
+        g_form.clearValue('pan_india');
+        g_form.clearValue('number_of_days');
+    }
+}]]&gt;&lt;/script&gt;&lt;sys_class_name&gt;sys_script_client&lt;/sys_class_name&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-08-31 13:08:18&lt;/sys_created_on&gt;&lt;sys_domain&gt;cacbc7742bb676104572f3745e91bf5a&lt;/sys_domain&gt;&lt;sys_domain_path&gt;!!!/!!&amp;amp;/&lt;/sys_domain_path&gt;&lt;sys_id&gt;b97345a997cb8710be31fa17f053af32&lt;/sys_id&gt;&lt;sys_mod_count&gt;4&lt;/sys_mod_count&gt;&lt;sys_name&gt;Auto Approver Map&lt;/sys_name&gt;&lt;sys_overrides/&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sys_script_client_b97345a997cb8710be31fa17f053af32&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-08-31 13:37:00&lt;/sys_updated_on&gt;&lt;table&gt;x_birl3_clm_approval_matrix&lt;/table&gt;&lt;type&gt;onChange&lt;/type&gt;&lt;ui_type&gt;10&lt;/ui_type&gt;&lt;view/&gt;&lt;/sys_script_client&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>-1991909992</payload_hash>
+        <record_name>Auto Approver Map</record_name>
+        <reverted_from/>
+        <source>0d1e00262bb27e104572f3745e91bf51</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-08-31 13:37:00</sys_created_on>
+        <sys_id>eb7a0d21974f8710be31fa17f053af9a</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a05809a0360000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-08-31 13:37:00</sys_updated_on>
+        <type>Client Script</type>
+        <update_guid>eb7a0d21dc4f8710fa424777bec1ab99</update_guid>
+        <update_guid_history>eb7a0d21dc4f8710fa424777bec1ab99:-1991909992,22290da9940f87109e7e755d81d65a72:-657347897,ef06c9a1560f8710b4a2229c44bbd67f:1332660622,6cb5c561ff0f8710422cc93cd84f13bc:-1810561554,0be3c5e913cb8710f10c2c6d60f19249:-591198095</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-08-31 13:37:30</sys_created_on>
+        <sys_db_object display_value="" name="sys_script_client">sys_script_client</sys_db_object>
+        <sys_id>210f76392e814ffc9ba9ef8d5e8cf484</sys_id>
+        <sys_metadata>b97345a997cb8710be31fa17f053af32</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>Auto Approver Map</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent display_value="NT Approval Matrix">f877c60897c9c350be31fa17f053aff2</sys_parent>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sys_script_client_b97345a997cb8710be31fa17f053af32</sys_update_name>
+        <sys_update_version display_value="sys_script_client_b97345a997cb8710be31fa17f053af32">eb7a0d21974f8710be31fa17f053af9a</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-08-31 13:37:30</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

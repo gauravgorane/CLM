@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[function($scope, $location, $window) {
+    var c = this;
+
+    c.goToDashboard = function(dashboard) {
+        // Navigate to the Service Portal page using the correct URL format
+        $window.location.href = '?id=' + dashboard;
+    };
+
+    c.onTileClick = function() {
+        if (c.data.primaryDashboard) {
+            c.goToDashboard(c.data.primaryDashboard);
+        }
+    };
+
+    c.onRoleSelect = function(role) {
+        c.goToDashboard(role.dashboard);
+    };
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* Container forces tiles to the extreme left */
+.dashboard-launcher {
+  padding: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  justify-content: flex-start;
+}
+
+/* Base Tile Styling */
+.launcher-tile {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 24px;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 100%;
+  max-width: 240px; 
+  min-height: 240px; 
+  margin: 0; 
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* Hover Effects with Amber Border */
+.launcher-tile:hover {
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  transform: translateY(-2px);
+  border-color: #f59e0b; /* Amber border */
+}
+
+.launcher-tile.disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.launcher-tile.disabled:hover {
+  transform: none;
+  box-shadow: none;
+  border-color: #e2e8f0;
+}
+
+/* Icon - Minimalist Outline Style (Matching the image) */
+.tile-icon {
+  font-size: 22px; 
+  color: #ea580c; /* Vibrant burnt orange/amber icon */
+  background-color: #fffdf4; /* Extremely pale, warm off-white background */
+  border: 1px solid #fde68a; /* Delicate light amber border */
+  width: 48px; /* Slightly larger to match the airy feel of the image */
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px; /* Softer, more rounded corners like the image */
+  margin-bottom: 20px;
+  box-shadow: none; /* No heavy drop shadows to keep it flat and clean */
+}
+
+/* Title - Made extra bold */
+.tile-label {
+  font-size: 16px;
+  font-weight: 800; /* Extra bold */
+  color: #1a202c;
+  margin-bottom: 8px;
+  line-height: 1.3;
+}
+
+/* Subtitle - Pushes other elements down */
+.tile-subtitle {
+  font-size: 13px;
+  color: #718096;
+  font-weight: 400;
+  line-height: 1.5;
+  flex-grow: 1; /* Pushes the role tag/arrow/dropdown to the bottom */
+  margin-bottom: 16px;
+}
+
+/* Description / Role Tag */
+.tile-role {
+  font-size: 11px;
+  color: #d97706; /* Dark amber text */
+  background-color: #fef3c7; /* Light amber background */
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  display: inline-table;
+  align-self: flex-start;
+}
+
+/* Generates the bottom arrow automatically */
+.launcher-tile::after {
+  content: '→';
+  display: block;
+  margin-top: 16px;
+  font-size: 16px;
+  color: #cbd5e1;
+  font-family: Arial, sans-serif;
+  transition: color 0.2s ease;
+}
+
+.launcher-tile:hover::after {
+  color: #f59e0b; /* Arrow turns Amber on hover */
+}
+
+/* Multi-role dropdown inside tile */
+.launcher-tile.multi {
+  cursor: default;
+}
+
+/* Hides the arrow if the tile has a dropdown instead */
+.launcher-tile.multi::after {
+  display: none; 
+}
+
+.role-select {
+  margin-top: auto;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  font-size: 13px;
+  background: #fff;
+  cursor: pointer;
+  color: #4a5568;
+  font-weight: 500;
+  transition: border-color 0.2s;
+}
+
+.role-select:hover, .role-select:focus {
+  border-color: #f59e0b; /* Amber focus border */
+  outline: none;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>uclm_dashboard_control</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>uclm_dashboard_control</name>
+        <option_schema/>
+        <public>true</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    var ROLE_MAP_TABLE = 'x_birl3_clm_role_user_mapping';
+    var currentUserId = gs.getUserID();
+
+    // Recognised roles and their dashboard pages (Service Portal page suffix)
+    var DASHBOARD_MAP = {
+        'RHM': 'clm_rhm_dashboard',
+        'ZHM': 'clm_zhm_dashboard',
+        'TSH': 'clm_tsh_dashboard',
+        'NSH': 'clm_nsh_dashboard',
+        'CCH': 'clm_cch_dashboard',
+        'CFO': 'clm_cfo_dashboard',
+        'BH' : 'clm_bh1_dashboard',
+        'MD' : 'clm_md1_dashboard'
+    };
+
+    data.roles = [];
+    data.primaryRole = null;
+    data.primaryDashboard = null;
+
+    var gr = new GlideRecord(ROLE_MAP_TABLE);
+    gr.addQuery('u_user', currentUserId);
+    gr.query();
+
+    while (gr.next()) {
+        var role = gr.getValue('u_role');
+        if (role && DASHBOARD_MAP[role]) {
+            data.roles.push({
+                role: role,
+                dashboard: DASHBOARD_MAP[role]
+            });
+        }
+    }
+
+    if (data.roles.length === 1) {
+        data.primaryRole = data.roles[0].role;
+        data.primaryDashboard = data.roles[0].dashboard;
+    }
+    // If multiple roles, the client will show a dropdown
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>jatin.sharma@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-13 15:50:13</sys_created_on>
+        <sys_id>81135df997c2c310be31fa17f053af0d</sys_id>
+        <sys_mod_count>12</sys_mod_count>
+        <sys_name>uclm_dashboard_control</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_81135df997c2c310be31fa17f053af0d</sys_update_name>
+        <sys_updated_by>jatin.sharma@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-28 17:04:07</sys_updated_on>
+        <template><![CDATA[<div class="dashboard-launcher">
+  <!-- Single tile when exactly one role -->
+  <div class="launcher-tile" ng-if="c.data.primaryRole" ng-click="c.onTileClick()">
+    <div class="tile-icon">
+      <i class="fa fa-line-chart"></i>
+    </div>
+    <div class="tile-label">Go to Dashboard</div>
+    <div class="tile-subtitle">Access your personalized dashboard to track key metrics and performance.</div>
+    <div class="tile-role">{{c.data.primaryRole}} View</div>
+  </div>
+
+  <!-- Multiple roles: show a dropdown-styled tile -->
+  <div class="launcher-tile multi" ng-if="!c.data.primaryRole && c.data.roles.length > 1">
+    <div class="tile-icon">
+      <i class="fa fa-line-chart"></i>
+    </div>
+    <div class="tile-label">Select Dashboard</div>
+    <div class="tile-subtitle">Choose a specific role view to access your analytics dashboard.</div>
+    <select class="role-select" ng-model="c.selectedRole" ng-change="c.onRoleSelect(c.selectedRole)"
+            ng-options="r.role for r in c.data.roles track by r.dashboard">
+      <option value="">-- Choose --</option>
+    </select>
+  </div>
+
+  <!-- No recognised role -->
+  <div class="launcher-tile disabled" ng-if="c.data.roles.length === 0">
+    <div class="tile-icon">
+      <i class="fa fa-line-chart"></i>
+    </div>
+    <div class="tile-label">No Dashboard Access</div>
+    <div class="tile-subtitle">You do not have the required permissions to view this dashboard.</div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>81135df997c2c310be31fa17f053af0d</id>
+        <sys_created_by>jatin.sharma@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-13 15:50:13</sys_created_on>
+        <sys_id>8d139df997c2c310be31fa17f053af63</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>jatin.sharma@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-13 15:50:13</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

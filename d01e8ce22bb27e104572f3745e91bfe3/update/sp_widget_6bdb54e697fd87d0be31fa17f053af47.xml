@@ -1,0 +1,2370 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[/*
+  CLM TSH Portfolio Overview - Client Script
+  v1.0 - Aligned to the MD/MD1 master client script (master v2.2)
+  - Same formatters, "nice" trend axis, Chart.js scales / tooltips / colours as the master
+  - Active SD + Net Exposure formatted (fmtActiveSd / fmtNetExposure) for the Credit Limits tiles
+  - TSH-specific behaviour kept: Segment + Depot filters only, read-only Zone / Region derived from the selected depots,
+    accessDenied handling, fmtRatio showing 0.00, TSH CSV columns, TSH log prefixes and export file names
+*/
+function widgetcontroller($scope, $timeout, $rootScope, $document, $window, $ocLazyLoad, $element) {
+  var c = this;
+  c.loading = false;
+  c.initialLoadComplete = false; 
+  c.chartLoading = false; 
+  c.tableLoading = false;
+  c.needsFilters = true; 
+  
+  c.tableSearch = '';
+  c.filteredList = [];
+  c.tableTotal = 0;
+  c.limit = 10;
+  c.page = 0;
+
+  c.counts = { total: 0, overdue: 0, review15: 0, review30: 0, highRisk: 0, highGrowth: 0, pending: 0, sendBack: 0, rejected: 0, expiring: 0 };
+  c.filters = { segments: [], depots: [], period: '' };
+
+  c.displaySegments = [];
+  c.displayDepots = [];
+
+  // ===================== UTILITY FORMATTERS =====================
+  c.fmtCurrency = function(value) {
+      if (value === undefined || value === null || isNaN(value)) return '—';
+      var abs = Math.abs(value);
+      var sign = value < 0 ? '-' : '';
+      if (abs === 0) return '₹0.0L';
+      if (abs >= 1e7) return sign + '₹' + (abs / 1e7).toFixed(1) + ' Cr';
+      return sign + '₹' + (abs / 1e5).toFixed(1) + 'L';
+  };
+  c.fmtDash = function(val) { if (!val || isNaN(val) || val === 0) return '—'; return c.fmtCurrency(val); };
+  c.fmtRatio = function(value) { if (value === undefined || value === null || isNaN(value) || value === 0) return '0.00'; return Number(value).toFixed(2); };
+  c.capPct = function(pct) { if (pct === undefined || pct === null || isNaN(pct)) return 0; return Math.max(0, Math.min(100, pct)); };
+
+  // Compact number for chart axes: drops trailing ".0" (e.g. ₹50 Cr, ₹2.5 Cr, ₹75 L)
+  function trimNum(n, dp) { var s = Number(n).toFixed(dp); return s.indexOf('.') > -1 ? s.replace(/\.?0+$/, '') : s; }
+  c.fmtQty = function(value) {
+      if (value === undefined || value === null || isNaN(value)) return '—';
+      var abs = Math.abs(value), sign = value < 0 ? '-' : '';
+      if (abs >= 1e7) return sign + trimNum(abs / 1e7, 1) + ' Cr';
+      if (abs >= 1e5) return sign + trimNum(abs / 1e5, 1) + ' L';
+      if (abs >= 1e3) return sign + trimNum(abs / 1e3, 1) + ' K';
+      return sign + trimNum(abs, 0);
+  };
+  c.fmtAxisCurrency = function(value) {
+      if (value === undefined || value === null || isNaN(value)) return '—';
+      if (Number(value) === 0) return '₹0';
+      return (value < 0 ? '-' : '') + '₹' + c.fmtQty(Math.abs(value));
+  };
+
+  // "Nice" axis: rounds the max up to a clean step (1 / 2 / 2.5 / 5 x 10^n)
+  function niceScale(maxVal, targetTicks) {
+      targetTicks = targetTicks || 5;
+      if (!maxVal || maxVal <= 0) return { max: 1, step: 0.25 };
+      var rough = maxVal / (targetTicks - 1);
+      var mag = Math.pow(10, Math.floor(Math.log(rough) / Math.LN10));
+      var norm = rough / mag;
+      var mult = norm <= 1 ? 1 : (norm <= 2 ? 2 : (norm <= 2.5 ? 2.5 : (norm <= 5 ? 5 : 10)));
+      var step = mult * mag;
+      var max = Math.ceil(maxVal / step) * step;
+      if (max - maxVal < step * 0.15) max += step; // headroom for value labels above the line
+      return { max: max, step: step };
+  }
+
+  var refreshTimer = null;
+  
+  c.debouncedRefresh = function() {
+      if (refreshTimer) $timeout.cancel(refreshTimer);
+      refreshTimer = $timeout(function() {
+          c.page = 0;
+          c.refresh(false); 
+      }, 500); 
+  };
+
+  c.onPeriodChange = function() {
+      if (refreshTimer) $timeout.cancel(refreshTimer);
+      refreshTimer = $timeout(function() {
+          c.page = 0;
+          c.refresh(true); 
+      }, 500);
+  };
+
+  var MONTH_SHORT_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  var todayForPeriod = new Date();
+  var anchorDateForPeriod = new Date(todayForPeriod.getFullYear(), todayForPeriod.getMonth() - 1, 1);
+
+  function buildLast6Months() {
+      var arr = [];
+      for (var i = 5; i >= 0; i--) {
+          var d = new Date(anchorDateForPeriod.getFullYear(), anchorDateForPeriod.getMonth() - i, 1);
+          var y = d.getFullYear();
+          var mIdx = d.getMonth();
+          var monthStr = (mIdx + 1) < 10 ? ('0' + (mIdx + 1)) : String(mIdx + 1);
+          arr.push({ value: y + '-' + monthStr, label: MONTH_SHORT_NAMES[mIdx] + ' ' + String(y).slice(-2) });
+      }
+      return arr;
+  }
+
+  c.last6Months = buildLast6Months();
+  c.defaultPeriod = c.last6Months[c.last6Months.length - 1].value;
+  c.filters.period = c.defaultPeriod;
+
+  c.getPeriodDisplayText = function() {
+      var match = c.last6Months.filter(function(m) { return m.value === c.filters.period; })[0];
+      if (match) return match.label;
+      var parts = (c.filters.period || '').split('-');
+      if (parts.length !== 2) return c.filters.period || '';
+      return MONTH_SHORT_NAMES[parseInt(parts[1], 10) - 1] + ' ' + String(parts[0]).slice(-2);
+  };
+
+  c.msItemDisplay = function(item) {
+      if (!item) return '';
+      if (item.value === undefined || item.value === null || item.value === '' || item.label === item.value) { return item.label; }
+      return item.label + ' (' + item.value + ')';
+  };
+
+  c.updateSegmentList = function() {
+      var all = (c.data && c.data.filterOpts && c.data.filterOpts.segments) || [];
+      var term = (c.segmentSearch || '').toLowerCase();
+      c.displaySegments = term ? all.filter(function(s) { return String(s.label || '').toLowerCase().indexOf(term) !== -1; }) : all;
+  };
+  c.updateDepotList = function() {
+      var all = (c.data && c.data.filterOpts && c.data.filterOpts.depots) || [];
+      var term = (c.depotSearch || '').toLowerCase();
+      c.displayDepots = term ? all.filter(function(d) { return String(d.label || '').toLowerCase().indexOf(term) !== -1 || String(d.value || '').toLowerCase().indexOf(term) !== -1; }) : all;
+  };
+
+  function handleClickOutside(event) {
+      var target = event.target;
+      if (target.closest('.clm-multiselect-container')) return;
+      $timeout(function() {
+          c.segmentDropdownOpen = false; c.depotDropdownOpen = false;
+      });
+  }
+  $document.on('click', handleClickOutside);
+  $scope.$on('$destroy', function() { $document.off('click', handleClickOutside); });
+
+  // Filter Actions & Cascading triggers
+  c.segmentDropdownOpen = false; c.segmentSearch = ''; c.selectedSegmentLabels = [];
+  c.openSegmentDropdown = function() { c.segmentDropdownOpen = true; c.depotDropdownOpen = false; c.updateSegmentList(); };
+  c.closeSegmentDropdown = function() { $timeout(function() { c.segmentDropdownOpen = false; }, 200); };
+  
+  function cascadeResetBelowSegment() { 
+      c.filters.depots = []; c.selectedDepotLabels = []; 
+      c.depotSearch = ''; 
+      c.needsFilters = true;
+  }
+  
+  c.toggleSegment = function(s) { var idx = c.filters.segments.indexOf(s.value); if (idx === -1) { c.filters.segments.push(s.value); c.selectedSegmentLabels.push(s.label); } else { c.filters.segments.splice(idx, 1); c.selectedSegmentLabels.splice(idx, 1); } cascadeResetBelowSegment(); c.segmentSearch = ''; c.debouncedRefresh(); };
+  c.selectAllSegments = function() { var all = (c.data && c.data.filterOpts && c.data.filterOpts.segments) || []; c.filters.segments = all.map(function(s) { return s.value; }); c.selectedSegmentLabels = all.map(function(s) { return s.label; }); cascadeResetBelowSegment(); c.segmentSearch = ''; c.debouncedRefresh(); };
+  c.clearAllSegments = function() { c.filters.segments = []; c.selectedSegmentLabels = []; cascadeResetBelowSegment(); c.segmentSearch = ''; c.debouncedRefresh(); };
+  c.isSegmentSelected = function(s) { return c.filters.segments.indexOf(s.value) !== -1; };
+  c.getSegmentDisplayText = function() { if (!c.selectedSegmentLabels || c.selectedSegmentLabels.length === 0) return 'All Segments'; if (c.selectedSegmentLabels.length === 1) return c.selectedSegmentLabels[0]; return c.selectedSegmentLabels.length + ' segments selected'; };
+
+  c.depotDropdownOpen = false; c.depotSearch = ''; c.selectedDepotLabels = [];
+  c.openDepotDropdown = function() { c.depotDropdownOpen = true; c.segmentDropdownOpen = false; c.updateDepotList(); };
+  c.closeDepotDropdown = function() { $timeout(function() { c.depotDropdownOpen = false; }, 200); };
+  c.toggleDepot = function(d) { var idx = c.filters.depots.indexOf(d.value); if (idx === -1) { c.filters.depots.push(d.value); c.selectedDepotLabels.push(d.label); } else { c.filters.depots.splice(idx, 1); c.selectedDepotLabels.splice(idx, 1); } c.depotSearch = ''; c.debouncedRefresh(); };
+  c.selectAllDepots = function() { var all = (c.data && c.data.filterOpts && c.data.filterOpts.depots) || []; c.filters.depots = all.map(function(d) { return d.value; }); c.selectedDepotLabels = all.map(function(d) { return d.label; }); c.depotSearch = ''; c.debouncedRefresh(); };
+  c.clearAllDepots = function() { c.filters.depots = []; c.selectedDepotLabels = []; c.depotSearch = ''; c.debouncedRefresh(); };
+  c.isDepotSelected = function(d) { return c.filters.depots.indexOf(d.value) !== -1; };
+  c.getDepotDisplayText = function() { if (!c.selectedDepotLabels || c.selectedDepotLabels.length === 0) return 'All Depots'; if (c.selectedDepotLabels.length === 1) return c.selectedDepotLabels[0]; return c.selectedDepotLabels.length + ' depots selected'; };
+
+  // ===================== ZONE / REGION (READ-ONLY, DERIVED FROM DEPOT) =====================
+  var GEO_PLACEHOLDER = 'Auto – based on Depot';
+
+  function fmtGeo(name, code) {
+      name = (name || '').toString().trim();
+      code = (code || '').toString().trim();
+      if (name && code && name !== code) return name + ' (' + code + ')';
+      return name || code || '';
+  }
+
+  // Returns unique "Name (Code)" strings for the currently selected depots
+  function getSelectedGeoList(kind) {
+      var depotOpts = (c.data && c.data.filterOpts && c.data.filterOpts.depots) || [];
+      var selected = c.filters.depots || [];
+      var seen = {};
+      var out = [];
+      selected.forEach(function(dv) {
+          for (var i = 0; i < depotOpts.length; i++) {
+              if (depotOpts[i].value === dv) {
+                  var txt = kind === 'zone'
+                      ? fmtGeo(depotOpts[i].zoneName, depotOpts[i].zoneCode)
+                      : fmtGeo(depotOpts[i].regionName, depotOpts[i].regionCode);
+                  if (txt && !seen[txt]) { seen[txt] = true; out.push(txt); }
+                  break;
+              }
+          }
+      });
+      return out;
+  }
+
+  c.hasDepotSelection = function() { return !!(c.filters.depots && c.filters.depots.length > 0); };
+
+  function geoDisplayText(kind) {
+      if (!c.hasDepotSelection()) return GEO_PLACEHOLDER;
+      var list = getSelectedGeoList(kind);
+      if (list.length === 0) return '—';
+      if (list.length === 1) return list[0];
+      return list.join(', ');
+  }
+  function geoTooltip(kind) {
+      if (!c.hasDepotSelection()) return '';
+      return getSelectedGeoList(kind).join(', ');
+  }
+
+  c.getZoneDisplayText   = function() { return geoDisplayText('zone'); };
+  c.getRegionDisplayText = function() { return geoDisplayText('region'); };
+  c.getZoneTooltip       = function() { return geoTooltip('zone'); };
+  c.getRegionTooltip     = function() { return geoTooltip('region'); };
+
+  // ===================== QUICK FILTERS =====================
+  c.quickFilter = 'all';
+  c.riskFilter = '';
+  c.kpiFilter = '';
+  c.largeExposureSortOrder = 'desc';
+
+  function scrollToTable() {
+      $timeout(function() {
+          var el = $element[0].querySelector('#clmTableContainer');
+          if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      }, 100);
+  }
+
+  c.setQuickFilter = function(f) { c.quickFilter = f; c.page = 0; if (f === 'largeExposure') c.largeExposureSortOrder = 'desc'; c.loadTableOnly(); };
+  c.setKpiFilter = function(filterName) { c.kpiFilter = (c.kpiFilter === filterName) ? '' : filterName; c.page = 0; c.loadTableOnly(); scrollToTable(); };
+  c.setRiskKpiFilter = function() { c.riskFilter = (c.riskFilter === 'High') ? '' : 'High'; c.page = 0; c.loadTableOnly(); scrollToTable(); };
+  c.setExpiringKpiFilter = function() { c.quickFilter = (c.quickFilter === 'review15') ? 'all' : 'review15'; c.page = 0; c.loadTableOnly(); scrollToTable(); };
+  c.toggleLargeExposureSort = function() { c.largeExposureSortOrder = c.largeExposureSortOrder === 'desc' ? 'asc' : 'desc'; if (c.quickFilter === 'largeExposure') { c.page = 0; c.loadTableOnly(); } };
+  c.getLargeExposureIcon = function() { return c.largeExposureSortOrder === 'desc' ? 'fa-sort-amount-desc' : 'fa-sort-amount-asc'; };
+
+  var tableReqId = 0;
+  var searchTimer = null;
+
+  function tableParams() {
+      return { page: c.page, limit: c.limit, search: c.tableSearch || '', quick: c.quickFilter, risk: c.riskFilter, kpi: c.kpiFilter, largeSort: c.largeExposureSortOrder };
+  }
+
+  function preFormatTableData(rows) {
+      return rows.map(function(row) {
+          row.fmtOutstanding = c.fmtCurrency(row.outstanding);
+          row.fmtLimit = c.fmtCurrency(row.limit);
+          row.fmtAvailable = c.fmtCurrency(row.available);
+          row.cappedUtil = c.capPct(row.util);
+          row.fmtOsSalesRatio = c.fmtRatio(row.osSalesRatio);
+          row.fmtOd90 = c.fmtDash(row.od90);
+          return row;
+      });
+  }
+
+  c.loadTableOnly = function() {
+      var myId = ++tableReqId;
+      c.tableLoading = true;
+      c.server.get({ action: 'table', filters: angular.copy(c.filters), table: tableParams() }).then(function(r) {
+          if (myId !== tableReqId) return;
+          var d = r.data || {};
+          if (d.error && !d.accessDenied) { console.warn('TSH widget table error:', d.error); }
+          c.filteredList = preFormatTableData(d.tableData || []);
+          c.tableTotal = d.tableTotal || 0;
+          c.tableLoading = false;
+      }, function(err) {
+          if (myId !== tableReqId) return;
+          c.tableLoading = false;
+      });
+  };
+
+  c.applyLocalFilters = function() { c.page = 0; c.loadTableOnly(); };
+  c.onSearchChange = function() { if (searchTimer) $timeout.cancel(searchTimer); searchTimer = $timeout(function() { c.page = 0; c.loadTableOnly(); }, 400); };
+  c.updatePagination = function() { c.page = 0; c.loadTableOnly(); };
+  c.goToPage = function(p) { var maxPage = c.getTotalPages() - 1; p = Math.max(0, Math.min(maxPage, p)); if (p === c.page) return; c.page = p; c.loadTableOnly(); };
+  c.getTotalPages = function() { return Math.max(1, Math.ceil((c.tableTotal || 0) / c.limit)); };
+  c.getShowingTo = function() { return Math.min(c.tableTotal, (c.page + 1) * c.limit); };
+  c.getPageArray = function() {
+      var maxPage = c.getTotalPages() - 1;
+      var start = Math.max(0, c.page - 2);
+      var end = Math.min(maxPage, c.page + 2);
+      var arr = []; for (var i = start; i <= end; i++) { arr.push(i); } return arr;
+  };
+
+  // ===================== CHARTS =====================
+  var CHART_COLORS = {
+      text: '#3a4451', muted: '#5a6a7a', grid: '#e6eaef',
+      bar: '#0b5394', barHover: '#073b6b', line: '#E87722'
+  };
+  var CHART_FONT = '"Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif';
+  function normLabel(l) { return String(l || '').replace('-', ' '); }
+
+  function emptyTrend() {
+      return { points: [], activePoints: [], yTicks: [], linePoints: '', areaPath: '', width: 1550, height: 300, padLeft: 96, padRight: 60, padY: 30, drawHeight: 225, baselineY: 255 };
+  }
+  c.trendChart = emptyTrend();
+
+  c.buildTrendChart = function() {
+      if (!c.data || !c.data.trend) return;
+      var trend = c.data.trend.points || [];
+      if (trend.length === 0) { trend = c.last6Months.map(function(m) { return { label: m.label, value: 0 }; }); }
+
+      var width = 1550, height = 300, padLeft = 96, padRight = 60, padY = 30, padBottom = 45;
+      var drawHeight = height - padY - padBottom;
+      var baselineY = padY + drawHeight;
+      var values = trend.map(function(p) { return p.value || 0; });
+      var dataMax = Math.max.apply(null, values.concat([0]));
+      var scale = niceScale(dataMax, 5);
+      var minVal = 0, maxVal = scale.max;
+      var n = trend.length;
+      var stepX = (width - padLeft - padRight) / (n > 1 ? (n - 1) : 1);
+      
+      var pts = trend.map(function(p, i) {
+          var plotValue = Math.max(0, p.value || 0);
+          var x = padLeft + 20 + i * ((width - padLeft - padRight - 40) / (n > 1 ? (n - 1) : 1));
+          var y = padY + (1 - (plotValue - minVal) / (maxVal - minVal)) * drawHeight;
+          return { x: x, y: y, label: p.label, value: p.value || 0, formattedValue: c.fmtCurrency(p.value || 0) };
+      });
+      var activePts = pts.slice();
+      var yTicks = [];
+      for (var tickVal = 0; tickVal <= maxVal + scale.step / 1000; tickVal += scale.step) {
+          var tickY = padY + (1 - (tickVal - minVal) / (maxVal - minVal)) * drawHeight;
+          yTicks.push({ y: tickY, label: c.fmtAxisCurrency(tickVal) });
+      }
+      var linePoints = activePts.map(function(p) { return p.x + ',' + p.y; }).join(' ');
+      var areaPath = 'M ' + activePts[0].x + ',' + baselineY + ' ';
+      activePts.forEach(function(p) { areaPath += 'L ' + p.x + ',' + p.y + ' '; });
+      areaPath += 'L ' + activePts[activePts.length - 1].x + ',' + baselineY + ' Z';
+      
+      c.trendChart = { points: pts, activePoints: activePts, yTicks: yTicks, linePoints: linePoints, areaPath: areaPath, width: width, height: height, padLeft: padLeft, padRight: padRight, padY: padY, drawHeight: drawHeight, baselineY: baselineY, stepX: stepX };
+  };
+
+  window.__clmChartVisibilityTargets = window.__clmChartVisibilityTargets || [];
+  function isElementVisible(el) {
+      if (!el || !document.body.contains(el)) return false;
+      var rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+  }
+  function ensureChartVisibilityWatcher() {
+      if (window.__clmChartVisibilityWatcher) return;
+      window.__clmChartVisibilityWatcher = new MutationObserver(function() {
+          window.__clmChartVisibilityTargets.forEach(function(target) {
+              var nowVisible = isElementVisible(target.canvas);
+              if (nowVisible && !target.wasVisible) {
+                  var inst = target.getInstance();
+                  if (inst) { inst.resize(); }
+              }
+              target.wasVisible = nowVisible;
+          });
+      });
+      window.__clmChartVisibilityWatcher.observe(document.body, { attributes: true, subtree: true, attributeFilter: ['class', 'style'] });
+  }
+  function registerChartVisibilityTarget(canvas, getChartInstance) {
+      if (!canvas) return;
+      window.__clmChartVisibilityTargets = window.__clmChartVisibilityTargets.filter(function(t) { return document.body.contains(t.canvas); });
+      var already = window.__clmChartVisibilityTargets.some(function(t) { return t.canvas === canvas; });
+      if (!already) { window.__clmChartVisibilityTargets.push({ canvas: canvas, getInstance: getChartInstance, wasVisible: isElementVisible(canvas) }); }
+      ensureChartVisibilityWatcher();
+  }
+
+  // Ageing bucket colours: 0-60 green shades, 61-90 amber, >90 red
+  var AGEING_BUCKET_DEFS = [
+    { key: '0-30D',  color: '#27ae60', match: ['0-30 Days'] },
+    { key: '31-60D', color: '#8fd19e', match: ['31-60 Days'] },
+    { key: '61-90D', color: '#f0a030', match: ['61-90 Days'] },
+    { key: '>90D',   color: '#E23D28', match: ['>90 Days'] }
+  ];
+  function consolidateAgeingMonth(month) {
+    return AGEING_BUCKET_DEFS.map(function(def) {
+      var sum = 0;
+      (month.buckets || []).forEach(function(b) { if (def.match.indexOf(b.label) !== -1) { sum += (b.value || 0); } });
+      return sum;
+    });
+  }
+
+  var salesChartInstance = null;
+  var ageingChartInstance = null;
+  c.ageingLegend = AGEING_BUCKET_DEFS.map(function(def) { return { label: def.key, color: def.color }; });
+
+  function applyChartDefaults() {
+      if (typeof Chart === 'undefined' || !Chart.defaults) return;
+      try { Chart.defaults.font.family = CHART_FONT; Chart.defaults.color = CHART_COLORS.muted; } catch (e) {}
+  }
+  function axisTitle(text) { return { display: true, text: text, font: { size: 12, weight: '700' }, color: CHART_COLORS.text, padding: { bottom: 6, top: 6 } }; }
+  var TOOLTIP_BASE = { backgroundColor: '#1a1a1a', titleColor: '#F3D54E', bodyColor: '#ffffff', padding: 10, cornerRadius: 6, titleFont: { weight: '700' }, boxPadding: 4 };
+
+  c.renderCharts = function() { applyChartDefaults(); renderSalesChart(); renderAgeingChart(); };
+
+  function renderSalesChart() {
+      var canvas = $element[0].querySelector('#md1SalesChart');
+      if (salesChartInstance) { try { salesChartInstance.destroy(); } catch(e) {} salesChartInstance = null; }
+      if (!canvas || !c.data || !c.data.salesTrend || !c.data.salesTrend.points) return;
+      
+      var recent = c.data.salesTrend.points.slice(-6);
+      var labels = recent.map(function(p) { return normLabel(p.label); });
+      var volumes = recent.map(function(p) { return p.volume || 0; });
+      var values  = recent.map(function(p) { return p.value || 0; });
+
+      salesChartInstance = new Chart(canvas.getContext('2d'), {
+          type: 'bar',
+          data: {
+              labels: labels,
+              datasets: [
+                  { type: 'bar', label: 'Credit Sales Volume (MT)', data: volumes, backgroundColor: CHART_COLORS.bar, hoverBackgroundColor: CHART_COLORS.barHover, yAxisID: 'yVolume', borderRadius: 4, maxBarThickness: 48, categoryPercentage: 0.6, order: 2 },
+                  { type: 'line', label: 'Credit Sales Value (₹)', data: values, borderColor: CHART_COLORS.line, backgroundColor: CHART_COLORS.line, pointBackgroundColor: '#fff', pointBorderColor: CHART_COLORS.line, pointBorderWidth: 2.5, pointRadius: 4.5, pointHoverRadius: 6, borderWidth: 2.5, tension: 0.25, fill: false, yAxisID: 'yValue', order: 1 }
+              ]
+          },
+          options: {
+              responsive: true, maintainAspectRatio: false, resizeDelay: 0,
+              interaction: { mode: 'index', intersect: false },
+              plugins: {
+                  legend: { display: false },
+                  tooltip: angular.extend({}, TOOLTIP_BASE, { callbacks: {
+                      label: function(ctx) {
+                          return ctx.dataset.yAxisID === 'yValue'
+                              ? ' Value: ' + c.fmtCurrency(ctx.parsed.y)
+                              : ' Volume: ' + c.fmtQty(ctx.parsed.y) + ' MT';
+                      }
+                  } })
+              },
+              scales: {
+                  yVolume: { type: 'linear', position: 'left', beginAtZero: true, grace: '8%', title: axisTitle('Volume (MT)'),
+                             ticks: { maxTicksLimit: 6, font: { size: 11.5 }, color: CHART_COLORS.muted, callback: function(v) { return c.fmtQty(v); } },
+                             grid: { color: CHART_COLORS.grid }, border: { display: false } },
+                  yValue:  { type: 'linear', position: 'right', beginAtZero: true, grace: '8%', title: axisTitle('Value (₹)'),
+                             ticks: { maxTicksLimit: 6, font: { size: 11.5 }, color: CHART_COLORS.line, callback: function(v) { return c.fmtAxisCurrency(v); } },
+                             grid: { drawOnChartArea: false }, border: { display: false } },
+                  x: { ticks: { font: { size: 12, weight: '700' }, color: CHART_COLORS.text }, grid: { display: false } }
+              }
+          }
+      });
+      registerChartVisibilityTarget(canvas, function() { return salesChartInstance; });
+  }
+
+  function renderAgeingChart() {
+      var canvas = $element[0].querySelector('#md1AgeingChart');
+      if (ageingChartInstance) { try { ageingChartInstance.destroy(); } catch(e) {} ageingChartInstance = null; }
+      if (!canvas || !c.data || !c.data.ageingTrend) return;
+
+      var months = c.data.ageingTrend.months || [];
+      if (months.length === 0) {
+          months = c.last6Months.map(function(m) {
+              return { label: m.label, buckets: [ { label: '0-30 Days', value: 0 }, { label: '31-60 Days', value: 0 }, { label: '61-90 Days', value: 0 }, { label: '>90 Days', value: 0 } ] };
+          });
+      }
+
+      var labels = months.map(function(m) { return normLabel(m.label); });
+      var consolidated = months.map(consolidateAgeingMonth);
+      var datasets = AGEING_BUCKET_DEFS.map(function(def, idx) {
+          return { label: def.key, backgroundColor: def.color, borderColor: '#ffffff', borderWidth: { top: 1 }, maxBarThickness: 48, categoryPercentage: 0.6,
+                   data: consolidated.map(function(monthValues) { return monthValues[idx]; }) };
+      });
+
+      ageingChartInstance = new Chart(canvas.getContext('2d'), {
+          type: 'bar',
+          data: { labels: labels, datasets: datasets },
+          options: {
+              responsive: true, maintainAspectRatio: false, resizeDelay: 0,
+              interaction: { mode: 'index', intersect: false },
+              plugins: {
+                  legend: { display: false },
+                  tooltip: angular.extend({}, TOOLTIP_BASE, { itemSort: function(a, b) { return b.datasetIndex - a.datasetIndex; }, callbacks: {
+                      label: function(ctx) { return ' ' + ctx.dataset.label + ': ' + c.fmtCurrency(ctx.parsed.y); },
+                      footer: function(items) {
+                          var total = 0; items.forEach(function(i) { total += i.parsed.y || 0; });
+                          return 'Total: ' + c.fmtCurrency(total);
+                      }
+                  } })
+              },
+              scales: {
+                  x: { stacked: true, ticks: { font: { size: 12, weight: '700' }, color: CHART_COLORS.text }, grid: { display: false } },
+                  y: { stacked: true, beginAtZero: true, grace: '5%', title: axisTitle('Outstanding (₹)'),
+                       ticks: { maxTicksLimit: 6, font: { size: 11.5 }, color: CHART_COLORS.muted, callback: function(v) { return c.fmtAxisCurrency(v); } },
+                       grid: { color: CHART_COLORS.grid }, border: { display: false } }
+              }
+          }
+      });
+      registerChartVisibilityTarget(canvas, function() { return ageingChartInstance; });
+  }
+
+  var onResize = function() { if (salesChartInstance) salesChartInstance.resize(); if (ageingChartInstance) ageingChartInstance.resize(); };
+  angular.element($window).on('resize', onResize);
+
+  $scope.$on('$destroy', function() {
+      angular.element($window).off('resize', onResize);
+      if (searchTimer) $timeout.cancel(searchTimer);
+      if (refreshTimer) $timeout.cancel(refreshTimer);
+      if (salesChartInstance) { try { salesChartInstance.destroy(); } catch(e) {} }
+      if (ageingChartInstance) { try { ageingChartInstance.destroy(); } catch(e) {} }
+  });
+
+  c.getActiveFilterCount = function() {
+      var count = 0;
+      if (c.filters.segments && c.filters.segments.length > 0) count++;
+      if (c.filters.depots && c.filters.depots.length > 0) count++;
+      if (c.filters.period && c.filters.period !== c.defaultPeriod) count++;
+      if (c.riskFilter) count++; if (c.kpiFilter) count++; if (c.quickFilter !== 'all') count++;
+      return count;
+  };
+
+  c.filterWrapperClass = '';
+  c.clearAllFilters = function() {
+      c.filterWrapperClass = 'collapsing';
+      $timeout(function() {
+          c.filters.segments = []; c.selectedSegmentLabels = []; c.segmentSearch = '';
+          c.filters.depots = []; c.selectedDepotLabels = []; c.depotSearch = '';
+          c.filters.period = c.defaultPeriod; c.riskFilter = ''; c.kpiFilter = ''; c.quickFilter = 'all'; c.tableSearch = '';
+          c.page = 0;
+          c.filterWrapperClass = '';
+          c.needsFilters = true; // Tell server to recalculate dropdowns when completely cleared
+          c.refresh();
+      }, 350);
+  };
+
+  // ===================== MAIN PARALLEL REFRESH =====================
+ c.refresh = function(skipCharts) {
+      c.loading = true;
+      c.tableLoading = true;
+      if (!skipCharts) c.chartLoading = true; 
+      
+      var reqId = ++tableReqId;
+      var reqFilters = angular.copy(c.filters);
+      c.data = c.data || {};
+
+      c.server.get({ action: 'kpis', filters: reqFilters, fetchFilters: c.needsFilters }).then(function(r) {
+          if (reqId !== tableReqId) return;
+          var data = r.data || {};
+
+          if (data.accessDenied) {
+              c.data.accessDenied = true;
+              c.data.error = data.error;
+              c.loading = false;
+              c.initialLoadComplete = true;
+              return;
+          }
+
+          if (data.error) console.warn('TSH server error:', data.error);
+          
+          c.data.kpis = data.kpis || {};
+          c.data.kpis.fmtLimit = c.fmtCurrency(c.data.kpis.limit);
+          c.data.kpis.fmtAvailable = c.fmtCurrency(c.data.kpis.available);
+          c.data.kpis.fmtOutstanding = c.fmtCurrency(c.data.kpis.outstanding);
+          c.data.kpis.fmtOverdue = c.fmtCurrency(c.data.kpis.overdueExposure);
+          c.data.kpis.fmtOd90 = c.fmtCurrency(c.data.kpis.od90);
+          c.data.kpis.fmtRatio = c.fmtRatio(c.data.kpis.osSalesRatioSum);
+          c.data.kpis.fmtActiveSd = c.fmtCurrency(c.data.kpis.activeSd);
+          c.data.kpis.fmtNetExposure = c.fmtCurrency(c.data.kpis.netExposure);
+
+          if (c.needsFilters && data.filterOpts) {
+              c.data.filterOpts = data.filterOpts;
+              c.updateSegmentList(); c.updateDepotList();
+              c.needsFilters = false; 
+          }
+
+          c.counts = angular.extend({ total: 0, overdue: 0, review15: 0, review30: 0, highRisk: 0, highGrowth: 0, pending: 0, sendBack: 0, rejected: 0, expiring: 0 }, data.counts || {});
+          
+          c.loading = false;
+          c.initialLoadComplete = true; 
+
+          c.server.get({ action: 'table', filters: reqFilters, table: tableParams() }).then(function(r3) {
+              if (reqId !== tableReqId) return;
+              var tData = r3.data || {};
+              c.filteredList = preFormatTableData(tData.tableData || []);
+              c.tableTotal = tData.tableTotal || 0;
+              c.tableLoading = false;
+          });
+
+          if (!skipCharts) {
+              c.server.get({ action: 'charts', filters: reqFilters }).then(function(r2) {
+                  if (reqId !== tableReqId) return;
+                  var cData = r2.data || {};
+                  c.data.trend = cData.trend || { points: [] };
+                  c.data.salesTrend = cData.salesTrend || { points: [] };
+                  c.data.ageingTrend = cData.ageingTrend || { months: [] };
+                  
+                  c.buildTrendChart();
+                  c.chartLoading = false;
+                  $timeout(function() { c.renderCharts(); });
+              });
+          }
+      });
+  };
+
+  c.selectCustomer = function(row) {
+      if (!row || !row.code) return;
+      $rootScope.clmPendingCustomerSysId = row.sysId || null;
+      $rootScope.clmPendingCustomerCode = row.code;
+      $rootScope.clmPendingCustomerPan = row.pan || null;
+      $rootScope.$broadcast('clm.customer.selected', { sysId: row.sysId || null, code: row.code, pan: row.pan || null });
+      $rootScope.$broadcast('clm.switch.tab', 'customer360');
+  };
+
+  // ===================== EXPORT LOGIC =====================
+  function escapeCSV(val) {
+      if (val === null || val === undefined) return '""';
+      return '"' + String(val).replace(/"/g, '""') + '"';
+  }
+
+  c.exportToCSV = function() {
+      var params = tableParams();
+      params.page = 0;
+      params.limit = 5000;
+      c.server.get({ action: 'export', filters: angular.copy(c.filters), table: params }).then(function(r) {
+          var dataToExport = (r.data && r.data.tableData) || [];
+          if (!dataToExport.length) { alert('No rows to export.'); return; }
+          var BOM = "\uFEFF";
+          var csvContent = BOM + "PAN,Customer Code,Name,Segment,Depot,Status,Outstanding,Current Credit Limit,Available,Utilisation %,OS/Sales,Overdue >90D,Risk,Review In,High Growth 20\n";
+          dataToExport.forEach(function(row) {
+              csvContent += [
+                  escapeCSV(row.pan), escapeCSV(row.code), escapeCSV(row.name), escapeCSV(row.segment),
+                  escapeCSV(row.depotName), escapeCSV(row.status),
+                  escapeCSV(row.outstanding), escapeCSV(row.limit), escapeCSV(row.available), escapeCSV(row.util),
+                  escapeCSV(row.osSalesRatio), escapeCSV(row.od90), escapeCSV(row.risk),
+                  escapeCSV(row.reviewIn), escapeCSV(row.highGrowth20 || 'No')
+              ].join(",") + "\n";
+          });
+          var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+          var link = document.createElement('a');
+          link.href = URL.createObjectURL(blob);
+          link.download = 'TSH_Portfolio_Data_' + new Date().toISOString().slice(0, 10) + '.csv';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(link.href);
+      }, function(err) { alert('Export failed. Check console for details.'); });
+  };
+
+  c.isExporting = false;
+  c.exportToPDF = function() {
+      c.isExporting = true;
+      $ocLazyLoad.load([
+          'https://cdnjs.cloudflare.com/ajax/libs/dom-to-image-more/3.10.0/dom-to-image-more.min.js',
+          'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'
+      ]).then(function() {
+          var libDomToImage = window.domtoimage;
+          var jsPDFConstructor = window.jspdf ? window.jspdf.jsPDF : window.jsPDF;
+          if (!libDomToImage || !jsPDFConstructor) { alert("Could not load export libraries properly."); $scope.$applyAsync(function() { c.isExporting = false; }); return; }
+          var overlay = document.createElement('div');
+          overlay.id = 'pdf-loading-overlay';
+          overlay.innerHTML = '<div class="pdf-spinner"></div><div class="pdf-loading-text">Generating PDF Report...</div><div class="pdf-loading-sub">Please do not close this window</div>';
+          document.body.appendChild(overlay);
+
+          var element = $element[0].querySelector('#cch-dashboard-capture');
+          var fileName = 'TSH_Portfolio_Report_' + new Date().toISOString().slice(0, 10) + '.pdf';
+          element.classList.add('pdf-export-mode');
+
+          function cleanup() { element.classList.remove('pdf-export-mode'); if (document.body.contains(overlay)) document.body.removeChild(overlay); $scope.$applyAsync(function() { c.isExporting = false; }); }
+
+          $timeout(function() {
+              try {
+                  libDomToImage.toPng(element, { bgcolor: '#ffffff', width: 1920 }).then(function (dataUrl) {
+                      var img = new Image();
+                      img.onload = function() { var pdf = new jsPDFConstructor('l', 'pt', [img.width, img.height + 60]); pdf.addImage(dataUrl, 'PNG', 0, 0, img.width, img.height); pdf.save(fileName); cleanup(); };
+                      img.src = dataUrl;
+                  }).catch(function (error) { cleanup(); });
+              } catch (e) { cleanup(); }
+          }, 150);
+      }).catch(function(err) { $scope.$applyAsync(function() { c.isExporting = false; }); });
+  };
+
+  c.refresh();
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/*
+  CLM TSH Portfolio Overview - CSS
+  v1.0 - Copy of the MD/MD1 master Portfolio Overview CSS (master v2.2)
+  - Added: Access Restricted card (.clm-access-denied) and read-only Zone / Region fields (.clm-readonly-box)
+  - Table min-width reduced to 1300px (14 columns, no Zone / Region)
+*/
+@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+/* ---------- Page ---------- */
+.clm-pf { color: #1a1a1a; }
+.clm-portfolio-overview { padding-bottom: 24px; }
+.clm-initial-loader { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 100px 20px; text-align: center; }
+.clm-initial-loader i { color: #1a1a1a; }
+.clm-initial-loader h3 { margin: 20px 0 6px; font-size: 18px; font-weight: 700; color: #1a1a1a; }
+.clm-initial-loader p { margin: 0; font-size: 13px; color: #5a6a7a; }
+.is-busy { opacity: .6; pointer-events: none; }
+.clm-pf-body { transition: opacity .3s; }
+
+/* ---------- Section (tinted background panel) ---------- */
+.clm-pf-section { margin: 0 0 18px; padding: 18px 20px 20px; background: #f4f4f1; border: 1px solid #e0e6ed; border-radius: 10px; }
+.clm-section-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 14px;
+  font-size: 14px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; letter-spacing: 1px; }
+.clm-section-num { width: 26px; height: 26px; border-radius: 50%; background: #F3D54E; color: #1a1a1a;
+  font-size: 13px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.clm-section-sub { font-size: 12px; font-weight: 400; color: #5a6a7a; text-transform: none; letter-spacing: 0; }
+.clm-section-sub::before { content: "\2014"; margin-right: 8px; color: #b0b9c4; }
+
+/* ---------- Card (block) ---------- */
+.clm-block { background: #fff; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden; position: relative; }
+.clm-block-head { display: flex; align-items: center; justify-content: space-between; gap: 10px 20px; flex-wrap: wrap;
+  padding: 14px 20px; background: #fafbfc; border-bottom: 1px solid #dde3ea; }
+.clm-block-title { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 700; color: #1a1a1a;
+  text-transform: uppercase; letter-spacing: .8px; }
+.clm-block-title::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: #F3D54E; flex-shrink: 0; }
+.clm-block-sub { margin: 4px 0 0 14px; font-size: 12px; color: #5a6a7a; }
+.clm-block-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.clm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: #fff;
+  border: 1px solid #dde3ea; border-radius: 12px; font-size: 12px; font-weight: 700; color: #1a1a1a; white-space: nowrap; }
+.clm-chip-k { font-weight: 400; color: #5a6a7a; }
+.clm-tw-body { padding: 16px 18px; }
+
+/* ---------- Filters ---------- */
+.clm-filter-card { margin: 0 0 18px; background: #fff; border: 1px solid #dde3ea; border-radius: 10px; position: relative; z-index: 20; transition: opacity .3s; }
+.clm-filter-head .clm-btn { height: 30px; }
+.clm-filter-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 20px;
+  background: #fafbfc; border-bottom: 1px solid #dde3ea; border-radius: 10px 10px 0 0; }
+.clm-filter-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(140px, .7fr); gap: 14px; padding: 14px 20px 16px; }
+.clm-filter-field { display: flex; flex-direction: column; gap: 6px; margin: 0; font-weight: normal; position: relative; min-width: 0; }
+.clm-filter-label { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-filter-field select { width: 100%; height: 36px; font-size: 13px; color: #1a1a1a; border-radius: 6px; border: 1px solid #cdd4dc;
+  background-color: #fff; padding: 0 10px; outline: none; cursor: pointer; box-shadow: none; transition: border-color .2s; }
+.clm-filter-field select:hover, .clm-filter-field select:focus { border-color: #1a1a1a; }
+
+/* ===================== Multiselect ===================== */
+.clm-multiselect-container { position: relative; width: 100%; }
+.clm-multiselect-trigger { display: flex; align-items: center; justify-content: space-between; width: 100%; height: 36px; padding: 0 10px;
+  font-size: 13px; border: 1px solid #cdd4dc; border-radius: 6px; background: #fff; cursor: pointer; box-sizing: border-box; transition: border-color .2s; }
+.clm-multiselect-trigger:hover { border-color: #1a1a1a; }
+.clm-multiselect-container.open .clm-multiselect-trigger { border-color: #1a1a1a; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.clm-multiselect-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #1a1a1a; flex: 1; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.clm-multiselect-arrow { color: #7f8c9a; font-size: 10px; margin-left: 6px; }
+.clm-multiselect-dropdown { position: absolute; top: 36px; left: 0; right: 0; z-index: 60; background: #fff; border: 1px solid #1a1a1a; border-top: none;
+  border-radius: 0 0 6px 6px; box-shadow: 0 8px 18px rgba(0,0,0,.12); max-height: 290px; display: flex; flex-direction: column; overflow: hidden; }
+.clm-multiselect-actions { display: flex; justify-content: space-between; padding: 7px 10px; border-bottom: 1px solid #e6eaef; background: #fafbfc; }
+.clm-multiselect-actions a { font-size: 12px; color: #1a1a1a; cursor: pointer; font-weight: 700; }
+.clm-multiselect-actions a:hover { text-decoration: underline; }
+.clm-multiselect-search { width: 100%; height: 32px; padding: 0 10px; border: none; border-bottom: 1px solid #e6eaef; font-size: 12px; outline: none; box-sizing: border-box; }
+.clm-multiselect-list { list-style: none; margin: 0; padding: 4px 0; overflow-y: auto; max-height: 190px; }
+.clm-multiselect-list li { display: flex; align-items: flex-start; gap: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer; color: #1a1a1a; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.clm-multiselect-list li:hover { background: #f6f7f9; }
+.clm-multiselect-list li.selected { background: #fffcf0; }
+.clm-dropdown-empty { color: #7f8c9a !important; cursor: default !important; font-style: italic; }
+.clm-checkbox { width: 14px; height: 14px; border: 2px solid #cdd4dc; border-radius: 3px; display: inline-block; flex-shrink: 0; position: relative; margin-top: 2px; background: #fff; }
+.clm-checkbox.checked { background: #1a1a1a; border-color: #1a1a1a; }
+.clm-checkbox.checked::after { content: ''; position: absolute; left: 3px; top: 0; width: 4px; height: 7px; border: solid #F3D54E; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.clm-readonly-box { display: flex; align-items: center; width: 100%; height: 36px; padding: 0 10px; box-sizing: border-box; font-size: 13px;
+  border: 1px dashed #cdd4dc; border-radius: 6px; background: #f6f7f9; color: #1a1a1a; cursor: not-allowed; user-select: none; overflow: hidden; }
+.clm-readonly-box.clm-readonly-empty { color: #7f8c9a; font-style: italic; }
+.clm-ro-lock { margin-left: 4px; font-size: 10px; color: #9aa5b1; }
+.clm-multiselect-item-text { font-size: 13px; color: #1a1a1a; line-height: 1.3; white-space: normal; word-break: break-word; }
+
+/* ---------- KPI tiles ---------- */
+.clm-pf-tiles { display: grid; gap: 14px; }
+.clm-pf-tiles-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.clm-pf-tiles-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.clm-pf-tiles-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.clm-pf-tiles-6 .clm-pf-tile-v { font-size: 24px; }
+.clm-pf-tile { box-sizing: border-box; position: relative; display: flex; flex-direction: column; gap: 6px; min-height: 108px; padding: 14px 16px 30px;
+  background: #fff; border: 1px solid #dde3ea; border-top: 4px solid #cdd4dc; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  transition: background-color .2s, box-shadow .2s, border-color .2s; }
+.clm-pf-section &gt; .clm-pf-tiles .clm-pf-tile { min-height: 128px; }
+.clm-tw-body .clm-pf-tile { background: #fafbfc; box-shadow: none; min-height: 0; padding-bottom: 14px; }
+.clm-pf-tile.edge-green  { border-top-color: #27ae60; }
+.clm-pf-tile.edge-orange { border-top-color: #E87722; }
+.clm-pf-tile.edge-red    { border-top-color: #E23D28; }
+.clm-pf-tile-k { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; padding-right: 22px; }
+.clm-pf-tile-v { font-size: 26px; font-weight: 700; line-height: 1.15; color: #1a1a1a; white-space: nowrap; }
+.clm-pf-tile-hint { font-size: 11px; color: #7f8c9a; }
+.v-green  { color: #1e8449; }
+.v-orange { color: #c95f0e; }
+.v-red    { color: #c0392b; }
+.clm-pf-tile.is-click { cursor: pointer; }
+.clm-pf-tile.is-click:hover { border-color: #c9d1db; border-top-color: inherit; box-shadow: 0 3px 10px rgba(0,0,0,.08); }
+.clm-pf-tile.edge-green.is-click:hover  { border-top-color: #27ae60; }
+.clm-pf-tile.edge-orange.is-click:hover { border-top-color: #E87722; }
+.clm-pf-tile.is-active, .clm-tw-body .clm-pf-tile.is-active { background: #fffcf0; border-color: #F3D54E; box-shadow: 0 0 0 2px rgba(243,213,78,.45); }
+.clm-pf-tile.edge-green.is-active  { border-top-color: #27ae60; }
+.clm-pf-tile.edge-orange.is-active { border-top-color: #E87722; }
+.clm-kpi-info { position: absolute; top: 12px; right: 12px; color: #7f8c9a; font-size: 15px; cursor: pointer; transition: color .2s, transform .2s; }
+.clm-pf-tile.is-click:hover .clm-kpi-info, .clm-kpi-info:hover { color: #1a1a1a; transform: scale(1.1); }
+.clm-pf-util-bar { height: 5px; border-radius: 3px; background: #e6eaef; overflow: hidden; margin-top: 2px; }
+.clm-pf-util-fill { height: 100%; border-radius: 3px; background: #27ae60; transition: width .4s; }
+
+/* Live Data marker (kept on the same tiles) */
+.clm-tile-subtitle { position: absolute; right: 12px; bottom: 10px; display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px; border-radius: 10px; background: #eaf7ee; border: 1px solid #b9e3c6;
+  font-size: 10.5px; font-weight: 700; color: #1e8449; text-transform: uppercase; letter-spacing: .5px; }
+.clm-live-dot { width: 6px; height: 6px; border-radius: 50%; background: #27ae60; box-shadow: 0 0 0 0 rgba(39,174,96,.6); animation: clmLivePulse 1.8s infinite; }
+@keyframes clmLivePulse { 0% { box-shadow: 0 0 0 0 rgba(39,174,96,.55); } 70% { box-shadow: 0 0 0 6px rgba(39,174,96,0); } 100% { box-shadow: 0 0 0 0 rgba(39,174,96,0); } }
+
+/* Section 2 split: Outstanding (wide) + Risk (narrow) */
+.clm-pf-split { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; }
+
+/* ---------- Charts ---------- */
+.clm-chart-card { margin: 0; }
+.clm-chart-card + .clm-charts-row { margin-top: 16px; }
+.clm-trend-body { padding: 14px 18px 8px; width: 100%; box-sizing: border-box; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.clm-trend-svg { display: block; width: 100% !important; min-width: 680px; height: auto !important; max-height: none !important; aspect-ratio: 1550 / 300; overflow: visible; }
+.clm-trend-area { fill: rgba(232,119,34,.10); }
+.clm-trend-line { fill: none; stroke: #E87722; stroke-width: 2.5px; stroke-linejoin: round; }
+.clm-trend-dot { fill: #fff; stroke: #E87722; stroke-width: 2.5px; cursor: pointer; pointer-events: all; }
+.clm-trend-dot:hover { fill: #E87722; }
+.clm-trend-dot.last { fill: #E87722; stroke: #fff; stroke-width: 2px; }
+.clm-trend-grid line { stroke: #e6eaef; stroke-dasharray: 4 4; stroke-width: 1px; }
+.clm-axis-line { stroke: #c9d1db; stroke-width: 1.5px; }
+.clm-trend-yaxis text { font-size: 12px; fill: #5a6a7a; }
+.clm-trend-xaxis text { font-size: 12px; font-weight: 700; fill: #3a4451; }
+.clm-trend-vals text { font-size: 12px; font-weight: 700; fill: #3a4451; }
+.clm-trend-vals text.last { fill: #c95f0e; font-size: 13px; }
+.clm-trend-axis-title { font-size: 12px; font-weight: 700; fill: #3a4451; }
+
+.clm-charts-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.clm-chart-half { margin: 0; }
+.clm-charts-row .clm-chart-wrapper { position: relative; height: 280px; width: 100%; padding: 14px 16px 4px; box-sizing: border-box; }
+.clm-charts-row .clm-chart-wrapper canvas { width: 100% !important; height: 100% !important; }
+.clm-ageing-legend { display: flex; justify-content: center; gap: 8px 20px; flex-wrap: wrap; padding: 10px 16px 14px; border-top: 1px solid #eef1f5; margin-top: 6px; }
+.clm-legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #3a4451; font-weight: 700; }
+.clm-legend-color { width: 12px; height: 12px; border-radius: 3px; display: inline-block; flex-shrink: 0; }
+.clm-legend-line { width: 18px; height: 3px; border-radius: 2px; display: inline-block; flex-shrink: 0; }
+.clm-chart-empty { text-align: center; color: #7f8c9a; padding: 20px; font-style: italic; }
+.clm-chart-loader { position: absolute; top: 56px; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,.75);
+  display: flex; align-items: center; justify-content: center; z-index: 10; }
+.clm-chart-loader i { color: #7f8c9a !important; font-size: 18px !important; }
+
+/* ---------- Table card ---------- */
+.clm-table-container { transition: opacity .3s; }
+.clm-chip-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 12px 20px; border-bottom: 1px solid #e6eaef; }
+.clm-qf { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 13px; font-size: 12px; font-weight: 700; color: #3a4451;
+  background: #fff; border: 1px solid #dde3ea; border-radius: 16px; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
+.clm-qf:hover { border-color: #9aa5b1; background: #fafbfc; }
+.clm-qf .clm-qf-count { padding: 1px 8px; border-radius: 10px; background: #eef1f5; color: #1a1a1a; font-size: 11px; }
+.clm-qf.qf-red i    { color: #E23D28; }
+.clm-qf.qf-orange i { color: #E87722; }
+.clm-qf.qf-blue i   { color: #2e86c1; }
+.clm-qf.qf-purple i { color: #6a3fb5; }
+.clm-qf.qf-green i  { color: #27ae60; }
+.clm-qf.active { background: #1a1a1a; border-color: #1a1a1a; color: #F3D54E; }
+.clm-qf.active i { color: #F3D54E !important; }
+.clm-qf.active .clm-qf-count { background: #F3D54E; color: #1a1a1a; }
+.clm-qf-sort { margin-left: 2px; padding-left: 7px; border-left: 1px solid #dde3ea; }
+.clm-qf-select { height: 32px; padding: 0 12px; font-size: 12px; font-weight: 700; color: #3a4451; background: #fff; border: 1px solid #dde3ea;
+  border-radius: 16px; outline: none; cursor: pointer; margin-left: auto; }
+.clm-qf-select:hover, .clm-qf-select:focus { border-color: #1a1a1a; }
+
+.clm-filters-transition-wrapper { max-height: 200px; overflow: hidden; opacity: 1; padding: 10px 20px; background: #fffcf0; border-bottom: 1px solid #f1e2a0;
+  transition: max-height .35s ease, opacity .35s ease, padding .35s ease; }
+.clm-filters-transition-wrapper.collapsing { max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; border-bottom: none; }
+.clm-active-filters-inline { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.clm-af-label { font-size: 12px; font-weight: 700; color: #3a4451; margin-right: 2px; }
+.clm-filter-chip { display: inline-flex; align-items: center; gap: 6px; background: #fff; border: 1px solid #e6d58a; border-radius: 12px; padding: 3px 10px;
+  font-size: 12px; font-weight: 700; color: #1a1a1a; white-space: nowrap; animation: fadeInChip .25s ease; }
+@keyframes fadeInChip { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.clm-filter-chip i { cursor: pointer; color: #7f8c9a; font-size: 11px; }
+.clm-filter-chip i:hover { color: #E23D28; }
+.clm-clear-all-inline { background: #fff; border: 1px solid #f5c2bc; border-radius: 12px; padding: 3px 10px; font-size: 12px; font-weight: 700; color: #c0392b;
+  cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.clm-clear-all-inline:hover { background: #fef5f4; }
+
+.clm-table-toolbar-top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 20px; border-bottom: 1px solid #e6eaef; }
+.clm-search-box { position: relative; display: flex; align-items: center; flex: 1; max-width: 380px; min-width: 220px; }
+.clm-search-box i { position: absolute; left: 12px; color: #7f8c9a; font-size: 13px; }
+.clm-search-box input { width: 100%; height: 36px; padding: 0 10px 0 34px; border: 1px solid #cdd4dc; border-radius: 6px; font-size: 13px; outline: none; transition: border-color .2s; }
+.clm-search-box input:focus { border-color: #1a1a1a; }
+.clm-table-controls-right { display: flex; align-items: center; gap: 8px; margin-left: auto; font-size: 12px; color: #3a4451; }
+.clm-table-controls-right select { height: 34px; padding: 0 8px; border: 1px solid #cdd4dc; border-radius: 6px; background: #fff; outline: none; cursor: pointer; font-size: 13px; }
+.clm-rows-label { margin-left: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; }
+.clm-btn { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px;
+  border-radius: 6px; cursor: pointer; transition: all .2s ease; white-space: nowrap; }
+.clm-btn-csv { background: #fff; color: #1e8449; border: 1px solid #b9e3c6; }
+.clm-btn-csv:hover { background: #eaf7ee; border-color: #27ae60; }
+.clm-btn-export { background: #1a1a1a; color: #F3D54E; border: 1px solid #1a1a1a; }
+.clm-btn-export:hover:not(:disabled) { background: #333; }
+.clm-btn-export:disabled { background: #cdd4dc; border-color: #cdd4dc; color: #fff; cursor: not-allowed; }
+
+/* ---------- Data table ---------- */
+.clm-table-wrapper { max-height: 520px; overflow: auto; -webkit-overflow-scrolling: touch; width: 100%; transition: opacity .3s; }
+.clm-table { width: 100%; min-width: 1300px; border-collapse: separate; border-spacing: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+.clm-table th { position: sticky; z-index: 10; background: #eef1f5; color: #2b3440; padding: 0 12px; height: 40px; box-sizing: border-box;
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; text-align: center; white-space: nowrap;
+  border-bottom: 1px solid #dde3ea; border-right: 1px solid #dde3ea; vertical-align: middle; }
+.clm-table thead tr.super th { top: 0; height: 36px; letter-spacing: 1px; }
+.clm-table thead tr.cols th { top: 36px; border-bottom: 2px solid #c9d1db; }
+.clm-table th.bg-code   { background: #e3eefa; color: #0b5394; }
+.clm-table th.bg-pan    { background: #fdf3e1; color: #a35400; }
+.clm-table th.bg-seg    { background: #f1f3f7; color: #3a4451; }
+.clm-table th.bg-assess { background: #efe9f9; color: #6a3fb5; }
+.clm-table td { padding: 11px 12px; color: #1a1a1a; text-align: center; white-space: nowrap; vertical-align: middle;
+  border-bottom: 1px solid #e6eaef; border-right: 1px solid #eef1f5; background: #fff; }
+.clm-table tr &gt; :last-child { border-right: 0; }
+.clm-table tbody tr:nth-child(even) td { background: #fbfcfd; }
+.clm-table tbody tr:hover td { background: #fffcf0; }
+.clm-table thead tr.cols th:first-child, .clm-table td:first-child { text-align: left; }
+.clm-table td.num { text-align: right; }
+.clm-table td.clm-loc { text-align: left; }
+.clm-cust-cell { min-width: 230px; max-width: 300px; white-space: normal !important; }
+.clm-cust-link { display: block; text-decoration: none !important; cursor: pointer; }
+.clm-cust-name { display: block; font-weight: 700; color: #0b5394; line-height: 1.3;
+  text-decoration: underline; text-decoration-color: #9cc3e6; text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+.clm-cust-code { display: block; margin-top: 2px; font-size: 12px; font-weight: 600; color: #5a6a7a; }
+.clm-cust-go { display: inline-flex; align-items: center; gap: 4px; margin-top: 5px; padding: 1px 8px; border-radius: 10px;
+  background: #e3eefa; border: 1px solid #bcd2ec; color: #0b5394; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; }
+.clm-cust-go .fa { font-size: 9px; }
+.clm-cust-link:hover .clm-cust-name { color: #073b6b; text-decoration-color: #0b5394; }
+.clm-cust-link:hover .clm-cust-go { background: #0b5394; border-color: #0b5394; color: #fff; }
+.clm-code { font-weight: 700; color: #1a1a1a; letter-spacing: .3px; }
+.clm-sub-code { display: block; font-size: 11px; color: #7f8c9a; margin-top: 2px; }
+.clm-empty-row { text-align: center !important; padding: 34px !important; color: #5a6a7a !important; font-size: 13px; }
+.clm-strong { font-weight: 700; }
+.clm-od90 { color: #c0392b; font-weight: 700; }
+.clm-util { display: inline-flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.clm-mini-progress { width: 40px; height: 5px; background: #e6eaef; border-radius: 3px; overflow: hidden; }
+.clm-mini-fill { height: 100%; border-radius: 3px; background: currentColor; }
+
+/* pills */
+.clm-pill-status { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11.5px; font-weight: 700; border: 1px solid #dde3ea; background: #f6f7f9; color: #3a4451; }
+.status-approved  { background: #eaf7ee; color: #1e8449; border-color: #b9e3c6; }
+.status-submitted { background: #e8f2fa; color: #2e86c1; border-color: #bcd8ee; }
+.status-active    { background: #f1f3f7; color: #1a1a1a; border-color: #dde3ea; }
+.status-rejected  { background: #fdecea; color: #b3261e; border-color: #f5c2bc; }
+.seg-cement { background: #fff8e1; color: #7a5a00; border-color: #f3d54e; }
+.seg-bpd    { background: #fdf3e1; color: #a35400; border-color: #f6d39a; }
+.seg-rmc    { background: #e3eefa; color: #0b5394; border-color: #bcd2ec; }
+.clm-hg-yes { background: #eaf7ee; color: #1e8449; border-color: #b9e3c6; }
+.clm-hg-no  { background: #f6f7f9; color: #7f8c9a; border-color: #e6eaef; }
+.clm-risk-pill { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11.5px; font-weight: 700; background: #f6f7f9; color: #5a6a7a; border: 1px solid #e6eaef; }
+.clm-risk-pill.clm-text-red    { background: #fdecea; border-color: #f5c2bc; }
+.clm-risk-pill.clm-text-orange { background: #fff4e0; border-color: #f6d39a; }
+.clm-risk-pill.clm-text-green  { background: #eaf7ee; border-color: #b9e3c6; }
+.clm-text-red    { color: #c0392b !important; font-weight: 700; }
+.clm-text-orange { color: #c95f0e !important; font-weight: 700; }
+.clm-text-green  { color: #1e8449 !important; font-weight: 700; }
+
+/* footer */
+.clm-table-footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 20px; background: #fafbfc; border-top: 1px solid #dde3ea; }
+.clm-showing { font-size: 12px; color: #5a6a7a; }
+.clm-showing b { color: #1a1a1a; }
+.clm-page-numbers { display: flex; gap: 4px; margin-left: auto; }
+.clm-page-btn { min-width: 32px; height: 32px; padding: 0 8px; background: #fff; border: 1px solid #cdd4dc; border-radius: 6px; color: #3a4451; font-size: 12px; font-weight: 700;
+  cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.clm-page-btn:hover:not(:disabled) { border-color: #1a1a1a; }
+.clm-page-btn.active { background: #1a1a1a; border-color: #1a1a1a; color: #F3D54E; }
+.clm-page-btn:disabled { color: #b0b9c4; background: #f6f7f9; border-color: #e6eaef; cursor: not-allowed; }
+
+/* ---------- Responsive ---------- */
+@media (max-width: 1600px) {
+  .clm-pf-tiles-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 1280px) {
+  .clm-pf-split { grid-template-columns: 1fr; }
+}
+@media (max-width: 1100px) {
+  .clm-filter-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .clm-pf-tiles-4, .clm-pf-tiles-6 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .clm-charts-row { grid-template-columns: 1fr; }
+}
+@media (max-width: 768px) {
+  .clm-pf-section { padding: 14px 12px; }
+  .clm-qf-select { margin-left: 0; }
+  .clm-search-box { max-width: none; flex-basis: 100%; }
+  .clm-table-controls-right { margin-left: 0; flex-wrap: wrap; }
+}
+@media (max-width: 640px) {
+  .clm-filter-row, .clm-pf-tiles-4, .clm-pf-tiles-6, .clm-pf-tiles-2 { grid-template-columns: 1fr; }
+  .clm-pf-tile-v { font-size: 22px; }
+  .clm-pf-section &gt; .clm-pf-tiles .clm-pf-tile { min-height: 92px; }
+  .clm-section-sub { flex-basis: 100%; }
+  .clm-section-sub::before { display: none; }
+  .clm-charts-row .clm-chart-wrapper { height: 240px; padding: 10px 8px 4px; }
+  .clm-table-footer { justify-content: center; }
+  .clm-page-numbers { margin-left: 0; flex-wrap: wrap; }
+}
+
+/* ==========================================
+   --- EXPORT MODE STYLES (PDF SNAPSHOT) ---
+   ========================================== */
+.pdf-export-mode { width: 1920px !important; min-width: 1920px !important; max-width: 1920px !important; padding: 20px !important; background: #fff !important; box-sizing: border-box !important; }
+.pdf-export-mode .clm-filter-card, .pdf-export-mode .clm-table-section, .pdf-export-mode .clm-btn-export, .pdf-export-mode .clm-kpi-info { display: none !important; }
+.pdf-export-mode .clm-pf-tiles-4 { grid-template-columns: repeat(4, 1fr) !important; }
+.pdf-export-mode .clm-pf-tiles-6 { grid-template-columns: repeat(6, 1fr) !important; }
+.pdf-export-mode .clm-pf-tiles-2 { grid-template-columns: repeat(2, 1fr) !important; }
+.pdf-export-mode .clm-pf-split { grid-template-columns: 2fr 1fr !important; }
+.pdf-export-mode .clm-charts-row { grid-template-columns: 1fr 1fr !important; }
+.pdf-export-mode .clm-live-dot { animation: none !important; }
+.pdf-export-mode .clm-trend-svg { min-width: 0 !important; }
+
+/* ==========================================
+   --- FULL-SCREEN LOADING OVERLAY ---
+   ========================================== */
+.pdf-loading-overlay { position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; width: 100vw !important; height: 100vh !important;
+  background: rgba(255,255,255,.95) !important; z-index: 2147483647 !important; display: flex !important; flex-direction: column !important;
+  align-items: center !important; justify-content: center !important; color: #1a1a1a !important; backdrop-filter: blur(4px); }
+.pdf-spinner-box { text-align: center; }
+.pdf-loading-text { font-size: 22px; font-weight: 700; margin-top: 20px; color: #1a1a1a; }
+.pdf-loading-sub { font-size: 13px; color: #5a6a7a; margin-top: 8px; }
+
+/* ---------- Access Restricted ---------- */
+.clm-access-denied { max-width: 620px; margin: 40px auto; padding: 32px 28px; text-align: center; background: #fff;
+  border: 1px solid #dde3ea; border-top: 4px solid #E23D28; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+.clm-ad-icon { width: 48px; height: 48px; margin: 0 auto 14px; border-radius: 50%; background: #fdecea; color: #c0392b;
+  display: flex; align-items: center; justify-content: center; font-size: 20px; }
+.clm-ad-title { font-size: 16px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+.clm-ad-text { font-size: 13px; color: #3a4451; line-height: 1.5; }
+.clm-ad-detail { display: inline-block; margin-top: 12px; padding: 4px 10px; border-radius: 12px; background: #f6f7f9; border: 1px solid #e6eaef;
+  font-size: 12px; color: #5a6a7a; }
+
+/* ---------- One font family (keep last) ---------- */
+.clm-widget, .clm-widget *, .clm-widget input, .clm-widget select,
+.clm-widget textarea, .clm-widget button, .clm-widget table, .clm-widget svg text {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}
+.clm-widget .fa { font-family: FontAwesome !important; }
+</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clm_tsh_portfolio</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>clm_portfolio_overview</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[/*
+  CLM TSH Portfolio Overview - Server Script
+  v1.0 - Aligned to the MD/MD1 master KPIs (master v2.2)
+  - kpis action now returns data.kpis.activeSd (de-duplicated current_sd_amount per SAP code, same source as Total Approved Limit)
+  - data.kpis.netExposure = latest-month Outstanding - Active SD (same rule as the master; the latest month is read
+    separately, de-duplicated per SAP code, only when a different Period is selected)
+  - All other TSH logic (role + depot mapping, Zone / Region geo for depots, de-dup aggregation, table / export) unchanged
+*/
+(function() {
+    if (typeof data === 'undefined') return;
+    if (typeof input === 'undefined' || !input) {
+        data.filterOpts = { segments: [], depots: [] };
+        return;
+    }
+
+    var TABLES = {
+        master:      'x_birl3_clm_clm_customer_master1',
+        request:     'x_birl3_clm_clm_new_credit_request',
+        snapshot:    'x_birl3_clm_clm_aging_snapshot',
+        roleMap:     'x_birl3_clm_role_user_mapping',
+        salesData:   'x_birl3_clm_clm_cement_rmc_bpd_values',
+        salesVolume: 'x_birl3_clm_clm_sales_data'
+    };
+
+    // ===== ZONE / REGION FIELD NAMES ON THE CUSTOMER MASTER TABLE =====
+    // >>> CHANGE THESE if your column names are different <<<
+    var ZONE_CODE_FIELD   = 'zone_code';
+    var ZONE_NAME_FIELD   = 'zone_name';
+    var REGION_CODE_FIELD = 'region_code';
+    var REGION_NAME_FIELD = 'region_name';
+
+    var AUTHORIZED_ROLES = ['TSH', 'TSM', 'TSH_BPD'];
+    var ROLE_SEGMENT_MAP = {
+        'TSH': 'Cement',
+        'TSM': 'RMC',
+        'TSH_BPD': 'BPD'
+    };
+
+    var SALES_FIELDS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    var BUCKETS = ['bucket_0_30_days', 'bucket_31_45_days', 'bucket_46_60_days', 'bucket_61_75_days', 'bucket_76_90_days', 'bucket_91_120_days', 'bucket_gt120_days'];
+    var HIGH_GROWTH_THRESHOLD_PCT = 110;
+    var MAX_EXPORT_ROWS = 5000;
+    var MAX_PAGE_ROWS = 200;
+
+    var MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var MONTH_ABBR  = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+
+    function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+    function firstOfMonth(y, m) { var d = new Date(y, m, 1); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-01'; }
+    function fastNum(v) {
+        if (!v) return 0;
+        var n = parseFloat(v.toString().replace(/,/g, ''));
+        return isNaN(n) ? 0 : n;
+    }
+    function monthFieldName(year, month) { return MONTH_ABBR[month]; }
+
+    // ================= DEDUPLICATING AGGREGATOR =================
+    // Dedups strictly by the SAP Customer Code string, ensuring true per-customer calculation
+    function aggSums(table, fields, opts) {
+        opts = opts || {};
+        var out = {};
+        
+        var gr = new GlideRecord(table);
+        if (opts.scope) opts.scope(gr);
+        if (opts.extra) opts.extra(gr);
+        
+        // Order by snapshot month (if applicable), then sys_created_on to get the absolute latest
+        if (table === TABLES.snapshot) {
+            gr.orderByDesc('snapshot_month');
+        }
+        var dateField = opts.dateField || 'sys_created_on';
+        gr.orderByDesc(dateField);
+        gr.query();
+        
+        var seen = {};
+        while (gr.next()) {
+            var gKey = opts.groupBy ? String(gr.getValue(opts.groupBy) || '').substring(0, 7) : '_all';
+            
+            // Extract the actual SAP code string instead of the sys_id
+            var sapCode = '';
+            if (table === TABLES.master) {
+                sapCode = gr.getValue('customer_code_sap') || gr.getUniqueValue();
+            } else if (table === TABLES.snapshot || table === TABLES.request) {
+                sapCode = gr.customer.customer_code_sap.toString() || gr.getValue('customer');
+            } else if (table.indexOf('sales') > -1) {
+                sapCode = gr.u_customer.customer_code_sap.toString() || gr.getValue('u_customer');
+            } else {
+                sapCode = gr.getUniqueValue();
+            }
+            
+            var uniqKey = gKey + '_' + sapCode;
+            
+            // If we have already seen this SAP code for this group, skip it entirely
+            if (seen[uniqKey]) continue;
+            seen[uniqKey] = true;
+            
+            if (!out[gKey]) {
+                out[gKey] = {};
+                fields.forEach(function(b) { out[gKey][b] = 0; });
+                out[gKey]._count = 0;
+            }
+            out[gKey]._count++;
+            
+            fields.forEach(function(base) {
+                var actual = gr.isValidField(base) ? base : (gr.isValidField('u_' + base) ? 'u_' + base : null);
+                if (actual) {
+                    out[gKey][base] += fastNum(gr.getValue(actual));
+                }
+            });
+        }
+        return out;
+    }
+    data.error = '';
+    data.accessDenied = false;
+
+    try { run(); }
+    catch (e) {
+        gs.error('CLM TSH Portfolio widget error: ' + e + ' | ' + (e && e.stack));
+        data.error = 'Server error: ' + (e && e.message ? e.message : e);
+    }
+
+    function run() {
+        var f = (input && input.filters) ? input.filters : {};
+        function normalizeArray(val) {
+            if (typeof val === 'string') { try { val = JSON.parse(val); } catch (e) { val = val ? [val] : []; } }
+            if (!Array.isArray(val)) val = val ? [val] : [];
+            return val;
+        }
+        f.segments = normalizeArray(f.segments); 
+        f.depots = normalizeArray(f.depots);
+
+        var action = (input && input.action) || 'kpis';
+
+        // ---------- TSH ROLE & DEPOT MAPPING ----------
+        var allowedSet = {};
+        var allowedDepotSet = {};
+        
+        var grUserRoles = new GlideRecord(TABLES.roleMap);
+        grUserRoles.addQuery('u_user', gs.getUserID());
+        grUserRoles.addQuery('u_role', 'IN', AUTHORIZED_ROLES);
+        grUserRoles.query();
+        
+        while (grUserRoles.next()) {
+            var rv = String(grUserRoles.getValue('u_role') || '').toUpperCase().trim();
+            if (ROLE_SEGMENT_MAP[rv]) {
+                allowedSet[ROLE_SEGMENT_MAP[rv]] = true;
+                var d = grUserRoles.getValue('u_depot');
+                if (d) {
+                    var dArr = String(d).split(',');
+                    dArr.forEach(function(dep) {
+                        var t = dep.trim();
+                        if(t) allowedDepotSet[t] = true;
+                    });
+                }
+            }
+        }
+        
+        var allowedSegments = Object.keys(allowedSet);
+        var allowedDepots = Object.keys(allowedDepotSet);
+        
+        if (!allowedSegments.length || !allowedDepots.length) { 
+            data.error = 'Access denied: You are either not mapped to a valid TSH role or lack valid depot mappings.'; 
+            data.accessDenied = true; 
+            return; 
+        }
+
+        var pm = /^(\d{4})-(\d{2})$/.exec(f.period || '');
+        var pYear, pMonth;
+        if (pm) { pYear = parseInt(pm[1], 10); pMonth = parseInt(pm[2], 10) - 1; }
+        else { var nowF = new Date(); var lm = new Date(nowF.getFullYear(), nowF.getMonth() - 1, 1); pYear = lm.getFullYear(); pMonth = lm.getMonth(); }
+        var periodStart = firstOfMonth(pYear, pMonth);
+        var periodNext  = firstOfMonth(pYear, pMonth + 1);
+        var monthSalesFieldName = monthFieldName(pYear, pMonth);
+
+        // Core Scoping Logic
+        var activeSegments = f.segments.length ? f.segments.filter(function(s) { return allowedSegments.indexOf(s) > -1; }) : allowedSegments;
+        if (!activeSegments.length) activeSegments = allowedSegments;
+        
+        var activeDepots = f.depots.length ? f.depots.filter(function(d) { return allowedDepots.indexOf(d) > -1; }) : allowedDepots;
+        if (!activeDepots.length) activeDepots = allowedDepots;
+
+        function applyScope(gr, prefix) {
+            prefix = prefix || '';
+            gr.addQuery(prefix + 'segment', 'IN', activeSegments.join(','));
+            gr.addQuery(prefix + 'depot', 'IN', activeDepots.join(','));
+            gr.addQuery(prefix + 'cg1', 'T00');
+        }
+
+        function populateFilterOptions() {
+            var opts = { segments: [], depots: [] };
+            function fetchDistinct(field, nameField, targetArray, filterFn) {
+                var ga = new GlideAggregate(TABLES.master);
+                ga.addQuery('cg1', 'T00');
+                ga.addQuery('segment', 'IN', allowedSegments.join(','));
+                ga.addQuery('depot', 'IN', allowedDepots.join(','));
+                if (filterFn) filterFn(ga);
+                ga.groupBy(field);
+                if (nameField) ga.groupBy(nameField);
+                ga.query();
+                var uniqueMap = {};
+                while (ga.next()) {
+                    var val = ga.getValue(field);
+                    if (val && !uniqueMap[val]) {
+                        uniqueMap[val] = true;
+                        var lbl = nameField ? (ga.getValue(nameField) || val) : (ga.getDisplayValue(field) || val);
+                        targetArray.push({ label: lbl, value: val });
+                    }
+                }
+                targetArray.sort(function(a, b) { return String(a.label).localeCompare(String(b.label)); });
+            }
+
+            // Depots WITH their zone / region mapping (used for the read-only Zone & Region fields)
+            function fetchDepotsWithGeo(targetArray) {
+                var probe = new GlideRecord(TABLES.master);
+                var hasZoneCode   = probe.isValidField(ZONE_CODE_FIELD);
+                var hasZoneName   = probe.isValidField(ZONE_NAME_FIELD);
+                var hasRegionCode = probe.isValidField(REGION_CODE_FIELD);
+                var hasRegionName = probe.isValidField(REGION_NAME_FIELD);
+
+                var ga = new GlideAggregate(TABLES.master);
+                ga.addQuery('cg1', 'T00');
+                ga.addQuery('segment', 'IN', allowedSegments.join(','));
+                ga.addQuery('depot', 'IN', allowedDepots.join(','));
+                if (f.segments && f.segments.length) ga.addQuery('segment', 'IN', activeSegments.join(','));
+                ga.groupBy('depot');
+                ga.groupBy('depot_name');
+                if (hasZoneCode)   ga.groupBy(ZONE_CODE_FIELD);
+                if (hasZoneName)   ga.groupBy(ZONE_NAME_FIELD);
+                if (hasRegionCode) ga.groupBy(REGION_CODE_FIELD);
+                if (hasRegionName) ga.groupBy(REGION_NAME_FIELD);
+                ga.query();
+
+                var depotMap = {};
+                while (ga.next()) {
+                    var val = ga.getValue('depot');
+                    if (!val) continue;
+
+                    // Works for plain string fields and for reference fields (falls back to display value)
+                    var zCode = hasZoneCode   ? (ga.getDisplayValue(ZONE_CODE_FIELD)   || ga.getValue(ZONE_CODE_FIELD)   || '') : '';
+                    var zName = hasZoneName   ? (ga.getDisplayValue(ZONE_NAME_FIELD)   || ga.getValue(ZONE_NAME_FIELD)   || '') : '';
+                    var rCode = hasRegionCode ? (ga.getDisplayValue(REGION_CODE_FIELD) || ga.getValue(REGION_CODE_FIELD) || '') : '';
+                    var rName = hasRegionName ? (ga.getDisplayValue(REGION_NAME_FIELD) || ga.getValue(REGION_NAME_FIELD) || '') : '';
+
+                    if (!depotMap[val]) {
+                        depotMap[val] = {
+                            label: ga.getValue('depot_name') || val,
+                            value: val,
+                            zoneCode: zCode, zoneName: zName,
+                            regionCode: rCode, regionName: rName
+                        };
+                    } else {
+                        // Prefer non-empty mapping if the depot appears on multiple master rows
+                        var dm = depotMap[val];
+                        if (!dm.zoneCode && zCode) dm.zoneCode = zCode;
+                        if (!dm.zoneName && zName) dm.zoneName = zName;
+                        if (!dm.regionCode && rCode) dm.regionCode = rCode;
+                        if (!dm.regionName && rName) dm.regionName = rName;
+                    }
+                }
+                Object.keys(depotMap).forEach(function(k) { targetArray.push(depotMap[k]); });
+                targetArray.sort(function(a, b) { return String(a.label).localeCompare(String(b.label)); });
+            }
+
+            fetchDistinct('segment', null, opts.segments, function(gr){}); 
+            fetchDepotsWithGeo(opts.depots);
+            return opts;
+        }
+
+        // =================================================================
+        // ACTION 1: KPIs & Filters
+        // =================================================================
+        if (action === 'kpis') {
+            if (input.fetchFilters) data.filterOpts = populateFilterOptions();
+
+            var counts = { total: 0, overdue: 0, review15: 0, review30: 0, highRisk: 0, highGrowth: 0, pending: 0, sendBack: 0, rejected: 0, expiring: 0 };
+            var currentYm = pYear + '-' + pad2(pMonth + 1);
+
+            // Fetch Deduplicated Master Sums & Total Customer Count
+            // Total Approved Limit (cr_limit) and Active SD (current_sd_amount) come from the same de-duplicated master pass
+            var masterSums = aggSums(TABLES.master, ['cr_limit', 'current_sd_amount'], { scope: function(gr) { applyScope(gr, ''); } })['_all'] || { cr_limit: 0, current_sd_amount: 0, _count: 0 };
+            counts.total = masterSums._count;
+            var totalLimit = masterSums.cr_limit || 0;
+            var totalActiveSd = masterSums.current_sd_amount || 0;
+
+            // Fetch Deduplicated Snapshot Sums for Target Period Month
+            var snapSums = aggSums(TABLES.snapshot, ['total_outstanding'].concat(BUCKETS), {
+                scope: function(gr) { applyScope(gr, 'customer.'); },
+                extra: function(gr) { gr.addQuery('snapshot_month', '>=', periodStart); gr.addQuery('snapshot_month', '<', periodNext); },
+                groupBy: 'snapshot_month'
+            });
+
+            // Count Unique Customers from Snapshot with specified buckets
+            function countCustomersWith(buckets) {
+                var seen = {};
+                var count = 0;
+                var ga = new GlideRecord(TABLES.snapshot); 
+                applyScope(ga, 'customer.');
+                ga.addQuery('snapshot_month', '>=', periodStart); 
+                ga.addQuery('snapshot_month', '<', periodNext);
+                
+                var q = ga.addQuery(buckets[0], '!=', 0);
+                for (var b = 1; b < buckets.length; b++) { q.addOrCondition(buckets[b], '!=', 0); }
+                
+                ga.orderByDesc('snapshot_month');
+                ga.orderByDesc('sys_created_on'); 
+                ga.query();
+                
+                while (ga.next()) {
+                    // Extract SAP code via dot-walking
+                    var sapCode = ga.customer.customer_code_sap.toString() || ga.getValue('customer');
+                    if (seen[sapCode]) continue;
+                    seen[sapCode] = true;
+                    count++;
+                }
+                return count;
+            }
+            counts.highRisk = countCustomersWith(['bucket_91_120_days', 'bucket_gt120_days']);
+            counts.overdue  = countCustomersWith(BUCKETS);
+
+            var cmap = snapSums[currentYm] || { total_outstanding: 0, bucket_0_30_days: 0, bucket_31_45_days: 0, bucket_46_60_days: 0, bucket_61_75_days: 0, bucket_76_90_days: 0, bucket_91_120_days: 0, bucket_gt120_days: 0 };
+            var totalOutstanding = cmap.total_outstanding;
+            var totalOd90 = cmap.bucket_91_120_days + cmap.bucket_gt120_days;
+            var totalOverdue = cmap.bucket_0_30_days + cmap.bucket_31_45_days + cmap.bucket_46_60_days + cmap.bucket_61_75_days + cmap.bucket_76_90_days + totalOd90;
+
+            // Net Exposure uses the LATEST month's outstanding (same rule as the MD/MD1 master).
+            // If the selected Period is already the latest month, reuse totalOutstanding.
+            var nowLatest = new Date();
+            var dLatest = new Date(nowLatest.getFullYear(), nowLatest.getMonth() - 1, 1);
+            var latestPeriodStart = firstOfMonth(dLatest.getFullYear(), dLatest.getMonth());
+            var latestPeriodNext  = firstOfMonth(dLatest.getFullYear(), dLatest.getMonth() + 1);
+            var latestOutstanding = totalOutstanding;
+            if (periodStart !== latestPeriodStart) {
+                var latestSums = aggSums(TABLES.snapshot, ['total_outstanding'], {
+                    scope: function(gr) { applyScope(gr, 'customer.'); },
+                    extra: function(gr) { gr.addQuery('snapshot_month', '>=', latestPeriodStart); gr.addQuery('snapshot_month', '<', latestPeriodNext); }
+                });
+                latestOutstanding = (latestSums['_all'] && latestSums['_all'].total_outstanding) || 0;
+            }
+
+            // Evaluate Deduplicated Requests
+            var reqSeen = {};
+            var grReq = new GlideRecord(TABLES.request); 
+            applyScope(grReq, 'customer.'); 
+            grReq.orderByDesc('sys_created_on'); 
+            grReq.query();
+            while (grReq.next()) {
+                var cid = grReq.getValue('customer'); 
+                if (reqSeen[cid]) continue;
+                reqSeen[cid] = true;
+                
+                var state = (grReq.getValue('state') || '').toLowerCase();
+                if (state.indexOf('submit') > -1 || state.indexOf('pend') > -1) counts.pending++;
+                if (state.indexOf('send') > -1 || state.indexOf('back') > -1) counts.sendBack++;
+                if (state.indexOf('reject') > -1) counts.rejected++;
+            }
+
+            var rev15Seen = {};
+            var grRev15 = new GlideRecord(TABLES.request); 
+            applyScope(grRev15, 'customer.'); 
+            grRev15.addEncodedQuery('next_review_date>=javascript:gs.beginningOfToday()^next_review_date<=javascript:gs.daysAgoEnd(-15)'); 
+            grRev15.orderByDesc('sys_created_on'); 
+            grRev15.query();
+            while (grRev15.next()) {
+                var rcid = grRev15.getValue('customer');
+                if (rev15Seen[rcid]) continue;
+                rev15Seen[rcid] = true;
+                counts.review15++;
+            }
+            counts.expiring = counts.review15;
+
+            var rev30Seen = {};
+            var grRev30 = new GlideRecord(TABLES.request); 
+            applyScope(grRev30, 'customer.'); 
+            grRev30.addEncodedQuery('next_review_date>=javascript:gs.beginningOfToday()^next_review_date<=javascript:gs.daysAgoEnd(-30)'); 
+            grRev30.orderByDesc('sys_created_on'); 
+            grRev30.query();
+            while (grRev30.next()) {
+                var rcid30 = grRev30.getValue('customer');
+                if (rev30Seen[rcid30]) continue;
+                rev30Seen[rcid30] = true;
+                counts.review30++;
+            }
+
+            var valSums = aggSums(TABLES.salesData, [monthSalesFieldName], { scope: function(gr) { applyScope(gr, 'u_customer.'); } })['_all'] || {};
+            var sumTotalMonthSales = valSums[monthSalesFieldName] || 0;
+
+            var hhiScore = 0;
+            var hhiLabel = 'Less';
+            if (totalOutstanding > 0) {
+                var sumOfSquares = 0;
+                var hhiSeen = {};
+                var gaHHI = new GlideRecord(TABLES.snapshot);
+                applyScope(gaHHI, 'customer.');
+                gaHHI.addQuery('snapshot_month', '>=', periodStart); 
+                gaHHI.addQuery('snapshot_month', '<', periodNext);
+                gaHHI.addQuery('total_outstanding', '>', 0);
+                gaHHI.orderByDesc('sys_created_on');
+                gaHHI.query();
+                while (gaHHI.next()) {
+                    var hcid = gaHHI.getValue('customer');
+                    if (hhiSeen[hcid]) continue;
+                    hhiSeen[hcid] = true;
+
+                    var custOs = fastNum(gaHHI.getValue('total_outstanding'));
+                    var share = (custOs / totalOutstanding) * 100;
+                    sumOfSquares += (share * share);
+                }
+                hhiScore = Math.round(sumOfSquares);
+                if (hhiScore < 1500) hhiLabel = 'Less';
+                else if (hhiScore <= 2500) hhiLabel = 'Moderate';
+                else hhiLabel = 'High';
+            }
+
+            data.counts = counts;
+            data.kpis = { 
+                customerCount: counts.total, limit: totalLimit, outstanding: totalOutstanding, available: totalLimit - totalOutstanding, 
+                utilPct: totalLimit > 0 ? Math.round((totalOutstanding / totalLimit) * 100) : 0, overdueExposure: totalOverdue, od90: totalOd90, 
+                concentrationRisk: hhiScore, concentrationLabel: hhiLabel,
+                activeSd: totalActiveSd,
+                netExposure: latestOutstanding - totalActiveSd, 
+                osSalesRatioSum: sumTotalMonthSales > 0 ? totalOutstanding / sumTotalMonthSales : 0 
+            };
+        }
+
+        // =================================================================
+        // ACTION 2: Charts
+        // =================================================================
+        if (action === 'charts') {
+            var nowC = new Date(); var anchor = new Date(nowC.getFullYear(), nowC.getMonth() - 1, 1); var months = [];
+            for (var i = 5; i >= 0; i--) { var d = new Date(anchor.getFullYear(), anchor.getMonth() - i, 1); months.push({ year: d.getFullYear(), month: d.getMonth() }); }
+            var tStart6 = firstOfMonth(months[0].year, months[0].month); var tEndEx6 = firstOfMonth(months[5].year, months[5].month + 1);
+
+            var snapSums6 = aggSums(TABLES.snapshot, ['total_outstanding'].concat(BUCKETS), {
+                scope: function(gr) { applyScope(gr, 'customer.'); },
+                extra: function(gr) { gr.addQuery('snapshot_month', '>=', tStart6); gr.addQuery('snapshot_month', '<', tEndEx6); },
+                groupBy: 'snapshot_month'
+            });
+            var isAnySnapshotDataFound = Object.keys(snapSums6).length > 0;
+            var av = function(ym, fl) { return (snapSums6[ym] && snapSums6[ym][fl]) || 0; };
+
+            data.trend = { metric: 'outstanding', period: 'static-6m', points: !isAnySnapshotDataFound ? [] : months.map(function(mo) {
+                var ym = mo.year + '-' + pad2(mo.month + 1); 
+                return { label: MONTH_NAMES[mo.month] + ' ' + String(mo.year).slice(-2), value: av(ym, 'total_outstanding') };
+            })};
+
+            data.ageingTrend = { months: !isAnySnapshotDataFound ? [] : months.map(function(mo) {
+                var ym = mo.year + '-' + pad2(mo.month + 1);
+                return { label: MONTH_NAMES[mo.month] + ' ' + String(mo.year).slice(-2), buckets: [
+                        { label: '0-30 Days',  value: av(ym, 'bucket_0_30_days') },
+                        { label: '31-60 Days', value: av(ym, 'bucket_31_45_days') + av(ym, 'bucket_46_60_days') },
+                        { label: '61-90 Days', value: av(ym, 'bucket_61_75_days') + av(ym, 'bucket_76_90_days') },
+                        { label: '>90 Days',   value: av(ym, 'bucket_91_120_days') + av(ym, 'bucket_gt120_days') }
+                ] };
+            })};
+
+            var comboFields = months.map(function(mo) { return MONTH_ABBR[mo.month]; });
+            var valSums6 = aggSums(TABLES.salesData, comboFields, { scope: function(gr) { applyScope(gr, 'u_customer.'); } })['_all'] || {};
+            var volSums6 = aggSums(TABLES.salesVolume, comboFields, { scope: function(gr) { applyScope(gr, 'u_customer.'); } })['_all'] || {};
+            
+            data.salesTrend = { metric: 'combo', points: comboFields.map(function(fl, idx) {
+                var mo = months[idx]; 
+                return { label: MONTH_NAMES[mo.month] + '-' + String(mo.year).slice(-2), value: valSums6[fl] || 0, volume: volSums6[fl] || 0 };
+            })};
+        }
+
+        // =================================================================
+        // ACTION 3: Table (Kept structurally same as requested per customer)
+        // =================================================================
+        if (action === 'table' || action === 'export') {
+            var t = (input && input.table) || {};
+            var tp = {
+                page: Math.max(0, parseInt(t.page, 10) || 0),
+                limit: Math.max(1, Math.min(action === 'export' ? MAX_EXPORT_ROWS : MAX_PAGE_ROWS, parseInt(t.limit, 10) || 10)),
+                search: String(t.search || '').trim(),
+                quick: t.quick || 'all', risk: t.risk || '', kpi: t.kpi || '', largeSort: t.largeSort === 'asc' ? 'asc' : 'desc'
+            };
+            var special = tp.quick !== 'all' || !!tp.risk || !!tp.kpi;
+            var start = tp.page * tp.limit;
+            
+            function applyMasterFilters(gr) {
+                applyScope(gr, '');
+                if (tp.search) {
+                    var qc = gr.addQuery('customer_code_sap', 'CONTAINS', tp.search);
+                    qc.addOrCondition('customer_name', 'CONTAINS', tp.search);
+                    qc.addOrCondition('pan', 'CONTAINS', tp.search);
+                }
+            }
+
+            function loadActivity(ids) {
+                var A = { info: {}, reqMap: {}, snapMap: {}, salesMap: {}, monthSales: {} };
+                if (!ids || ids.length === 0) return A;
+                var segCache = {};
+
+                function scopeOrIds(gr, idField, prefix) { if (ids && ids.length) gr.addQuery(idField, 'IN', ids.join(',')); else applyScope(gr, prefix); }
+
+                var grMaster = new GlideRecord(TABLES.master);
+                grMaster.addQuery('sys_id', 'IN', ids.join(','));
+                grMaster.orderByDesc('sys_created_on'); 
+                grMaster.query();
+                while (grMaster.next()) {
+                    var mid = grMaster.getUniqueValue();
+                    var segRaw = grMaster.getValue('segment') || '';
+                    if (segCache[segRaw] === undefined) segCache[segRaw] = grMaster.getDisplayValue('segment') || segRaw;
+                    
+                    if(!A.info[mid]) {
+                        A.info[mid] = {
+                            sysId: mid, code: grMaster.getValue('customer_code_sap'), name: grMaster.getValue('customer_name'),
+                            pan: grMaster.getValue('pan'), segment: segCache[segRaw],
+                            depotCode: grMaster.getValue('depot'), depotName: grMaster.getValue('depot_name') || grMaster.getValue('depot'),
+                            crLimit: fastNum(grMaster.getValue('cr_limit')), currentSd: fastNum(grMaster.getValue('current_sd_amount'))
+                        };
+                    }
+                }
+
+                var grReq = new GlideRecord(TABLES.request); scopeOrIds(grReq, 'customer', 'customer.'); grReq.orderByDesc('sys_created_on'); grReq.query();
+                while (grReq.next()) {
+                    var cId = grReq.getValue('customer'); if (!cId || A.reqMap[cId]) continue;
+                    A.reqMap[cId] = { grossExp: fastNum(grReq.getValue('net_exposure')), status: grReq.getDisplayValue('state') || 'Active', reviewDate: grReq.getValue('next_review_date'), expectedPotential: fastNum(grReq.getValue('u_tool_expected_potential')) };
+                }
+
+                var grSnap = new GlideRecord(TABLES.snapshot); scopeOrIds(grSnap, 'customer', 'customer.'); grSnap.addQuery('snapshot_month', '>=', periodStart); grSnap.addQuery('snapshot_month', '<', periodNext); grSnap.orderByDesc('sys_created_on'); grSnap.query();
+                while (grSnap.next()) {
+                    var cId2 = grSnap.getValue('customer'); if (!cId2 || A.snapMap[cId2]) continue;
+                    A.snapMap[cId2] = { outst: fastNum(grSnap.getValue('total_outstanding')), lt60: fastNum(grSnap.getValue('bucket_0_30_days')) + fastNum(grSnap.getValue('bucket_31_45_days')) + fastNum(grSnap.getValue('bucket_46_60_days')), d60_90: fastNum(grSnap.getValue('bucket_61_75_days')) + fastNum(grSnap.getValue('bucket_76_90_days')), gt90: fastNum(grSnap.getValue('bucket_91_120_days')) + fastNum(grSnap.getValue('bucket_gt120_days')) };
+                }
+
+                var grSales = new GlideRecord(TABLES.salesData); scopeOrIds(grSales, 'u_customer', 'u_customer.'); grSales.orderByDesc('sys_created_on'); grSales.query();
+                while (grSales.next()) {
+                    var cId3 = grSales.getValue('u_customer'); if (!cId3 || A.salesMap[cId3]) continue;
+                    var sum = 0, cnt = 0;
+                    for (var m = 0; m < SALES_FIELDS.length; m++) {
+                        var raw = grSales.getValue(SALES_FIELDS[m]) || grSales.getValue('u_' + SALES_FIELDS[m]);
+                        if (raw !== null && raw !== '') { sum += fastNum(raw); cnt++; }
+                    }
+                    A.salesMap[cId3] = { avgMonthlySales: cnt > 0 ? sum / cnt : 0 };
+                    var msRaw = grSales.getValue(monthSalesFieldName) || grSales.getValue('u_' + monthSalesFieldName);
+                    A.monthSales[cId3] = fastNum(msRaw);
+                }
+                return A;
+            }
+
+            var gdtToday = new GlideDateTime();
+            function buildRow(info, req, snap, sales, mSales) {
+                sales = sales || { avgMonthlySales: 0 }; mSales = mSales || 0;
+                var limit = info.crLimit || 0; var activeSd = info.currentSd || 0;
+                var outst = snap ? snap.outst : 0; 
+                var od90 = snap ? (snap.gt90 || 0) : 0;
+                var od60_90 = snap ? (snap.d60_90 || 0) : 0;
+                var odLt60 = snap ? (snap.lt60 || 0) : 0;
+
+                var risk = 'No Overdue', riskClass = '';
+                if (od90 !== 0) { 
+                    risk = 'High'; 
+                    riskClass = 'clm-text-red'; 
+                } else if (od60_90 !== 0) { 
+                    risk = 'Medium'; 
+                    riskClass = 'clm-text-orange'; 
+                } else if (odLt60 !== 0) { 
+                    risk = 'Low'; 
+                    riskClass = 'clm-text-green'; 
+                }
+
+                var statusRaw = req ? (req.status || '') : 'Active';
+                var statLower = statusRaw.toLowerCase();
+                var displayStatus = statusRaw, cssClass = 'status-' + statLower.replace(/\s+/g, '-');
+                var isPending = statLower.indexOf('submit') > -1 || statLower.indexOf('pend') > -1;
+                if (isPending) { displayStatus = 'Pending'; cssClass = 'status-submitted'; }
+
+                var reviewDays = '--', reviewColor = '', reviewNum = null;
+                if (req && req.reviewDate) {
+                    try {
+                        reviewNum = GlideDateTime.subtract(gdtToday, new GlideDateTime(req.reviewDate)).getRoundedDayPart();
+                        reviewDays = reviewNum + 'd';
+                        if (reviewNum <= 15) reviewColor = 'clm-text-red';
+                        else if (reviewNum <= 30) reviewColor = 'clm-text-orange';
+                        else reviewColor = 'clm-text-green';
+                    } catch (e) {}
+                }
+
+                var available = limit - outst;
+                var util = limit > 0 ? Math.round((outst / limit) * 100) : 0;
+                var potential = req ? req.expectedPotential : 0;
+                var growthPct = potential > 0 ? (sales.avgMonthlySales / potential) * 100 : 0;
+
+                return {
+                    sysId: info.sysId, code: info.code, name: info.name, pan: info.pan, segment: info.segment,
+                    segmentClass: 'seg-' + (info.segment || 'default').toLowerCase().replace(/\s+/g, '-'),
+                    depotCode: info.depotCode, depotName: info.depotName, status: displayStatus, statusClass: cssClass,
+                    outstanding: outst, limit: limit, available: available, util: util, utilClass: util > 90 ? 'clm-text-red' : (util > 75 ? 'clm-text-orange' : 'clm-text-green'),
+                    od90: od90, risk: risk, riskClass: riskClass, reviewIn: reviewDays, reviewColor: reviewColor, reviewNum: reviewNum,
+                    highGrowth20: (growthPct > HIGH_GROWTH_THRESHOLD_PCT ? 'Yes' : 'No'), 
+                    osSalesRatio: mSales > 0 ? outst / mSales : 0
+                };
+            }
+
+            var pagedIds = [], matchingIds = [];
+
+            if (special) {
+                if (tp.quick === 'highGrowth20') {
+                    var grH = new GlideRecord(TABLES.request); applyScope(grH, 'customer.');
+                    grH.addQuery('u_tool_expected_potential', '>', 0); 
+                    grH.query();
+                    while (grH.next()) matchingIds.push(grH.getValue('customer'));
+                    
+                    var hgRows = [];
+                    if (matchingIds.length) {
+                        var PA_hg = loadActivity(matchingIds);
+                        for (var h = 0; h < matchingIds.length; h++) {
+                            var infoH = PA_hg.info[matchingIds[h]]; if (!infoH) continue;
+                            var rowH = buildRow(infoH, PA_hg.reqMap[matchingIds[h]], PA_hg.snapMap[matchingIds[h]], PA_hg.salesMap[matchingIds[h]], PA_hg.monthSales[matchingIds[h]]);
+                            if (rowH.highGrowth20 === 'Yes') hgRows.push(rowH);
+                        }
+                        hgRows.sort(function(a, b) { return b.avgMonthlySales - a.avgMonthlySales; });
+                        hgRows = hgRows.slice(0, 20);
+                    }
+                    data.tableTotal = hgRows.length;
+                    data.tableData = hgRows.slice(start, start + tp.limit);
+                }
+                else if (tp.quick === 'largeExposure') {
+                    var grLE = new GlideRecord(TABLES.snapshot); 
+                    applyScope(grLE, 'customer.');
+                    grLE.addQuery('snapshot_month', '>=', periodStart); 
+                    grLE.addQuery('snapshot_month', '<', periodNext);
+                    
+                    // Capture negative balances as well
+                    var leQc = grLE.addQuery('bucket_91_120_days', '!=', 0); 
+                    leQc.addOrCondition('bucket_gt120_days', '!=', 0);
+                    
+                    if (tp.search) {
+                        var sqLE = grLE.addQuery('customer.customer_code_sap', 'CONTAINS', tp.search);
+                        sqLE.addOrCondition('customer.customer_name', 'CONTAINS', tp.search);
+                        sqLE.addOrCondition('customer.pan', 'CONTAINS', tp.search);
+                    }
+                    
+                    // Order descending to get the absolute latest snapshot per customer
+                    grLE.orderByDesc('snapshot_month');
+                    grLE.orderByDesc('sys_created_on'); 
+                    grLE.query();
+                    
+                    var leMap = {}, leCustIds = [], seenSapLE = {};
+                    
+                    while (grLE.next()) {
+                        // Extract SAP code to ignore duplicate Master records
+                        var sapCode = grLE.customer.customer_code_sap.toString() || grLE.getValue('customer');
+                        if (seenSapLE[sapCode]) continue;
+                        seenSapLE[sapCode] = true;
+                        
+                        var leCid = grLE.getValue('customer'); // Keep sys_id to load details
+                        if (leCid) {
+                            var totalOverdue90 = fastNum(grLE.getValue('bucket_91_120_days')) + fastNum(grLE.getValue('bucket_gt120_days'));
+                            
+                            if (totalOverdue90 !== 0) {
+                                // Store the absolute value for correct mathematical sorting
+                                leMap[leCid] = {
+                                    raw: totalOverdue90,
+                                    abs: Math.abs(totalOverdue90)
+                                };
+                                leCustIds.push(leCid);
+                            }
+                        }
+                    }
+                    
+                    // Sort by the absolute value (ignoring the minus sign)
+                    leCustIds.sort(function(a, b) { 
+                        return tp.largeSort === 'asc' ? (leMap[a].abs - leMap[b].abs) : (leMap[b].abs - leMap[a].abs); 
+                    });
+                    
+                    data.tableTotal = leCustIds.length;
+                    var pagedLeIds = leCustIds.slice(start, start + tp.limit);
+                    
+                    if (pagedLeIds.length > 0) {
+                        var PA_le = loadActivity(pagedLeIds); 
+                        var leRows = [];
+                        for (var k = 0; k < pagedLeIds.length; k++) {
+                            var infoLE = PA_le.info[pagedLeIds[k]];
+                            if (infoLE) {
+                                leRows.push(buildRow(infoLE, PA_le.reqMap[pagedLeIds[k]], PA_le.snapMap[pagedLeIds[k]], PA_le.salesMap[pagedLeIds[k]], PA_le.monthSales[pagedLeIds[k]]));
+                            }
+                        }
+                        
+                        // Ensure final table rows are sorted by absolute value for display
+                        leRows.sort(function(a, b) { 
+                            return tp.largeSort === 'asc' ? (Math.abs(a.od90) - Math.abs(b.od90)) : (Math.abs(b.od90) - Math.abs(a.od90)); 
+                        });
+                        
+                        data.tableData = leRows;
+                    } else { 
+                        data.tableData = []; 
+                    }
+                }
+                else {
+                    var srcTable = TABLES.snapshot, srcField = 'customer';
+                    var grBase = new GlideRecord(srcTable); applyScope(grBase, 'customer.');
+                    
+                    if (tp.quick === 'overdue' || tp.risk) {
+                        grBase.addQuery('snapshot_month', '>=', periodStart); 
+                        grBase.addQuery('snapshot_month', '<', periodNext);
+                        
+                        if (tp.risk === 'High') {
+                            grBase.addEncodedQuery('bucket_91_120_days!=0^ORbucket_gt120_days!=0');
+                        }
+                        else if (tp.risk === 'Medium') {
+                            grBase.addEncodedQuery('(bucket_61_75_days!=0^ORbucket_76_90_days!=0)^bucket_91_120_days=0^bucket_gt120_days=0');
+                        }
+                        else if (tp.risk === 'Low') {
+                            grBase.addEncodedQuery('(bucket_0_30_days!=0^ORbucket_31_45_days!=0^ORbucket_46_60_days!=0)^bucket_61_75_days=0^bucket_76_90_days=0^bucket_91_120_days=0^bucket_gt120_days=0');
+                        }
+                        else if (tp.risk === 'No Overdue') {
+                            grBase.addEncodedQuery('bucket_0_30_days=0^bucket_31_45_days=0^bucket_46_60_days=0^bucket_61_75_days=0^bucket_76_90_days=0^bucket_91_120_days=0^bucket_gt120_days=0');
+                        }
+                        else if (tp.quick === 'overdue') {
+                            grBase.addEncodedQuery('bucket_0_30_days!=0^ORbucket_31_45_days!=0^ORbucket_46_60_days!=0^ORbucket_61_75_days!=0^ORbucket_76_90_days!=0^ORbucket_91_120_days!=0^ORbucket_gt120_days!=0');
+                        }
+                    }
+                    else if (tp.quick === 'review15' || tp.quick === 'review30' || tp.kpi) {
+                        srcTable = TABLES.request; grBase = new GlideRecord(srcTable); applyScope(grBase, 'customer.');
+                        if (tp.quick === 'review15') grBase.addEncodedQuery('next_review_date>=javascript:gs.beginningOfToday()^next_review_date<=javascript:gs.daysAgoEnd(-15)');
+                        else if (tp.quick === 'review30') grBase.addEncodedQuery('next_review_date>=javascript:gs.beginningOfToday()^next_review_date<=javascript:gs.daysAgoEnd(-30)');
+                    }
+
+                    if (tp.search) { 
+                        var sq = grBase.addQuery('customer.customer_code_sap', 'CONTAINS', tp.search); 
+                        sq.addOrCondition('customer.customer_name', 'CONTAINS', tp.search); 
+                        sq.addOrCondition('customer.pan', 'CONTAINS', tp.search); 
+                    }
+                    
+                    var gaCount = new GlideAggregate(srcTable); gaCount.addEncodedQuery(grBase.getEncodedQuery()); gaCount.addAggregate('COUNT'); gaCount.query();
+                    data.tableTotal = gaCount.next() ? parseInt(gaCount.getAggregate('COUNT'), 10) : 0;
+                    
+                    grBase.chooseWindow(start, start + tp.limit);
+                    grBase.query();
+                    
+                    var uniquePageIds = {};
+                    while (grBase.next()) { 
+                        var cid = grBase.getValue('customer'); 
+                        if (cid && !uniquePageIds[cid]) { uniquePageIds[cid] = true; pagedIds.push(cid); }
+                    }
+
+                    if (pagedIds.length > 0) {
+                        var PA_sp = loadActivity(pagedIds); var rawRows = [];
+                        for (var j = 0; j < pagedIds.length; j++) {
+                            var info = PA_sp.info[pagedIds[j]]; 
+                            if (info) rawRows.push(buildRow(info, PA_sp.reqMap[pagedIds[j]], PA_sp.snapMap[pagedIds[j]], PA_sp.salesMap[pagedIds[j]], PA_sp.monthSales[pagedIds[j]]));
+                        }
+                        data.tableData = rawRows;
+                    }
+                }
+            }
+            else {
+                var gc = new GlideAggregate(TABLES.master); applyMasterFilters(gc); gc.addAggregate('COUNT'); gc.query();
+                data.tableTotal = gc.next() ? (parseInt(gc.getAggregate('COUNT'), 10) || 0) : 0;
+
+                var gm = new GlideRecord(TABLES.master); applyMasterFilters(gm); gm.orderBy('customer_name'); gm.chooseWindow(start, start + tp.limit); gm.query();
+                var pageInfos = [], pageIds = [], pSegCache = {};
+                while (gm.next()) {
+                    var mid = gm.getUniqueValue(); var segRaw = gm.getValue('segment') || '';
+                    if (pSegCache[segRaw] === undefined) pSegCache[segRaw] = gm.getDisplayValue('segment') || segRaw;
+                    pageIds.push(mid);
+                    pageInfos.push({
+                        sysId: mid, code: gm.getValue('customer_code_sap'), name: gm.getValue('customer_name'), pan: gm.getValue('pan'),
+                        segment: pSegCache[segRaw], depotCode: gm.getValue('depot'), depotName: gm.getValue('depot_name') || gm.getValue('depot'),
+                        crLimit: fastNum(gm.getValue('cr_limit')), currentSd: fastNum(gm.getValue('current_sd_amount'))
+                    });
+                }
+                var PA = pageIds.length ? loadActivity(pageIds) : { reqMap: {}, snapMap: {}, salesMap: {}, monthSales: {} };
+                data.tableData = pageInfos.map(function(info) { return buildRow(info, PA.reqMap[info.sysId], PA.snapMap[info.sysId], PA.salesMap[info.sysId], PA.monthSales[info.sysId]); });
+            }
+        }
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>jatin.sharma@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-03 09:28:44</sys_created_on>
+        <sys_id>6bdb54e697fd87d0be31fa17f053af47</sys_id>
+        <sys_mod_count>72</sys_mod_count>
+        <sys_name>clm_portfolio_overview</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_6bdb54e697fd87d0be31fa17f053af47</sys_update_name>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-15 05:55:33</sys_updated_on>
+        <template><![CDATA[<!--
+  CLM TSH Portfolio Overview - HTML Template
+  v1.0 - Aligned to the MD/MD1 master Portfolio Overview UI (master v2.2)
+  - Same layout as the master: Portfolio Filters card (Period chip + Export PDF), then 4 numbered sections
+      1 Credit Limits (6 tiles incl. Active SD + Net Exposure)  2 Exposure & Risk  3 Portfolio Trends  4 Customer Portfolio
+  - TSH-specific behaviour kept:
+      * Access Restricted card (server message) when the user has no TSH role / depot mapping
+      * Filters: Segment + Depot multiselects; Zone and Region are read-only, auto-filled from the selected depots
+      * Segment "Select All / Clear" only when more than one segment is allowed
+      * Table without Zone / Region columns (Location group = Depot), active-filter chips for Segment / Depot only
+  - All ng-* bindings, ids (#cch-dashboard-capture, #clmTableContainer, #md1SalesChart, #md1AgeingChart) unchanged
+-->
+<div ng-cloak class="clm-widget clm-pf">
+
+  <!-- ===================== INITIAL LOADING SCREEN ===================== -->
+  <div class="clm-initial-loader" ng-if="!c.initialLoadComplete && !c.data.accessDenied">
+    <i class="fa fa-spinner fa-spin fa-4x"></i>
+    <h3>Analyzing Portfolio Data</h3>
+    <p>Please wait while we aggregate the latest records...</p>
+  </div>
+
+  <!-- ===================== FULLSCREEN LOADING OVERLAY (PDF Export) ===================== -->
+  <div class="pdf-loading-overlay" ng-if="c.isExporting">
+    <div class="pdf-spinner-box">
+      <i class="fa fa-spinner fa-spin fa-4x"></i>
+      <div class="pdf-loading-text">Generating PDF Report...</div>
+      <div class="pdf-loading-sub">Please do not close this window, formatting in progress.</div>
+    </div>
+  </div>
+
+  <div class="clm-portfolio-overview" id="cch-dashboard-capture" ng-show="c.initialLoadComplete || c.data.accessDenied">
+
+    <!-- ===================== ACCESS DENIED ===================== -->
+    <div class="clm-access-denied" ng-if="c.data.accessDenied">
+      <div class="clm-ad-icon"><i class="fa fa-lock"></i></div>
+      <div class="clm-ad-title">Access Restricted</div>
+      <div class="clm-ad-text">{{c.data.error}}</div>
+    </div>
+
+    <div ng-if="!c.data.accessDenied">
+
+    <!-- ===================== FILTERS ===================== -->
+    <div class="clm-filter-card" ng-class="{'is-busy': c.loading}">
+      <div class="clm-filter-head">
+        <div class="clm-block-title">Portfolio Filters</div>
+        <div class="clm-block-meta">
+          <span class="clm-chip"><span class="clm-chip-k">Period</span> {{c.getPeriodDisplayText()}}</span>
+          <button type="button" class="clm-btn clm-btn-export" ng-click="c.exportToPDF()" ng-disabled="c.isExporting" title="Exports the KPI and chart sections as a PDF">
+            <i class="fa" ng-class="c.isExporting ? 'fa-spinner fa-spin' : 'fa-file-pdf-o'"></i>
+            {{c.isExporting ? 'Generating PDF...' : 'Export PDF'}}
+          </button>
+        </div>
+      </div>
+      <div class="clm-filter-row">
+
+        <!-- SEGMENT (MULTISELECT) -->
+        <label class="clm-filter-field clm-multiselect-field">
+          <span class="clm-filter-label">Segment</span>
+          <div class="clm-multiselect-container" ng-class="{open: c.segmentDropdownOpen}" ng-click="$event.stopPropagation()">
+            <div class="clm-multiselect-trigger" ng-click="c.segmentDropdownOpen ? c.closeSegmentDropdown() : c.openSegmentDropdown()">
+              <span class="clm-multiselect-text">{{c.getSegmentDisplayText()}}</span>
+              <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+            </div>
+            <div class="clm-multiselect-dropdown" ng-if="c.segmentDropdownOpen">
+              <div class="clm-multiselect-actions" ng-if="c.data.filterOpts.segments.length > 1">
+                <a ng-click="c.selectAllSegments()">Select All</a>
+                <a ng-click="c.clearAllSegments()">Clear</a>
+              </div>
+              <input type="text" class="clm-multiselect-search" ng-model="c.segmentSearch" ng-change="c.updateSegmentList()" placeholder="Search segments...">
+              <ul class="clm-multiselect-list">
+                <li ng-repeat="s in c.displaySegments"
+                    ng-click="c.toggleSegment(s)"
+                    ng-class="{selected: c.isSegmentSelected(s)}">
+                  <span class="clm-checkbox" ng-class="{checked: c.isSegmentSelected(s)}"></span>
+                  {{::s.label}}
+                </li>
+                <li class="clm-dropdown-empty" ng-if="c.displaySegments.length === 0">No matches</li>
+              </ul>
+            </div>
+          </div>
+        </label>
+
+        <!-- ZONE (READ-ONLY, AUTO-POPULATED FROM DEPOT) -->
+        <div class="clm-filter-field clm-readonly-field">
+          <span class="clm-filter-label">Zone <i class="fa fa-lock clm-ro-lock" title="Auto-filled from the selected depots"></i></span>
+          <div class="clm-readonly-box" ng-class="{'clm-readonly-empty': !c.hasDepotSelection()}" title="{{c.getZoneTooltip()}}">
+            <span class="clm-multiselect-text">{{c.getZoneDisplayText()}}</span>
+          </div>
+        </div>
+
+        <!-- REGION (READ-ONLY, AUTO-POPULATED FROM DEPOT) -->
+        <div class="clm-filter-field clm-readonly-field">
+          <span class="clm-filter-label">Region <i class="fa fa-lock clm-ro-lock" title="Auto-filled from the selected depots"></i></span>
+          <div class="clm-readonly-box" ng-class="{'clm-readonly-empty': !c.hasDepotSelection()}" title="{{c.getRegionTooltip()}}">
+            <span class="clm-multiselect-text">{{c.getRegionDisplayText()}}</span>
+          </div>
+        </div>
+
+        <!-- DEPOT (MULTISELECT) -->
+        <label class="clm-filter-field clm-multiselect-field">
+          <span class="clm-filter-label">Depot</span>
+          <div class="clm-multiselect-container" ng-class="{open: c.depotDropdownOpen}" ng-click="$event.stopPropagation()">
+            <div class="clm-multiselect-trigger" ng-click="c.depotDropdownOpen ? c.closeDepotDropdown() : c.openDepotDropdown()">
+              <span class="clm-multiselect-text">{{c.getDepotDisplayText()}}</span>
+              <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+            </div>
+            <div class="clm-multiselect-dropdown" ng-if="c.depotDropdownOpen">
+              <div class="clm-multiselect-actions">
+                <a ng-click="c.selectAllDepots()">Select All</a>
+                <a ng-click="c.clearAllDepots()">Clear</a>
+              </div>
+              <input type="text" class="clm-multiselect-search" ng-model="c.depotSearch" ng-change="c.updateDepotList()" placeholder="Search depots...">
+              <ul class="clm-multiselect-list">
+                <li ng-repeat="d in c.displayDepots"
+                    ng-click="c.toggleDepot(d)"
+                    ng-class="{selected: c.isDepotSelected(d)}">
+                  <span class="clm-checkbox" ng-class="{checked: c.isDepotSelected(d)}"></span>
+                  <span class="clm-multiselect-item-text">{{::c.msItemDisplay(d)}}</span>
+                </li>
+                <li class="clm-dropdown-empty" ng-if="c.displayDepots.length === 0">No matches</li>
+              </ul>
+            </div>
+          </div>
+        </label>
+
+        <!-- PERIOD -->
+        <label class="clm-filter-field clm-filter-period">
+          <span class="clm-filter-label">Period</span>
+          <select class="form-control" ng-model="c.filters.period" ng-change="c.onPeriodChange()">
+            <option ng-repeat="p in c.last6Months" value="{{::p.value}}">{{::p.label}}</option>
+          </select>
+        </label>
+
+      </div>
+    </div>
+
+    <div class="clm-pf-body" ng-class="{'is-busy': c.loading}">
+
+      <!-- ===================== SECTION 1: CREDIT LIMITS ===================== -->
+      <div class="clm-pf-section">
+        <div class="clm-section-title">
+          <span class="clm-section-num">1</span>
+          <span>Credit Limits</span>
+          <span class="clm-section-sub">Approved CL, available CL, security deposit, net exposure and upcoming reviews</span>
+        </div>
+
+        <div class="clm-pf-tiles clm-pf-tiles-6">
+          <div class="clm-pf-tile edge-green">
+            <div class="clm-pf-tile-k">Total Approved Limit</div>
+            <div class="clm-pf-tile-v v-green">{{c.data.kpis.fmtLimit}}</div>
+            <div class="clm-tile-subtitle"><span class="clm-live-dot"></span>Live Data</div>
+          </div>
+          <div class="clm-pf-tile edge-green">
+            <div class="clm-pf-tile-k">Available Limit</div>
+            <div class="clm-pf-tile-v v-green">{{c.data.kpis.fmtAvailable}}</div>
+            <div class="clm-tile-subtitle"><span class="clm-live-dot"></span>Live Data</div>
+          </div>
+          <div class="clm-pf-tile edge-green">
+            <div class="clm-pf-tile-k">Utilisation %</div>
+            <div class="clm-pf-tile-v v-green">{{c.data.kpis.utilPct || 0}}%</div>
+            <div class="clm-pf-util-bar"><div class="clm-pf-util-fill" ng-style="{width: c.capPct(c.data.kpis.utilPct) + '%'}"></div></div>
+            <div class="clm-tile-subtitle"><span class="clm-live-dot"></span>Live Data</div>
+          </div>
+          <div class="clm-pf-tile edge-green">
+            <div class="clm-pf-tile-k">Active SD</div>
+            <div class="clm-pf-tile-v v-green">{{c.data.kpis.fmtActiveSd}}</div>
+            <div class="clm-pf-tile-hint">Security deposit held</div>
+            <div class="clm-tile-subtitle"><span class="clm-live-dot"></span>Live Data</div>
+          </div>
+          <div class="clm-pf-tile edge-green">
+            <div class="clm-pf-tile-k">Net Exposure</div>
+            <div class="clm-pf-tile-v v-green">{{c.data.kpis.fmtNetExposure}}</div>
+            <div class="clm-tile-subtitle"><span class="clm-live-dot"></span>Live Data</div>
+          </div>
+          <div class="clm-pf-tile edge-green is-click"
+               ng-click="c.setExpiringKpiFilter()" ng-class="{'is-active': c.quickFilter === 'review15'}">
+            <i class="fa fa-info-circle clm-kpi-info" title="Click to drill down into Expiring ≤15 Days"></i>
+            <div class="clm-pf-tile-k">Expiring &le;15 Days</div>
+            <div class="clm-pf-tile-v v-green">{{c.counts.expiring}}</div>
+            <div class="clm-pf-tile-hint">Click to view customers</div>
+            <div class="clm-tile-subtitle"><span class="clm-live-dot"></span>Live Data</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===================== SECTION 2: EXPOSURE & RISK ===================== -->
+      <div class="clm-pf-section">
+        <div class="clm-section-title">
+          <span class="clm-section-num">2</span>
+          <span>Exposure &amp; Risk</span>
+          <span class="clm-section-sub">Outstanding position for {{c.getPeriodDisplayText()}}</span>
+        </div>
+
+        <div class="clm-pf-split">
+          <div class="clm-block">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Outstanding &amp; Overdue</div>
+                <div class="clm-block-sub">Receivables and overdue amounts across the selected portfolio</div>
+              </div>
+            </div>
+            <div class="clm-tw-body">
+              <div class="clm-pf-tiles clm-pf-tiles-4">
+                <div class="clm-pf-tile edge-orange">
+                  <div class="clm-pf-tile-k">Total Outstanding</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.data.kpis.fmtOutstanding}}</div>
+                </div>
+                <div class="clm-pf-tile edge-orange">
+                  <div class="clm-pf-tile-k">Overdue Exposure</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.data.kpis.fmtOverdue}}</div>
+                </div>
+                <div class="clm-pf-tile edge-orange">
+                  <div class="clm-pf-tile-k">Overdue &gt;90D</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.data.kpis.fmtOd90}}</div>
+                </div>
+                <div class="clm-pf-tile edge-orange">
+                  <div class="clm-pf-tile-k">OS / Sales Ratio</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.data.kpis.fmtRatio}}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="clm-block">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Risk Indicators</div>
+                <div class="clm-block-sub">High-risk customers and concentration</div>
+              </div>
+            </div>
+            <div class="clm-tw-body">
+              <div class="clm-pf-tiles clm-pf-tiles-2">
+                <div class="clm-pf-tile edge-orange is-click"
+                     ng-click="c.setRiskKpiFilter()" ng-class="{'is-active': c.riskFilter === 'High'}">
+                  <i class="fa fa-info-circle clm-kpi-info" title="Click to drill down into High Risk Count"></i>
+                  <div class="clm-pf-tile-k">Risk Classification</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.counts.highRisk}}</div>
+                  <div class="clm-pf-tile-hint">High risk customers</div>
+                </div>
+                <div class="clm-pf-tile edge-orange">
+                  <div class="clm-pf-tile-k">Concentration Risk (HHI)</div>
+                  <div class="clm-pf-tile-v v-orange">{{c.data.kpis.concentrationRisk || 0}} &ndash; {{c.data.kpis.concentrationLabel || 'Less'}}</div>
+                  <div class="clm-pf-tile-hint">&lt;1500 Less &middot; &le;2500 Moderate</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===================== SECTION 3: TRENDS ===================== -->
+      <div class="clm-pf-section">
+        <div class="clm-section-title">
+          <span class="clm-section-num">3</span>
+          <span>Portfolio Trends</span>
+          <span class="clm-section-sub">Last 6 months</span>
+        </div>
+
+        <!-- Chart 1: Total Outstanding MoM Trend -->
+        <div class="clm-block clm-chart-card">
+          <div class="clm-block-head">
+            <div class="clm-block-heading">
+              <div class="clm-block-title">Total Outstanding &middot; MoM Trend</div>
+              <div class="clm-block-sub">Month-end outstanding amount</div>
+            </div>
+            <div class="clm-block-meta">
+              <span class="clm-chip"><span class="clm-legend-color" style="background:#E87722;"></span>Outstanding (&#8377;)</span>
+            </div>
+          </div>
+
+          <div class="clm-chart-loader" ng-if="c.chartLoading">
+            <i class="fa fa-spinner fa-spin fa-2x"></i>
+          </div>
+
+          <div class="clm-trend-body" ng-show="!c.chartLoading && c.trendChart.points.length > 0">
+            <svg class="clm-trend-svg" viewBox="0 0 1550 300" preserveAspectRatio="xMidYMid meet">
+              <g class="clm-trend-grid">
+                <line ng-repeat="t in c.trendChart.yTicks"
+                      ng-attr-x1="{{c.trendChart.padLeft}}" ng-attr-y1="{{t.y}}"
+                      ng-attr-x2="{{c.trendChart.width - c.trendChart.padRight}}" ng-attr-y2="{{t.y}}"></line>
+              </g>
+              <text class="clm-trend-axis-title" ng-attr-x="-{{(c.trendChart.padY + c.trendChart.baselineY) / 2}}"
+                    y="18" transform="rotate(-90)" text-anchor="middle">Outstanding Amount (&#8377;)</text>
+              <g class="clm-trend-yaxis">
+                <text ng-repeat="t in c.trendChart.yTicks" ng-attr-x="{{c.trendChart.padLeft - 12}}" ng-attr-y="{{t.y + 4}}" text-anchor="end">{{t.label}}</text>
+              </g>
+              <line class="clm-axis-line"
+                    ng-attr-x1="{{c.trendChart.padLeft}}" ng-attr-y1="{{c.trendChart.baselineY}}"
+                    ng-attr-x2="{{c.trendChart.width - c.trendChart.padRight}}" ng-attr-y2="{{c.trendChart.baselineY}}"></line>
+              <path class="clm-trend-area" ng-attr-d="{{c.trendChart.areaPath}}"></path>
+              <polyline class="clm-trend-line" ng-attr-points="{{c.trendChart.linePoints}}"></polyline>
+              <circle class="clm-trend-dot" ng-class="{last: $last}"
+                      ng-repeat="p in c.trendChart.points"
+                      ng-attr-cx="{{p.x}}" ng-attr-cy="{{p.y}}" ng-attr-r="{{$last ? 6 : 4.5}}">
+                <title>{{p.label}}: {{p.formattedValue}}</title>
+              </circle>
+              <g class="clm-trend-vals">
+                <text ng-repeat="p in c.trendChart.points" ng-class="{last: $last}"
+                      ng-attr-x="{{p.x}}" ng-attr-y="{{p.y - 14}}" text-anchor="middle">{{p.formattedValue}}</text>
+              </g>
+              <g class="clm-trend-xaxis">
+                <text ng-repeat="p in c.trendChart.points"
+                      ng-attr-x="{{p.x}}" ng-attr-y="{{c.trendChart.baselineY + 22}}"
+                      text-anchor="middle">{{p.label}}</text>
+              </g>
+            </svg>
+          </div>
+        </div>
+
+        <!-- Chart Row: Sales Trend & Ageing -->
+        <div class="clm-charts-row">
+
+          <!-- Chart 2: Sales Trend -->
+          <div class="clm-block clm-chart-card clm-chart-half">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Sales Trend (6M)</div>
+                <div class="clm-block-sub">Credit sales volume vs value</div>
+              </div>
+            </div>
+
+            <div class="clm-chart-loader" ng-if="c.chartLoading">
+              <i class="fa fa-spinner fa-spin fa-2x"></i>
+            </div>
+
+            <div class="clm-chart-wrapper" ng-show="!c.chartLoading">
+              <canvas id="md1SalesChart"></canvas>
+            </div>
+
+            <div class="clm-ageing-legend" ng-show="!c.chartLoading && c.data.salesTrend.points.length > 0">
+              <span class="clm-legend-item"><span class="clm-legend-color" style="background:#0b5394;"></span>Credit Sales Volume (MT)</span>
+              <span class="clm-legend-item"><span class="clm-legend-line" style="background:#E87722;"></span>Credit Sales Value (&#8377;)</span>
+            </div>
+          </div>
+
+          <!-- Chart 3: Ageing Breakdown -->
+          <div class="clm-block clm-chart-card clm-chart-half">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Ageing Breakdown (6M)</div>
+                <div class="clm-block-sub">Outstanding split by days overdue</div>
+              </div>
+            </div>
+
+            <div class="clm-chart-loader" ng-if="c.chartLoading">
+              <i class="fa fa-spinner fa-spin fa-2x"></i>
+            </div>
+
+            <div class="clm-chart-wrapper" ng-show="!c.chartLoading">
+              <canvas id="md1AgeingChart"></canvas>
+            </div>
+
+            <div class="clm-ageing-legend" ng-show="!c.chartLoading && c.data.ageingTrend.months.length > 0">
+              <span ng-repeat="leg in c.ageingLegend" class="clm-legend-item">
+                <span class="clm-legend-color" ng-style="::{'background-color': leg.color}"></span>
+                {{::leg.label}}
+              </span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ===================== SECTION 4: CUSTOMER PORTFOLIO (TABLE) ===================== -->
+      <div class="clm-pf-section clm-table-section" id="clmTableContainer">
+        <div class="clm-section-title">
+          <span class="clm-section-num">4</span>
+          <span>Customer Portfolio</span>
+          <span class="clm-section-sub">Click a customer name to open Customer 360</span>
+        </div>
+
+        <div class="clm-block clm-table-container">
+          <div class="clm-block-head">
+            <div class="clm-block-heading">
+              <div class="clm-block-title">Customer List</div>
+              <div class="clm-block-sub">Use the quick filters to focus on overdue, review and exposure groups</div>
+            </div>
+            <div class="clm-block-meta">
+              <span class="clm-chip"><span class="clm-chip-k">Records</span> {{c.tableTotal}}</span>
+            </div>
+          </div>
+
+          <!-- Quick filters -->
+          <div class="clm-chip-row">
+            <button type="button" class="clm-qf" ng-class="{active: c.quickFilter === 'all'}" ng-click="c.setQuickFilter('all')">
+              All Customers <span class="clm-qf-count">{{c.counts.total}}</span>
+            </button>
+            <button type="button" class="clm-qf qf-red" ng-class="{active: c.quickFilter === 'overdue'}" ng-click="c.setQuickFilter('overdue')">
+              <i class="fa fa-exclamation-triangle"></i> Overdue Balance <span class="clm-qf-count">{{c.counts.overdue}}</span>
+            </button>
+            <button type="button" class="clm-qf qf-orange" ng-class="{active: c.quickFilter === 'review15'}" ng-click="c.setQuickFilter('review15')">
+              <i class="fa fa-clock-o"></i> Review &le;15D <span class="clm-qf-count">{{c.counts.review15}}</span>
+            </button>
+            <button type="button" class="clm-qf qf-blue" ng-class="{active: c.quickFilter === 'review30'}" ng-click="c.setQuickFilter('review30')">
+              <i class="fa fa-calendar"></i> Review &le;30D <span class="clm-qf-count">{{c.counts.review30}}</span>
+            </button>
+            <button type="button" class="clm-qf qf-purple"
+                    ng-class="{active: c.quickFilter === 'largeExposure'}"
+                    ng-click="c.setQuickFilter('largeExposure')">
+              <i class="fa fa-exclamation-circle"></i> Large Exposure
+              <i class="fa clm-qf-sort" ng-class="c.getLargeExposureIcon()" ng-click="c.toggleLargeExposureSort(); $event.stopPropagation();" title="Toggle sort order (OD>90)"></i>
+            </button>
+            <button type="button" class="clm-qf qf-green"
+                    ng-class="{active: c.quickFilter === 'highGrowth20'}"
+                    ng-click="c.setQuickFilter('highGrowth20')">
+              <i class="fa fa-line-chart"></i> High Growth
+            </button>
+            <select class="clm-qf-select" ng-model="c.riskFilter" ng-change="c.applyLocalFilters()">
+              <option value="">All Risk Levels</option>
+              <option value="High">High Risk</option>
+              <option value="Medium">Medium Risk</option>
+              <option value="Low">Low Risk</option>
+              <option value="No Overdue">No Overdue</option>
+            </select>
+          </div>
+
+          <!-- Active filters -->
+          <div class="clm-filters-transition-wrapper" ng-class="c.filterWrapperClass" ng-if="c.getActiveFilterCount() > 0">
+            <div class="clm-active-filters-inline">
+              <span class="clm-af-label">Active filters:</span>
+              <span class="clm-filter-chip" ng-if="c.filters.segments.length > 0">
+                Segment: {{c.selectedSegmentLabels.join(', ')}}
+                <i class="fa fa-times" ng-click="c.clearAllSegments()"></i>
+              </span>
+              <span class="clm-filter-chip" ng-if="c.filters.depots.length > 0">
+                Depot: {{c.selectedDepotLabels.join(', ')}}
+                <i class="fa fa-times" ng-click="c.clearAllDepots()"></i>
+              </span>
+              <span class="clm-filter-chip" ng-if="c.filters.period && c.filters.period !== c.defaultPeriod">
+                Period: {{c.getPeriodDisplayText()}}
+                <i class="fa fa-times" ng-click="c.filters.period = c.defaultPeriod; c.debouncedRefresh()"></i>
+              </span>
+              <span class="clm-filter-chip" ng-if="c.riskFilter">
+                Risk: {{c.riskFilter}}
+                <i class="fa fa-times" ng-click="c.riskFilter=''; c.applyLocalFilters()"></i>
+              </span>
+              <span class="clm-filter-chip" ng-if="c.quickFilter !== 'all'">
+                Quick: {{c.quickFilter}}
+                <i class="fa fa-times" ng-click="c.setQuickFilter('all')"></i>
+              </span>
+              <button class="clm-clear-all-inline" ng-click="c.clearAllFilters()">
+                <i class="fa fa-times-circle"></i> Clear All
+              </button>
+            </div>
+          </div>
+
+          <!-- Toolbar -->
+          <div class="clm-table-toolbar-top">
+            <div class="clm-search-box">
+              <i class="fa fa-search"></i>
+              <input type="text" ng-model="c.tableSearch" ng-change="c.onSearchChange()" placeholder="Search by code, name, PAN, depot...">
+            </div>
+            <div class="clm-table-controls-right">
+              <button type="button" class="clm-btn clm-btn-csv" ng-click="c.exportToCSV()" title="Exports up to 5000 rows of the current filter">
+                <i class="fa fa-file-excel-o"></i> Export (CSV)
+              </button>
+              <span class="clm-rows-label">Rows</span>
+              <select ng-model="c.limit" ng-options="n for n in [10, 15, 20, 50, 100]" ng-change="c.updatePagination()"></select>
+            </div>
+          </div>
+
+          <!-- Table -->
+          <div class="clm-table-wrapper" ng-class="{'is-busy': c.tableLoading}">
+            <table class="clm-table clm-pf-table">
+              <thead>
+                <tr class="super">
+                  <th colspan="4" class="bg-pan">Customer</th>
+                  <th colspan="1" class="bg-seg grp">Location</th>
+                  <th colspan="6" class="bg-code grp">Exposure</th>
+                  <th colspan="3" class="bg-assess grp">Risk &amp; Review</th>
+                </tr>
+                <tr class="cols">
+                  <th>Customer</th>
+                  <th>PAN</th>
+                  <th>Seg</th>
+                  <th>Status</th>
+                  <th class="grp">Depot</th>
+                  <th class="grp">Outstanding</th>
+                  <th>Current CL</th>
+                  <th>Available</th>
+                  <th>Utilisation</th>
+                  <th>OS / Sales</th>
+                  <th>OD &gt;90D</th>
+                  <th class="grp">Risk</th>
+                  <th>Review In</th>
+                  <th>High Growth</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr ng-repeat="row in c.filteredList track by row.sysId">
+                  <td class="clm-cust-cell">
+                    <a class="clm-cust-link" href="javascript:void(0)" ng-click="c.selectCustomer(row)" title="Open Customer 360">
+                      <span class="clm-cust-name">{{::row.name}}</span>
+                      <span class="clm-cust-code">({{::row.code}})</span>
+                      <span class="clm-cust-go">View 360 <i class="fa fa-arrow-right"></i></span>
+                    </a>
+                  </td>
+                  <td class="clm-code">{{::row.pan}}</td>
+                  <td><span class="clm-pill-status" ng-class="::row.segmentClass">{{::row.segment}}</span></td>
+                  <td><span class="clm-pill-status" ng-class="::row.statusClass">{{::row.status}}</span></td>
+                  <td class="grp clm-loc">{{::row.depotName}}<span class="clm-sub-code">{{::row.depotCode}}</span></td>
+                  <td class="grp num clm-strong">{{::row.fmtOutstanding}}</td>
+                  <td class="num">{{::row.fmtLimit}}</td>
+                  <td class="num">{{::row.fmtAvailable}}</td>
+                  <td class="num">
+                    <div class="clm-util">
+                      <div class="clm-mini-progress"><div class="clm-mini-fill" ng-class="::row.utilClass" style="width: {{::row.cappedUtil}}%"></div></div>
+                      <span ng-class="::row.utilClass">{{::row.util}}%</span>
+                    </div>
+                  </td>
+                  <td class="num">{{::row.fmtOsSalesRatio}}</td>
+                  <td class="num clm-od90">{{::row.fmtOd90}}</td>
+                  <td class="grp"><span class="clm-risk-pill" ng-class="::row.riskClass">{{::row.risk}}</span></td>
+                  <td ng-class="::row.reviewColor">{{::row.reviewIn}}</td>
+                  <td><span class="clm-pill-status" ng-class="row.highGrowth20 === 'Yes' ? 'clm-hg-yes' : 'clm-hg-no'">{{::row.highGrowth20}}</span></td>
+                </tr>
+                <tr ng-if="c.tableLoading && c.filteredList.length === 0">
+                  <td colspan="14" class="clm-empty-row">Loading customers...</td>
+                </tr>
+                <tr ng-if="!c.tableLoading && c.filteredList.length === 0">
+                  <td colspan="14" class="clm-empty-row">No customers match your criteria.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Footer / pagination -->
+          <div class="clm-table-footer">
+            <div class="clm-showing" ng-if="c.tableTotal > 0">
+              Showing <b>{{c.page * c.limit + 1}}&ndash;{{c.getShowingTo()}}</b> of <b>{{c.tableTotal}}</b>
+            </div>
+            <div class="clm-page-numbers">
+              <button class="clm-page-btn" ng-disabled="c.page == 0" ng-click="c.goToPage(0)">&laquo;&laquo;</button>
+              <button class="clm-page-btn" ng-disabled="c.page == 0" ng-click="c.goToPage(c.page - 1)">&laquo;</button>
+              <button class="clm-page-btn"
+                      ng-repeat="p in c.getPageArray()"
+                      ng-class="{'active': c.page == p}"
+                      ng-click="c.goToPage(p)">{{p + 1}}</button>
+              <button class="clm-page-btn" ng-disabled="c.page >= c.getTotalPages() - 1" ng-click="c.goToPage(c.page + 1)">&raquo;</button>
+              <button class="clm-page-btn" ng-disabled="c.page >= c.getTotalPages() - 1" ng-click="c.goToPage(c.getTotalPages() - 1)">&raquo;&raquo;</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    </div><!-- /access granted -->
+  </div>
+</div>
+]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>6bdb54e697fd87d0be31fa17f053af47</id>
+        <sys_created_by>jatin.sharma@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-03 09:28:44</sys_created_on>
+        <sys_id>27db98e697fd87d0be31fa17f053af4e</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>jatin.sharma@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-03 09:28:44</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

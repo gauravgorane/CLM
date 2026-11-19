@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>false</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>false</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_nt_pan_request</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition table="x_birl3_clm_nt_pan_request">approval=approved^state=4^EQ<item display_value="Approved" endquery="false" field="approval" goto="false" newquery="false" operator="=" or="false" value="approved"/>
+            <item display_value="Closed Incomplete" endquery="false" field="state" goto="false" newquery="false" operator="=" or="false" value="4"/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>CLM: NT CL &amp; Date Update</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous /*null when async*/) {
+
+    // 1. Map segment to SAP credit segment
+    var segment = current.getValue('segment') + '';
+    var creditSegment = '';
+
+    if (segment === 'Cement') creditSegment = 'GIL';
+    else if (segment === 'RMC') creditSegment = 'URMX';
+    else if (segment === 'BPD') creditSegment = 'GIL';
+
+    if (!creditSegment) {
+        gs.error('CLM NT SAP Writeback: Unrecognized segment "' + segment + '" for PAN ' + current.getValue('number'));
+        return;
+    }
+
+    // 2. Query child site requests matching this PAN Request
+    var siteGr = new GlideRecord('x_birl3_clm_nt_site_request');
+    siteGr.addQuery('pan_request', current.getUniqueValue());
+    siteGr.query();
+
+    while (siteGr.next()) {
+        // Parse approved_limit (strip currency prefix if present)
+        var rawLimit = siteGr.getValue('approved_limit');
+        if (typeof rawLimit === 'string' && rawLimit.indexOf(';') > -1) {
+            rawLimit = rawLimit.split(';')[1];
+        }
+
+        // 3. Insert directly into the SAP send-back queue
+        var q = new GlideRecord('x_birl3_clm_clm_servicenow_to_sap_send_back');
+        q.initialize();
+
+        q.setValue('nt_request', current.getUniqueValue());
+        q.setValue('customer_type', 'non_trade');
+        q.setValue('u_customer_code', siteGr.getValue('customer_site_code'));
+        q.setValue('u_approved_code_limit', parseFloat(rawLimit));
+        q.setValue('u_next_review_date', siteGr.getValue('proposed_next_review'));
+        q.setValue('u_credit_segment', creditSegment);
+        q.setValue('u_status', 'Pending');
+        q.setValue('u_attempt_count', 0);
+
+        q.insert();
+    }
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-02 18:10:57</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>7c512a752b949710335bf9fe4e91bff7</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>CLM: NT CL &amp; Date Update</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_7c512a752b949710335bf9fe4e91bff7</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-02 19:15:35</sys_updated_on>
+        <template/>
+        <when>after</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=7c512a752b949710335bf9fe4e91bff7"/>
+</record_update>

@@ -1,0 +1,376 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $window, $sce) {
+	var c = this;
+
+	var BG_SHIELD_SVG = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>';
+
+	// ── 2 Side-by-Side Customer Segment Cards (Non-Trade & Key Only) ──
+	c.cards = [
+		{
+			id: 'nontrade',
+			segment: 'Non-Trade',
+			level: 'Site Level',
+			pillClass: 'pill-nontrade',
+			label: 'Non-Trade Bank Guarantee Monitor',
+			desc: 'Monitor expiring Bank Guarantees and revise credit limits at site code level for Non-Trade accounts.',
+			page: 'uclm_nt_bank_guarantee_monitor',
+			iconBg: 'blue',
+			iconHtml: $sce.trustAsHtml(BG_SHIELD_SVG)
+		},
+		{
+			id: 'key',
+			segment: 'Key Customer',
+			level: 'Site Level',
+			pillClass: 'pill-key',
+			label: 'Key Customer Bank Guarantee Monitor',
+			desc: 'Monitor expiring Bank Guarantees and revise credit limits at site code level across Key customer accounts.',
+			page: 'uclm_key_bank_guarantee_monitor',
+			iconBg: 'orange',
+			iconHtml: $sce.trustAsHtml(BG_SHIELD_SVG)
+		}
+	];
+
+	// Safe Navigation Function
+	c.navigate = function(pageId) {
+		if (pageId && pageId.trim() !== '') {
+			$window.location.href = '/uclm?id=' + pageId;
+		} else {
+			$window.location.href = '/uclm';
+		}
+	};
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Wrapper ── */
+.db-wrap {
+  width: 100%;
+  min-height: 90vh;
+  background: #F9FAFB;
+  font-family: 'Oxygen', "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  padding: clamp(16px, 3vw, 48px);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ── Content Container ── */
+.db-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* ── Section Header ── */
+.clm-hb-section       { margin-bottom: 32px; flex-shrink: 0; }
+.clm-hb-section-head  { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+.clm-hb-badge {
+  display: inline-flex; align-items: center; height: 32px; padding: 0 18px; border-radius: 16px;
+  background: #062a62; color: #FFE100; font-size: 12px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 1px; white-space: nowrap;
+}
+.clm-hb-line          { flex: 1; height: 1px; background: #dde3ea; }
+
+/* ── Balanced 2-Column Grid (Non-Trade &amp; Key) ── */
+.clm-bg-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  width: 100%;
+  max-width: 960px;
+}
+
+/* ── Tile Card ── */
+.clm-bg-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 240px;
+  padding: 24px 22px 20px;
+  background: #ffffff;
+  border: 1px solid #dde3ea;
+  border-top: 4px solid #FFE100;
+  border-radius: 10px;
+  box-shadow: 0 2px 6px rgba(0,0,0,.03), 0 6px 16px rgba(0,0,0,.04);
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  transition: transform .25s ease, box-shadow .25s ease, border-color .25s ease;
+}
+
+.clm-bg-tile:hover {
+  transform: translateY(-4px);
+  border-color: #F3D54E;
+  box-shadow: 0 0 0 2px rgba(243, 213, 78, .25), 0 12px 28px rgba(0,0,0,.09);
+}
+
+.clm-bg-tile:focus {
+  outline: none;
+  border-color: #AF272F;
+  box-shadow: 0 0 0 3px rgba(175, 39, 47, .15);
+}
+
+/* ── Segment Header Row in Tile ── */
+.clm-tile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.clm-segment-pill {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: 12px;
+}
+.clm-segment-pill.pill-nontrade { background: #e3eefa; color: #0b5394; border: 1px solid #b8daff; }
+.clm-segment-pill.pill-key      { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+
+.clm-level-tag {
+  font-size: 11px;
+  font-weight: 600;
+  color: #7f8c9a;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+/* ── Tile Icons ── */
+.clm-hb-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 12px;
+  flex-shrink: 0;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform .2s ease;
+}
+.clm-hb-icon span { display: flex; }
+.clm-hb-icon svg  { width: 26px; height: 26px; }
+.clm-bg-tile:hover .clm-hb-icon { transform: scale(1.06); }
+
+.clm-hb-icon.blue   { background: #e3eefa; color: #0b5394; }
+.clm-hb-icon.orange { background: #fde8dc; color: #E87722; }
+
+/* ── Tile Typography ── */
+.clm-hb-label {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1a1a1a;
+  line-height: 1.35;
+}
+.clm-hb-desc {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #5a6a7a;
+  line-height: 1.5;
+}
+
+/* ── Tile Footer ── */
+.clm-hb-foot {
+  margin-top: auto;
+  padding-top: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.clm-action-text {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #062a62;
+  transition: color .2s ease;
+}
+.clm-bg-tile:hover .clm-action-text {
+  color: #E87722;
+}
+.clm-hb-arrow {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #062a62;
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform .2s ease, background .2s ease;
+}
+.clm-bg-tile:hover .clm-hb-arrow {
+  transform: translateX(4px);
+  background: #E87722;
+}
+
+/* ── Access Denied State ── */
+.clm-access-denied {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+  border: 1px solid #dde3ea;
+  border-radius: 8px;
+  padding: 56px 24px;
+  text-align: center;
+  margin-top: 24px;
+}
+.clm-denied-icon { margin-bottom: 16px; }
+.clm-denied-title { font-size: 18px; font-weight: 700; color: #1a1a1a; margin-bottom: 8px; }
+.clm-denied-desc { font-size: 14px; color: #5a6a7a; max-width: 480px; line-height: 1.5; }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .clm-bg-grid { grid-template-columns: 1fr; }
+  .clm-bg-tile { min-height: 0; padding: 18px 16px; }
+}
+
+/* ── Font Enforcement ── */
+.clm-widget, .clm-widget *, .clm-widget input, .clm-widget select,
+.clm-widget textarea, .clm-widget button, .clm-widget table {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>uclm_bank_guarantee_monitor</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Bank Guarantee Monitor</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+	var userId = gs.getUserID();
+
+	// ── Group Authorization Verification ──────────────────────────────
+	var isZch = false;
+	var isDev = false;
+	var isAdmin = false;
+
+	var gmGr = new GlideRecord('sys_user_grmember');
+	gmGr.addQuery('user', userId);
+	gmGr.query();
+	while (gmGr.next()) {
+		var gName = (gmGr.getDisplayValue('group') || '').toUpperCase().trim();
+		if (gName === 'CLM: ZCH INITIATOR') {
+			isZch = true;
+		} else if (gName === 'CLM: DEVELOPER') {
+			isDev = true;
+		} else if (gName === 'CLM: ADMIN') {
+			isAdmin = true;
+		}
+	}
+
+	// Fallback check against Approval Matrix for Non-Trade / Key ZCH mapping
+	if (!isZch) {
+		var mxGr = new GlideRecord('x_birl3_clm_approval_matrix');
+		mxGr.addQuery('approver_user', userId);
+		mxGr.addQuery('role_name', 'CONTAINS', 'ZCH');
+		mxGr.addQuery('customer_type', 'IN', 'non_trade,Non-Trade,key,Key');
+		mxGr.setLimit(1);
+		mxGr.query();
+		if (mxGr.hasNext()) {
+			isZch = true;
+		}
+	}
+
+	// Enforce strict access: ZCH Initiator persona, Admin, or Developer
+	data.isZchAuthorized = (isZch || isDev || isAdmin);
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-14 11:22:39</sys_created_on>
+        <sys_id>d8b11f6f97ff8710be31fa17f053afe2</sys_id>
+        <sys_mod_count>40</sys_mod_count>
+        <sys_name>UCLM Bank Guarantee Monitor</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_d8b11f6f97ff8710be31fa17f053afe2</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-17 07:51:36</sys_updated_on>
+        <template><![CDATA[<div class="db-wrap clm-widget">
+  <div class="db-content">
+
+    <!-- Access Restriction Warning (If User is NOT ZCH / Admin / Dev) -->
+    <div class="clm-access-denied" ng-if="!c.data.isZchAuthorized">
+      <div class="clm-denied-icon">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#E23D28" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="12" y1="8" x2="12" y2="12"></line>
+          <line x1="12" y1="16" x2="12.01" y2="16"></line>
+        </svg>
+      </div>
+      <div class="clm-denied-title">Access Restricted</div>
+      <div class="clm-denied-desc">The Bank Guarantee monitoring and revision functionality is reserved exclusively for ZCH personnel.</div>
+    </div>
+
+    <!-- ── Unified Bank Guarantee Section (Non-Trade & Key Side-by-Side) ── -->
+    <div class="clm-hb-section" ng-if="c.data.isZchAuthorized">
+      <div class="clm-hb-section-head">
+        <span class="clm-hb-badge">Bank Guarantee</span>
+        <div class="clm-hb-line"></div>
+      </div>
+
+      <div class="clm-bg-grid">
+        <div class="clm-hb-tile clm-bg-tile"
+             ng-repeat="card in c.cards"
+             ng-click="c.navigate(card.page)"
+             role="button"
+             tabindex="0">
+          
+          <!-- Segment Header Tag -->
+          <div class="clm-tile-header">
+            <span class="clm-segment-pill {{card.pillClass}}">{{card.segment}}</span>
+            <span class="clm-level-tag">{{card.level}}</span>
+          </div>
+
+          <!-- Icon & Details -->
+          <div class="clm-hb-icon {{card.iconBg}}">
+            <span ng-bind-html="card.iconHtml"></span>
+          </div>
+
+          <div class="clm-hb-label">{{card.label}}</div>
+          <div class="clm-hb-desc">{{card.desc}}</div>
+
+          <div class="clm-hb-foot">
+            <span class="clm-action-text">Proceed to Monitor</span>
+            <span class="clm-hb-arrow" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 12h14M13 6l6 6-6 6"/>
+              </svg>
+            </span>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>d8b11f6f97ff8710be31fa17f053afe2</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-14 11:22:39</sys_created_on>
+        <sys_id>14b15f6f97ff8710be31fa17f053afed</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-14 11:22:39</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

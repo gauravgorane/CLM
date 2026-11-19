@@ -1,0 +1,1088 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $timeout) {
+    var c = this;
+
+    c.options = c.data.options || { roles: [], segments: [] };
+    c.summary = c.data.summary || { users: [], inactiveUserRows: 0, noUserRows: 0 };
+
+    c.filters = { search: '', segment: '', role: '', zone: '', region: '', depot: '', status: '', user: '' };
+    c.filterUserName = '';
+    c.rows = [];
+    c.total = 0;
+    c.page = 1;
+    c.pageSize = 50;
+    c.loading = false;
+
+    c.panel = null;            // 'edit' | 'new' | 'reassign'
+    c.edit = {};
+    c.pick = { displayValue: '', value: '', name: 'approver' };
+    c.toPick = { displayValue: '', value: '', name: 'newApprover' };
+    c.fromUser = null;
+    c.preview = null;
+    c.error = '';
+    c.canForce = false;
+    c.saving = false;
+    c.toast = null;
+
+    function call(payload) {
+        return c.server.get(payload).then(function(r) { return r.data; });
+    }
+
+    function showToast(text, kind) {
+        c.toast = { text: text, kind: kind || 'ok' };
+        $timeout(function() { c.toast = null; }, 4500);
+    }
+
+    // ---------- list ----------
+    c.load = function(page) {
+        c.page = page || 1;
+        c.loading = true;
+        call({ action: 'list', filters: c.filters, page: c.page }).then(function(d) {
+            c.loading = false;
+            if (!d.list) return;
+            c.rows = d.list.rows;
+            c.total = d.list.total;
+            c.pageSize = d.list.pageSize;
+        });
+    };
+
+    c.refreshSummary = function() {
+        call({ action: 'summary' }).then(function(d) { if (d.summary) c.summary = d.summary; });
+    };
+
+    c.clearFilters = function() {
+        c.filters = { search: '', segment: '', role: '', zone: '', region: '', depot: '', status: '', user: '' };
+        c.filterUserName = '';
+        c.load(1);
+    };
+
+    c.showUser = function(u) {
+        c.filters.user = u.id;
+        c.filters.status = '';
+        c.filterUserName = u.name;
+        c.load(1);
+    };
+
+    c.showNeedsAttention = function() {
+        c.filters.status = 'inactive_user';
+        c.load(1);
+    };
+
+    c.rangeStart = function() { return c.total ? (c.page - 1) * c.pageSize + 1 : 0; };
+    c.rangeEnd = function() { return Math.min(c.page * c.pageSize, c.total); };
+    c.hasNext = function() { return c.page * c.pageSize < c.total; };
+
+    c.statusOf = function(r) {
+        if (!r.active) return { label: 'Mapping off', cls: 'off' };
+        if (!r.user_id) return { label: 'No approver', cls: 'warn' };
+        if (!r.user_active) return { label: 'Inactive user', cls: 'bad' };
+        return { label: 'OK', cls: 'ok' };
+    };
+
+    // ---------- edit / create ----------
+    c.openEdit = function(r) {
+        c.edit = {
+            sys_id: r.sys_id, role: r.role, segment: r.segment, zone: r.zone,
+            region: r.region, depot: r.depot, active: r.active,
+            currentName: r.user_name, currentEmail: r.user_email, currentActive: r.user_active
+        };
+        // Start empty when the current approver is inactive so the admin must pick a replacement.
+        c.pick = r.user_active
+            ? { displayValue: r.user_name, value: r.user_id, name: 'approver' }
+            : { displayValue: '', value: '', name: 'approver' };
+        c.error = '';
+        c.canForce = false;
+        c.panel = 'edit';
+    };
+
+    c.openNew = function() {
+        c.edit = { sys_id: '', role: '', segment: '', zone: '', region: '', depot: '', active: true };
+        c.pick = { displayValue: '', value: '', name: 'approver' };
+        c.error = '';
+        c.canForce = false;
+        c.panel = 'new';
+    };
+
+    c.save = function(force) {
+        c.saving = true;
+        c.error = '';
+        var row = {
+            sys_id: c.edit.sys_id, role: c.edit.role, segment: c.edit.segment,
+            zone: c.edit.zone, region: c.edit.region, depot: c.edit.depot,
+            user: c.pick.value, active: !!c.edit.active
+        };
+        call({ action: 'save', row: row, force: !!force }).then(function(d) {
+            c.saving = false;
+            var r = d.result || {};
+            if (r.ok) {
+                showToast('Approver mapping saved');
+                c.closePanel();
+                c.load(c.page);
+                c.refreshSummary();
+            } else {
+                c.error = r.error || 'Save failed.';
+                c.canForce = !!r.duplicate;
+            }
+        });
+    };
+
+    // ---------- bulk reassign ----------
+    c.openReassign = function(u) {
+        c.fromUser = u;
+        c.toPick = { displayValue: '', value: '', name: 'newApprover' };
+        c.preview = null;
+        c.error = '';
+        c.panel = 'reassign';
+    };
+
+    $scope.$watch(function() { return c.toPick && c.toPick.value; }, function(val) {
+        if (c.panel !== 'reassign' || !val || !c.fromUser) { c.preview = null; return; }
+        call({ action: 'reassignPreview', fromUser: c.fromUser.id, toUser: val }).then(function(d) {
+            var r = d.result || {};
+            if (r.ok) { c.preview = r; c.error = ''; }
+            else { c.preview = null; c.error = r.error || ''; }
+        });
+    });
+
+    c.confirmReassign = function() {
+        c.saving = true;
+        c.error = '';
+        call({ action: 'reassign', fromUser: c.fromUser.id, toUser: c.toPick.value }).then(function(d) {
+            c.saving = false;
+            var r = d.result || {};
+            if (r.ok) {
+                showToast(r.count + ' mappings now point to ' + r.toName);
+                c.closePanel();
+                c.filters.user = '';
+                c.filterUserName = '';
+                c.load(1);
+                c.refreshSummary();
+            } else {
+                c.error = r.error || 'Reassign failed.';
+            }
+        });
+    };
+
+    c.closePanel = function() {
+        c.panel = null;
+        c.error = '';
+        c.canForce = false;
+        c.preview = null;
+    };
+
+    if (c.data.isAdmin) c.load(1);
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+$ink: #1a1a1a;
+$muted: #5a6a7a;
+$line: #dde3ea;
+$line-soft: #eef1f5;
+$page: #eff3f7;
+$head-bg: #fafbfc;
+$yellow: #fff200;
+$marker: #F3D54E;
+$red: #E23D28;
+$orange: #E87722;
+$bad: #b3261e;
+$bad-bg: #fef5f4;
+$bad-line: #f5c2bc;
+$warn: #7a5a00;
+$warn-bg: #fff8e1;
+$warn-line: #f3d54e;
+$ok: #1e8449;
+$ok-bg: #eaf7ee;
+$ok-line: #b9e3c6;
+
+.aa {
+  background: $page;
+  color: $ink;
+  font-size: 14px;
+  padding: 24px 32px 48px;
+  box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  *, *::before, *::after { box-sizing: border-box; }
+  h1, h2, p { margin: 0; }
+  .aa-muted { color: $muted; }
+  .aa-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+  /* ───────── Banner ───────── */
+  .aa-hero {
+    position: relative; overflow: hidden;
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+    gap: 20px 32px; padding: 28px 32px; margin-bottom: 20px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #9b1111 0%, #b81e1e 45%, #e0301e 100%);
+    color: #fff; box-shadow: 0 10px 28px rgba(120, 20, 15, 0.28);
+  }
+  .aa-hero::before, .aa-hero::after { content: ""; position: absolute; border-radius: 50%; pointer-events: none; }
+  .aa-hero::before { width: 360px; height: 360px; right: -110px; top: -190px; background: rgba(244, 123, 48, 0.55); }
+  .aa-hero::after  { width: 260px; height: 260px; right: 160px; bottom: -200px; background: rgba(120, 15, 15, 0.45); }
+  .aa-hero-left, .aa-hero-right { position: relative; z-index: 1; }
+  .aa-hero-left { flex: 1 1 380px; min-width: 0; }
+
+  .aa-hero-crumb { margin-bottom: 14px; font-size: 12px; font-weight: 700; color: #ffd9cf; }
+  .aa-hero-crumb-link { color: $yellow; text-decoration: none; }
+  .aa-hero-crumb-link:hover { color: $yellow; text-decoration: underline; }
+  .aa-hero-crumb-sep { margin: 0 8px; color: #ffb9a8; }
+  .aa-hero-crumb-current { color: #ffeae4; }
+
+  .aa-hero-bar { width: 44px; height: 6px; margin-bottom: 12px; border-radius: 3px; background: $yellow; }
+  .aa-hero-title { font-size: 26px; font-weight: 700; line-height: 1.25; color: #fff; }
+  .aa-hero-accent { color: $yellow; }
+  .aa-hero-sub { max-width: 720px; margin-top: 6px; font-size: 15px; line-height: 1.5; color: #ffeae4; }
+
+  .aa-hero-right { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+  .aa-hero-stat { padding-left: 24px; border-left: 1px solid rgba(255, 255, 255, 0.3); text-align: right; }
+  .aa-hero-stat-v { font-size: 34px; font-weight: 700; line-height: 1.1; letter-spacing: 1px; color: $yellow; white-space: nowrap; text-shadow: 0 1px 3px rgba(80, 10, 10, 0.35); }
+  .aa-hero-stat-k { margin-top: 6px; font-size: 12px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; color: #ffd9cf; white-space: nowrap; }
+  .aa-hero-stat.is-alert .aa-hero-stat-v { color: #fff; }
+
+  .aa-hero-btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px;
+    background: $yellow; color: #8f1d16; border: none; border-radius: 8px;
+    font-size: 14px; font-weight: 700; white-space: nowrap; cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+    transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
+  }
+  .aa-hero-btn:hover { background: #fff566; transform: translateY(-1px); box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22); }
+
+  /* ───────── Buttons ───────── */
+  .aa-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    height: 38px; padding: 0 16px; background: #fff; color: $ink;
+    border: 1px solid #cdd4dc; border-radius: 6px;
+    font-size: 13px; font-weight: 700; line-height: 1; cursor: pointer; white-space: nowrap;
+    transition: all .2s ease;
+    &amp;:hover:not([disabled]) { border-color: $ink; background: $head-bg; }
+    &amp;:focus-visible { outline: 2px solid $orange; outline-offset: 2px; }
+    &amp;[disabled] { opacity: .5; cursor: not-allowed; }
+  }
+  .aa-btn-small { height: 30px; padding: 0 12px; font-size: 12px; }
+  .aa-btn-primary {
+    background: $ink; border-color: $ink; color: $yellow;
+    &amp;:hover:not([disabled]) { background: #333; border-color: #333; }
+  }
+  .aa-btn-danger {
+    background: $red; border-color: $red; color: #fff;
+    &amp;:hover:not([disabled]) { background: #c0392b; border-color: #c0392b; }
+  }
+
+  /* ───────── Cards ───────── */
+  .aa-block { margin-top: 16px; background: #fff; border: 1px solid $line; border-radius: 8px; overflow: hidden; }
+  .aa-block-head {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+    gap: 12px 20px; padding: 14px 20px; background: $head-bg; border-bottom: 1px solid $line;
+  }
+  .aa-block-heading { min-width: 0; }
+  .aa-block-title {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; font-weight: 700; color: $ink; text-transform: uppercase; letter-spacing: .8px;
+    &amp;::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: $marker; flex-shrink: 0; }
+  }
+  .aa-block-sub { margin: 4px 0 0 14px; font-size: 12px; color: $muted; }
+  .aa-block-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .aa-pill {
+    display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
+    background: #fff; border: 1px solid $line; border-radius: 12px;
+    font-size: 12px; font-weight: 700; color: $ink; white-space: nowrap;
+  }
+  .aa-pill-k { font-weight: 400; color: $muted; }
+
+  /* ───────── Alerts ───────── */
+  .aa-attention {
+    margin-bottom: 16px; background: #fff; border: 1px solid $bad-line; border-left: 5px solid $red;
+    border-radius: 8px; overflow: hidden;
+
+    .aa-att-head { padding: 14px 20px; background: $bad-bg; border-bottom: 1px solid #f6d5d0; }
+    h2 { font-size: 14px; font-weight: 700; color: $bad; }
+    .aa-att-head p { margin-top: 4px; font-size: 13px; color: $muted; }
+    ul { list-style: none; margin: 0; padding: 0; }
+    li {
+      display: grid; align-items: center; gap: 12px;
+      grid-template-columns: minmax(150px, 1.2fr) minmax(200px, 1.6fr) auto auto auto;
+      padding: 12px 20px; border-top: 1px solid $line-soft;
+      &amp;:first-child { border-top: 0; }
+    }
+    .aa-att-name { font-weight: 700; }
+    .aa-att-mail { color: $muted; font-size: 13px; word-break: break-word; }
+    .aa-att-count { font-weight: 700; color: $bad; white-space: nowrap; }
+  }
+
+  .aa-note {
+    margin-bottom: 16px; padding: 12px 16px;
+    background: $warn-bg; border: 1px solid $warn-line; border-left: 4px solid $orange; border-radius: 6px;
+    font-size: 13px; font-weight: 700; color: $warn;
+    a { margin-left: 6px; color: #AF272F; cursor: pointer; }
+  }
+
+  /* ───────── Filters ───────── */
+  .aa-filters {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px 16px; padding: 16px 20px 18px; align-items: end;
+  }
+  .aa-f {
+    display: flex; flex-direction: column; min-width: 0;
+    &gt; span { margin-bottom: 6px; font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+    input, select {
+      width: 100%; height: 40px; padding: 0 12px; background: #fff; color: $ink;
+      border: 1px solid #cdd4dc; border-radius: 6px; font-size: 13px;
+      transition: border-color .2s, box-shadow .2s;
+      &amp;:focus { outline: none; border-color: $orange; box-shadow: 0 0 0 3px rgba(232, 119, 34, .15); }
+    }
+  }
+  .aa-f-wide { grid-column: span 2; }
+
+  .aa-chip-row { padding: 0 20px 16px; }
+  .aa-chip {
+    display: inline-flex; align-items: center; gap: 8px; padding: 4px 6px 4px 12px;
+    background: #fffcf0; border: 1px solid $marker; border-radius: 14px;
+    font-size: 12px; font-weight: 700;
+  }
+  .aa-chip-x { border: 0; background: transparent; font-size: 18px; line-height: 1; cursor: pointer; color: $muted; &amp;:hover { color: $bad; } }
+
+  /* ───────── Table ───────── */
+  .aa-tablewrap { overflow-x: auto; background: #fff; }
+  .aa-table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+    th {
+      padding: 12px 14px; background: $line-soft; color: #2b3440; text-align: left; white-space: nowrap;
+      font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px;
+      border-bottom: 1px solid $line;
+    }
+    td { padding: 13px 14px; text-align: left; vertical-align: middle; border-bottom: 1px solid $line-soft; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover td { background: $head-bg; }
+    .aa-row-bad td { background: $bad-bg; }
+    .aa-row-bad:hover td { background: #fdeeec; }
+    .aa-row-bad td:first-child { box-shadow: inset 4px 0 0 $red; }
+    .aa-user { font-weight: 700; }
+    .aa-usermail { margin-top: 2px; font-size: 12px; color: $muted; }
+    .aa-actions { text-align: right; white-space: nowrap; }
+    .aa-empty { padding: 36px; text-align: center; color: $muted; font-weight: 700; }
+  }
+
+  .aa-badge {
+    display: inline-block; padding: 3px 10px; border-radius: 12px; border: 1px solid transparent;
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; white-space: nowrap;
+  }
+  .aa-badge-ok   { background: $ok-bg;   border-color: $ok-line;   color: $ok; }
+  .aa-badge-bad  { background: #fdecea;  border-color: $bad-line;  color: $bad; }
+  .aa-badge-warn { background: $warn-bg; border-color: $warn-line; color: $warn; }
+  .aa-badge-off  { background: $line-soft; border-color: $line;    color: $muted; }
+
+  .aa-pager {
+    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px 20px;
+    padding: 12px 20px; background: $head-bg; border-top: 1px solid $line; font-size: 13px; color: #3a4451;
+  }
+  .aa-pager-btns { display: inline-flex; gap: 8px; }
+
+  /* ───────── State card ───────── */
+  .aa-state {
+    max-width: 640px; margin: 24px auto; padding: 48px 32px; text-align: center;
+    background: #fff; border: 1px solid $line; border-top: 5px solid $red; border-radius: 8px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, .08);
+    h2 { margin-bottom: 8px; font-size: 20px; font-weight: 700; }
+    p { color: $muted; }
+  }
+  .aa-state-icon {
+    width: 64px; height: 64px; margin: 0 auto 20px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: #fdecea; color: $red; font-size: 28px; font-weight: 700;
+  }
+
+  /* ───────── Side panel ───────── */
+  .aa-scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, .4); z-index: 1040; }
+  .aa-panel {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 460px; max-width: 100%;
+    background: #fff; z-index: 1050; overflow-y: auto;
+    border-top: 5px solid $yellow; box-shadow: -8px 0 28px rgba(0, 0, 0, .18);
+  }
+  .aa-panel-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 16px 24px; background: $head-bg; border-bottom: 1px solid $line;
+    h2 {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px;
+      &amp;::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: $marker; }
+    }
+  }
+  .aa-panel-x { border: 0; background: transparent; font-size: 16px; color: $muted; cursor: pointer; padding: 4px 8px; border-radius: 4px; &amp;:hover { background: $line-soft; color: $ink; } }
+  .aa-panel-body { padding: 20px 24px 8px; }
+  .aa-panel-body &gt; p { margin-bottom: 14px; line-height: 1.5; }
+
+  .aa-field { display: block; margin-bottom: 14px; flex: 1; min-width: 0; }
+  .aa-field &gt; span { display: block; margin-bottom: 6px; font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+  .aa-field input[type=text], .aa-field select {
+    width: 100%; height: 40px; padding: 0 12px; background: #fff;
+    border: 1px solid #cdd4dc; border-radius: 6px; font-size: 13px; color: $ink;
+    transition: border-color .2s, box-shadow .2s;
+    &amp;:focus { outline: none; border-color: $orange; box-shadow: 0 0 0 3px rgba(232, 119, 34, .15); }
+  }
+  .aa-field-row { display: flex; gap: 12px; }
+  .aa-check { display: flex; align-items: center; gap: 8px; margin: 4px 0 12px; font-weight: 700; cursor: pointer; input { width: 16px; height: 16px; accent-color: $orange; } }
+  .aa-error { margin: 8px 0; padding: 10px 12px; background: $bad-bg; border: 1px solid $bad-line; border-left: 4px solid $red; border-radius: 6px; color: $bad; font-weight: 700; }
+  .aa-warnline { margin-bottom: 14px; padding: 10px 12px; background: $warn-bg; border: 1px solid $warn-line; border-left: 4px solid $orange; border-radius: 6px; color: $warn; font-weight: 700; }
+  .aa-preview { margin: 8px 0; padding: 10px 12px; background: #fffcf0; border: 1px solid #f1e2a0; border-radius: 6px; font-weight: 700; }
+  .aa-panel-actions {
+    display: flex; gap: 8px; flex-wrap: wrap; padding: 16px 24px 24px;
+    margin-top: 8px; border-top: 1px solid $line-soft;
+  }
+
+  /* ───────── Toast ───────── */
+  .aa-toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 1060;
+    padding: 12px 20px; border-radius: 6px; background: $ink; color: #fff;
+    font-size: 13px; font-weight: 700; box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
+  }
+  .aa-toast-ok, .aa-toast-success { background: $ok; }
+  .aa-toast-error, .aa-toast-bad  { background: $bad; }
+}
+
+/* ───────── Responsive ───────── */
+@media (max-width: 1024px) {
+  .aa { padding: 20px 24px 40px; }
+  .aa .aa-hero { padding: 24px 26px; }
+  .aa .aa-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .aa .aa-attention li { grid-template-columns: minmax(150px, 1fr) minmax(180px, 1.4fr) auto; }
+}
+
+@media (max-width: 768px) {
+  .aa { padding: 16px 16px 32px; }
+  .aa .aa-hero { padding: 22px 20px; margin-bottom: 16px; }
+  .aa .aa-hero::before { width: 260px; height: 260px; right: -110px; top: -150px; }
+  .aa .aa-hero::after { display: none; }
+  .aa .aa-hero-title { font-size: 22px; }
+  .aa .aa-hero-sub { font-size: 14px; }
+  .aa .aa-hero-stat-v { font-size: 28px; }
+  .aa .aa-block-head { padding: 12px 14px; }
+  .aa .aa-block-sub { margin-left: 0; }
+  .aa .aa-filters { grid-template-columns: 1fr 1fr; padding: 12px 14px 14px; }
+  .aa .aa-f-wide { grid-column: 1 / -1; }
+  .aa .aa-chip-row { padding: 0 14px 14px; }
+  .aa .aa-pager { justify-content: center; }
+
+  .aa .aa-attention li { display: flex; flex-wrap: wrap; gap: 8px 12px; padding: 12px 14px; }
+  .aa .aa-attention .aa-att-name, .aa .aa-attention .aa-att-mail { flex-basis: 100%; }
+  .aa .aa-attention .aa-att-count { margin-right: auto; }
+
+  /* table → label/value cards */
+  .aa .aa-table, .aa .aa-table tbody { display: block; }
+  .aa .aa-table thead { display: none; }
+  .aa .aa-tablewrap { background: #f4f5f7; padding: 4px 0; }
+  .aa .aa-table tbody tr {
+    display: block; margin: 10px; background: #fff;
+    border: 1px solid $line; border-radius: 8px; overflow: hidden;
+  }
+  .aa .aa-table td {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 9px 12px; text-align: right; border-bottom: 1px solid $line-soft;
+    &amp;::before { content: attr(data-label); font-size: 12px; color: $muted; text-align: left; }
+  }
+  .aa .aa-table tbody tr:last-child td { border-bottom: 1px solid $line-soft; }
+  .aa .aa-table td.aa-actions { justify-content: flex-end; border-bottom: 0; &amp;::before { display: none; } }
+  .aa .aa-table td.aa-empty { display: block; text-align: center; &amp;::before { display: none; } }
+  .aa .aa-table .aa-row-bad { border-color: $bad-line; }
+  .aa .aa-table .aa-row-bad td:first-child { box-shadow: none; }
+}
+
+@media (max-width: 640px) {
+  .aa .aa-hero { flex-direction: column; align-items: stretch; gap: 16px; }
+  .aa .aa-hero-left { flex-basis: auto; width: 100%; }
+  .aa .aa-hero-title { font-size: 20px; }
+  .aa .aa-hero-sub { font-size: 13px; }
+  .aa .aa-hero-right { width: 100%; justify-content: space-between; padding-top: 14px; border-top: 1px solid rgba(255, 255, 255, .3); }
+  .aa .aa-hero-stat { padding-left: 0; border-left: 0; text-align: left; }
+  .aa .aa-hero-stat-v { font-size: 26px; }
+  .aa .aa-filters { grid-template-columns: 1fr; }
+  .aa .aa-panel-body, .aa .aa-panel-head, .aa .aa-panel-actions { padding-left: 16px; padding-right: 16px; }
+  .aa .aa-field-row { flex-direction: column; gap: 0; }
+}
+
+@media (max-width: 480px) {
+  .aa { padding: 12px 10px 28px; }
+  .aa .aa-hero { padding: 18px 16px; border-radius: 10px; margin-bottom: 12px; }
+  .aa .aa-hero-bar { width: 36px; height: 5px; margin-bottom: 10px; }
+  .aa .aa-hero-crumb { font-size: 11px; margin-bottom: 12px; }
+  .aa .aa-hero-stat-k { font-size: 11px; }
+}
+
+/* ───────── One font family (keep LAST) ───────── */
+.aa, .aa * {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clm_approver_change__admin_</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>CLM Approver Change (admin)</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+    var TABLE = 'x_birl3_clm_role_user_mapping';
+    var ADMIN_ROLE = 'x_birl3_clm.admin';
+    var PAGE_SIZE = 50;
+    var SEGMENTS = ['', 'Cement', 'BPD', 'RMC'];
+
+    data.isAdmin = gs.hasRole(ADMIN_ROLE);
+    data.result = null;
+    if (!data.isAdmin) return;
+
+    // Initial page load: only filter options and the attention summary.
+    if (!input) {
+        data.options = { roles: distinct('u_role'), segments: SEGMENTS.slice(1) };
+        data.summary = getSummary();
+        return;
+    }
+
+    switch (input.action) {
+        case 'list':
+            data.list = getList(input.filters || {}, parseInt(input.page, 10) || 1);
+            break;
+        case 'summary':
+            data.summary = getSummary();
+            break;
+        case 'save':
+            data.result = saveRow(input.row, input.force === true);
+            break;
+        case 'reassignPreview':
+            data.result = reassign(input.fromUser, input.toUser, true);
+            break;
+        case 'reassign':
+            data.result = reassign(input.fromUser, input.toUser, false);
+            break;
+    }
+
+    // ------------------------------------------------------------
+    // helpers
+    // ------------------------------------------------------------
+    function isTrue(v) {
+        return v === true || v === 1 || v === 'true' || v === '1';
+    }
+
+    function trim(v) {
+        return (v === null || v === undefined) ? '' : (v + '').trim();
+    }
+
+    function fail(msg, extra) {
+        var r = { ok: false, error: msg };
+        if (extra) for (var k in extra) r[k] = extra[k];
+        return r;
+    }
+
+    function distinct(field) {
+        var out = [];
+        var ga = new GlideAggregate(TABLE);
+        ga.addAggregate('COUNT');
+        ga.groupBy(field);
+        ga.orderBy(field);
+        ga.query();
+        while (ga.next()) {
+            var v = ga.getValue(field);
+            if (v) out.push(v);
+        }
+        return out;
+    }
+
+    function applyFilters(gr, f) {
+        if (f.segment) gr.addQuery('u_segment', f.segment);
+        if (f.role) gr.addQuery('u_role', f.role);
+        if (f.zone) gr.addQuery('u_zone', 'STARTSWITH', trim(f.zone));
+        if (f.region) gr.addQuery('u_region', 'STARTSWITH', trim(f.region));
+        if (f.depot) gr.addQuery('u_depot', 'STARTSWITH', trim(f.depot));
+        if (f.user) gr.addQuery('u_user', f.user);
+
+        if (f.status === 'inactive_user') {
+            gr.addQuery('u_active', 'true');
+            gr.addQuery('u_user.active', 'false');
+        } else if (f.status === 'no_user') {
+            gr.addQuery('u_active', 'true');
+            gr.addNullQuery('u_user');
+        } else if (f.status === 'inactive_row') {
+            gr.addQuery('u_active', 'false');
+        }
+
+        if (f.search) {
+            var s = trim(f.search);
+            var qc = gr.addQuery('u_user.name', 'CONTAINS', s);
+            qc.addOrCondition('u_user.email', 'CONTAINS', s);
+        }
+    }
+
+    function rowToObj(gr) {
+        var uid = gr.getValue('u_user') || '';
+        return {
+            sys_id: gr.getUniqueValue(),
+            role: gr.getValue('u_role') || '',
+            segment: gr.getValue('u_segment') || '',
+            zone: gr.getValue('u_zone') || '',
+            region: gr.getValue('u_region') || '',
+            depot: gr.getValue('u_depot') || '',
+            active: isTrue(gr.getValue('u_active')),
+            user_id: uid,
+            user_name: uid ? gr.getDisplayValue('u_user') : '',
+            user_email: uid ? gr.getElement('u_user.email').toString() : '',
+            user_active: uid ? isTrue(gr.getElement('u_user.active').toString()) : false
+        };
+    }
+
+    function getList(f, page) {
+        var gr = new GlideRecord(TABLE);
+        applyFilters(gr, f);
+        gr.orderBy('u_segment');
+        gr.orderBy('u_role');
+        gr.orderBy('u_zone');
+        gr.orderBy('u_region');
+        gr.orderBy('u_depot');
+        var offset = (page - 1) * PAGE_SIZE;
+        gr.chooseWindow(offset, offset + PAGE_SIZE, true);
+        gr.query();
+        var total = gr.getRowCount();
+        var rows = [];
+        while (gr.next()) rows.push(rowToObj(gr));
+        return { rows: rows, total: total, page: page, pageSize: PAGE_SIZE };
+    }
+
+    function getSummary() {
+        var out = { inactiveUserRows: 0, noUserRows: 0, users: [] };
+
+        var ga = new GlideAggregate(TABLE);
+        ga.addQuery('u_active', 'true');
+        ga.addQuery('u_user.active', 'false');
+        ga.addAggregate('COUNT');
+        ga.groupBy('u_user');
+        ga.query();
+        while (ga.next()) {
+            var n = parseInt(ga.getAggregate('COUNT'), 10) || 0;
+            var id = ga.getValue('u_user');
+            var email = '';
+            var u = new GlideRecord('sys_user');
+            if (id && u.get(id)) email = u.getValue('email') || '';
+            out.inactiveUserRows += n;
+            out.users.push({ id: id, name: ga.getDisplayValue('u_user'), email: email, count: n });
+        }
+
+        var gn = new GlideAggregate(TABLE);
+        gn.addQuery('u_active', 'true');
+        gn.addNullQuery('u_user');
+        gn.addAggregate('COUNT');
+        gn.query();
+        if (gn.next()) out.noUserRows = parseInt(gn.getAggregate('COUNT'), 10) || 0;
+
+        return out;
+    }
+
+    function saveRow(row, force) {
+        if (!row) return fail('Nothing to save.');
+
+        var clean = {
+            role: trim(row.role),
+            segment: trim(row.segment),
+            zone: trim(row.zone),
+            region: trim(row.region),
+            depot: trim(row.depot),
+            user: trim(row.user),
+            active: row.active === true
+        };
+
+        if (!clean.role) return fail('Role is required.');
+        if (SEGMENTS.indexOf(clean.segment) === -1) return fail('Segment must be Cement, BPD, RMC or blank.');
+        if (clean.active && !clean.user) return fail('Pick an approver before saving an active mapping.');
+
+        if (clean.user) {
+            var u = new GlideRecord('sys_user');
+            if (!u.get(clean.user)) return fail('That user no longer exists.');
+            if (clean.active && !isTrue(u.getValue('active'))) {
+                return fail(u.getValue('name') + ' is inactive. Pick an active user.');
+            }
+        }
+
+        // Resolver takes the first active match, so two active rows for the same key is ambiguous.
+        if (clean.active && !force) {
+            var dup = new GlideRecord(TABLE);
+            dup.addQuery('u_active', 'true');
+            dup.addQuery('u_role', clean.role);
+            dup.addQuery('u_segment', clean.segment);
+            dup.addQuery('u_zone', clean.zone);
+            dup.addQuery('u_region', clean.region);
+            dup.addQuery('u_depot', clean.depot);
+            if (row.sys_id) dup.addQuery('sys_id', '!=', row.sys_id);
+            dup.query();
+            if (dup.next()) {
+                return fail('Another active mapping already uses this role and location (' +
+                    (dup.getDisplayValue('u_user') || 'no approver') +
+                    '). The resolver will pick only one of them.', { duplicate: true });
+            }
+        }
+
+        var gr = new GlideRecord(TABLE);
+        if (row.sys_id) {
+            if (!gr.get(row.sys_id)) return fail('This mapping no longer exists. Refresh the list.');
+        } else {
+            gr.initialize();
+        }
+
+        gr.setValue('u_role', clean.role);
+        gr.setValue('u_segment', clean.segment);
+        gr.setValue('u_zone', clean.zone);
+        gr.setValue('u_region', clean.region);
+        gr.setValue('u_depot', clean.depot);
+        gr.setValue('u_user', clean.user);
+        gr.setValue('u_active', clean.active ? 'true' : 'false');
+
+        var id = row.sys_id ? gr.update() : gr.insert();
+        if (!id) return fail('Save failed. Check that your role can write to this table.');
+
+        gs.info('CLMApproverAdmin: ' + gs.getUserName() + (row.sys_id ? ' updated ' : ' created ') +
+            'mapping ' + id + ' role=' + clean.role + ' segment=' + clean.segment +
+            ' zone=' + clean.zone + ' region=' + clean.region + ' depot=' + clean.depot +
+            ' user=' + clean.user + ' active=' + clean.active);
+
+        return { ok: true, row: rowToObj(gr) };
+    }
+
+    // Moves every ACTIVE mapping from one user to another. previewOnly just counts.
+    function reassign(fromId, toId, previewOnly) {
+        fromId = trim(fromId);
+        toId = trim(toId);
+        if (!fromId) return fail('Choose the approver to replace.');
+        if (!toId) return fail('Choose the new approver.');
+        if (fromId === toId) return fail('The new approver must be a different user.');
+
+        var to = new GlideRecord('sys_user');
+        if (!to.get(toId)) return fail('The new approver no longer exists.');
+        if (!isTrue(to.getValue('active'))) return fail(to.getValue('name') + ' is inactive. Pick an active user.');
+
+        var gr = new GlideRecord(TABLE);
+        gr.addQuery('u_user', fromId);
+        gr.addQuery('u_active', 'true');
+        gr.query();
+        var count = gr.getRowCount();
+        if (previewOnly) return { ok: true, count: count, toName: to.getValue('name') };
+        if (!count) return fail('No active mappings found for that approver.');
+
+        var done = 0, failed = 0;
+        while (gr.next()) {
+            gr.setValue('u_user', toId);
+            if (gr.update()) done++; else failed++;
+        }
+
+        gs.info('CLMApproverAdmin: ' + gs.getUserName() + ' reassigned ' + done +
+            ' mappings from ' + fromId + ' to ' + toId + ' (failed ' + failed + ')');
+
+        return { ok: failed === 0, count: done, failed: failed, toName: to.getValue('name'),
+                 error: failed ? failed + ' mappings could not be updated.' : '' };
+    }
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-18 16:46:52</sys_created_on>
+        <sys_id>7042c58997401b10be31fa17f053afd6</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>CLM Approver Change (admin)</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_7042c58997401b10be31fa17f053afd6</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-18 16:53:34</sys_updated_on>
+        <template><![CDATA[<div class="aa">
+
+  <!-- PAGE HEADER BANNER -->
+  <div class="aa-hero">
+    <div class="aa-hero-left">
+      <div class="aa-hero-crumb">
+        <a href="/uclm" class="aa-hero-crumb-link">Home</a>
+        <span class="aa-hero-crumb-sep">›</span>
+        <span class="aa-hero-crumb-current">Approver Mapping</span>
+      </div>
+      <div class="aa-hero-bar"></div>
+      <h1 class="aa-hero-title">Approver <span class="aa-hero-accent">Mapping</span></h1>
+      <p class="aa-hero-sub">Who approves for each role, zone, region and depot.</p>
+    </div>
+    <div class="aa-hero-right" ng-if="c.data.isAdmin">
+      <div class="aa-hero-stat">
+        <div class="aa-hero-stat-v">{{c.total}}</div>
+        <div class="aa-hero-stat-k">Mappings</div>
+      </div>
+      <div class="aa-hero-stat is-alert" ng-if="c.summary.inactiveUserRows">
+        <div class="aa-hero-stat-v">{{c.summary.inactiveUserRows}}</div>
+        <div class="aa-hero-stat-k">Need attention</div>
+      </div>
+      <button type="button" class="aa-hero-btn" ng-click="c.openNew()">+ Add mapping</button>
+    </div>
+  </div>
+
+  <!-- Access denied -->
+  <div class="aa-state" ng-if="!c.data.isAdmin">
+    <div class="aa-state-icon">!</div>
+    <h2>You don't have access to approver administration</h2>
+    <p>Ask a CLM admin to grant you the CLM admin role.</p>
+  </div>
+
+  <div ng-if="c.data.isAdmin">
+
+    <!-- Inactive approvers -->
+    <section class="aa-attention" ng-if="c.summary.users.length" role="alert">
+      <div class="aa-att-head">
+        <h2>{{c.summary.inactiveUserRows}} active mappings point to inactive users</h2>
+        <p>These people are inactive in the user table. Requests routed to their roles will go to someone who can't approve. Replace each approver below.</p>
+      </div>
+      <ul>
+        <li ng-repeat="u in c.summary.users">
+          <span class="aa-att-name">{{u.name}}</span>
+          <span class="aa-att-mail">{{u.email || 'no email on record'}}</span>
+          <span class="aa-att-count">{{u.count}} mapping{{u.count === 1 ? '' : 's'}}</span>
+          <button type="button" class="aa-btn aa-btn-small" ng-click="c.showUser(u)">View rows</button>
+          <button type="button" class="aa-btn aa-btn-small aa-btn-primary" ng-click="c.openReassign(u)">Replace approver</button>
+        </li>
+      </ul>
+    </section>
+
+    <section class="aa-note" ng-if="c.summary.noUserRows">
+      {{c.summary.noUserRows}} active mappings have no approver.
+      <a href="" ng-click="c.filters.status='no_user'; c.load(1)">Show them</a>
+    </section>
+
+    <!-- Search & filter -->
+    <section class="aa-block aa-block-filters">
+      <div class="aa-block-head">
+        <div class="aa-block-heading">
+          <div class="aa-block-title">Search &amp; Filter</div>
+          <div class="aa-block-sub">Find a mapping by approver, role, location or status</div>
+        </div>
+        <div class="aa-block-meta">
+          <button type="button" class="aa-btn aa-btn-small" ng-click="c.clearFilters()">✕ Clear filters</button>
+        </div>
+      </div>
+
+      <form class="aa-filters" ng-submit="c.load(1)">
+        <label class="aa-f aa-f-wide">
+          <span>Approver name or email</span>
+          <input type="search" ng-model="c.filters.search" ng-model-options="{debounce: 400}" ng-change="c.load(1)" placeholder="Search approver" />
+        </label>
+        <label class="aa-f">
+          <span>Segment</span>
+          <select ng-model="c.filters.segment" ng-change="c.load(1)">
+            <option value="">All</option>
+            <option ng-repeat="s in c.options.segments" value="{{s}}">{{s}}</option>
+          </select>
+        </label>
+        <label class="aa-f">
+          <span>Role</span>
+          <select ng-model="c.filters.role" ng-change="c.load(1)">
+            <option value="">All</option>
+            <option ng-repeat="r in c.options.roles" value="{{r}}">{{r}}</option>
+          </select>
+        </label>
+        <label class="aa-f">
+          <span>Zone</span>
+          <input type="text" ng-model="c.filters.zone" ng-model-options="{debounce: 400}" ng-change="c.load(1)" />
+        </label>
+        <label class="aa-f">
+          <span>Region</span>
+          <input type="text" ng-model="c.filters.region" ng-model-options="{debounce: 400}" ng-change="c.load(1)" />
+        </label>
+        <label class="aa-f">
+          <span>Depot</span>
+          <input type="text" ng-model="c.filters.depot" ng-model-options="{debounce: 400}" ng-change="c.load(1)" />
+        </label>
+        <label class="aa-f">
+          <span>Status</span>
+          <select ng-model="c.filters.status" ng-change="c.load(1)">
+            <option value="">All</option>
+            <option value="inactive_user">Inactive approver</option>
+            <option value="no_user">No approver</option>
+            <option value="inactive_row">Mapping turned off</option>
+          </select>
+        </label>
+      </form>
+
+      <div class="aa-chip-row" ng-if="c.filters.user">
+        <span class="aa-chip">
+          Showing rows for {{c.filterUserName}}
+          <button type="button" class="aa-chip-x" aria-label="Remove approver filter" ng-click="c.filters.user=''; c.filterUserName=''; c.load(1)">&times;</button>
+        </span>
+      </div>
+    </section>
+
+    <!-- Table -->
+    <section class="aa-block">
+      <div class="aa-block-head">
+        <div class="aa-block-heading">
+          <div class="aa-block-title">Mappings</div>
+          <div class="aa-block-sub">Edit a row to change its approver, or add a new mapping</div>
+        </div>
+        <div class="aa-block-meta">
+          <span class="aa-pill"><span class="aa-pill-k">Total</span> {{c.total}}</span>
+        </div>
+      </div>
+
+      <div class="aa-tablewrap" aria-busy="{{c.loading}}">
+        <table class="aa-table">
+          <thead>
+            <tr>
+              <th>Segment</th>
+              <th>Role</th>
+              <th>Zone</th>
+              <th>Region</th>
+              <th>Depot</th>
+              <th>Approver</th>
+              <th>Status</th>
+              <th><span class="aa-sr">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr ng-repeat="r in c.rows" ng-class="{'aa-row-bad': c.statusOf(r).cls==='bad'}">
+              <td data-label="Segment">{{r.segment || '-'}}</td>
+              <td data-label="Role"><b>{{r.role}}</b></td>
+              <td data-label="Zone">{{r.zone || '-'}}</td>
+              <td data-label="Region">{{r.region || '-'}}</td>
+              <td data-label="Depot">{{r.depot || '-'}}</td>
+              <td data-label="Approver">
+                <div class="aa-user" ng-if="r.user_id">{{r.user_name}}</div>
+                <div class="aa-usermail" ng-if="r.user_id">{{r.user_email}}</div>
+                <span ng-if="!r.user_id" class="aa-muted">Not set</span>
+              </td>
+              <td data-label="Status"><span class="aa-badge aa-badge-{{c.statusOf(r).cls}}">{{c.statusOf(r).label}}</span></td>
+              <td class="aa-actions"><button type="button" class="aa-btn aa-btn-small" ng-click="c.openEdit(r)">Edit</button></td>
+            </tr>
+            <tr ng-if="!c.loading && !c.rows.length">
+              <td colspan="8" class="aa-empty">No mappings match these filters. Clear a filter or add a mapping.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <footer class="aa-pager">
+        <span>Showing <b>{{c.rangeStart()}}–{{c.rangeEnd()}}</b> of <b>{{c.total}}</b></span>
+        <span class="aa-pager-btns">
+          <button type="button" class="aa-btn aa-btn-small" ng-disabled="c.page<=1 || c.loading" ng-click="c.load(c.page-1)">‹ Previous</button>
+          <button type="button" class="aa-btn aa-btn-small" ng-disabled="!c.hasNext() || c.loading" ng-click="c.load(c.page+1)">Next ›</button>
+        </span>
+      </footer>
+    </section>
+
+    <!-- Side panel -->
+    <div class="aa-scrim" ng-if="c.panel" ng-click="c.closePanel()"></div>
+
+    <aside class="aa-panel" ng-if="c.panel" role="dialog" aria-modal="true" aria-label="Edit approver mapping">
+
+      <!-- edit / new -->
+      <div ng-if="c.panel === 'edit' || c.panel === 'new'">
+        <div class="aa-panel-head">
+          <h2>{{c.panel === 'new' ? 'Add mapping' : 'Edit mapping'}}</h2>
+          <button type="button" class="aa-panel-x" aria-label="Close" ng-click="c.closePanel()">✕</button>
+        </div>
+
+        <div class="aa-panel-body">
+          <p class="aa-warnline" ng-if="c.panel === 'edit' && !c.edit.currentActive && c.edit.currentName">
+            {{c.edit.currentName}} is inactive. Pick a replacement approver.
+          </p>
+
+          <label class="aa-field">
+            <span>Role</span>
+            <input type="text" list="aa-roles" ng-model="c.edit.role" />
+            <datalist id="aa-roles"><option ng-repeat="r in c.options.roles" value="{{r}}"></option></datalist>
+          </label>
+
+          <label class="aa-field">
+            <span>Segment</span>
+            <select ng-model="c.edit.segment">
+              <option value="">None (for example ZCH and head-office roles)</option>
+              <option ng-repeat="s in c.options.segments" value="{{s}}">{{s}}</option>
+            </select>
+          </label>
+
+          <div class="aa-field-row">
+            <label class="aa-field"><span>Zone</span><input type="text" ng-model="c.edit.zone" /></label>
+            <label class="aa-field"><span>Region</span><input type="text" ng-model="c.edit.region" /></label>
+            <label class="aa-field"><span>Depot</span><input type="text" ng-model="c.edit.depot" /></label>
+          </div>
+
+          <div class="aa-field">
+            <span>Approver</span>
+            <sn-record-picker field="c.pick" table="'sys_user'" display-field="'name'" value-field="'sys_id'"
+                              search-fields="'name,email,user_name'" default-query="'active=true'" page-size="20"></sn-record-picker>
+          </div>
+
+          <label class="aa-check">
+            <input type="checkbox" ng-model="c.edit.active" />
+            <span>Mapping is active</span>
+          </label>
+
+          <p class="aa-error" ng-if="c.error" role="alert">{{c.error}}</p>
+        </div>
+
+        <div class="aa-panel-actions">
+          <button type="button" class="aa-btn aa-btn-primary" ng-disabled="c.saving" ng-click="c.save(false)">Save changes</button>
+          <button type="button" class="aa-btn aa-btn-danger" ng-if="c.canForce" ng-disabled="c.saving" ng-click="c.save(true)">Save anyway</button>
+          <button type="button" class="aa-btn" ng-click="c.closePanel()">Cancel</button>
+        </div>
+      </div>
+
+      <!-- bulk reassign -->
+      <div ng-if="c.panel === 'reassign'">
+        <div class="aa-panel-head">
+          <h2>Replace approver</h2>
+          <button type="button" class="aa-panel-x" aria-label="Close" ng-click="c.closePanel()">✕</button>
+        </div>
+
+        <div class="aa-panel-body">
+          <p>
+            <b>{{c.fromUser.name}}</b> is inactive and covers {{c.fromUser.count}} active mapping{{c.fromUser.count === 1 ? '' : 's'}}.
+            Choose who takes over all of them.
+          </p>
+
+          <div class="aa-field">
+            <span>New approver</span>
+            <sn-record-picker field="c.toPick" table="'sys_user'" display-field="'name'" value-field="'sys_id'"
+                              search-fields="'name,email,user_name'" default-query="'active=true'" page-size="20"></sn-record-picker>
+          </div>
+
+          <p class="aa-preview" ng-if="c.preview">
+            {{c.preview.count}} mapping{{c.preview.count === 1 ? '' : 's'}} will move from {{c.fromUser.name}} to {{c.preview.toName}}.
+          </p>
+
+          <p class="aa-error" ng-if="c.error" role="alert">{{c.error}}</p>
+        </div>
+
+        <div class="aa-panel-actions">
+          <button type="button" class="aa-btn aa-btn-primary" ng-disabled="c.saving || !c.preview" ng-click="c.confirmReassign()">
+            Reassign {{c.preview ? c.preview.count : ''}} mappings
+          </button>
+          <button type="button" class="aa-btn" ng-click="c.closePanel()">Cancel</button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="aa-toast aa-toast-{{c.toast.kind}}" ng-if="c.toast" role="status" aria-live="polite">{{c.toast.text}}</div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>7042c58997401b10be31fa17f053afd6</id>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-18 16:46:52</sys_created_on>
+        <sys_id>784249c197801b10be31fa17f053af46</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-18 16:46:52</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

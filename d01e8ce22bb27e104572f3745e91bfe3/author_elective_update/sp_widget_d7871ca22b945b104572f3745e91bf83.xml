@@ -1,0 +1,1030 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope) {
+  var c = this;
+
+  c.loading = false;
+  c.inserting = false;
+  c.testResult = null;
+
+  c.refresh = function() {
+    c.loading = true;
+    c.server.get({ action: 'load' }).then(function(resp) {
+      c.data = resp.data;
+      c.loading = false;
+    }, function() {
+      c.loading = false;
+    });
+  };
+
+  c.testInsert = function() {
+    c.inserting = true;
+    c.testResult = null;
+    c.server.get({ action: 'test_insert' }).then(function(resp) {
+      c.inserting = false;
+      c.testResult = resp.data.testResult;
+      // Refresh visible lists after test insert
+      if (resp.data.queueRecords) c.data.queueRecords = resp.data.queueRecords;
+      if (resp.data.monitorRecords) c.data.monitorRecords = resp.data.monitorRecords;
+    }, function(err) {
+      c.inserting = false;
+      c.testResult = { ok: false, message: 'Server communication failed: ' + JSON.stringify(err) };
+    });
+  };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.clm-dbg-widget {
+  padding: 20px;
+  background: #f4f6f9;
+  min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+}
+
+.clm-dbg-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 16px 20px;
+  background: #2c3e50;
+  color: #fff;
+  border-radius: 8px;
+}
+
+.clm-dbg-title {
+  font-size: 18px;
+  font-weight: 700;
+}
+.clm-dbg-title span {
+  color: #f39c12;
+}
+
+.clm-dbg-k {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #7f8c8d;
+  font-weight: 700;
+  margin-bottom: 3px;
+}
+.clm-dbg-v {
+  font-size: 14px;
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.clm-dbg-table {
+  font-size: 12px;
+  margin-bottom: 0;
+}
+.clm-dbg-table th {
+  background: #edf2f7;
+  color: #34495e;
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 11px;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>false</has_preview>
+        <id>clone_demo_bg</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>clone demo bg</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+  var T_QUEUE   = 'x_birl3_clm_clm_servicenow_to_sap_send_back';
+  var T_MONITOR = 'x_birl3_clm_bank_guarantee_monitor';
+  var T_MATRIX  = 'x_birl3_clm_approval_matrix';
+  var T_CUST    = 'x_birl3_clm_clm_customer_master1';
+
+  var userId = gs.getUserID();
+  var userGr = gs.getUser();
+  var isAdmin = gs.hasRole('admin');
+
+  // 1. Session & Identity
+  data.user = {
+    id: userId,
+    name: gs.getUserDisplayName(),
+    userName: userGr.getName(),
+    isAdmin: isAdmin
+  };
+
+  // 2. ACL Checks
+  var dummyQ = new GlideRecord(T_QUEUE);
+  var dummyMon = new GlideRecord(T_MONITOR);
+
+  data.acl = {
+    queueRead: dummyQ.canRead(),
+    queueCreate: dummyQ.canCreate(),
+    monRead: dummyMon.canRead(),
+    monCreate: dummyMon.canCreate()
+  };
+
+  // 3. Approval Matrix Inspection
+  var matrixGr = new GlideRecord(T_MATRIX);
+  matrixGr.addQuery('approver_user', userId);
+  var rqc = matrixGr.addQuery('role_name', 'CONTAINS', 'ZCH');
+  rqc.addOrCondition('role_name', 'CONTAINS', 'Zonal');
+  var ctqc = matrixGr.addQuery('customer_type', 'CONTAINS', 'Non-Trade');
+  ctqc.addOrCondition('customer_type', 'CONTAINS', 'non_trade');
+  ctqc.addOrCondition('customer_type', 'CONTAINS', 'non-trade');
+  matrixGr.query();
+
+  var isZch = false;
+  var isPanIndia = false;
+  var userZones = [];
+  var recordCount = 0;
+
+  while (matrixGr.next()) {
+    isZch = true;
+    recordCount++;
+    var pIndiaVal = matrixGr.getValue('pan_india');
+    if (pIndiaVal === '1' || pIndiaVal === 'true' || pIndiaVal === true) {
+      isPanIndia = true;
+    }
+    var z = matrixGr.getValue('zone');
+    if (z && userZones.indexOf(z) === -1) {
+      userZones.push(z);
+    }
+  }
+
+  data.matrix = {
+    isZch: isZch,
+    isPanIndia: isPanIndia,
+    userZones: userZones,
+    recordCount: recordCount
+  };
+
+  // 4. Fetch Queue Records (Unrestricted by Zone so we can diagnose missing items)
+  function fetchQueueRecords() {
+    var list = [];
+    var qGr = new GlideRecord(T_QUEUE);
+    qGr.orderByDesc('sys_created_on');
+    qGr.setLimit(50);
+    qGr.query();
+
+    while (qGr.next()) {
+      list.push({
+        id: qGr.getUniqueValue(),
+        customerCode: qGr.u_customer_code.customer_code_sap ? qGr.u_customer_code.customer_code_sap.toString() : qGr.getDisplayValue('u_customer_code'),
+        customerName: qGr.u_customer_code.customer_name ? qGr.u_customer_code.customer_name.toString() : '',
+        customerType: qGr.isValidField('customer_type') ? qGr.getValue('customer_type') : qGr.getValue('u_customer_type'),
+        oldLimit: parseFloat(qGr.getValue('u_old_credit_limit')) || 0,
+        newLimit: parseFloat(qGr.getValue('u_approved_code_limit')) || 0,
+        status: qGr.getValue('u_status') || 'Pending',
+        attempts: qGr.getValue('u_attempt_count') || 0,
+        lastError: qGr.getValue('u_last_error') || '',
+        createdBy: qGr.getValue('sys_created_by') || '',
+        createdOn: qGr.getDisplayValue('sys_created_on')
+      });
+    }
+    return list;
+  }
+
+  // 5. Fetch Monitor Audit Records
+  function fetchMonitorRecords() {
+    var list = [];
+    var mGr = new GlideRecord(T_MONITOR);
+    mGr.orderByDesc('sys_created_on');
+    mGr.setLimit(50);
+    mGr.query();
+
+    while (mGr.next()) {
+      list.push({
+        id: mGr.getUniqueValue(),
+        customerSite: mGr.getDisplayValue('customer_site_code'),
+        creditSegment: mGr.getValue('credit_segment') || '',
+        creditLimit: parseFloat(mGr.getValue('credit_limit')) || 0,
+        oldLimit: parseFloat(mGr.getValue('old_credit_limit')) || 0,
+        nextReviewDate: mGr.getValue('next_review_date') || '',
+        description: mGr.getValue('description') || '',
+        createdBy: mGr.getValue('sys_created_by') || '',
+        createdOn: mGr.getDisplayValue('sys_created_on')
+      });
+    }
+    return list;
+  }
+
+  // 6. Test Insert Action (Evaluates whether user can write directly)
+  function runTestInsert() {
+    // Find an arbitrary active customer master record to reference
+    var custGr = new GlideRecord(T_CUST);
+    custGr.addQuery('is_active', 'true');
+    custGr.setLimit(1);
+    custGr.query();
+
+    if (!custGr.next()) {
+      return { ok: false, message: 'Could not find any customer record in ' + T_CUST + ' to link test insert.' };
+    }
+
+    var custSysId = custGr.getUniqueValue();
+
+    // Try audit table insert
+    var monGr = new GlideRecord(T_MONITOR);
+    monGr.initialize();
+    monGr.setValue('customer_site_code', custSysId);
+    monGr.setValue('credit_limit', 100);
+    monGr.setValue('old_credit_limit', 100);
+    monGr.setValue('credit_segment', 'GIL');
+    monGr.setValue('customer_type', 'non_trade');
+    monGr.setValue('description', 'DIAGNOSTIC TEST INSERT by ' + gs.getUserDisplayName());
+    var monId = monGr.insert();
+
+    // Try send-back queue insert
+    var qGr = new GlideRecord(T_QUEUE);
+    qGr.initialize();
+    qGr.setValue('u_customer_code', custSysId);
+    qGr.setValue('u_approved_code_limit', 100);
+    qGr.setValue('u_old_credit_limit', 100);
+    qGr.setValue('u_status', 'Pending');
+    qGr.setValue('u_attempt_count', 0);
+    qGr.setValue('u_last_error', 'TEST INSERT');
+    if (qGr.isValidField('customer_type')) qGr.setValue('customer_type', 'non_trade_bg');
+    if (qGr.isValidField('u_customer_type')) qGr.setValue('u_customer_type', 'non_trade_bg');
+    if (monId && qGr.isValidField('bg_request')) qGr.setValue('bg_request', monId);
+
+    var qId = qGr.insert();
+
+    if (!qId && !monId) {
+      return {
+        ok: false,
+        message: 'BOTH inserts FAILED! The logged-in user lacks Create ACL permissions on both ' + T_QUEUE + ' and ' + T_MONITOR + '.'
+      };
+    }
+
+    if (!qId) {
+      return {
+        ok: false,
+        monId: monId,
+        message: 'Audit record inserted (' + monId + '), but Send-Back Queue insert FAILED. Check Create ACL on ' + T_QUEUE + '.'
+      };
+    }
+
+    return {
+      ok: true,
+      queueId: qId,
+      monId: monId,
+      message: 'SUCCESS: Current user CAN write to both tables. If real submissions fail, the problem is either zone mismatch in Approval Matrix or field validation.'
+    };
+  }
+
+  var action = (input && input.action) ? input.action : 'load';
+
+  if (action === 'test_insert') {
+    data.testResult = runTestInsert();
+  }
+
+  data.queueRecords = fetchQueueRecords();
+  data.monitorRecords = fetchMonitorRecords();
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-04 15:46:51</sys_created_on>
+        <sys_id>d7871ca22b945b104572f3745e91bf83</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>clone demo bg</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_d7871ca22b945b104572f3745e91bf83</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-04 15:48:38</sys_updated_on>
+        <template><![CDATA[<div class="clm-dbg-widget">
+
+  <!-- HERO HEADER -->
+  <div class="clm-dbg-header">
+    <div class="clm-dbg-title">
+      <i class="fa fa-bug"></i> CLM SAP Send-Back &amp; BG Monitor <span>Diagnostics</span>
+    </div>
+    <div class="clm-dbg-actions">
+      <button type="button" class="btn btn-sm btn-info" ng-click="c.refresh()">
+        <i class="fa fa-refresh" ng-class="{'fa-spin': c.loading}"></i> Refresh Data
+      </button>
+      <button type="button" class="btn btn-sm btn-warning" ng-click="c.testInsert()" ng-disabled="c.inserting">
+        <i class="fa fa-bolt"></i> {{c.inserting ? 'Testing Insert...' : 'Simulate Test Insert as ' + c.data.user.name}}
+      </button>
+    </div>
+  </div>
+
+  <!-- TEST RESULT BANNER -->
+  <div class="alert alert-info m-b-md" ng-if="c.testResult">
+    <b>Insert Test Result:</b> {{c.testResult.message}}
+    <div ng-if="c.testResult.queueId" class="text-muted text-xs">
+      Generated Queue ID: <code>{{c.testResult.queueId}}</code> | Audit ID: <code>{{c.testResult.monId}}</code>
+    </div>
+  </div>
+
+  <!-- SECTION 1: USER CONTEXT & PERMISSIONS -->
+  <div class="panel panel-default">
+    <div class="panel-heading font-bold">
+      <i class="fa fa-user-circle-o m-r-xs"></i> 1. Current Session Context &amp; Access Check
+    </div>
+    <div class="panel-body">
+      <div class="row">
+        <!-- Identity -->
+        <div class="col-sm-4">
+          <div class="clm-dbg-k">Logged-In User</div>
+          <div class="clm-dbg-v">{{c.data.user.name}} (<code>{{c.data.user.userName}}</code>)</div>
+          <div class="text-muted text-xs">Sys ID: {{c.data.user.id}}</div>
+          <div class="m-t-xs">
+            <span class="label" ng-class="c.data.user.isAdmin ? 'label-success' : 'label-default'">
+              {{c.data.user.isAdmin ? 'Admin' : 'Non-Admin'}}
+            </span>
+            <span class="label" ng-class="c.data.matrix.isZch ? 'label-primary' : 'label-danger'">
+              {{c.data.matrix.isZch ? 'ZCH Verified' : 'Not in Matrix as ZCH'}}
+            </span>
+            <span class="label label-info" ng-if="c.data.matrix.isPanIndia">Pan-India</span>
+          </div>
+        </div>
+
+        <!-- Matrix Zones -->
+        <div class="col-sm-4">
+          <div class="clm-dbg-k">Approval Matrix Mapped Zones</div>
+          <div class="clm-dbg-v" ng-if="c.data.matrix.userZones.length > 0">
+            <span class="badge" ng-repeat="z in c.data.matrix.userZones">{{z}}</span>
+          </div>
+          <div class="text-danger font-bold" ng-if="c.data.matrix.userZones.length === 0 && !c.data.user.isAdmin">
+            No zones mapped! User will be blocked by matrix queries.
+          </div>
+          <div class="text-muted text-xs m-t-xs">
+            Matrix records found for user: <b>{{c.data.matrix.recordCount}}</b>
+          </div>
+        </div>
+
+        <!-- Table ACL Status -->
+        <div class="col-sm-4">
+          <div class="clm-dbg-k">Table CRUD Capabilities</div>
+          <table class="table table-condensed text-xs m-b-none">
+            <thead>
+              <tr>
+                <th>Target Table</th>
+                <th class="text-center">Can Read</th>
+                <th class="text-center">Can Insert</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Send-Back Queue</td>
+                <td class="text-center">
+                  <span class="fa" ng-class="c.data.acl.queueRead ? 'fa-check text-success' : 'fa-times text-danger'"></span>
+                </td>
+                <td class="text-center">
+                  <span class="fa" ng-class="c.data.acl.queueCreate ? 'fa-check text-success' : 'fa-times text-danger'"></span>
+                </td>
+              </tr>
+              <tr>
+                <td>BG Monitor Table</td>
+                <td class="text-center">
+                  <span class="fa" ng-class="c.data.acl.monRead ? 'fa-check text-success' : 'fa-times text-danger'"></span>
+                </td>
+                <td class="text-center">
+                  <span class="fa" ng-class="c.data.acl.monCreate ? 'fa-check text-success' : 'fa-times text-danger'"></span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 2: SEND-BACK QUEUE TABLE VIEWER -->
+  <div class="panel panel-default">
+    <div class="panel-heading clearfix font-bold">
+      <span class="pull-left">
+        <i class="fa fa-paper-plane m-r-xs"></i> 2. Send-Back Queue Records (<code>x_birl3_clm_clm_servicenow_to_sap_send_back</code>)
+      </span>
+      <span class="pull-right badge badge-primary">{{c.data.queueRecords.length}} recent records</span>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-bordered table-striped table-hover clm-dbg-table">
+        <thead>
+          <tr>
+            <th>Sys ID</th>
+            <th>Customer Site</th>
+            <th>Type</th>
+            <th class="text-right">Old Limit (₹)</th>
+            <th class="text-right">Approved Limit (₹)</th>
+            <th class="text-center">Status</th>
+            <th>Attempts</th>
+            <th>Error / Message</th>
+            <th>Created By</th>
+            <th>Created On</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr ng-repeat="q in c.data.queueRecords track by q.id">
+            <td class="text-monospace text-xs" title="{{q.id}}">{{q.id | limitTo:8}}&hellip;</td>
+            <td>
+              <b>{{q.customerCode}}</b>
+              <div class="text-muted text-xs">{{q.customerName}}</div>
+            </td>
+            <td><code>{{q.customerType}}</code></td>
+            <td class="text-right">{{q.oldLimit | number:2}}</td>
+            <td class="text-right font-bold">{{q.newLimit | number:2}}</td>
+            <td class="text-center">
+              <span class="label" ng-class="{
+                'label-success': q.status === 'Success',
+                'label-danger': q.status === 'Failed',
+                'label-warning': q.status === 'Pending'
+              }">{{q.status}}</span>
+            </td>
+            <td>{{q.attempts}}</td>
+            <td class="text-danger text-xs" title="{{q.lastError}}">
+              {{q.lastError ? (q.lastError | limitTo:45) + '...' : '—'}}
+            </td>
+            <td><b>{{q.createdBy}}</b></td>
+            <td class="text-xs">{{q.createdOn}}</td>
+          </tr>
+          <tr ng-if="c.data.queueRecords.length === 0">
+            <td colspan="10" class="text-center text-muted p-md">
+              No records found in the send-back queue table.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- SECTION 3: BG MONITOR AUDIT RECORDS -->
+  <div class="panel panel-default">
+    <div class="panel-heading clearfix font-bold">
+      <span class="pull-left">
+        <i class="fa fa-database m-r-xs"></i> 3. Bank Guarantee Monitor Audit Records (<code>x_birl3_clm_bank_guarantee_monitor</code>)
+      </span>
+      <span class="pull-right badge badge-primary">{{c.data.monitorRecords.length}} recent records</span>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-bordered table-striped table-hover clm-dbg-table">
+        <thead>
+          <tr>
+            <th>Sys ID</th>
+            <th>Site Reference</th>
+            <th>Credit Segment</th>
+            <th class="text-right">Old Limit (₹)</th>
+            <th class="text-right">Credit Limit (₹)</th>
+            <th>Next Review Date</th>
+            <th>Description</th>
+            <th>Created By</th>
+            <th>Created On</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr ng-repeat="m in c.data.monitorRecords track by m.id">
+            <td class="text-monospace text-xs" title="{{m.id}}">{{m.id | limitTo:8}}&hellip;</td>
+            <td><b>{{m.customerSite}}</b></td>
+            <td><span class="label label-info">{{m.creditSegment}}</span></td>
+            <td class="text-right">{{m.oldLimit | number:2}}</td>
+            <td class="text-right font-bold">{{m.creditLimit | number:2}}</td>
+            <td>{{m.nextReviewDate || '—'}}</td>
+            <td class="text-xs">{{m.description}}</td>
+            <td><b>{{m.createdBy}}</b></td>
+            <td class="text-xs">{{m.createdOn}}</td>
+          </tr>
+          <tr ng-if="c.data.monitorRecords.length === 0">
+            <td colspan="9" class="text-center text-muted p-md">
+              No records found in the BG monitor table.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>d7871ca22b945b104572f3745e91bf83</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-04 15:46:51</sys_created_on>
+        <sys_id>53871ca22b945b104572f3745e91bf8b</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-04 15:46:51</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_d7871ca22b945b104572f3745e91bf83</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function($scope) {
+  var c = this;
+
+  c.loading = false;
+  c.inserting = false;
+  c.testResult = null;
+
+  c.refresh = function() {
+    c.loading = true;
+    c.server.get({ action: 'load' }).then(function(resp) {
+      c.data = resp.data;
+      c.loading = false;
+    }, function() {
+      c.loading = false;
+    });
+  };
+
+  c.testInsert = function() {
+    c.inserting = true;
+    c.testResult = null;
+    c.server.get({ action: 'test_insert' }).then(function(resp) {
+      c.inserting = false;
+      c.testResult = resp.data.testResult;
+      // Refresh visible lists after test insert
+      if (resp.data.queueRecords) c.data.queueRecords = resp.data.queueRecords;
+      if (resp.data.monitorRecords) c.data.monitorRecords = resp.data.monitorRecords;
+    }, function(err) {
+      c.inserting = false;
+      c.testResult = { ok: false, message: 'Server communication failed: ' + JSON.stringify(err) };
+    });
+  };
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;.clm-dbg-widget {
+  padding: 20px;
+  background: #f4f6f9;
+  min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+}
+
+.clm-dbg-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 16px 20px;
+  background: #2c3e50;
+  color: #fff;
+  border-radius: 8px;
+}
+
+.clm-dbg-title {
+  font-size: 18px;
+  font-weight: 700;
+}
+.clm-dbg-title span {
+  color: #f39c12;
+}
+
+.clm-dbg-k {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #7f8c8d;
+  font-weight: 700;
+  margin-bottom: 3px;
+}
+.clm-dbg-v {
+  font-size: 14px;
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.clm-dbg-table {
+  font-size: 12px;
+  margin-bottom: 0;
+}
+.clm-dbg-table th {
+  background: #edf2f7;
+  color: #34495e;
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 11px;
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;false&lt;/has_preview&gt;&lt;id&gt;clone_demo_bg&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;clone demo bg&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+  var T_QUEUE   = 'x_birl3_clm_clm_servicenow_to_sap_send_back';
+  var T_MONITOR = 'x_birl3_clm_bank_guarantee_monitor';
+  var T_MATRIX  = 'x_birl3_clm_approval_matrix';
+  var T_CUST    = 'x_birl3_clm_clm_customer_master1';
+
+  var userId = gs.getUserID();
+  var userGr = gs.getUser();
+  var isAdmin = gs.hasRole('admin');
+
+  // 1. Session &amp; Identity
+  data.user = {
+    id: userId,
+    name: gs.getUserDisplayName(),
+    userName: userGr.getName(),
+    isAdmin: isAdmin
+  };
+
+  // 2. ACL Checks
+  var dummyQ = new GlideRecord(T_QUEUE);
+  var dummyMon = new GlideRecord(T_MONITOR);
+
+  data.acl = {
+    queueRead: dummyQ.canRead(),
+    queueCreate: dummyQ.canCreate(),
+    monRead: dummyMon.canRead(),
+    monCreate: dummyMon.canCreate()
+  };
+
+  // 3. Approval Matrix Inspection
+  var matrixGr = new GlideRecord(T_MATRIX);
+  matrixGr.addQuery('approver_user', userId);
+  var rqc = matrixGr.addQuery('role_name', 'CONTAINS', 'ZCH');
+  rqc.addOrCondition('role_name', 'CONTAINS', 'Zonal');
+  var ctqc = matrixGr.addQuery('customer_type', 'CONTAINS', 'Non-Trade');
+  ctqc.addOrCondition('customer_type', 'CONTAINS', 'non_trade');
+  ctqc.addOrCondition('customer_type', 'CONTAINS', 'non-trade');
+  matrixGr.query();
+
+  var isZch = false;
+  var isPanIndia = false;
+  var userZones = [];
+  var recordCount = 0;
+
+  while (matrixGr.next()) {
+    isZch = true;
+    recordCount++;
+    var pIndiaVal = matrixGr.getValue('pan_india');
+    if (pIndiaVal === '1' || pIndiaVal === 'true' || pIndiaVal === true) {
+      isPanIndia = true;
+    }
+    var z = matrixGr.getValue('zone');
+    if (z &amp;&amp; userZones.indexOf(z) === -1) {
+      userZones.push(z);
+    }
+  }
+
+  data.matrix = {
+    isZch: isZch,
+    isPanIndia: isPanIndia,
+    userZones: userZones,
+    recordCount: recordCount
+  };
+
+  // 4. Fetch Queue Records (Unrestricted by Zone so we can diagnose missing items)
+  function fetchQueueRecords() {
+    var list = [];
+    var qGr = new GlideRecord(T_QUEUE);
+    qGr.orderByDesc('sys_created_on');
+    qGr.setLimit(50);
+    qGr.query();
+
+    while (qGr.next()) {
+      list.push({
+        id: qGr.getUniqueValue(),
+        customerCode: qGr.u_customer_code.customer_code_sap ? qGr.u_customer_code.customer_code_sap.toString() : qGr.getDisplayValue('u_customer_code'),
+        customerName: qGr.u_customer_code.customer_name ? qGr.u_customer_code.customer_name.toString() : '',
+        customerType: qGr.isValidField('customer_type') ? qGr.getValue('customer_type') : qGr.getValue('u_customer_type'),
+        oldLimit: parseFloat(qGr.getValue('u_old_credit_limit')) || 0,
+        newLimit: parseFloat(qGr.getValue('u_approved_code_limit')) || 0,
+        status: qGr.getValue('u_status') || 'Pending',
+        attempts: qGr.getValue('u_attempt_count') || 0,
+        lastError: qGr.getValue('u_last_error') || '',
+        createdBy: qGr.getValue('sys_created_by') || '',
+        createdOn: qGr.getDisplayValue('sys_created_on')
+      });
+    }
+    return list;
+  }
+
+  // 5. Fetch Monitor Audit Records
+  function fetchMonitorRecords() {
+    var list = [];
+    var mGr = new GlideRecord(T_MONITOR);
+    mGr.orderByDesc('sys_created_on');
+    mGr.setLimit(50);
+    mGr.query();
+
+    while (mGr.next()) {
+      list.push({
+        id: mGr.getUniqueValue(),
+        customerSite: mGr.getDisplayValue('customer_site_code'),
+        creditSegment: mGr.getValue('credit_segment') || '',
+        creditLimit: parseFloat(mGr.getValue('credit_limit')) || 0,
+        oldLimit: parseFloat(mGr.getValue('old_credit_limit')) || 0,
+        nextReviewDate: mGr.getValue('next_review_date') || '',
+        description: mGr.getValue('description') || '',
+        createdBy: mGr.getValue('sys_created_by') || '',
+        createdOn: mGr.getDisplayValue('sys_created_on')
+      });
+    }
+    return list;
+  }
+
+  // 6. Test Insert Action (Evaluates whether user can write directly)
+  function runTestInsert() {
+    // Find an arbitrary active customer master record to reference
+    var custGr = new GlideRecord(T_CUST);
+    custGr.addQuery('is_active', 'true');
+    custGr.setLimit(1);
+    custGr.query();
+
+    if (!custGr.next()) {
+      return { ok: false, message: 'Could not find any customer record in ' + T_CUST + ' to link test insert.' };
+    }
+
+    var custSysId = custGr.getUniqueValue();
+
+    // Try audit table insert
+    var monGr = new GlideRecord(T_MONITOR);
+    monGr.initialize();
+    monGr.setValue('customer_site_code', custSysId);
+    monGr.setValue('credit_limit', 100);
+    monGr.setValue('old_credit_limit', 100);
+    monGr.setValue('credit_segment', 'GIL');
+    monGr.setValue('customer_type', 'non_trade');
+    monGr.setValue('description', 'DIAGNOSTIC TEST INSERT by ' + gs.getUserDisplayName());
+    var monId = monGr.insert();
+
+    // Try send-back queue insert
+    var qGr = new GlideRecord(T_QUEUE);
+    qGr.initialize();
+    qGr.setValue('u_customer_code', custSysId);
+    qGr.setValue('u_approved_code_limit', 100);
+    qGr.setValue('u_old_credit_limit', 100);
+    qGr.setValue('u_status', 'Pending');
+    qGr.setValue('u_attempt_count', 0);
+    qGr.setValue('u_last_error', 'TEST INSERT');
+    if (qGr.isValidField('customer_type')) qGr.setValue('customer_type', 'non_trade_bg');
+    if (qGr.isValidField('u_customer_type')) qGr.setValue('u_customer_type', 'non_trade_bg');
+    if (monId &amp;&amp; qGr.isValidField('bg_request')) qGr.setValue('bg_request', monId);
+
+    var qId = qGr.insert();
+
+    if (!qId &amp;&amp; !monId) {
+      return {
+        ok: false,
+        message: 'BOTH inserts FAILED! The logged-in user lacks Create ACL permissions on both ' + T_QUEUE + ' and ' + T_MONITOR + '.'
+      };
+    }
+
+    if (!qId) {
+      return {
+        ok: false,
+        monId: monId,
+        message: 'Audit record inserted (' + monId + '), but Send-Back Queue insert FAILED. Check Create ACL on ' + T_QUEUE + '.'
+      };
+    }
+
+    return {
+      ok: true,
+      queueId: qId,
+      monId: monId,
+      message: 'SUCCESS: Current user CAN write to both tables. If real submissions fail, the problem is either zone mismatch in Approval Matrix or field validation.'
+    };
+  }
+
+  var action = (input &amp;&amp; input.action) ? input.action : 'load';
+
+  if (action === 'test_insert') {
+    data.testResult = runTestInsert();
+  }
+
+  data.queueRecords = fetchQueueRecords();
+  data.monitorRecords = fetchMonitorRecords();
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-11-04 15:46:51&lt;/sys_created_on&gt;&lt;sys_id&gt;d7871ca22b945b104572f3745e91bf83&lt;/sys_id&gt;&lt;sys_mod_count&gt;1&lt;/sys_mod_count&gt;&lt;sys_name&gt;clone demo bg&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_d7871ca22b945b104572f3745e91bf83&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-11-04 15:48:38&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="clm-dbg-widget"&gt;
+
+  &lt;!-- HERO HEADER --&gt;
+  &lt;div class="clm-dbg-header"&gt;
+    &lt;div class="clm-dbg-title"&gt;
+      &lt;i class="fa fa-bug"&gt;&lt;/i&gt; CLM SAP Send-Back &amp;amp; BG Monitor &lt;span&gt;Diagnostics&lt;/span&gt;
+    &lt;/div&gt;
+    &lt;div class="clm-dbg-actions"&gt;
+      &lt;button type="button" class="btn btn-sm btn-info" ng-click="c.refresh()"&gt;
+        &lt;i class="fa fa-refresh" ng-class="{'fa-spin': c.loading}"&gt;&lt;/i&gt; Refresh Data
+      &lt;/button&gt;
+      &lt;button type="button" class="btn btn-sm btn-warning" ng-click="c.testInsert()" ng-disabled="c.inserting"&gt;
+        &lt;i class="fa fa-bolt"&gt;&lt;/i&gt; {{c.inserting ? 'Testing Insert...' : 'Simulate Test Insert as ' + c.data.user.name}}
+      &lt;/button&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;!-- TEST RESULT BANNER --&gt;
+  &lt;div class="alert alert-info m-b-md" ng-if="c.testResult"&gt;
+    &lt;b&gt;Insert Test Result:&lt;/b&gt; {{c.testResult.message}}
+    &lt;div ng-if="c.testResult.queueId" class="text-muted text-xs"&gt;
+      Generated Queue ID: &lt;code&gt;{{c.testResult.queueId}}&lt;/code&gt; | Audit ID: &lt;code&gt;{{c.testResult.monId}}&lt;/code&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;!-- SECTION 1: USER CONTEXT &amp; PERMISSIONS --&gt;
+  &lt;div class="panel panel-default"&gt;
+    &lt;div class="panel-heading font-bold"&gt;
+      &lt;i class="fa fa-user-circle-o m-r-xs"&gt;&lt;/i&gt; 1. Current Session Context &amp;amp; Access Check
+    &lt;/div&gt;
+    &lt;div class="panel-body"&gt;
+      &lt;div class="row"&gt;
+        &lt;!-- Identity --&gt;
+        &lt;div class="col-sm-4"&gt;
+          &lt;div class="clm-dbg-k"&gt;Logged-In User&lt;/div&gt;
+          &lt;div class="clm-dbg-v"&gt;{{c.data.user.name}} (&lt;code&gt;{{c.data.user.userName}}&lt;/code&gt;)&lt;/div&gt;
+          &lt;div class="text-muted text-xs"&gt;Sys ID: {{c.data.user.id}}&lt;/div&gt;
+          &lt;div class="m-t-xs"&gt;
+            &lt;span class="label" ng-class="c.data.user.isAdmin ? 'label-success' : 'label-default'"&gt;
+              {{c.data.user.isAdmin ? 'Admin' : 'Non-Admin'}}
+            &lt;/span&gt;
+            &lt;span class="label" ng-class="c.data.matrix.isZch ? 'label-primary' : 'label-danger'"&gt;
+              {{c.data.matrix.isZch ? 'ZCH Verified' : 'Not in Matrix as ZCH'}}
+            &lt;/span&gt;
+            &lt;span class="label label-info" ng-if="c.data.matrix.isPanIndia"&gt;Pan-India&lt;/span&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;!-- Matrix Zones --&gt;
+        &lt;div class="col-sm-4"&gt;
+          &lt;div class="clm-dbg-k"&gt;Approval Matrix Mapped Zones&lt;/div&gt;
+          &lt;div class="clm-dbg-v" ng-if="c.data.matrix.userZones.length &gt; 0"&gt;
+            &lt;span class="badge" ng-repeat="z in c.data.matrix.userZones"&gt;{{z}}&lt;/span&gt;
+          &lt;/div&gt;
+          &lt;div class="text-danger font-bold" ng-if="c.data.matrix.userZones.length === 0 &amp;&amp; !c.data.user.isAdmin"&gt;
+            No zones mapped! User will be blocked by matrix queries.
+          &lt;/div&gt;
+          &lt;div class="text-muted text-xs m-t-xs"&gt;
+            Matrix records found for user: &lt;b&gt;{{c.data.matrix.recordCount}}&lt;/b&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;!-- Table ACL Status --&gt;
+        &lt;div class="col-sm-4"&gt;
+          &lt;div class="clm-dbg-k"&gt;Table CRUD Capabilities&lt;/div&gt;
+          &lt;table class="table table-condensed text-xs m-b-none"&gt;
+            &lt;thead&gt;
+              &lt;tr&gt;
+                &lt;th&gt;Target Table&lt;/th&gt;
+                &lt;th class="text-center"&gt;Can Read&lt;/th&gt;
+                &lt;th class="text-center"&gt;Can Insert&lt;/th&gt;
+              &lt;/tr&gt;
+            &lt;/thead&gt;
+            &lt;tbody&gt;
+              &lt;tr&gt;
+                &lt;td&gt;Send-Back Queue&lt;/td&gt;
+                &lt;td class="text-center"&gt;
+                  &lt;span class="fa" ng-class="c.data.acl.queueRead ? 'fa-check text-success' : 'fa-times text-danger'"&gt;&lt;/span&gt;
+                &lt;/td&gt;
+                &lt;td class="text-center"&gt;
+                  &lt;span class="fa" ng-class="c.data.acl.queueCreate ? 'fa-check text-success' : 'fa-times text-danger'"&gt;&lt;/span&gt;
+                &lt;/td&gt;
+              &lt;/tr&gt;
+              &lt;tr&gt;
+                &lt;td&gt;BG Monitor Table&lt;/td&gt;
+                &lt;td class="text-center"&gt;
+                  &lt;span class="fa" ng-class="c.data.acl.monRead ? 'fa-check text-success' : 'fa-times text-danger'"&gt;&lt;/span&gt;
+                &lt;/td&gt;
+                &lt;td class="text-center"&gt;
+                  &lt;span class="fa" ng-class="c.data.acl.monCreate ? 'fa-check text-success' : 'fa-times text-danger'"&gt;&lt;/span&gt;
+                &lt;/td&gt;
+              &lt;/tr&gt;
+            &lt;/tbody&gt;
+          &lt;/table&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;!-- SECTION 2: SEND-BACK QUEUE TABLE VIEWER --&gt;
+  &lt;div class="panel panel-default"&gt;
+    &lt;div class="panel-heading clearfix font-bold"&gt;
+      &lt;span class="pull-left"&gt;
+        &lt;i class="fa fa-paper-plane m-r-xs"&gt;&lt;/i&gt; 2. Send-Back Queue Records (&lt;code&gt;x_birl3_clm_clm_servicenow_to_sap_send_back&lt;/code&gt;)
+      &lt;/span&gt;
+      &lt;span class="pull-right badge badge-primary"&gt;{{c.data.queueRecords.length}} recent records&lt;/span&gt;
+    &lt;/div&gt;
+    &lt;div class="table-responsive"&gt;
+      &lt;table class="table table-bordered table-striped table-hover clm-dbg-table"&gt;
+        &lt;thead&gt;
+          &lt;tr&gt;
+            &lt;th&gt;Sys ID&lt;/th&gt;
+            &lt;th&gt;Customer Site&lt;/th&gt;
+            &lt;th&gt;Type&lt;/th&gt;
+            &lt;th class="text-right"&gt;Old Limit (₹)&lt;/th&gt;
+            &lt;th class="text-right"&gt;Approved Limit (₹)&lt;/th&gt;
+            &lt;th class="text-center"&gt;Status&lt;/th&gt;
+            &lt;th&gt;Attempts&lt;/th&gt;
+            &lt;th&gt;Error / Message&lt;/th&gt;
+            &lt;th&gt;Created By&lt;/th&gt;
+            &lt;th&gt;Created On&lt;/th&gt;
+          &lt;/tr&gt;
+        &lt;/thead&gt;
+        &lt;tbody&gt;
+          &lt;tr ng-repeat="q in c.data.queueRecords track by q.id"&gt;
+            &lt;td class="text-monospace text-xs" title="{{q.id}}"&gt;{{q.id | limitTo:8}}&amp;hellip;&lt;/td&gt;
+            &lt;td&gt;
+              &lt;b&gt;{{q.customerCode}}&lt;/b&gt;
+              &lt;div class="text-muted text-xs"&gt;{{q.customerName}}&lt;/div&gt;
+            &lt;/td&gt;
+            &lt;td&gt;&lt;code&gt;{{q.customerType}}&lt;/code&gt;&lt;/td&gt;
+            &lt;td class="text-right"&gt;{{q.oldLimit | number:2}}&lt;/td&gt;
+            &lt;td class="text-right font-bold"&gt;{{q.newLimit | number:2}}&lt;/td&gt;
+            &lt;td class="text-center"&gt;
+              &lt;span class="label" ng-class="{
+                'label-success': q.status === 'Success',
+                'label-danger': q.status === 'Failed',
+                'label-warning': q.status === 'Pending'
+              }"&gt;{{q.status}}&lt;/span&gt;
+            &lt;/td&gt;
+            &lt;td&gt;{{q.attempts}}&lt;/td&gt;
+            &lt;td class="text-danger text-xs" title="{{q.lastError}}"&gt;
+              {{q.lastError ? (q.lastError | limitTo:45) + '...' : '—'}}
+            &lt;/td&gt;
+            &lt;td&gt;&lt;b&gt;{{q.createdBy}}&lt;/b&gt;&lt;/td&gt;
+            &lt;td class="text-xs"&gt;{{q.createdOn}}&lt;/td&gt;
+          &lt;/tr&gt;
+          &lt;tr ng-if="c.data.queueRecords.length === 0"&gt;
+            &lt;td colspan="10" class="text-center text-muted p-md"&gt;
+              No records found in the send-back queue table.
+            &lt;/td&gt;
+          &lt;/tr&gt;
+        &lt;/tbody&gt;
+      &lt;/table&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;!-- SECTION 3: BG MONITOR AUDIT RECORDS --&gt;
+  &lt;div class="panel panel-default"&gt;
+    &lt;div class="panel-heading clearfix font-bold"&gt;
+      &lt;span class="pull-left"&gt;
+        &lt;i class="fa fa-database m-r-xs"&gt;&lt;/i&gt; 3. Bank Guarantee Monitor Audit Records (&lt;code&gt;x_birl3_clm_bank_guarantee_monitor&lt;/code&gt;)
+      &lt;/span&gt;
+      &lt;span class="pull-right badge badge-primary"&gt;{{c.data.monitorRecords.length}} recent records&lt;/span&gt;
+    &lt;/div&gt;
+    &lt;div class="table-responsive"&gt;
+      &lt;table class="table table-bordered table-striped table-hover clm-dbg-table"&gt;
+        &lt;thead&gt;
+          &lt;tr&gt;
+            &lt;th&gt;Sys ID&lt;/th&gt;
+            &lt;th&gt;Site Reference&lt;/th&gt;
+            &lt;th&gt;Credit Segment&lt;/th&gt;
+            &lt;th class="text-right"&gt;Old Limit (₹)&lt;/th&gt;
+            &lt;th class="text-right"&gt;Credit Limit (₹)&lt;/th&gt;
+            &lt;th&gt;Next Review Date&lt;/th&gt;
+            &lt;th&gt;Description&lt;/th&gt;
+            &lt;th&gt;Created By&lt;/th&gt;
+            &lt;th&gt;Created On&lt;/th&gt;
+          &lt;/tr&gt;
+        &lt;/thead&gt;
+        &lt;tbody&gt;
+          &lt;tr ng-repeat="m in c.data.monitorRecords track by m.id"&gt;
+            &lt;td class="text-monospace text-xs" title="{{m.id}}"&gt;{{m.id | limitTo:8}}&amp;hellip;&lt;/td&gt;
+            &lt;td&gt;&lt;b&gt;{{m.customerSite}}&lt;/b&gt;&lt;/td&gt;
+            &lt;td&gt;&lt;span class="label label-info"&gt;{{m.creditSegment}}&lt;/span&gt;&lt;/td&gt;
+            &lt;td class="text-right"&gt;{{m.oldLimit | number:2}}&lt;/td&gt;
+            &lt;td class="text-right font-bold"&gt;{{m.creditLimit | number:2}}&lt;/td&gt;
+            &lt;td&gt;{{m.nextReviewDate || '—'}}&lt;/td&gt;
+            &lt;td class="text-xs"&gt;{{m.description}}&lt;/td&gt;
+            &lt;td&gt;&lt;b&gt;{{m.createdBy}}&lt;/b&gt;&lt;/td&gt;
+            &lt;td class="text-xs"&gt;{{m.createdOn}}&lt;/td&gt;
+          &lt;/tr&gt;
+          &lt;tr ng-if="c.data.monitorRecords.length === 0"&gt;
+            &lt;td colspan="9" class="text-center text-muted p-md"&gt;
+              No records found in the BG monitor table.
+            &lt;/td&gt;
+          &lt;/tr&gt;
+        &lt;/tbody&gt;
+      &lt;/table&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;d7871ca22b945b104572f3745e91bf83&lt;/id&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-11-04 15:46:51&lt;/sys_created_on&gt;&lt;sys_id&gt;53871ca22b945b104572f3745e91bf8b&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-11-04 15:46:51&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>-304813610</payload_hash>
+        <record_name>clone demo bg</record_name>
+        <reverted_from/>
+        <source>d386fafb973acb106bf93da0f053af20</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-04 15:48:38</sys_created_on>
+        <sys_id>25f794e22b945b104572f3745e91bf42</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a1a73f7d0a0000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-04 15:48:38</sys_updated_on>
+        <type>Widget</type>
+        <update_guid>61f794e201945b106906306536ed8b41</update_guid>
+        <update_guid_history>61f794e201945b106906306536ed8b41:-304813610,9f871ca2cf945b1099cf875a5dd74188:-67457541</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="clone demo bg">86e8778e976c5710be31fa17f053af03</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-16 05:10:11</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>01a5d04b128041cfb3d80c5fdba7db29</sys_id>
+        <sys_metadata>d7871ca22b945b104572f3745e91bf83</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clone demo bg</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_d7871ca22b945b104572f3745e91bf83</sys_update_name>
+        <sys_update_version display_value="sp_widget_d7871ca22b945b104572f3745e91bf83">25f794e22b945b104572f3745e91bf42</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 05:10:11</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

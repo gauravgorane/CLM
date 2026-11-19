@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>false</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_bs_ocr</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition/>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>BS_OCR Cal</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[// ============================================================
+// BR2 — RATIO CALCULATION (fixed)
+// ============================================================
+(function executeRule(current, previous) {
+
+    gs.info('BR2: Starting ratio calculation for ' + current.getDisplayValue());
+
+    // Null-aware parser — distinguishes "missing" from "zero"
+    function num(fieldName) {
+        var val = current.getValue(fieldName);
+        if (val === null || val === '' || val === undefined) return null;
+        var parsed = parseFloat(val.toString().replace(/,/g, ''));
+        return isNaN(parsed) ? null : parsed;
+    }
+
+    // Only writes if value is a real finite number
+    function setIfValid(field, value) {
+        if (value !== null && value !== undefined && isFinite(value)) {
+            current.setValue(field, Math.round(value * 100) / 100);
+        }
+    }
+
+    try {
+        // ── RAW FIELDS ───────────────────────────────────────
+        var sales              = num('u_sales');
+        var grossProfit        = num('u_gross_profit');
+        var netProfit          = num('u_net_profit');
+        var interestExpense    = num('u_interest_expense');
+        var depreciation       = num('u_depreciation');
+        var taxExpense         = num('u_tax_expense');         // null for proprietorships — handled below
+        var accountsReceivable = num('u_accounts_receivable');
+        var accountsPayable    = num('u_accounts_payable');
+        var inventory          = num('u_inventory');
+        var currentAssets      = num('u_current_assets');
+        var currentLiabilities = num('u_current_liabilities');
+        var cogsExtracted      = num('u_cogs_extracted');      // direct OCR field
+
+        // ── COGS — prefer direct extraction, derive as fallback ──
+     // ── COGS ──────────────────────────────
+var purchases = num('u_purchases');
+
+var cogs = null;
+
+if (purchases !== null && purchases > 0) {
+    cogs = purchases;
+    gs.info('BR2: COGS from Purchases');
+}
+else if (cogsExtracted !== null && cogsExtracted > 0) {
+    cogs = cogsExtracted;
+    gs.info('BR2: COGS from OCR');
+}
+else if (sales !== null && grossProfit !== null && sales > 0) {
+    cogs = sales - grossProfit;
+    gs.info('BR2: COGS derived from Sales - GP');
+}
+
+        // ── EBITDA via addback — robust, 4 independent fields ──
+        // Works even when taxExpense is null (proprietorships don't show tax in P&L)
+        var ebitda = null;
+        if (netProfit !== null && interestExpense !== null && depreciation !== null) {
+            ebitda = netProfit
+                   + (interestExpense || 0)
+                   + (depreciation    || 0)
+                   + (taxExpense      || 0); // safely adds 0 if tax not available
+            gs.info('BR2: EBITDA via addback = ' + ebitda);
+        } else {
+            gs.warn('BR2: EBITDA could not be calculated — netProfit/interest/dep missing');
+        }
+
+        // ── EBIT ─────────────────────────────────────────────
+        var ebit = (ebitda !== null && depreciation !== null)
+            ? ebitda - depreciation
+            : null;
+
+        // ── NET WORKING CAPITAL ───────────────────────────────
+        // Calculated regardless of P&L availability (BS-only uploads)
+        var nwc = (currentAssets !== null && currentLiabilities !== null)
+            ? currentAssets - currentLiabilities
+            : null;
+
+        // ── RATIOS ────────────────────────────────────────────
+        var gpPct = (sales && sales > 0 && grossProfit !== null)
+            ? (grossProfit / sales) * 100
+            : null;
+
+        var ebitdaPct = (sales && sales > 0 && ebitda !== null)
+            ? (ebitda / sales) * 100
+            : null;
+
+        // ICR: null if interest is 0 or missing (avoid divide-by-zero AND false zero)
+        var icr = (interestExpense && interestExpense > 0 && ebit !== null)
+            ? ebit / interestExpense
+            : null;
+
+   // Formula 1: Operating Cycle Method
+
+
+        var arDays = (sales && sales > 0 && accountsReceivable !== null)
+            ? (accountsReceivable / sales) * 365
+            : null;
+
+        var inventoryDays = (cogs && cogs > 0 && inventory !== null)
+            ? (inventory / cogs) * 365
+            : null;
+
+        var apDays = (cogs && cogs > 0 && accountsPayable !== null)
+            ? (accountsPayable / cogs) * 365
+            : null;
+
+		var nwcDays = (
+    inventoryDays !== null &&
+    arDays !== null &&
+    apDays !== null
+)
+    ? inventoryDays + arDays - apDays
+    : null;
+
+// Formula 2: Fallback Method
+if (nwcDays === null &&
+    sales && sales > 0 &&
+    nwc !== null) {
+
+    nwcDays = (nwc / sales) * 365;
+}
+
+        // ── WRITE BACK — only valid values ────────────────────
+        setIfValid('u_net_working_capital',  nwc);
+        setIfValid('u_cogs',                 cogs);
+        setIfValid('u_ebitda',               ebitda);
+        setIfValid('u_ebit',                 ebit);
+        setIfValid('u_gross_profit_percent', gpPct);
+        setIfValid('u_ebitda_percent',       ebitdaPct);
+        setIfValid('u_interest_coverage',    icr);
+        setIfValid('u_net_wcc_days',         nwcDays);
+        setIfValid('u_ar_days',              arDays);
+        setIfValid('u_inventory_days',       inventoryDays);
+        setIfValid('u_ap_days',              apDays);
+
+        gs.info('BR2: Complete. EBITDA=' + ebitda + ' EBIT=' + ebit + ' ICR=' + icr + ' NWC=' + nwc);
+			gs.info('AR Days = ' + arDays);
+gs.info('Inventory Days = ' + inventoryDays);
+gs.info('AP Days = ' + apDays);
+gs.info('NWC Days = ' + nwcDays);
+
+
+    } catch(e) {
+        gs.error('BR2: Exception — ' + e.message);
+    }
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-05-26 16:46:17</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>90831e922b49c3104572f3745e91bf65</sys_id>
+        <sys_mod_count>19</sys_mod_count>
+        <sys_name>BS_OCR Cal</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_90831e922b49c3104572f3745e91bf65</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-11 12:23:35</sys_updated_on>
+        <template/>
+        <when>before</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=90831e922b49c3104572f3745e91bf65"/>
+</record_update>

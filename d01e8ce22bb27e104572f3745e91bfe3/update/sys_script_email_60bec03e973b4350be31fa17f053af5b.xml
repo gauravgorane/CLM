@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_sap_writeback_success</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm_sap_writeback_success
+// Notification table: x_birl3_clm_clm_servicenow_to_sap_send_back
+(function runMailScript(current, template, email, email_action, event) {
+
+    function esc(s) { return GlideStringUtil.escapeHTML(s || ''); }
+    function inr(n) {
+        var s = Math.round(Math.abs(n)).toString();
+        var last = s.slice(-3), rest = s.slice(0, -3);
+        if (rest) last = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last;
+        return last;
+    }
+    function rupee(n) { return '&#8377; ' + inr(n); }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Linked credit request
+    // ─────────────────────────────────────────────────────────────────
+    var reqSysId = current.getValue('u_request') + '';
+    var req = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+    var reqValid = reqSysId && req.get(reqSysId);
+
+    var initiatorName  = '';
+    var reqNumber      = '';
+    var customerName   = '';
+    var customerCode   = '';
+    var pan            = '';
+    var approvedLimit  = 0;
+    var previousLimit  = 0;
+    var segment        = '';
+    var reqLink        = '';
+
+    if (reqValid) {
+        reqNumber = req.getValue('number') + '';
+
+        var initSysId = req.getValue('initiator') + '';
+        if (initSysId) {
+            var iu = new GlideRecord('sys_user');
+            if (iu.get(initSysId)) {
+                initiatorName = iu.getValue('name') + '';
+            }
+        }
+
+        var custSysId = req.getValue('customer') + '';
+        if (custSysId) {
+            var custGR = new GlideRecord('x_birl3_clm_clm_customer_master1');
+            if (custGR.get(custSysId)) {
+                customerName = custGR.getValue('customer_name') + '';
+                customerCode = custGR.getValue('customer_code_sap') + '';
+                pan          = custGR.getValue('pan') + '';
+            }
+        }
+
+        previousLimit = parseFloat(req.getValue('u_code_level_current_limit')) || 0;
+        segment       = req.getValue('segment') + '';
+
+        var base = (gs.getProperty('glide.servlet.uri') || '').replace(/\/?$/, '/');
+        reqLink = base + 'uclm?id=view_my_credit_request';
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Approved limit — authoritative source is the send-back record.
+    // This is what actually went to SAP. The credit request's
+    // u_approved_code_limit may be empty on older records.
+    // ─────────────────────────────────────────────────────────────────
+    approvedLimit = parseFloat(current.getValue('u_approved_code_limit')) || 0;
+    if (!approvedLimit && reqValid) {
+        approvedLimit = parseFloat(req.getValue('u_approved_code_limit')) || 0;
+    }
+
+    // Fallbacks for customer + segment if the linked request is missing
+    if (!customerCode) {
+        var custRefId = current.getValue('u_customer_code') + '';
+        if (custRefId) {
+            var cr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+            if (cr.get(custRefId)) {
+                customerCode = cr.getValue('customer_code_sap') + '';
+                if (!customerName) customerName = cr.getValue('customer_name') + '';
+                if (!pan)          pan          = cr.getValue('pan') + '';
+            } else {
+                customerCode = custRefId;
+            }
+        }
+    }
+    if (!segment) segment = current.getValue('u_credit_segment') + '';
+
+    // ─────────────────────────────────────────────────────────────────
+    // Success specifics
+    // ─────────────────────────────────────────────────────────────────
+    var processedOn = current.getDisplayValue('u_processed_on') + '' ||
+                      current.getDisplayValue('sys_updated_on') + '';
+    var attempts    = parseInt(current.getValue('u_attempt_count')) || 0;
+    var requestVal  = current.getDisplayValue('u_request') + '';
+    var changed     = approvedLimit - previousLimit;
+    var signed      = (changed > 0 ? '+' : (changed < 0 ? '-' : '')) + rupee(changed);
+
+    // ─────────────────────────────────────────────────────────────────
+    // Shared styles
+    // ─────────────────────────────────────────────────────────────────
+    var TD_K = 'padding:8px 0; color:#5a6a7a; border-bottom:1px solid #eef1f5;';
+    var TD_V = 'padding:8px 0; color:#1a1a1a; border-bottom:1px solid #eef1f5;';
+    var TILE = 'border:1px solid #e0e6ed; border-radius:6px; padding:12px 14px; background-color:#fafbfc;';
+    var TILE_K = 'font-size:10px; text-transform:uppercase; letter-spacing:.8px; color:#5a6a7a; font-weight:700;';
+
+    function sec(t, top) {
+        return '<h3 style="margin:' + (top || 24) + 'px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">' + t + '</h3>';
+    }
+    function kv(label, value, last, bold) {
+        return '<tr><td width="38%" style="' + (last ? 'padding:8px 0; color:#5a6a7a;' : TD_K) + '">' + label + '</td>' +
+               '<td style="' + (last ? 'padding:8px 0; color:#1a1a1a;' : TD_V) + (bold ? ' font-weight:700;' : '') + '">' + value + '</td></tr>';
+    }
+
+    var h = '';
+
+    // ── Success banner ─────────────────────────────────────────────
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#eafaf1; border:1px solid #a9dfbf; border-left:5px solid #27ae60; border-radius:6px; margin-top:6px;"><tbody><tr>';
+    h += '<td width="52" align="center" valign="middle" style="padding:16px 0 16px 14px;"><div style="width:36px; height:36px; line-height:36px; border-radius:18px; background-color:#27ae60; color:#ffffff; font-size:20px; font-weight:700; text-align:center;">&#10004;</div></td>';
+    h += '<td style="padding:16px 16px 16px 12px;"><div style="font-size:20px; font-weight:700; color:#1e8449;">Credit limit updated in SAP</div>';
+    h += '<div style="font-size:13px; color:#3a4451; padding-top:2px;">The new limit is now live' + (processedOn ? ' &middot; ' + esc(processedOn) : '') + '</div></td>';
+    h += '</tr></tbody></table>';
+
+    // ── Request number card ────────────────────────────────────────
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:16px; background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px;"><tbody><tr>';
+    h += '<td style="padding:12px 16px;"><div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#5a6a7a; font-weight:700;">Credit Limit Request</div>';
+    h += '<div style="font-size:18px; font-weight:700; color:#1a1a1a;">' + (reqNumber ? esc(reqNumber) : esc(requestVal)) + '</div>';
+    if (segment) h += '<div style="font-size:12px; color:#5a6a7a; padding-top:2px;">Segment: ' + esc(segment) + '</div>';
+    h += '</td>';
+    h += '<td align="right" valign="middle" style="padding:12px 16px;"><span style="display:inline-block; background-color:#eafaf1; color:#1e8449; border:1px solid #a9dfbf; border-radius:4px; padding:5px 12px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">SAP Updated</span></td>';
+    h += '</tr></tbody></table>';
+
+    // ── Limit tiles (Previous / New / Change) ─────────────────────
+    h += sec('Credit Limit', 24);
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+    h += '<td width="34%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Previous Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(previousLimit) + '</div></div></td>';
+    h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="background-color:#eafaf1; border:1px solid #27ae60; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + ' color:#1e8449;">Updated Limit</div><div style="font-size:19px; font-weight:700; color:#1e8449; padding-top:3px;">' + rupee(approvedLimit) + '</div></div></td>';
+    h += '<td width="32%" valign="top" style="padding-left:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Change</div><div style="font-size:17px; font-weight:700; padding-top:3px; color:' + (changed < 0 ? '#E23D28' : '#1e8449') + ';">' + signed + '</div></div></td>';
+    h += '</tr></tbody></table>';
+
+    // ── Details ─────────────────────────────────────────────────────
+    h += sec('Details');
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+    h += kv('Customer Name', esc(customerName || '—'), false, true);
+    h += kv('Customer Code', esc(customerCode || '—'));
+    if (pan) h += kv('PAN', esc(pan));
+    if (segment) h += kv('Credit Segment', esc(segment));
+    if (attempts) h += kv('Attempts', esc(attempts + ''));
+    h += kv('Updated On', esc(processedOn), true);
+    h += '</tbody></table>';
+
+    // ── What happens next ──────────────────────────────────────────
+    h += sec('What Happens Next');
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f4f9fb; border-left:4px solid #3498db;"><tbody><tr><td style="padding:12px 16px; font-size:13px; line-height:1.6; color:#1a1a1a;">';
+    h += '<strong>Initiator:</strong> the customer&rsquo;s credit limit is now live in SAP. No further action is required from your side.<br><br>';
+    h += '<strong>Support team:</strong> this closes the writeback for this request. No action required unless you see a follow-up alert for the same customer.';
+    h += '</td></tr></tbody></table>';
+
+    // ── CTA ─────────────────────────────────────────────────────────
+    if (reqLink) {
+        h += '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:28px;"><tbody><tr>';
+        h += '<td align="center" style="background-color:#1a1a1a; border-radius:6px; border-bottom:3px solid #F3D54E;">';
+        h += '<a href="' + reqLink + '" style="display:inline-block; padding:12px 28px; font-size:13px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; color:#ffffff; text-decoration:none;">View Request in CredX</a>';
+        h += '</td></tr></tbody></table>';
+    }
+
+    h += '<p style="margin:14px 0 0 0; font-size:12px; color:#8a96a3;">Automated notification from CredX.</p>';
+
+    template.print(h);
+
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-11 13:15:14</sys_created_on>
+        <sys_id>60bec03e973b4350be31fa17f053af5b</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>clm_sap_writeback_success</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_60bec03e973b4350be31fa17f053af5b</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-11 13:21:34</sys_updated_on>
+    </sys_script_email>
+</record_update>

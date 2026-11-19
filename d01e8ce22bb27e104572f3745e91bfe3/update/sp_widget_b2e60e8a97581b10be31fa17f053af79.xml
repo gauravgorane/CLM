@@ -1,0 +1,2063 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $timeout, $q) {
+  var c = this;
+
+  c.activeView = 'update'; // 'update' | 'history'
+
+  var emptyFilters = function() {
+    return { search: '', zone: (c.data && c.data.defaultZone) || '', region: '', depot: '', review: '', change: '' };
+  };
+
+  c.filters = emptyFilters();
+  c.pageSizes = [10, 15, 25, 50];
+  c.pageSize = 15;
+  c.page = (c.data && c.data.page) || 1;
+  c.pageInput = c.page;
+  c.customers = (c.data && c.data.customers) || [];
+  c.total = (c.data && c.data.total) || 0;
+
+  c.sel = {};
+  c.dates = {};
+  c.bulkDate = null;
+
+  c.loading = false;
+  c.loadingPage = false;
+  c.selectingAll = false;
+  c.submitted = false;
+  c.triedSubmit = false;
+  c.resultMessage = '';
+  c.validationMsg = '';
+  c.progress = '';
+
+  c.history = [];
+  c.historyLoaded = false;
+  c.failedCount = 0;
+
+  /* ---------- HISTORY PAGINATION ---------- */
+  c.histPageSize = 15;
+  c.histPage = 1;
+  c.histPageInput = 1;
+
+  c.histTotalPages = function() {
+    return Math.max(Math.ceil(c.history.length / c.histPageSize), 1);
+  };
+
+  function clampHistPage() {
+    var pages = c.histTotalPages();
+    if (c.histPage > pages) { c.histPage = pages; c.histPageInput = pages; }
+    if (c.histPage < 1) { c.histPage = 1; c.histPageInput = 1; }
+  }
+
+  c.histSlice = function() {
+    clampHistPage();
+    var start = (c.histPage - 1) * c.histPageSize;
+    return c.history.slice(start, start + c.histPageSize);
+  };
+
+  c.histFrom = function() {
+    clampHistPage();
+    return c.history.length === 0 ? 0 : (c.histPage - 1) * c.histPageSize + 1;
+  };
+
+  c.histTo = function() {
+    clampHistPage();
+    return Math.min(c.histPage * c.histPageSize, c.history.length);
+  };
+
+  c.histGoTo = function(p) {
+    p = parseInt(p, 10);
+    if (isNaN(p)) { c.histPageInput = c.histPage; return; }
+    p = Math.min(Math.max(p, 1), c.histTotalPages());
+    c.histPage = p;
+    c.histPageInput = p;
+  };
+
+  c.histSetSize = function() {
+    c.histPage = 1;
+    c.histPageInput = 1;
+  };
+
+  // PAN header shows at the start of each PAN group within the current page
+  c.isNewHistGroup = function(index) {
+    if (index === 0) return true;
+    var rows = c.histSlice();
+    return rows[index].pan !== rows[index - 1].pan;
+  };
+
+  c.histPanCountOnPage = function(pan) {
+    var rows = c.histSlice(), cnt = 0;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].pan === pan) cnt++;
+    }
+    return cnt;
+  };
+  /* ---------- /HISTORY PAGINATION ---------- */
+
+  c.retrying = {};
+  c.retryingAll = false;
+  c.retryMsg = '';
+  c.refreshing = false;
+
+  var reqId = 0;
+  var searchTimer = null;
+  var pollTimer = null;
+
+  function toYMD(d) {
+    if (!d) return '';
+    if (typeof d === 'string') return d;
+    var m = d.getUTCMonth() + 1, day = d.getUTCDate();
+    return d.getUTCFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+  }
+
+  c.setView = function(v) {
+    c.activeView = v;
+    if (v === 'history' && !c.historyLoaded) {
+      c.loadHistory();
+    }
+  };
+
+  /* ---------- Filter Dropdowns ---------- */
+  function combos() { return (c.data && c.data.options) || []; }
+
+  function distinct(list, key) {
+    var seen = {}, out = [];
+    for (var i = 0; i < list.length; i++) {
+      var v = list[i][key];
+      if (v && !seen[v]) { seen[v] = true; out.push(v); }
+    }
+    return out.sort();
+  }
+
+  c.zoneList = function() { return distinct(combos(), 'zone'); };
+
+  c.regionList = function() {
+    var list = combos();
+    if (c.filters.zone) list = list.filter(function(o) { return o.zone === c.filters.zone; });
+    return distinct(list, 'region');
+  };
+
+  c.depotList = function() {
+    var f = c.filters;
+    var list = combos().filter(function(o) {
+      return (!f.zone || o.zone === f.zone) &&
+             (!f.region || o.region === f.region);
+    });
+    return distinct(list, 'depot');
+  };
+
+  /* ---------- Pagination ---------- */
+  c.totalPages = function() { return Math.max(Math.ceil(c.total / c.pageSize), 1); };
+  c.rangeFrom = function() { return c.total === 0 ? 0 : (c.page - 1) * c.pageSize + 1; };
+  c.rangeTo = function() { return Math.min(c.page * c.pageSize, c.total); };
+
+  function fetchPage() {
+    var myReq = ++reqId;
+    c.loadingPage = true;
+    c.server.get({
+      action: 'page',
+      page: c.page,
+      pageSize: c.pageSize,
+      filters: c.filters
+    }).then(function(resp) {
+      if (myReq !== reqId) return;
+      c.customers = resp.data.customers || [];
+      c.total = resp.data.total || 0;
+      c.pageInput = c.page;
+      c.loadingPage = false;
+    }, function() {
+      if (myReq !== reqId) return;
+      c.loadingPage = false;
+    });
+  }
+
+  c.goTo = function(p) {
+    p = parseInt(p, 10);
+    if (isNaN(p)) { c.pageInput = c.page; return; }
+    p = Math.min(Math.max(p, 1), c.totalPages());
+    if (p === c.page) { c.pageInput = c.page; return; }
+    c.page = p;
+    fetchPage();
+  };
+
+  /* ---------- Filters ---------- */
+  c.applyFilters = function() {
+    c.page = 1;
+    fetchPage();
+  };
+
+  c.onSearch = function() {
+    if (searchTimer) $timeout.cancel(searchTimer);
+    searchTimer = $timeout(c.applyFilters, 400);
+  };
+
+  c.onZoneChange = function() {
+    c.filters.region = '';
+    c.filters.depot = '';
+    c.applyFilters();
+  };
+
+  c.onRegionChange = function() {
+    c.filters.depot = '';
+    c.applyFilters();
+  };
+
+  /* ---------- Site & Territory display helpers (v2) ---------- */
+  c.hasGeo = function(v) {
+    v = String(v || '').trim();
+    return !!v && v !== '—' && v !== '-';
+  };
+
+  // "Region · Zone" for the Territory column; skips parts that are not set
+  c.geoLine = function(row) {
+    if (!row) return '';
+    var parts = [];
+    if (c.hasGeo(row.regionDisplay)) parts.push(row.regionDisplay);
+    if (c.hasGeo(row.zoneDisplay)) parts.push(row.zoneDisplay);
+    return parts.join(' · ');
+  };
+
+  // Name shown in the PAN group header that row i belongs to (first row of its group on this page)
+  c.groupHeadName = function(list, index) {
+    if (!list || !list[index]) return '';
+    var pan = list[index].pan, i = index;
+    while (i > 0 && list[i - 1].pan === pan) i--;
+    return list[i].customerName || '';
+  };
+
+  // Show the customer name under the site code only when it adds information
+  c.showSiteName = function(list, index) {
+    var r = list && list[index];
+    if (!r || !r.customerName) return false;
+    if (!r.pan) return true; // "without PAN" group has no single name in its header
+    return String(r.customerName).trim().toUpperCase() !==
+           String(c.groupHeadName(list, index)).trim().toUpperCase();
+  };
+
+  /* ---------- PAN Grouping Helpers for View 1 ---------- */
+  c.isNewPanGroup = function(index) {
+    if (index === 0) return true;
+    var currentPan = c.customers[index].pan;
+    var prevPan = c.customers[index - 1].pan;
+    return currentPan !== prevPan;
+  };
+
+  c.getPanCountOnPage = function(pan) {
+    var cnt = 0;
+    for (var i = 0; i < c.customers.length; i++) {
+      if (c.customers[i].pan === pan) cnt++;
+    }
+    return cnt;
+  };
+
+  c.isPanSelected = function(pan) {
+    var count = 0, selCount = 0;
+    for (var i = 0; i < c.customers.length; i++) {
+      if (c.customers[i].pan === pan) {
+        count++;
+        if (c.sel[c.customers[i].customerSysId]) selCount++;
+      }
+    }
+    return count > 0 && count === selCount;
+  };
+
+  c.togglePanSelection = function(pan) {
+    var allSelected = c.isPanSelected(pan);
+    for (var i = 0; i < c.customers.length; i++) {
+      var row = c.customers[i];
+      if (row.pan === pan) {
+        if (allSelected) {
+          delete c.sel[row.customerSysId];
+        } else if (!c.sel[row.customerSysId]) {
+          c.toggleRow(row);
+        }
+      }
+    }
+    c.validationMsg = '';
+  };
+
+  c.selectedPanCount = function() {
+    var pans = {};
+    for (var id in c.sel) {
+      if (c.sel[id].pan) pans[c.sel[id].pan] = true;
+    }
+    return Object.keys(pans).length;
+  };
+
+  /* ---------- Selection ---------- */
+  c.isSel = function(row) { return !!c.sel[row.customerSysId]; };
+
+  c.toggleRow = function(row) {
+    var id = row.customerSysId;
+    if (c.sel[id]) {
+      delete c.sel[id];
+    } else {
+      c.sel[id] = {
+        customerSysId: id,
+        pan: row.pan,
+        segment: row.segment,
+        zone: row.zone,
+        currentReviewDate: row.currentReviewDate
+      };
+    }
+    c.validationMsg = '';
+  };
+
+  c.pageAllSelected = function() {
+    if (!c.customers.length) return false;
+    for (var i = 0; i < c.customers.length; i++) {
+      if (!c.sel[c.customers[i].customerSysId]) return false;
+    }
+    return true;
+  };
+
+  c.togglePage = function() {
+    var all = c.pageAllSelected();
+    for (var i = 0; i < c.customers.length; i++) {
+      var r = c.customers[i];
+      if (all) delete c.sel[r.customerSysId];
+      else if (!c.sel[r.customerSysId]) c.toggleRow(r);
+    }
+    c.validationMsg = '';
+  };
+
+  c.selectAllMatching = function() {
+    c.selectingAll = true;
+    c.server.get({ action: 'ids', filters: c.filters }).then(function(resp) {
+      var list = (resp.data && resp.data.matching) || [];
+      for (var i = 0; i < list.length; i++) {
+        var r = list[i];
+        if (!c.sel[r.customerSysId]) {
+          c.sel[r.customerSysId] = {
+            customerSysId: r.customerSysId,
+            pan: r.pan,
+            segment: r.segment,
+            zone: r.zone,
+            currentReviewDate: r.currentReviewDate
+          };
+        }
+      }
+      c.selectingAll = false;
+    }, function() {
+      c.selectingAll = false;
+      c.validationMsg = 'Could not select all matching Non-Trade customers. Please try again.';
+    });
+  };
+
+  c.clearSelection = function() {
+    c.sel = {};
+    c.dates = {};
+    c.validationMsg = '';
+  };
+
+  c.onRowDate = function(row) {
+    if (c.dates[row.customerSysId] && !c.sel[row.customerSysId]) c.toggleRow(row);
+    c.validationMsg = '';
+  };
+
+  c.selectedCount = function() { return Object.keys(c.sel).length; };
+
+  c.readyCount = function() {
+    var n = 0;
+    for (var id in c.sel) if (c.dates[id]) n++;
+    return n;
+  };
+
+  c.missingCount = function() { return c.selectedCount() - c.readyCount(); };
+
+  c.applyDateToSelected = function() {
+    if (!c.bulkDate) return;
+    for (var id in c.sel) c.dates[id] = new Date(c.bulkDate.getTime());
+    c.validationMsg = '';
+  };
+
+  /* ---------- Formatting & Status ---------- */
+  c.formatINR = function(v) {
+    var n = Math.abs(parseFloat(v));
+    if (isNaN(n)) return '0';
+    return n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+  };
+
+  function isInFlightStatus(s) { return s === 'Pending' || s === 'Processing'; }
+
+  function isRetrying(e) {
+    return e && e.status === 'Pending' && (e.attempts > 0 || e.connRetries > 0);
+  }
+
+  c.statusLabel = function(e) {
+    if (!e) return '';
+    if (isRetrying(e)) return 'Retrying';
+    return e.status;
+  };
+
+  c.statusClass = function(e) {
+    if (!e) return 'is-pending';
+    if (e.status === 'Success') return 'is-success';
+    if (e.status === 'Failed') return 'is-failed';
+    return 'is-pending';
+  };
+
+  c.showAttempts = function(e) { return e && (e.status === 'Failed' || isRetrying(e)); };
+  c.showError = function(e) { return e && e.error && e.status !== 'Success'; };
+
+  c.shortErr = function(t) {
+    t = String(t || '');
+    return t.length > 80 ? t.substring(0, 80) + '…' : t;
+  };
+
+  /* ---------- Organize History by PAN without collision ---------- */
+  function organizeHistory(rawHistory) {
+    if (!rawHistory || !rawHistory.length) return [];
+    var panMap = {}, panOrder = [];
+    for (var i = 0; i < rawHistory.length; i++) {
+      var item = rawHistory[i];
+      var p = item.pan || 'NO_PAN';
+      if (!panMap[p]) {
+        panMap[p] = {
+          pan: item.pan,
+          customerName: item.customerName,
+          latestRequestedOn: item.requestedOn,
+          items: []
+        };
+        panOrder.push(p);
+      }
+      panMap[p].items.push(item);
+    }
+
+    var sortedList = [];
+    for (var j = 0; j < panOrder.length; j++) {
+      var grp = panMap[panOrder[j]];
+      for (var k = 0; k < grp.items.length; k++) {
+        var row = grp.items[k];
+        row._panGroupStart = (k === 0);
+        row._panGroupCount = grp.items.length;
+        row._panLatestDate = grp.latestRequestedOn;
+        sortedList.push(row);
+      }
+    }
+    return sortedList;
+  }
+
+  function applyFresh(d) {
+    if (!d) return;
+    if (d.customers) { c.customers = d.customers; c.total = d.total || 0; }
+    if (d.history)   { c.history = organizeHistory(d.history); c.historyLoaded = true; }
+    if (typeof d.failedCount !== 'undefined') c.failedCount = d.failedCount;
+  }
+
+  c.loadHistory = function() {
+    c.server.get({ action: 'history' }).then(function(resp) {
+      var rawHist = (resp.data && resp.data.history) || [];
+      c.history = organizeHistory(rawHist);
+      c.failedCount = (resp.data && resp.data.failedCount) || 0;
+      c.historyLoaded = true;
+    }, function() {
+      c.historyLoaded = true;
+    });
+  };
+
+  function refreshQuiet() {
+    return c.server.get({ action: 'history' }).then(function(h) {
+      var rawHist = (h.data && h.data.history) || [];
+      c.history = organizeHistory(rawHist);
+      c.failedCount = (h.data && h.data.failedCount) || 0;
+      c.historyLoaded = true;
+      return c.server.get({ action: 'page', page: c.page, pageSize: c.pageSize, filters: c.filters });
+    }).then(function(p) {
+      c.customers = (p.data && p.data.customers) || c.customers;
+      c.total = (p.data && p.data.total) || c.total;
+    });
+  }
+
+  c.refreshAll = function() {
+    c.refreshing = true;
+    refreshQuiet().finally(function() { c.refreshing = false; });
+  };
+
+  c.retryOne = function(entry) {
+    if (!entry || c.retrying[entry.id]) return;
+    if (!confirm('Retry the SAP writeback for site ' + (entry.customerCode || '') + '?')) return;
+
+    c.retrying[entry.id] = true;
+    c.retryMsg = '';
+
+    c.server.get({
+      action: 'retry',
+      queueId: entry.id,
+      page: c.page,
+      pageSize: c.pageSize,
+      filters: c.filters
+    }).then(function(resp) {
+      delete c.retrying[entry.id];
+      var d = resp.data || {};
+      c.retryMsg = d.retry_result ? d.retry_result.message : '';
+      applyFresh(d);
+      if (d.retry_result && d.retry_result.ok) c.pollQueue(4);
+    }, function() {
+      delete c.retrying[entry.id];
+      c.retryMsg = 'Could not submit retry. Please try again.';
+    });
+  };
+
+  c.retryAllFailed = function() {
+    if (c.retryingAll || c.failedCount < 1) return;
+    if (!confirm('Retry all ' + c.failedCount + ' failed Non-Trade update(s)?')) return;
+
+    c.retryingAll = true;
+    c.retryMsg = '';
+
+    c.server.get({
+      action: 'retry_failed',
+      page: c.page,
+      pageSize: c.pageSize,
+      filters: c.filters
+    }).then(function(resp) {
+      c.retryingAll = false;
+      var d = resp.data || {};
+      c.retryMsg = d.retry_result ? d.retry_result.message : '';
+      applyFresh(d);
+      if (d.retry_result && d.retry_result.ok) c.pollQueue(4);
+    }, function() {
+      c.retryingAll = false;
+      c.retryMsg = 'Could not submit retry. Please try again.';
+    });
+  };
+
+  c.pollQueue = function(tries) {
+    if (pollTimer) $timeout.cancel(pollTimer);
+    pollTimer = $timeout(function() {
+      refreshQuiet().then(function() {
+        var hasInFlight = false;
+        for (var i = 0; i < c.history.length; i++) {
+          if (isInFlightStatus(c.history[i].status)) { hasInFlight = true; break; }
+        }
+        if (hasInFlight && tries > 1) c.pollQueue(tries - 1);
+        else c.retryMsg = '';
+      });
+    }, 30000);
+  };
+
+  $scope.$on('$destroy', function() {
+    if (pollTimer) $timeout.cancel(pollTimer);
+    if (searchTimer) $timeout.cancel(searchTimer);
+  });
+
+  /* ---------- Submit Batch ---------- */
+  c.submit = function() {
+    var selections = [], missing = 0;
+    c.triedSubmit = true;
+    c.validationMsg = '';
+
+    for (var id in c.sel) {
+      var s = c.sel[id];
+      if (!c.dates[id]) { missing++; continue; }
+      selections.push({
+        customerSysId: s.customerSysId,
+        pan: s.pan,
+        segment: s.segment,
+        zone: s.zone,
+        oldReviewDate: s.currentReviewDate || '',
+        newReviewDate: toYMD(c.dates[id])
+      });
+    }
+
+    if (missing > 0) {
+      c.validationMsg = missing + ' selected site(s) do not have a new review date.';
+      return;
+    }
+    if (selections.length === 0) return;
+
+    var CHUNK = 500, chunks = [];
+    for (var i = 0; i < selections.length; i += CHUNK) chunks.push(selections.slice(i, i + CHUNK));
+
+    var done = 0, skipped = 0, sent = 0;
+    c.loading = true;
+    c.progress = '0/' + selections.length;
+
+    var chain = $q.when();
+    chunks.forEach(function(chunk) {
+      chain = chain.then(function() {
+        return c.server.get({ action: 'submit', selections: chunk }).then(function(resp) {
+          done += (resp.data && resp.data.count) || 0;
+          skipped += (resp.data && resp.data.skipped) || 0;
+          sent += chunk.length;
+          c.progress = sent + '/' + selections.length;
+        });
+      });
+    });
+
+    chain.then(function() {
+      c.loading = false;
+      c.resultMessage = done + ' Non-Trade review date update(s) submitted to the SAP processing queue.' +
+        (skipped ? ' ' + skipped + ' skipped (not in your zone).' : '');
+      c.submitted = true;
+    }, function() {
+      c.loading = false;
+      c.validationMsg = 'Submission failed after ' + done + ' record(s). Check "Recent Updates" before retrying.';
+    });
+  };
+
+  c.reset = function() {
+    c.sel = {};
+    c.dates = {};
+    c.bulkDate = null;
+    c.triedSubmit = false;
+    c.validationMsg = '';
+    c.resultMessage = '';
+    c.retryMsg = '';
+    c.filters = emptyFilters();
+    c.page = 1;
+    c.submitted = false;
+    c.activeView = 'update';
+    fetchPage();
+    c.loadHistory();
+  };
+
+  if (!(c.data && c.data.error)) c.loadHistory();
+};
+]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+/* ── Root Page Container ── */
+.clm-brd {
+  background: #ffffff;
+  min-height: 100vh;
+  padding: 20px 24px 40px;
+  color: #1a1a1a;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  width: 100%;
+}
+.clm-brd *, .clm-brd *::before, .clm-brd *::after { box-sizing: border-box; }
+
+/* ============================================================
+   BREADCRUMBS
+   ============================================================ */
+.clm-breadcrumb-nav { margin-bottom: 14px; }
+.clm-breadcrumb { display: flex; align-items: center; flex-wrap: wrap; list-style: none; padding: 0; margin: 0; font-size: 13px; }
+.clm-breadcrumb-item { display: inline-flex; align-items: center; }
+.clm-breadcrumb-link { color: #AF272F; text-decoration: none; font-weight: 700; }
+.clm-breadcrumb-link:hover { text-decoration: underline; color: #8c1e25; }
+.clm-breadcrumb-sep { margin: 0 8px; color: #8c9ba5; font-weight: 700; }
+.clm-breadcrumb-item.active { color: #5a6a7a; font-weight: 700; }
+
+/* ============================================================
+   PAGE HEADER BANNER (Crimson / Red theme with arcs)
+   ============================================================ */
+.clm-hero {
+  position: relative; overflow: hidden; display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 20px 32px; padding: 28px 32px; margin-bottom: 20px; border-radius: 12px;
+  background: linear-gradient(135deg, #9b1111 0%, #b81e1e 45%, #e0301e 100%);
+  color: #ffffff; box-shadow: 0 10px 28px rgba(120, 20, 15, 0.28);
+}
+.clm-hero::before, .clm-hero::after { content: ""; position: absolute; border-radius: 50%; pointer-events: none; }
+.clm-hero::before { width: 360px; height: 360px; right: -110px; top: -190px; background: rgba(244, 123, 48, 0.55); }
+.clm-hero::after  { width: 260px; height: 260px; right: 160px; bottom: -200px; background: rgba(120, 15, 15, 0.45); }
+.clm-hero-left, .clm-hero-right { position: relative; z-index: 1; }
+.clm-hero-left { flex: 1 1 380px; min-width: 0; }
+.clm-hero-bar { width: 44px; height: 6px; margin-bottom: 12px; border-radius: 3px; background: #fff200; }
+.clm-hero-title { margin: 0; font-size: 26px; font-weight: 700; line-height: 1.25; color: #ffffff; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.clm-hero-accent { color: #fff200; }
+.clm-hero-badge { font-size: 12px; background: rgba(255,255,255,.2); padding: 3px 9px; border-radius: 4px; border: 1px solid rgba(255,255,255,.4); text-transform: uppercase; letter-spacing: .5px; }
+.clm-hero-sub { max-width: 720px; margin-top: 6px; font-size: 15px; font-weight: 400; line-height: 1.5; color: #ffeae4; }
+.clm-hero-right { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+.clm-hero-stat { min-width: 120px; padding-left: 24px; border-left: 1px solid rgba(255,255,255,.3); text-align: right; }
+.clm-hero-stat-v { font-size: 34px; font-weight: 700; line-height: 1.1; letter-spacing: 1px; color: #fff200; white-space: nowrap; text-shadow: 0 1px 3px rgba(80,10,10,.35); }
+.clm-hero-stat-k { margin-top: 6px; font-size: 12px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: #ffd9cf; white-space: nowrap; }
+
+/* ============================================================
+   VIEW SWITCHER (tile style)
+   ============================================================ */
+.clm-view-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
+.clm-view-tab {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 18px; background: #fff; font: inherit;
+  border: 1px solid #dde3ea; border-top: 4px solid #cdd4dc; border-radius: 8px;
+  font-size: 13px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px;
+  cursor: pointer; text-align: left; appearance: none; transition: box-shadow .15s, border-color .15s;
+}
+.clm-view-tab:hover { box-shadow: 0 2px 8px rgba(0,0,0,.06); }
+.clm-view-tab:focus { outline: none; }
+.clm-view-tab.is-active { background: #fffcf0; border-color: #E87722; box-shadow: 0 0 0 2px rgba(232,119,34,.25); color: #1a1a1a; }
+.clm-view-label { display: inline-flex; align-items: center; gap: 6px; }
+.clm-view-badge { display: inline-block; padding: 2px 9px; background: #eef1f5; color: #3a4451; border-radius: 12px; font-size: 11.5px; font-weight: 700; letter-spacing: 0; }
+.clm-view-tab.is-active .clm-view-badge { background: #F3D54E; color: #1a1a1a; }
+.clm-view-badge.is-bad { background: #fdecea; color: #b3261e; }
+
+/* ============================================================
+   SECTIONS &amp; CARDS
+   ============================================================ */
+.clm-section { background: #fff; border: 1px solid #e0e6ed; border-radius: 8px; padding: 22px 24px; box-shadow: 0 4px 16px rgba(0,0,0,.04); }
+.clm-section-title { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; font-size: 14px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; letter-spacing: 1px; }
+.clm-section-num { width: 26px; height: 26px; border-radius: 50%; background: #F3D54E; color: #1a1a1a; font-size: 13px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.clm-brd-gap { margin-top: 34px; }
+
+.clm-block { margin-top: 16px; background: #fff; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden; }
+.clm-block.clm-brd-first { margin-top: 0; }
+.clm-block-head { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; padding: 14px 20px; background: #fafbfc; border-bottom: 1px solid #dde3ea; }
+.clm-block-title { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; letter-spacing: .8px; }
+.clm-block-title::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: #F3D54E; flex-shrink: 0; }
+.clm-block-sub { margin: 4px 0 0 14px; font-size: 12px; color: #5a6a7a; }
+.clm-block-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.clm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: #fff; border: 1px solid #dde3ea; border-radius: 12px; font-size: 12px; font-weight: 700; color: #1a1a1a; white-space: nowrap; }
+.clm-chip-k { font-weight: 400; color: #5a6a7a; }
+.clm-chip-live { background: #eaf7ee; border-color: #b9e3c6; color: #1e8449; }
+.clm-chip-req { background: #fff8e1; border-color: #f3d54e; color: #7a5a00; }
+.clm-tw-body { padding: 18px 20px; }
+
+/* ============================================================
+   OVERVIEW TILES
+   ============================================================ */
+.clm-brd-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.clm-brd-stat {
+  display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; background: #fff; font: inherit;
+  border: 1px solid #dde3ea; border-top: 4px solid #cdd4dc; border-radius: 8px; text-align: left; width: 100%;
+}
+.clm-brd-stat-k { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-brd-stat-v { font-size: 26px; font-weight: 700; line-height: 1.1; color: #1a1a1a; }
+.clm-brd-stat.st-all    { border-top-color: #b81e1e; }
+.clm-brd-stat.st-ready  { border-top-color: #27ae60; }
+.clm-brd-stat.st-ready .clm-brd-stat-v { color: #27ae60; }
+.clm-brd-stat.st-need   { border-top-color: #E87722; }
+.clm-brd-stat.st-need .clm-brd-stat-v { color: #E87722; }
+.clm-brd-stat.st-failed { border-top-color: #c0392b; }
+.clm-brd-stat.st-failed .clm-brd-stat-v { color: #c0392b; }
+
+/* ============================================================
+   FORM &amp; INPUTS
+   ============================================================ */
+.clm-brd-fgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px 16px; align-items: end; }
+.clm-brd-field-wide { grid-column: span 2; }
+.clm-brd-bulkrow { margin-top: 16px; padding-top: 16px; border-top: 1px dashed #dde3ea; display: grid; grid-template-columns: minmax(200px, 1fr) auto auto; gap: 14px; align-items: end; }
+.clm-brd-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.clm-brd-label { margin: 0; font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-brd-link { background: none; border: none; padding: 4px 6px; font-size: 12px; font-weight: 700; color: #AF272F; cursor: pointer; }
+.clm-brd-link:hover:not([disabled]) { text-decoration: underline; }
+
+.clm-input { width: 100%; height: 38px; padding: 0 12px; border: 1px solid #cdd4dc; border-radius: 6px; background: #fff; font-size: 13px; color: #1a1a1a; outline: none; transition: border-color .2s, box-shadow .2s; }
+.clm-input:focus { border-color: #E87722; box-shadow: 0 0 0 3px rgba(232,119,34,.12); }
+
+.clm-brd-search { position: relative; }
+.clm-brd-search-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #7f8c9a; font-size: 13px; }
+.clm-brd-input-search { padding: 0 34px; }
+.clm-brd-search-clear { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); width: 22px; height: 22px; border: none; border-radius: 50%; background: #eef1f5; color: #5a6a7a; font-size: 11px; cursor: pointer; transition: all .15s; }
+.clm-brd-search-clear:hover { background: #AF272F; color: #fff; }
+.clm-brd-clear { padding: 5px 12px; background: #fff; border: 1px solid #cdd4dc; border-radius: 6px; font-size: 12px; font-weight: 700; color: #AF272F; cursor: pointer; transition: all .15s; }
+.clm-brd-clear:hover { background: #fef5f4; border-color: #f5c2bc; color: #b3261e; }
+
+.clm-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 38px; padding: 0 18px; border: 1px solid transparent; border-radius: 6px; font-size: 12.5px; font-weight: 700; cursor: pointer; white-space: nowrap; text-decoration: none !important; transition: all .2s; }
+.clm-btn:disabled, .clm-btn[disabled] { opacity: .5; cursor: not-allowed; }
+.clm-btn-outline { background: #fff; border-color: #cdd4dc; color: #1a1a1a; }
+.clm-btn-outline:not(:disabled):hover { background: #1a1a1a; border-color: #1a1a1a; color: #F3D54E; }
+.clm-btn-primary { background: #E87722; border-color: #E87722; color: #fff; }
+.clm-btn-primary:not(:disabled):hover { background: #d35400; border-color: #d35400; }
+.clm-brd-btn-sm { height: 32px; padding: 0 12px; font-size: 12px; }
+.clm-checkbox { width: 16px; height: 16px; margin: 0; cursor: pointer; accent-color: #E87722; vertical-align: middle; }
+
+.clm-brd-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #dde3ea; border-top-color: #1a1a1a; border-radius: 50%; animation: clm-brd-spin .7s linear infinite; vertical-align: middle; }
+@keyframes clm-brd-spin { to { transform: rotate(360deg); } }
+
+/* ============================================================
+   BANNERS, LOAD BAR, NOTES, STATES
+   ============================================================ */
+.clm-brd-banner { padding: 10px 20px; background: #fffcf0; border-bottom: 1px solid #f1e2a0; font-size: 12.5px; color: #7a5a00; text-align: center; }
+.clm-brd-banner.is-done { background: #f4fbf6; border-bottom-color: #b9e3c6; color: #1e8449; }
+.clm-brd-loadbar { height: 3px; background: transparent; overflow: hidden; position: relative; }
+.clm-brd-loadbar.is-on { background: #fbe3cf; }
+.clm-brd-loadbar.is-on::after { content: ""; position: absolute; top: 0; left: -40%; width: 40%; height: 100%; background: #E87722; animation: clm-brd-load 1s ease-in-out infinite; }
+@keyframes clm-brd-load { to { left: 100%; } }
+.clm-brd-table-wrap.is-loading { opacity: .55; pointer-events: none; transition: opacity .15s; }
+.clm-brd-note { margin: 0 0 20px; padding: 10px 14px; background: #f4fbf6; border: 1px solid #cfead8; border-radius: 6px; color: #1e8449; font-size: 12.5px; }
+.clm-brd-note.clm-brd-note-in { margin: 12px 20px; }
+
+.clm-brd-state { padding: 40px 20px; text-align: center; }
+.clm-brd-state-icon { width: 54px; height: 54px; margin: 0 auto 12px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 26px; font-weight: 700; color: #fff; }
+.clm-brd-state-icon.is-ok { background: #27ae60; }
+.clm-brd-state-icon.is-bad { background: #c0392b; }
+.clm-brd-state-text { max-width: 640px; margin: 0 auto; font-size: 14px; line-height: 1.5; color: #3a4451; }
+.clm-state-actions { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
+
+/* ============================================================
+   PAN GROUPING ROWS
+   ============================================================ */
+.clm-pan-group-row td { background: #f7f8fa !important; padding: 8px 14px !important; border-top: 2px solid #c9d4e2 !important; border-bottom: 1px solid #dde3ea !important; text-align: left; white-space: normal; }
+.clm-pan-group-content { display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap; }
+.clm-pan-group-left { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.clm-pan-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; background: #fdf5f3; border: 1px solid #f5cfca; border-radius: 14px; font-size: 12px; font-weight: 700; color: #b81e1e; letter-spacing: .4px; }
+.clm-pan-custname { font-weight: 700; color: #1a1a1a; font-size: 13px; }
+.clm-pan-count { font-size: 12px; color: #5a6a7a; }
+.clm-pan-btn { height: 28px; padding: 0 12px; background: #fff; border: 1px solid #cdd4dc; border-radius: 6px; font-size: 11.5px; font-weight: 700; color: #1a1a1a; cursor: pointer; transition: all .15s; }
+.clm-pan-btn:hover { background: #1a1a1a; border-color: #1a1a1a; color: #F3D54E; }
+
+/* ============================================================
+   TABLES (fit without side-scroll; sticky columns when narrow)
+   ============================================================ */
+.clm-table-wrap { overflow-x: auto; background: #fff; -webkit-overflow-scrolling: touch; }
+.clm-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.clm-table th { background: #eef1f5; color: #2b3440; padding: 10px 12px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; text-align: center; white-space: nowrap; border: 1px solid #dde3ea; }
+.clm-table td { padding: 10px 12px; color: #1a1a1a; text-align: center; white-space: normal; border: 1px solid #e6eaef; vertical-align: middle; background: #fff; }
+.clm-table tr &gt; :first-child { border-left: 0; }
+.clm-table tr &gt; :last-child { border-right: 0; }
+.clm-table thead tr:first-child th { border-top: 0; }
+.clm-table tbody tr:last-child td { border-bottom: 0; }
+.clm-table .grp { border-left: 2px solid #c9d1db !important; }
+.clm-table tr.super th { letter-spacing: 1px; padding: 10px 12px; }
+.clm-table th.bg-blank { background: #f7f8fa; }
+.clm-table th.bg-code { background: #e3eefa; color: #0b5394; }
+.clm-table th.bg-seg { background: #f1f3f7; color: #3a4451; }
+.clm-table th.bg-req { background: #e6f4ea; color: #2e7d32; }
+.clm-table th.clm-subth { background: #f7f8fa; font-size: 11px; font-weight: 400; color: #5a6a7a; padding: 6px 10px; }
+
+.clm-brd-table { min-width: 1040px; }
+.clm-brd-hist { min-width: 1000px; }
+.clm-brd-th-left, .clm-brd-td-left { text-align: left !important; }
+.clm-brd-num { text-align: right !important; }
+.clm-brd-center { justify-content: flex-start; }
+
+/* Fixed widths for the sticky columns (select table) */
+.clm-brd-col-check { width: 44px; min-width: 44px; max-width: 44px; padding-left: 0 !important; padding-right: 0 !important; text-align: center !important; }
+.clm-brd-table th.clm-brd-s1, .clm-brd-table td.clm-brd-s1 { width: 200px; min-width: 200px; max-width: 200px; }
+.clm-brd-table th.clm-brd-s2, .clm-brd-table td.clm-brd-s2 { width: 230px; min-width: 230px; max-width: 230px; }
+.clm-brd-hist th.clm-brd-s0h, .clm-brd-hist td.clm-brd-s0h { width: 210px; min-width: 210px; max-width: 210px; }
+
+/* Sticky columns */
+.clm-brd .clm-table .clm-brd-stk { position: sticky; z-index: 2; }
+.clm-brd .clm-table thead .clm-brd-stk { z-index: 3; }
+.clm-brd .clm-table .clm-brd-s0  { left: 0; }
+.clm-brd .clm-table .clm-brd-s1  { left: 44px; }
+.clm-brd .clm-table .clm-brd-s2  { left: 244px; box-shadow: 2px 0 5px rgba(0,0,0,.06); }
+.clm-brd .clm-table .clm-brd-s0h { left: 0; box-shadow: 2px 0 5px rgba(0,0,0,.06); }
+
+/* Row states */
+.clm-brd-table tbody tr:not(.clm-pan-group-row):not(.clm-brd-empty-row) { cursor: pointer; transition: background-color .15s; }
+.clm-brd-table tbody tr:not(.clm-pan-group-row):not(.clm-brd-empty-row):hover td { background: #fafbfc; }
+.clm-brd-table tbody tr.is-selected td { background: #fffcf0; }
+.clm-brd-table tbody tr.is-selected td:first-child { box-shadow: inset 4px 0 0 #F3D54E; }
+.clm-brd-hist tbody tr.clm-brd-hist-row:hover td { background: #fafbfc; }
+
+/* Segment pills */
+.clm-segment-pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+.clm-segment-pill.seg-rmc { background: #f3e8ff; color: #6b21a8; border: 1px solid #e9d5ff; }
+.clm-segment-pill.seg-cement { background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; }
+
+.clm-date-transition { font-size: 12.5px; color: #2b3440; white-space: nowrap; }
+
+.clm-brd-date { width: 140px; height: 34px; padding: 4px 8px; }
+.clm-brd-date.is-missing { border-color: #f3d54e; background: #fffdf3; }
+.clm-brd-date.is-error { border-color: #E23D28; background: #fef5f4; }
+.clm-brd-muted { color: #a0aab6; font-style: italic; }
+.clm-brd-synced { font-size: 12px; font-weight: 700; color: #1e8449; white-space: nowrap; }
+
+.clm-brd-empty { padding: 44px 16px !important; text-align: center !important; color: #5a6a7a; font-size: 13px; }
+.clm-brd-empty-icon { font-size: 28px; margin-bottom: 8px; }
+
+/* ============================================================
+   SUBMIT BAR
+   ============================================================ */
+.clm-tw-res { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; padding: 14px 20px; background: #fffcf0; border-top: 1px solid #f1e2a0; }
+.clm-tw-res-k { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-tw-res-f { margin-top: 2px; font-size: 12px; color: #7f8c9a; }
+.clm-tw-res-v { font-size: 26px; font-weight: 700; line-height: 1.1; color: #1a1a1a; }
+.clm-tw-res.is-ok { background: #f4fbf6; border-top-color: #b9e3c6; }
+.clm-tw-res.is-ok .clm-tw-res-v { color: #1e8449; }
+.clm-brd-res-right { display: flex; align-items: center; gap: 20px; margin-left: auto; }
+.clm-brd-error { margin-top: 4px; font-size: 12px; font-weight: 700; color: #c0392b; }
+
+/* ============================================================
+   PAGINATION
+   ============================================================ */
+.clm-brd-pager { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; padding: 12px 20px; border-top: 1px solid #dde3ea; background: #fafbfc; font-size: 12.5px; color: #3a4451; }
+.clm-brd-pager-ctrl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.clm-brd-pager-size { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 400; color: #3a4451; margin: 0 8px 0 0; }
+.clm-brd-pager-size .clm-input { width: 72px; height: 30px; padding: 0 8px; font-size: 12.5px; }
+.clm-brd-pbtn { height: 30px; min-width: 32px; padding: 0 10px; background: #fff; border: 1px solid #cdd4dc; border-radius: 6px; font-size: 12px; font-weight: 700; color: #1a1a1a; cursor: pointer; transition: all .15s; }
+.clm-brd-pbtn:hover:not([disabled]) { background: #1a1a1a; border-color: #1a1a1a; color: #F3D54E; }
+.clm-brd-pbtn[disabled] { opacity: .4; cursor: not-allowed; }
+.clm-brd-pager-page { display: inline-flex; align-items: center; gap: 6px; margin: 0 4px; font-weight: 700; color: #1a1a1a; }
+.clm-brd-pager-input { width: 60px; height: 30px; padding: 0 6px; text-align: center; }
+
+/* ============================================================
+   ALERTS, RETRY &amp; STATUS PILLS
+   ============================================================ */
+.clm-brd-alert { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; margin: 0 0 20px; padding: 12px 16px; background: #fef5f4; border: 1px solid #f5c2bc; border-left: 4px solid #E23D28; border-radius: 6px; font-size: 13px; color: #1a1a1a; }
+.clm-brd-alert-sub { display: block; margin-top: 2px; font-size: 12px; color: #5a6a7a; }
+.clm-brd-alert-btns { display: flex; align-items: center; gap: 12px; }
+.clm-brd-retry-btn { background: #c0392b; border-color: #c0392b; color: #fff; height: 34px; padding: 0 14px; font-size: 12px; }
+.clm-brd-retry-btn:not(:disabled):hover { background: #a93226; border-color: #a93226; }
+.clm-brd-retry-sm { height: 28px; padding: 0 10px; font-size: 11.5px; margin-top: 5px; }
+
+.clm-brd-status { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; border: 1px solid transparent; white-space: nowrap; }
+.clm-brd-status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.clm-brd-status.is-pending { background: #fff8e1; border-color: #f3d54e; color: #7a5a00; }
+.clm-brd-status.is-success { background: #eaf7ee; border-color: #b9e3c6; color: #1e8449; }
+.clm-brd-status.is-failed  { background: #fdecea; border-color: #f5c2bc; color: #b3261e; }
+.clm-brd-att { display: inline-block; padding: 2px 7px; background: #f4f6f9; border: 1px solid #e6eaef; border-radius: 6px; font-size: 11px; font-weight: 700; color: #3a4451; }
+.clm-brd-last { text-align: left; }
+.clm-brd-last-top { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; }
+.clm-brd-last-sub { font-size: 11px; color: #7f8c9a; margin-top: 3px; }
+.clm-brd-last-err { margin-top: 4px; font-size: 11px; line-height: 1.3; color: #b3261e; word-break: break-word; white-space: normal; }
+.clm-brd-err-cell { font-size: 11.5px; color: #b3261e; word-break: break-word; white-space: normal; }
+
+/* ============================================================
+   SITE &amp; TERRITORY COLUMNS (v2)
+   ============================================================ */
+/* Two-line sub-header: bold uppercase title + light hint underneath */
+.clm-brd .clm-table th.clm-th-2l { padding: 8px 12px; text-transform: none; letter-spacing: 0; white-space: normal; vertical-align: middle; }
+.clm-th-main { display: block; font-size: 12px; font-weight: 700; color: #2b3440; text-transform: uppercase; letter-spacing: .6px; line-height: 1.3; }
+.clm-th-hint { display: block; margin-top: 2px; font-size: 11px; font-weight: 400; color: #7f8c9a; text-transform: none; letter-spacing: 0; line-height: 1.3; }
+
+/* Site cell: code + segment pill, name only when it differs from the PAN group */
+.clm-site-line { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; }
+.clm-site-code { font-size: 13px; font-weight: 700; color: #1a1a1a; letter-spacing: .3px; }
+.clm-site-alt { margin-top: 4px; font-size: 11.5px; line-height: 1.35; color: #5a6a7a; white-space: normal; word-break: break-word; }
+
+/* Territory cell: depot on top, region · zone underneath */
+.clm-terr-main { font-size: 13px; font-weight: 700; line-height: 1.35; color: #1a1a1a; word-break: break-word; }
+.clm-terr-sub { margin-top: 3px; font-size: 12px; line-height: 1.4; color: #5a6a7a; word-break: break-word; }
+.clm-terr-main.is-missing, .clm-terr-sub.is-missing { font-weight: 400; font-style: italic; color: #a0aab6; }
+
+/* PAN group header for rows without a PAN */
+.clm-pan-custname.is-muted { font-weight: 400; font-style: italic; color: #5a6a7a; }
+
+/* ============================================================
+   RESPONSIVE
+   ============================================================ */
+@media (max-width: 1024px) {
+  .clm-brd { padding: 16px; }
+  .clm-brd-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Phones &amp; small tablets: tables turn into stacked cards (no side-scroll) */
+@media (max-width: 768px) {
+  .clm-brd { padding: 12px 10px 24px; }
+  .clm-section { padding: 14px 10px; }
+  .clm-view-nav { grid-template-columns: 1fr; }
+  .clm-brd-fgrid { grid-template-columns: 1fr; }
+  .clm-brd-field-wide { grid-column: span 1; }
+  .clm-brd-bulkrow { grid-template-columns: 1fr; }
+  .clm-brd-bulkrow .clm-btn { width: 100%; }
+
+  .clm-hero { flex-direction: column; align-items: center; text-align: center; padding: 22px 16px; }
+  .clm-hero-title { justify-content: center; }
+  .clm-hero-right { width: 100%; justify-content: center; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.22); }
+  .clm-hero-stat { border-left: 0; padding-left: 0; text-align: center; }
+
+  .clm-brd-res-right { margin-left: 0; width: 100%; justify-content: space-between; }
+  .clm-brd-pager, .clm-brd-pager-ctrl { justify-content: center; }
+
+  .clm-table-wrap { overflow-x: visible; padding: 10px; }
+  .clm-brd .clm-brd-table, .clm-brd .clm-brd-hist { min-width: 0; }
+  .clm-brd-table thead, .clm-brd-hist thead { display: none; }
+  .clm-brd-table, .clm-brd-table tbody, .clm-brd-table tr, .clm-brd-table td,
+  .clm-brd-hist, .clm-brd-hist tbody, .clm-brd-hist tr, .clm-brd-hist td { display: block; width: 100%; }
+
+  .clm-brd .clm-table tbody tr { margin: 0 0 12px; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden; background: #fff; }
+  .clm-brd .clm-table tbody tr.clm-pan-group-row { border: 0; margin-bottom: 8px; }
+  .clm-brd .clm-table tbody tr.is-selected { border-color: #E87722; }
+  .clm-brd .clm-table td { width: auto; min-width: 0; max-width: none; text-align: left; border: 0 !important; border-bottom: 1px dashed #e6eaef !important; padding: 9px 12px !important; }
+  .clm-brd .clm-table td.clm-pan-group-cell { padding: 8px 10px !important; border-bottom: 0 !important; }
+  .clm-brd .clm-table td:last-child { border-bottom: 0 !important; }
+  .clm-brd .clm-table .clm-brd-stk { position: static; box-shadow: none; }
+  .clm-brd .clm-table td[data-label]::before {
+    content: attr(data-label); display: block; margin-bottom: 3px;
+    font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; color: #5a6a7a;
+  }
+  .clm-brd .clm-table td.clm-brd-td-inline { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .clm-brd .clm-table td.clm-brd-td-inline::before { margin-bottom: 0; }
+  .clm-brd .clm-table td.clm-brd-num { text-align: left !important; }
+  .clm-brd-date { width: 150px; }
+  .clm-brd-last-err { max-width: none; }
+}
+@media (max-width: 480px) {
+  .clm-brd-stats { grid-template-columns: 1fr 1fr; }
+}
+
+/* FONT RULE (Keep Last) */
+.clm-widget, .clm-widget *, .clm-widget input, .clm-widget select,
+.clm-widget button, .clm-widget table {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}
+</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>uclm_non-trade_next_review_date</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Non-Trade Next Review Date</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+  var CUST           = 'x_birl3_clm_clm_customer_master1';
+  var QUEUE          = 'x_birl3_clm_clm_review_date_update_queue';
+  var MATRIX         = 'x_birl3_clm_approval_matrix';
+  var MAX_SELECT_ALL = 20000;
+  var MAX_ATTEMPTS   = 3;
+  var RETRY_ALL_CAP  = 500;
+  var CG1_NON_TRADE  = 'N01'; // Non-Trade strictly N01
+
+  data.error = '';
+  data.customers = [];
+  data.total = 0;
+  data.totalPans = 0;
+  data.maxAttempts = MAX_ATTEMPTS;
+
+  var action = (input && input.action) ? input.action : 'load';
+  var isAdmin = gs.hasRole('admin');
+  data.isAdmin = isAdmin;
+
+  // Helper for Geo format Name (Code)
+  function formatGeo(name, code) {
+    name = (name || '').trim();
+    code = (code || '').trim();
+    if (!name && !code) return '—';
+    if (code && code.length === 32 && /^[0-9a-f]{32}$/i.test(code)) return name || '—';
+    if (name && code && name !== code) {
+      if (name.indexOf('(' + code + ')') !== -1) return name;
+      return name + ' (' + code + ')';
+    }
+    return name || code;
+  }
+
+  // ---- 1. Resolve ZCH Mapped Zones for Non-Trade (Strictly from Matrix or Admin) ----
+  var zones = [];
+  var isPanIndia = false;
+
+  if (isAdmin) {
+    // Admin has access to all active zones
+    var azGa = new GlideAggregate(CUST);
+    azGa.addQuery('cg1', CG1_NON_TRADE);
+    azGa.addQuery('is_active', 'true');
+    azGa.groupBy('zone');
+    azGa.orderBy('zone');
+    azGa.query();
+    while (azGa.next()) {
+      var azVal = azGa.getValue('zone');
+      if (azVal && zones.indexOf(azVal) === -1) zones.push(azVal);
+    }
+    // Set first zone as default for Admin
+    if (zones.length > 0) {
+      data.defaultZone = zones[0];
+    }
+  } else {
+    // Non-Trade ZCH mapping via x_birl3_clm_approval_matrix
+    var mxGr = new GlideRecord(MATRIX);
+    var rqc = mxGr.addQuery('role_name', 'CONTAINS', 'ZCH');
+    rqc.addOrCondition('role_name', 'CONTAINS', 'Zonal');
+    mxGr.addQuery('approver_user', gs.getUserID());
+    var ctqc = mxGr.addQuery('customer_type', 'CONTAINS', 'Non-Trade');
+    ctqc.addOrCondition('customer_type', 'CONTAINS', 'non_trade');
+    ctqc.addOrCondition('customer_type', 'CONTAINS', 'non-trade');
+    mxGr.query();
+
+    while (mxGr.next()) {
+      if (mxGr.getValue('pan_india') == 'true' || mxGr.getValue('pan_india') == true) {
+        isPanIndia = true;
+      }
+      var z = mxGr.getValue('zone');
+      if (z && zones.indexOf(z) === -1) zones.push(z);
+    }
+
+    if (isPanIndia) {
+      var piGa = new GlideAggregate(CUST);
+      piGa.addQuery('cg1', CG1_NON_TRADE);
+      piGa.addQuery('is_active', 'true');
+      piGa.groupBy('zone');
+      piGa.query();
+      while (piGa.next()) {
+        var pz = piGa.getValue('zone');
+        if (pz && zones.indexOf(pz) === -1) zones.push(pz);
+      }
+    }
+  }
+
+  if (zones.length === 0 && !isAdmin) {
+    data.error = 'No active Non-Trade ZCH zone mapping found for this user in the Approval Matrix.';
+    return;
+  }
+
+  // ---- 2. Queue Record Parser ----
+  function entryFrom(q) {
+    return {
+      id: q.getUniqueValue(),
+      customerSysId: q.getValue('customer_code'),
+      customerCode: q.getDisplayValue('customer_code'),
+      customerName: q.customer_code.customer_name ? q.customer_code.customer_name.toString() : '',
+      pan: q.getValue('pan') || (q.customer_code.pan ? q.customer_code.pan.toString() : ''),
+      segment: q.getValue('segment'),
+      customerType: q.getValue('customer_type') || 'Non-Trade',
+      oldDate: q.getValue('old_review_date') || '',
+      newDate: q.getValue('new_review_date') || '',
+      status: q.getValue('status'),
+      error: q.getValue('last_error') || '',
+      attempts: parseInt(q.getValue('u_attempt_count'), 10) || 0,
+      connRetries: parseInt(q.getValue('connection_retry_count'), 10) || parseInt(q.getValue('u_connection_retry_count'), 10) || 0,
+      requestedBy: q.getDisplayValue('requested_by'),
+      requestedOn: q.getDisplayValue('requested_on'),
+      canRetry: false
+    };
+  }
+
+  function queueCustomerIds(statusList) {
+    var ids = [];
+    var ga = new GlideAggregate(QUEUE);
+    ga.addQuery('customer_code.zone', 'IN', zones.join(','));
+    ga.addQuery('customer_type', 'non_trade');
+    if (statusList) ga.addQuery('status', 'IN', statusList);
+    ga.groupBy('customer_code');
+    ga.query();
+    while (ga.next()) ids.push(ga.getValue('customer_code'));
+    return ids;
+  }
+
+  // ---- 3. Filtered Customer Query Builder ----
+  function buildCustomerGr(f) {
+    f = f || {};
+    var zoneList = zones;
+
+    if (f.zone && zones.indexOf(f.zone) > -1) {
+      zoneList = [f.zone];
+    } else if (isAdmin && data.defaultZone && !f.zone) {
+      zoneList = [data.defaultZone];
+    }
+
+    var gr = new GlideRecord(CUST);
+    gr.addQuery('zone', 'IN', zoneList.join(','));
+    gr.addQuery('cg1', CG1_NON_TRADE); // Strictly N01
+    gr.addQuery('is_active', 'true');
+
+    if (f.region) gr.addQuery('region', f.region);
+    if (f.depot)  gr.addQuery('depot', f.depot);
+
+    if (f.search) {
+      var s = String(f.search).trim();
+      if (s) {
+        var qc = gr.addQuery('customer_name', 'CONTAINS', s);
+        qc.addOrCondition('customer_code_sap', 'STARTSWITH', s);
+        qc.addOrCondition('pan', 'STARTSWITH', s);
+      }
+    }
+
+    if (f.review) {
+      var todayStr = new GlideDate().getValue();
+      if (f.review === 'notset') {
+        gr.addNullQuery('next_review_date');
+      } else if (f.review === 'overdue') {
+        gr.addQuery('next_review_date', '<', todayStr);
+      } else if (f.review === 'due30') {
+        var d30 = new GlideDate();
+        d30.addDaysLocalTime(30);
+        gr.addQuery('next_review_date', '>=', todayStr);
+        gr.addQuery('next_review_date', '<=', d30.getValue());
+      }
+    }
+
+    if (f.change) {
+      var st = '';
+      if (f.change === 'Pending') st = 'Pending,Processing';
+      else if (f.change === 'Success') st = 'Success';
+      else if (f.change === 'Failed') st = 'Failed';
+
+      if (st) {
+        var ids = queueCustomerIds(st);
+        if (ids.length) gr.addQuery('sys_id', 'IN', ids.join(','));
+        else gr.addQuery('sys_id', '-1');
+      }
+    }
+    return gr;
+  }
+
+  // ---- 4. Page Loader with cr_limit and next_review_date ----
+  function loadPage(f, page, size) {
+    page = Math.max(parseInt(page, 10) || 1, 1);
+    size = Math.min(Math.max(parseInt(size, 10) || 15, 5), 100);
+
+    var gr = buildCustomerGr(f);
+
+    var ga = new GlideAggregate(CUST);
+    ga.addEncodedQuery(gr.getEncodedQuery());
+    ga.addAggregate('COUNT');
+    ga.query();
+    data.total = ga.next() ? parseInt(ga.getAggregate('COUNT'), 10) : 0;
+
+    var panGa = new GlideAggregate(CUST);
+    panGa.addEncodedQuery(gr.getEncodedQuery());
+    panGa.groupBy('pan');
+    panGa.query();
+    var pCount = 0;
+    while (panGa.next()) pCount++;
+    data.totalPans = pCount;
+
+    gr.orderBy('pan');
+    gr.orderBy('customer_code_sap');
+
+    var start = (page - 1) * size;
+    gr.chooseWindow(start, start + size);
+    gr.query();
+
+    var rows = [], ids = [];
+    while (gr.next()) {
+      var id = gr.getUniqueValue();
+      ids.push(id);
+
+      var zCode = gr.getValue('zone') || '';
+      var zName = gr.isValidField('zone_name') && gr.getValue('zone_name') ? gr.getDisplayValue('zone_name') : (gr.getDisplayValue('zone') || zCode);
+      var rCode = gr.getValue('region') || '';
+      var rName = gr.isValidField('region_name') && gr.getValue('region_name') ? gr.getDisplayValue('region_name') : (gr.getDisplayValue('region') || rCode);
+      var dCode = gr.getValue('depot') || '';
+      var dName = gr.isValidField('depot_name') && gr.getValue('depot_name') ? gr.getDisplayValue('depot_name') : (gr.getDisplayValue('depot') || dCode);
+
+      rows.push({
+        customerSysId: id,
+        customerCode: gr.getValue('customer_code_sap') || '',
+        pan: gr.getValue('pan') || '',
+        customerName: gr.getValue('customer_name') || '',
+        segment: gr.getValue('segment') || '',
+        zone: zCode,
+        zoneDisplay: formatGeo(zName, zCode),
+        region: rCode,
+        regionDisplay: formatGeo(rName, rCode),
+        depot: dCode,
+        depotDisplay: formatGeo(dName, dCode),
+        currentLimit: gr.getValue('cr_limit') || 0, // Strictly cr_limit
+        currentReviewDate: gr.getValue('next_review_date') || '', // Strictly next_review_date
+        lastChange: null
+      });
+    }
+
+    if (ids.length) {
+      var last = {};
+      var q = new GlideRecord(QUEUE);
+      q.addQuery('customer_code', 'IN', ids.join(','));
+      q.addQuery('customer_type', 'non_trade');
+      q.orderByDesc('requested_on');
+      q.query();
+      while (q.next()) {
+        var cid = q.getValue('customer_code');
+        if (!last[cid]) {
+          var e = entryFrom(q);
+          e.canRetry = (e.status === 'Failed');
+          last[cid] = e;
+        }
+      }
+      for (var i = 0; i < rows.length; i++) rows[i].lastChange = last[rows[i].customerSysId] || null;
+    }
+
+    data.customers = rows;
+    data.page = page;
+    data.pageSize = size;
+  }
+
+  // ---- 5. Options Loader ----
+  function loadOptions() {
+    var combos = [];
+    var ga = new GlideAggregate(CUST);
+    ga.addQuery('zone', 'IN', zones.join(','));
+    ga.addQuery('cg1', CG1_NON_TRADE);
+    ga.addQuery('is_active', 'true');
+    ga.groupBy('zone');
+    ga.groupBy('region');
+    ga.groupBy('depot');
+    ga.query();
+    while (ga.next()) {
+      combos.push({
+        zone: ga.getValue('zone') || '',
+        region: ga.getValue('region') || '',
+        depot: ga.getValue('depot') || ''
+      });
+    }
+    data.options = combos;
+  }
+
+  // ---- 6. Retryable Failed IDs ----
+  function retryableFailedIds() {
+    var failedCust = {};
+    var fq = new GlideRecord(QUEUE);
+    fq.addQuery('status', 'Failed');
+    fq.addQuery('customer_type', 'non_trade');
+    fq.addQuery('customer_code.zone', 'IN', zones.join(','));
+    fq.setLimit(5000);
+    fq.query();
+    while (fq.next()) failedCust[fq.getValue('customer_code')] = true;
+
+    var custIds = Object.keys(failedCust);
+    if (!custIds.length) return [];
+
+    var seen = {}, out = [];
+    var q = new GlideRecord(QUEUE);
+    q.addQuery('customer_code', 'IN', custIds.join(','));
+    q.addQuery('customer_type', 'non_trade');
+    q.orderByDesc('requested_on');
+    q.query();
+    while (q.next()) {
+      var cid = q.getValue('customer_code');
+      if (seen[cid]) continue;
+      seen[cid] = true;
+      if (q.getValue('status') === 'Failed') out.push(q.getUniqueValue());
+    }
+    return out;
+  }
+
+  // ---- 7. History Loader ----
+  function loadHistory() {
+    data.history = [];
+    var seen = {};
+    var q = new GlideRecord(QUEUE);
+    q.addQuery('customer_code.zone', 'IN', zones.join(','));
+    q.addQuery('customer_type', 'non_trade');
+    q.orderByDesc('requested_on');
+    q.setLimit(100);
+    q.query();
+    while (q.next()) {
+      var e = entryFrom(q);
+      e.canRetry = (e.status === 'Failed') && !seen[e.customerSysId];
+      seen[e.customerSysId] = true;
+      data.history.push(e);
+    }
+    data.failedCount = retryableFailedIds().length;
+  }
+
+  // ---- 8. Select All Matching IDs ----
+  function loadMatchingIds(f) {
+    var gr = buildCustomerGr(f);
+    gr.orderBy('pan');
+    gr.orderBy('customer_code_sap');
+    gr.setLimit(MAX_SELECT_ALL);
+    gr.query();
+    var list = [];
+    while (gr.next()) {
+      list.push({
+        customerSysId: gr.getUniqueValue(),
+        customerCode: gr.getValue('customer_code_sap'),
+        pan: gr.getValue('pan') || '',
+        customerName: gr.getValue('customer_name') || '',
+        segment: gr.getValue('segment') || '',
+        zone: gr.getValue('zone') || '',
+        currentReviewDate: gr.getValue('next_review_date') || ''
+      });
+    }
+    data.matching = list;
+  }
+
+  // ---- 9. Batch Submit to Queue Table ----
+  function submitSelections() {
+    var selections = input.selections || [];
+    var count = 0, skipped = 0;
+    var cust = new GlideRecord(CUST);
+
+    for (var i = 0; i < selections.length; i++) {
+      var s = selections[i];
+      if (!cust.get(s.customerSysId) || (!isAdmin && zones.indexOf(cust.getValue('zone')) === -1)) {
+        skipped++;
+        continue;
+      }
+      var gr = new GlideRecord(QUEUE);
+      gr.initialize();
+      gr.customer_code = s.customerSysId;
+      gr.pan = s.pan;
+      gr.segment = s.segment;
+      gr.customer_type = 'non_trade';
+      gr.zone = s.zone || cust.getValue('zone');
+      gr.old_review_date = s.oldReviewDate;
+      gr.new_review_date = s.newReviewDate;
+      gr.requested_by = gs.getUserID();
+      gr.requested_on = new GlideDateTime();
+      gr.status = 'Pending';
+      gr.u_attempt_count = 0;
+      gr.connection_retry_count = 0;
+      gr.insert();
+      count++;
+    }
+    data.count = count;
+    data.skipped = skipped;
+  }
+
+  // ---- 10. Requeue / Retry Handlers ----
+  function requeue(q) {
+    q.setValue('status', 'Pending');
+    q.setValue('u_attempt_count', 0);
+    q.setValue('connection_retry_count', 0);
+    q.setValue('last_error', 'Manual Non-Trade retry by ' + gs.getUserDisplayName() + ' at ' + new GlideDateTime().getDisplayValue());
+    q.update();
+  }
+
+  function retryOne(queueId) {
+    var q = new GlideRecord(QUEUE);
+    if (!queueId || !q.get(queueId)) return { ok: false, message: 'Update record not found.' };
+
+    var cust = new GlideRecord(CUST);
+    if (!cust.get(q.getValue('customer_code')) || (!isAdmin && zones.indexOf(cust.getValue('zone')) === -1)) {
+      return { ok: false, message: 'You are not authorized to retry this update.' };
+    }
+    if (q.getValue('status') !== 'Failed') {
+      return { ok: false, message: 'Only failed updates can be retried.' };
+    }
+
+    var newer = new GlideRecord(QUEUE);
+    newer.addQuery('customer_code', q.getValue('customer_code'));
+    newer.addQuery('requested_on', '>', q.getValue('requested_on'));
+    newer.setLimit(1);
+    newer.query();
+    if (newer.hasNext()) {
+      return { ok: false, blocked: true, message: 'A newer update exists for this customer, so this one cannot be retried.' };
+    }
+
+    requeue(q);
+    return { ok: true, message: 'Retry submitted. The SAP writeback will re-attempt shortly.' };
+  }
+
+  function retryAllFailed() {
+    var ids = retryableFailedIds();
+    if (!ids.length) return { ok: false, message: 'No failed updates to retry.' };
+
+    var done = 0;
+    for (var i = 0; i < ids.length && done < RETRY_ALL_CAP; i++) {
+      if (retryOne(ids[i]).ok) done++;
+    }
+    return done > 0
+      ? { ok: true, count: done, message: done + ' update(s) submitted for retry. SAP will reprocess shortly.' }
+      : { ok: false, message: 'Nothing could be retried.' };
+  }
+
+  // ---- Dispatch Actions ----
+  var f = (input && input.filters) || {};
+
+  if (action === 'load') {
+    if (isAdmin && data.defaultZone) {
+      f.zone = data.defaultZone;
+    }
+    loadOptions();
+    loadPage(f, 1, 15);
+  } else if (action === 'page') {
+    loadPage(f, input.page, input.pageSize);
+  } else if (action === 'ids') {
+    loadMatchingIds(f);
+  } else if (action === 'history') {
+    loadHistory();
+  } else if (action === 'submit') {
+    submitSelections();
+  } else if (action === 'retry' || action === 'retry_failed') {
+    data.retry_result = (action === 'retry') ? retryOne(input.queueId) : retryAllFailed();
+    loadPage(f, input.page, input.pageSize);
+    loadHistory();
+  }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-03 10:36:28</sys_created_on>
+        <sys_id>b2e60e8a97581b10be31fa17f053af79</sys_id>
+        <sys_mod_count>22</sys_mod_count>
+        <sys_name>UCLM Non-Trade Next Review Date</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_b2e60e8a97581b10be31fa17f053af79</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-13 06:10:33</sys_updated_on>
+        <template><![CDATA[<div class="clm-widget clm-brd">
+
+  <!-- BREADCRUMB NAVIGATION -->
+  <nav class="clm-breadcrumb-nav" aria-label="Breadcrumb">
+    <ol class="clm-breadcrumb">
+      <li class="clm-breadcrumb-item">
+        <a href="?id=uclm_next_review_date" class="clm-breadcrumb-link">
+          <i class="fa fa-home m-r-xs"></i> Home
+        </a>
+      </li>
+      <li class="clm-breadcrumb-sep" aria-hidden="true">&rsaquo;</li>
+      <li class="clm-breadcrumb-item active" aria-current="page">
+        Bulk Review Date Update
+      </li>
+    </ol>
+  </nav>
+
+  <!-- PAGE HEADER BANNER -->
+  <div class="clm-hero">
+    <div class="clm-hero-left">
+      <div class="clm-hero-bar"></div>
+      <div class="clm-hero-title">Bulk Review Date <span class="clm-hero-accent">Update</span></div>
+      <div class="clm-hero-sub">Non-Trade customers grouped by PAN mapped to your assigned zone(s).</div>
+    </div>
+    <div class="clm-hero-right" ng-if="!c.data.error && !c.submitted && c.data.total > 0">
+      <div class="clm-hero-stat">
+        <div class="clm-hero-stat-v">{{c.data.total}}</div>
+        <div class="clm-hero-stat-k">Site Codes</div>
+      </div>
+      <div class="clm-hero-stat">
+        <div class="clm-hero-stat-v">{{c.data.totalPans || 0}}</div>
+        <div class="clm-hero-stat-k">Total PANs</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIEW SWITCHER TABS -->
+  <div class="clm-view-nav" ng-if="!c.data.error && !c.submitted">
+    <button type="button" class="clm-view-tab" ng-class="{'is-active': c.activeView === 'update'}" ng-click="c.setView('update')">
+      <span class="clm-view-label"><i class="fa fa-pencil-square-o m-r-xs"></i> Select &amp; Update</span>
+      <span class="clm-view-badge">{{c.total}}</span>
+    </button>
+    <button type="button" class="clm-view-tab" ng-class="{'is-active': c.activeView === 'history'}" ng-click="c.setView('history')">
+      <span class="clm-view-label"><i class="fa fa-history m-r-xs"></i> Recent Updates &amp; SAP Status</span>
+      <span class="clm-view-badge" ng-if="c.historyLoaded">{{c.history.length}}</span>
+      <span class="clm-view-badge is-bad" ng-if="c.failedCount > 0" title="Failed Updates to SAP">{{c.failedCount}} Failed</span>
+    </button>
+  </div>
+
+  <!-- Error state -->
+  <div class="clm-section" ng-if="c.data.error">
+    <div class="clm-block clm-brd-first">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Access Restricted</div>
+          <div class="clm-block-sub">Review dates can only be updated for Non-Trade zones mapped to you as ZCH or Admin.</div>
+        </div>
+      </div>
+      <div class="clm-brd-state">
+        <div class="clm-brd-state-icon is-bad">!</div>
+        <div class="clm-brd-state-text">{{c.data.error}}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Success state -->
+  <div class="clm-section" ng-if="c.submitted">
+    <div class="clm-block clm-brd-first">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Updates Submitted</div>
+          <div class="clm-block-sub">Non-Trade review date update requests have been queued for SAP writeback.</div>
+        </div>
+        <div class="clm-block-meta">
+          <span class="clm-chip clm-chip-live">Queued</span>
+        </div>
+      </div>
+      <div class="clm-brd-state">
+        <div class="clm-brd-state-icon is-ok">&#10003;</div>
+        <div class="clm-brd-state-text">{{c.resultMessage}}</div>
+        <div class="clm-state-actions">
+          <button type="button" class="clm-btn clm-btn-primary" ng-click="c.reset()">Start New Batch</button>
+          <button type="button" class="clm-btn clm-btn-outline" ng-click="c.reset(); c.setView('history');">View Recent Updates</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================================================== -->
+  <!-- VIEW 1: SELECTION & BULK UPDATE -->
+  <!-- ======================================================== -->
+  <div class="clm-section" ng-if="!c.data.error && !c.submitted && c.activeView === 'update'">
+
+    <!-- Failed-updates alert -->
+    <div class="clm-brd-alert" ng-if="c.failedCount > 0">
+      <div>
+        <b>{{c.failedCount}} Non-Trade review date update(s) failed to reach SAP.</b>
+        <span class="clm-brd-alert-sub">You can retry them immediately or view detailed error logs.</span>
+      </div>
+      <div class="clm-brd-alert-btns">
+        <button type="button" class="clm-brd-link" ng-click="c.setView('history')">View details</button>
+        <button type="button" class="clm-btn clm-brd-retry-btn" ng-disabled="c.retryingAll" ng-click="c.retryAllFailed()">
+          <span ng-if="!c.retryingAll">&#8635; Retry all failed</span>
+          <span ng-if="c.retryingAll">Submitting&hellip;</span>
+        </button>
+      </div>
+    </div>
+    <div class="clm-brd-note" ng-if="c.retryMsg">{{c.retryMsg}}</div>
+
+    <div class="clm-section-title"><span class="clm-section-num">1</span> Select Customer Sites</div>
+
+    <!-- Search, Filters & Bulk Apply -->
+    <div class="clm-block clm-brd-first">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Search, Filters &amp; Bulk Apply</div>
+          <div class="clm-block-sub">Narrow Non-Trade customers, select rows or entire PANs, and apply review dates.</div>
+        </div>
+        <div class="clm-block-meta">
+          <span class="clm-chip" ng-if="!c.loadingPage"><span class="clm-chip-k">Showing</span> {{c.customers.length}} on this page</span>
+          <span class="clm-chip" ng-if="c.loadingPage"><span class="clm-brd-spinner"></span> Loading&hellip;</span>
+          <button type="button" class="clm-brd-clear"
+                  ng-if="c.filters.search || c.filters.region || c.filters.depot || c.filters.review || c.filters.change"
+                  ng-click="c.filters.search=''; c.filters.region=''; c.filters.depot=''; c.filters.review=''; c.filters.change=''; c.applyFilters()">&#x2715; Clear filters</button>
+        </div>
+      </div>
+      <div class="clm-tw-body">
+
+        <div class="clm-brd-fgrid">
+          <div class="clm-brd-field clm-brd-field-wide">
+            <label class="clm-brd-label" for="clmBrdSearch">Search</label>
+            <div class="clm-brd-search">
+              <i class="fa fa-search clm-brd-search-icon"></i>
+              <input id="clmBrdSearch" type="text" class="clm-input clm-brd-input-search" ng-model="c.filters.search"
+                     ng-change="c.onSearch()" placeholder="Search Customer Name, PAN, or Site Code..." autocomplete="off" />
+              <button type="button" class="clm-brd-search-clear" ng-if="c.filters.search"
+                      ng-click="c.filters.search=''; c.applyFilters()">&#x2715;</button>
+            </div>
+          </div>
+          <div class="clm-brd-field" ng-if="c.zoneList().length > 1 || c.data.isAdmin">
+            <label class="clm-brd-label">Zone</label>
+            <select class="clm-input" ng-model="c.filters.zone" ng-change="c.onZoneChange()">
+              <option value="" ng-if="!c.data.isAdmin">All Zones</option>
+              <option ng-repeat="z in c.zoneList() track by z" value="{{z}}">{{z}}</option>
+            </select>
+          </div>
+          <div class="clm-brd-field">
+            <label class="clm-brd-label">Region</label>
+            <select class="clm-input" ng-model="c.filters.region" ng-change="c.onRegionChange()">
+              <option value="">All Regions</option>
+              <option ng-repeat="r in c.regionList() track by r" value="{{r}}">{{r}}</option>
+            </select>
+          </div>
+          <div class="clm-brd-field">
+            <label class="clm-brd-label">Depot</label>
+            <select class="clm-input" ng-model="c.filters.depot" ng-change="c.applyFilters()">
+              <option value="">All Depots</option>
+              <option ng-repeat="d in c.depotList() track by d" value="{{d}}">{{d}}</option>
+            </select>
+          </div>
+          <div class="clm-brd-field">
+            <label class="clm-brd-label">Review Date Status</label>
+            <select class="clm-input" ng-model="c.filters.review" ng-change="c.applyFilters()">
+              <option value="">All</option>
+              <option value="notset">Not set</option>
+              <option value="overdue">Overdue</option>
+              <option value="due30">Due in 30 days</option>
+            </select>
+          </div>
+          <div class="clm-brd-field">
+            <label class="clm-brd-label">SAP Update Status</label>
+            <select class="clm-input" ng-model="c.filters.change" ng-change="c.applyFilters()">
+              <option value="">All Statuses</option>
+              <option value="Pending">Pending</option>
+              <option value="Success">Success</option>
+              <option value="Failed">Failed</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Bulk date toolbar -->
+        <div class="clm-brd-filters clm-brd-bulkrow">
+          <div class="clm-brd-field">
+            <label class="clm-brd-label" for="clmBrdBulkDate">New Review Date (Apply to all selected)</label>
+            <input id="clmBrdBulkDate" type="date" class="clm-input" ng-model="c.bulkDate"
+                   ng-model-options="{timezone: 'utc'}" title="Date to apply to all selected customer sites" />
+          </div>
+          <div class="clm-brd-field clm-brd-field-btn">
+            <button type="button" class="clm-btn clm-btn-primary"
+                    ng-disabled="!c.bulkDate || c.selectedCount() === 0"
+                    ng-click="c.applyDateToSelected()">
+              <i class="fa fa-calendar-check-o"></i> Apply Date to {{c.selectedCount()}} Selected
+            </button>
+          </div>
+          <div class="clm-brd-field clm-brd-field-btn">
+            <button type="button" class="clm-btn clm-btn-outline"
+                    ng-disabled="c.selectedCount() === 0" ng-click="c.clearSelection()">
+              Clear Selection
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Customer table (Grouped by PAN) -->
+    <div class="clm-block">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Non-Trade Customer Sites (Grouped by PAN)</div>
+          <div class="clm-block-sub">Tick individual sites or select entire PANs to apply dates collectively.</div>
+        </div>
+        <div class="clm-block-meta">
+          <span class="clm-chip" ng-class="{'clm-chip-req': c.selectedCount() > 0}">
+            <span class="clm-chip-k">Selected Sites:</span> {{c.selectedCount()}}
+          </span>
+          <span class="clm-chip"><span class="clm-chip-k">Page</span> {{c.page}} of {{c.totalPages()}}</span>
+        </div>
+      </div>
+
+      <!-- Select-all banner -->
+      <div class="clm-brd-banner" ng-if="c.pageAllSelected() && c.total > c.customers.length && c.selectedCount() < c.total">
+        All {{c.customers.length}} customers on this page are selected.
+        <button type="button" class="clm-brd-link" ng-disabled="c.selectingAll" ng-click="c.selectAllMatching()">
+          <span ng-if="!c.selectingAll">Select all {{c.total}} matching Non-Trade customers</span>
+          <span ng-if="c.selectingAll">Selecting&hellip;</span>
+        </button>
+      </div>
+      <div class="clm-brd-banner is-done" ng-if="c.selectedCount() >= c.total && c.total > c.customers.length">
+        All {{c.selectedCount()}} matching customers are selected.
+        <button type="button" class="clm-brd-link" ng-click="c.clearSelection()">Clear selection</button>
+      </div>
+
+      <div class="clm-brd-loadbar" ng-class="{'is-on': c.loadingPage}"></div>
+
+      <div class="clm-table-wrap clm-brd-table-wrap" ng-class="{'is-loading': c.loadingPage}">
+        <table class="clm-table clm-brd-table">
+          <thead>
+            <tr class="super">
+              <th class="bg-blank clm-brd-col-check clm-brd-stk clm-brd-s0"></th>
+              <th class="bg-code clm-brd-th-left clm-brd-stk clm-brd-s1">Site</th>
+              <th class="bg-seg clm-brd-th-left clm-brd-stk clm-brd-s2">Location</th>
+              <th class="bg-seg grp" colspan="3">Current Status</th>
+              <th class="bg-req grp">Update</th>
+            </tr>
+            <tr>
+              <th class="clm-brd-col-check clm-brd-stk clm-brd-s0">
+                <input type="checkbox" class="clm-checkbox" title="Select all on this page"
+                       ng-checked="c.pageAllSelected()" ng-click="c.togglePage()" />
+              </th>
+              <th class="clm-brd-th-left clm-subth clm-th-2l clm-brd-stk clm-brd-s1">
+                <span class="clm-th-main">Site Code</span>
+                <span class="clm-th-hint">Code &middot; Segment</span>
+              </th>
+              <th class="clm-brd-th-left clm-subth clm-th-2l clm-brd-stk clm-brd-s2">
+                <span class="clm-th-main">Territory</span>
+                <span class="clm-th-hint">Depot &middot; Region &middot; Zone</span>
+              </th>
+              <th class="grp clm-subth">Credit Limit</th>
+              <th class="clm-subth">Last Review Date</th>
+              <th class="clm-subth">Status &amp; Action</th>
+              <th class="grp clm-subth">Next Review Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- PAN Group Header -->
+            <tr ng-repeat-start="row in c.customers track by row.customerSysId"
+                ng-if="c.isNewPanGroup($index)"
+                class="clm-pan-group-row">
+              <td colspan="7" class="clm-pan-group-cell">
+                <div class="clm-pan-group-content">
+                  <div class="clm-pan-group-left">
+                    <span class="clm-pan-badge"><i class="fa fa-id-card-o m-r-xs"></i> PAN: <b>{{row.pan || 'NO PAN'}}</b></span>
+                    <span class="clm-pan-custname" ng-if="row.pan">{{row.customerName}}</span>
+                    <span class="clm-pan-custname is-muted" ng-if="!row.pan">Customers without PAN</span>
+                    <span class="clm-pan-count">({{c.getPanCountOnPage(row.pan)}} site(s) on this page)</span>
+                  </div>
+                  <div class="clm-pan-group-right">
+                    <button type="button" class="clm-pan-btn" ng-click="c.togglePanSelection(row.pan)">
+                      <i class="fa" ng-class="c.isPanSelected(row.pan) ? 'fa-check-square-o' : 'fa-square-o'"></i>
+                      {{ c.isPanSelected(row.pan) ? 'Deselect PAN Sites' : 'Select all under this PAN' }}
+                    </button>
+                  </div>
+                </div>
+              </td>
+            </tr>
+
+            <!-- Individual Customer Site Row -->
+            <tr ng-repeat-end
+                ng-class="{'is-selected': c.isSel(row)}"
+                ng-click="c.toggleRow(row)">
+              <td class="clm-brd-col-check clm-brd-stk clm-brd-s0 clm-brd-td-inline" data-label="Select">
+                <input type="checkbox" class="clm-checkbox" ng-checked="c.isSel(row)"
+                       ng-click="c.toggleRow(row); $event.stopPropagation()" />
+              </td>
+
+              <!-- Site (code + segment; name only when it differs from the PAN group) -->
+              <td class="clm-brd-td-left clm-brd-stk clm-brd-s1" data-label="Site Code">
+                <div class="clm-site-line">
+                  <span class="clm-site-code">{{row.customerCode || '&mdash;'}}</span>
+                  <span class="clm-segment-pill" ng-class="row.segment === 'RMC' ? 'seg-rmc' : 'seg-cement'" ng-if="row.segment">{{row.segment}}</span>
+                </div>
+                <div class="clm-site-alt" ng-if="c.showSiteName(c.customers, $index)" title="{{row.customerName}}">{{row.customerName}}</div>
+              </td>
+
+              <!-- Territory -->
+              <td class="clm-brd-td-left clm-brd-stk clm-brd-s2" data-label="Territory">
+                <div class="clm-terr-main" ng-if="c.hasGeo(row.depotDisplay)">{{row.depotDisplay}}</div>
+                <div class="clm-terr-main is-missing" ng-if="!c.hasGeo(row.depotDisplay)">Depot not set</div>
+                <div class="clm-terr-sub" ng-if="c.geoLine(row)">{{c.geoLine(row)}}</div>
+                <div class="clm-terr-sub is-missing" ng-if="!c.geoLine(row)">Region / zone not mapped</div>
+              </td>
+
+              <!-- Credit Limit -->
+              <td class="grp clm-brd-num clm-brd-td-inline font-weight-bold" data-label="Credit Limit">
+                <span>&#8377;{{c.formatINR(row.currentLimit)}}</span>
+              </td>
+
+              <!-- Last Review Date -->
+              <td class="clm-brd-td-inline" data-label="Last Review Date">
+                <span>
+                  <span ng-if="row.currentReviewDate" class="font-weight-bold">{{row.currentReviewDate}}</span>
+                  <span ng-if="!row.currentReviewDate" class="clm-brd-muted">Not set</span>
+                </span>
+              </td>
+
+              <!-- Status & Action (inside Current Status) -->
+              <td data-label="Status &amp; Action" ng-click="$event.stopPropagation()">
+                <span class="clm-brd-muted" ng-if="!row.lastChange">&mdash;</span>
+                <div class="clm-brd-last" ng-if="row.lastChange">
+                  <div class="clm-brd-last-top">
+                    <span class="clm-date-transition">{{row.lastChange.oldDate || 'Not set'}} &rarr; <b>{{row.lastChange.newDate}}</b></span>
+                    <span class="clm-brd-status" ng-class="c.statusClass(row.lastChange)">{{c.statusLabel(row.lastChange)}}</span>
+                    <span class="clm-brd-att" ng-if="c.showAttempts(row.lastChange)" title="Attempts used">{{row.lastChange.attempts}}/{{c.data.maxAttempts}}</span>
+                  </div>
+                  <div class="clm-brd-last-sub">{{row.lastChange.requestedBy}} &middot; {{row.lastChange.requestedOn}}</div>
+                  <div class="clm-brd-last-err" ng-if="c.showError(row.lastChange)" title="{{row.lastChange.error}}">{{c.shortErr(row.lastChange.error)}}</div>
+                  <button type="button" class="clm-btn clm-brd-retry-btn clm-brd-retry-sm"
+                          ng-if="row.lastChange.canRetry"
+                          ng-disabled="c.retrying[row.lastChange.id]"
+                          ng-click="c.retryOne(row.lastChange)">
+                    <span ng-if="!c.retrying[row.lastChange.id]">&#8635; Retry</span>
+                    <span ng-if="c.retrying[row.lastChange.id]">Submitting&hellip;</span>
+                  </button>
+                </div>
+              </td>
+
+              <!-- Next Review Date input -->
+              <td class="grp clm-brd-td-inline" data-label="Next Review Date" ng-click="$event.stopPropagation()">
+                <input type="date" class="clm-input clm-brd-date"
+                       ng-class="{'is-missing': c.isSel(row) && !c.dates[row.customerSysId], 'is-error': c.triedSubmit && c.isSel(row) && !c.dates[row.customerSysId]}"
+                       ng-model="c.dates[row.customerSysId]" ng-model-options="{timezone: 'utc'}"
+                       ng-change="c.onRowDate(row)" />
+              </td>
+            </tr>
+
+            <tr ng-if="c.customers.length === 0 && !c.loadingPage" class="clm-brd-empty-row">
+              <td colspan="7" class="clm-brd-empty">
+                <div class="clm-brd-empty-icon">&#128269;</div>
+                No Non-Trade customers match your search / filters.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Pagination -->
+      <div class="clm-brd-pager">
+        <div class="clm-brd-pager-info">
+          Showing <b>{{c.rangeFrom()}}&ndash;{{c.rangeTo()}}</b> of <b>{{c.total}}</b> sites
+        </div>
+        <div class="clm-brd-pager-ctrl">
+          <label class="clm-brd-pager-size">Rows per page
+            <select class="clm-input" ng-model="c.pageSize" ng-change="c.applyFilters()"
+                    ng-options="n for n in c.pageSizes"></select>
+          </label>
+          <button type="button" class="clm-brd-pbtn" ng-disabled="c.page <= 1 || c.loadingPage" ng-click="c.goTo(1)" title="First Page">&laquo;</button>
+          <button type="button" class="clm-brd-pbtn" ng-disabled="c.page <= 1 || c.loadingPage" ng-click="c.goTo(c.page - 1)" title="Previous Page">&lsaquo; Prev</button>
+          <span class="clm-brd-pager-page">
+            Page
+            <input type="number" class="clm-input clm-brd-pager-input" min="1" max="{{c.totalPages()}}"
+                   ng-model="c.pageInput" ng-keyup="$event.keyCode === 13 && c.goTo(c.pageInput)"
+                   ng-blur="c.pageInput = c.page" />
+            of {{c.totalPages()}}
+          </span>
+          <button type="button" class="clm-brd-pbtn" ng-disabled="c.page >= c.totalPages() || c.loadingPage" ng-click="c.goTo(c.page + 1)" title="Next Page">Next &rsaquo;</button>
+          <button type="button" class="clm-brd-pbtn" ng-disabled="c.page >= c.totalPages() || c.loadingPage" ng-click="c.goTo(c.totalPages())" title="Last Page">&raquo;</button>
+        </div>
+      </div>
+
+      <!-- Result / Submission Row -->
+      <div class="clm-tw-res clm-brd-res" ng-class="{'is-ok': c.readyCount() > 0 && c.missingCount() === 0}">
+        <div>
+          <div class="clm-tw-res-k">Ready to submit</div>
+          <div class="clm-tw-res-f">
+            {{c.selectedCount()}} site(s) selected
+            <span ng-if="c.missingCount() > 0"> &middot; {{c.missingCount()}} still need a new date</span>
+          </div>
+          <div class="clm-brd-error" ng-if="c.validationMsg">{{c.validationMsg}}</div>
+        </div>
+        <div class="clm-brd-res-right">
+          <div class="clm-tw-res-v">{{c.readyCount()}}</div>
+          <button type="button" class="clm-btn clm-btn-primary"
+                  ng-disabled="c.selectedCount() === 0 || c.loading"
+                  ng-click="c.submit()">
+            <span ng-if="!c.loading"><i class="fa fa-paper-plane m-r-xs"></i> Submit Non-Trade Updates</span>
+            <span ng-if="c.loading">Submitting&hellip; {{c.progress}}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================================================== -->
+  <!-- VIEW 2: RECENT UPDATES & SAP STATUS (Grouped by PAN) -->
+  <!-- ======================================================== -->
+  <div class="clm-section" ng-if="!c.data.error && !c.submitted && c.activeView === 'history'">
+
+    <!-- SECTION 1: UPDATE OVERVIEW -->
+    <div class="clm-section-title"><span class="clm-section-num">1</span> Update Overview</div>
+
+    <div class="clm-brd-stats is-4">
+      <div class="clm-brd-stat st-all">
+        <span class="clm-brd-stat-k">Total Updates</span>
+        <span class="clm-brd-stat-v">{{c.history.length}}</span>
+      </div>
+      <div class="clm-brd-stat st-ready">
+        <span class="clm-brd-stat-k">Success</span>
+        <span class="clm-brd-stat-v">{{(c.history | filter:{status:'Success'}:true).length}}</span>
+      </div>
+      <div class="clm-brd-stat st-need">
+        <span class="clm-brd-stat-k">Pending / Retrying</span>
+        <span class="clm-brd-stat-v">{{(c.history | filter:{status:'Pending'}:true).length + (c.history | filter:{status:'Processing'}:true).length}}</span>
+      </div>
+      <div class="clm-brd-stat st-failed">
+        <span class="clm-brd-stat-k">Failed SAP Updates</span>
+        <span class="clm-brd-stat-v">{{c.failedCount}}</span>
+      </div>
+    </div>
+
+    <!-- SECTION 2: HISTORY TABLE -->
+    <div class="clm-section-title clm-brd-gap"><span class="clm-section-num">2</span> Recent Updates &amp; SAP Status</div>
+
+    <div class="clm-block clm-brd-first">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Recent Non-Trade Review Date Updates</div>
+          <div class="clm-block-sub">Latest review date changes grouped by PAN with live SAP writeback statuses.</div>
+        </div>
+        <div class="clm-block-meta">
+          <span class="clm-chip" ng-if="c.historyLoaded"><span class="clm-chip-k">Showing:</span> {{c.history.length}} updates</span>
+          <span class="clm-chip" ng-if="!c.historyLoaded"><span class="clm-brd-spinner"></span> Loading&hellip;</span>
+          <button type="button" class="clm-btn clm-btn-outline clm-brd-btn-sm" ng-disabled="c.refreshing" ng-click="c.refreshAll()">
+            <span ng-if="!c.refreshing">&#8635; Refresh</span>
+            <span ng-if="c.refreshing">Refreshing&hellip;</span>
+          </button>
+          <button type="button" class="clm-btn clm-brd-retry-btn clm-brd-btn-sm"
+                  ng-if="c.failedCount > 0" ng-disabled="c.retryingAll" ng-click="c.retryAllFailed()">
+            &#8635; Retry all failed ({{c.failedCount}})
+          </button>
+        </div>
+      </div>
+
+      <div class="clm-brd-note clm-brd-note-in" ng-if="c.retryMsg">{{c.retryMsg}}</div>
+
+      <div class="clm-table-wrap clm-brd-hist-wrap">
+        <table class="clm-table clm-brd-hist">
+          <thead>
+            <tr class="super">
+              <th class="bg-code clm-brd-th-left clm-brd-stk clm-brd-s0h">Site</th>
+              <th class="bg-seg grp">Status &amp; Action</th>
+              <th class="bg-blank grp" rowspan="2">Requested By &amp; On</th>
+              <th class="bg-blank grp" rowspan="2">Attempts</th>
+              <th class="bg-blank clm-brd-th-left" rowspan="2">Error Message</th>
+              <th class="bg-blank grp" rowspan="2">Action</th>
+            </tr>
+            <tr>
+              <th class="clm-brd-th-left clm-subth clm-th-2l clm-brd-stk clm-brd-s0h">
+                <span class="clm-th-main">Site Code</span>
+                <span class="clm-th-hint">Code &middot; Segment</span>
+              </th>
+              <th class="grp clm-subth">Old &rarr; New</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- PAN Group Header (per page) -->
+            <tr ng-repeat-start="h in c.histSlice() track by h.id"
+                ng-if="c.isNewHistGroup($index)"
+                class="clm-pan-group-row">
+              <td colspan="6" class="clm-pan-group-cell">
+                <div class="clm-pan-group-content">
+                  <div class="clm-pan-group-left">
+                    <span class="clm-pan-badge"><i class="fa fa-id-card-o m-r-xs"></i> PAN: <b>{{h.pan || 'NO PAN'}}</b></span>
+                    <span class="clm-pan-custname" ng-if="h.pan">{{h.customerName}}</span>
+                    <span class="clm-pan-custname is-muted" ng-if="!h.pan">Customers without PAN</span>
+                    <span class="clm-pan-count">({{c.histPanCountOnPage(h.pan)}} site update(s) on this page)</span>
+                  </div>
+                  <div class="clm-pan-group-right">
+                    <span class="clm-pan-count"><i class="fa fa-clock-o m-r-xs"></i> Batch Date: <b>{{h._panLatestDate}}</b></span>
+                  </div>
+                </div>
+              </td>
+            </tr>
+
+            <!-- Individual History Row -->
+            <tr ng-repeat-end class="clm-brd-hist-row">
+              <td class="clm-brd-td-left clm-brd-stk clm-brd-s0h" data-label="Site Code">
+                <div class="clm-site-line">
+                  <span class="clm-site-code">{{h.customerCode || '&mdash;'}}</span>
+                  <span class="clm-segment-pill" ng-class="h.segment === 'RMC' ? 'seg-rmc' : 'seg-cement'" ng-if="h.segment">{{h.segment}}</span>
+                </div>
+                <div class="clm-site-alt" ng-if="c.showSiteName(c.histSlice(), $index)" title="{{h.customerName}}">{{h.customerName}}</div>
+              </td>
+
+              <td class="grp" data-label="Status &amp; Action">
+                <div class="clm-brd-last-top clm-brd-center">
+                  <span class="clm-date-transition">{{h.oldDate || 'Not set'}} &rarr; <b>{{h.newDate}}</b></span>
+                  <span class="clm-brd-status" ng-class="c.statusClass(h)">{{c.statusLabel(h)}}</span>
+                </div>
+              </td>
+
+              <td class="grp" data-label="Requested By &amp; On">
+                <div class="font-weight-bold">{{h.requestedBy}}</div>
+                <div class="clm-brd-last-sub">{{h.requestedOn}}</div>
+              </td>
+
+              <td class="grp clm-brd-td-inline" data-label="Attempts">
+                <span>
+                  <span class="clm-brd-att">{{h.attempts}}/{{c.data.maxAttempts}}</span>
+                  <span ng-if="h.connRetries > 0" class="clm-brd-last-sub"> &middot; {{h.connRetries}} conn.</span>
+                </span>
+              </td>
+
+              <td class="clm-brd-td-left clm-brd-err-cell" data-label="Error Message" title="{{h.error}}">
+                <span ng-if="c.showError(h)">{{c.shortErr(h.error)}}</span>
+                <span ng-if="!c.showError(h)" class="clm-brd-muted">&mdash;</span>
+              </td>
+
+              <td class="grp clm-brd-td-inline" data-label="Action">
+                <span>
+                  <button type="button" class="clm-btn clm-brd-retry-btn clm-brd-retry-sm"
+                          ng-if="h.canRetry" ng-disabled="c.retrying[h.id]" ng-click="c.retryOne(h)">
+                    <span ng-if="!c.retrying[h.id]">&#8635; Retry</span>
+                    <span ng-if="c.retrying[h.id]">Submitting&hellip;</span>
+                  </button>
+                  <span ng-if="!h.canRetry && h.status == 'Failed'" class="clm-brd-muted" title="A newer update exists for this customer">Superseded</span>
+                  <span ng-if="h.status == 'Success'" class="clm-brd-synced"><i class="fa fa-check-circle"></i> Synced</span>
+                </span>
+              </td>
+            </tr>
+
+            <tr ng-if="c.historyLoaded && c.history.length === 0" class="clm-brd-empty-row">
+              <td colspan="6" class="clm-brd-empty">
+                <div class="clm-brd-empty-icon">&#128196;</div>
+                No Non-Trade review date changes submitted yet.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- History Pagination -->
+      <div class="clm-brd-pager" ng-if="c.historyLoaded && c.history.length > 0">
+        <div class="clm-brd-pager-info">
+          Showing <b>{{c.histFrom()}}&ndash;{{c.histTo()}}</b> of <b>{{c.history.length}}</b> updates
+        </div>
+        <div class="clm-brd-pager-ctrl">
+          <label class="clm-brd-pager-size">Rows per page
+            <select class="clm-input" ng-model="c.histPageSize" ng-change="c.histSetSize()"
+                    ng-options="n for n in c.pageSizes"></select>
+          </label>
+          <button type="button" class="clm-brd-pbtn" ng-disabled="c.histPage <= 1" ng-click="c.histGoTo(1)" title="First Page">&laquo;</button>
+          <button type="button" class="clm-brd-pbtn" ng-disabled="c.histPage <= 1" ng-click="c.histGoTo(c.histPage - 1)" title="Previous Page">&lsaquo; Prev</button>
+          <span class="clm-brd-pager-page">
+            Page
+            <input type="number" class="clm-input clm-brd-pager-input" min="1" max="{{c.histTotalPages()}}"
+                   ng-model="c.histPageInput" ng-keyup="$event.keyCode === 13 && c.histGoTo(c.histPageInput)"
+                   ng-blur="c.histPageInput = c.histPage" />
+            of {{c.histTotalPages()}}
+          </span>
+          <button type="button" class="clm-brd-pbtn" ng-disabled="c.histPage >= c.histTotalPages()" ng-click="c.histGoTo(c.histPage + 1)" title="Next Page">Next &rsaquo;</button>
+          <button type="button" class="clm-brd-pbtn" ng-disabled="c.histPage >= c.histTotalPages()" ng-click="c.histGoTo(c.histTotalPages())" title="Last Page">&raquo;</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>b2e60e8a97581b10be31fa17f053af79</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-03 10:36:28</sys_created_on>
+        <sys_id>fee64aca97581b10be31fa17f053af39</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-03 10:36:28</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

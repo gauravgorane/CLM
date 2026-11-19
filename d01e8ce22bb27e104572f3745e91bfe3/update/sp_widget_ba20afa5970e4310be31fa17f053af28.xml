@@ -1,0 +1,260 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[function widgetcontroller($scope) {
+	var c = this;
+	// Routing + validation happen entirely in the server script.
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.clm-role-router {
+	width: 100%;
+}
+
+.clm-router-empty {
+	max-width: 600px;
+	margin: 60px auto;
+	text-align: center;
+	background: #ffffff;
+	border: 1px solid #cbd5e1;
+	border-radius: 6px;
+	padding: 32px 24px;
+	box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+	font-family: "Helvetica Neue", Arial, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.clm-router-empty-icon {
+	font-size: 28px;
+	margin-bottom: 8px;
+}
+
+.clm-router-empty-title {
+	font-size: 15px;
+	font-weight: 700;
+	color: #1a1a1a;
+	margin-bottom: 6px;
+}
+
+.clm-router-empty-text {
+	font-size: 12.5px;
+	color: #6b7280;
+	line-height: 1.5;
+	margin-bottom: 16px;
+}
+
+.clm-router-debug {
+	margin-top: 16px;
+	text-align: left;
+	background: #f8f9fb;
+	border: 1px dashed #cbd5e1;
+	border-radius: 4px;
+	padding: 12px 14px;
+	font-size: 11.5px;
+	color: #374151;
+	font-family: monospace;
+}
+
+.clm-router-debug-title {
+	font-weight: 700;
+	margin-bottom: 6px;
+	color: #1a1a1a;
+	font-family: "Helvetica Neue", Arial, sans-serif;
+}
+
+.clm-router-debug div {
+	padding: 2px 0;
+	word-break: break-all;
+}
+
+.clm-router-debug-error {
+	color: #b3261e;
+	font-weight: 700;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clm_tsh_nsh_dashboard</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>clm_tsh_nsh_dashboard</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+	/* ==========================================================================
+	   CLM Dashboard Role Router (with existence + template validation)
+	   Table checked: x_birl3_clm_role_user_mapping
+	     - u_user : REFERENCE field (to sys_user)
+	     - u_role : STRING field
+	   ========================================================================== */
+
+	data.widget = null;
+	data.widgetValid = false;
+	data.message = '';
+	data.role = '';
+	data.debug = {
+		userSysId: '',
+		userName: '',
+		mappingRowCount: 0,
+		rolesFound: '',
+		matchedRole: '',
+		attemptedWidgetId: '',
+		widgetExistsInTable: 'false',
+		widgetTableSysId: '',
+		widgetLoaded: 'false',
+		widgetHasTemplate: 'false',
+		templateLength: 0,
+		errorMsg: ''
+	};
+
+	var TSH_ROLE_VALUE = 'TSH';
+	var NSH_ROLE_VALUE = 'NSH';
+
+	var TSH_DASHBOARD_WIDGET_ID = 'clm_tsh_dashboard';
+	var NSH_DASHBOARD_WIDGET_ID = 'clm_nsh_dashboard';
+
+	try {
+
+		var userSysId = gs.getUserID();
+		data.debug.userSysId = userSysId;
+		data.debug.userName = gs.getUserName();
+
+		var matchedRole = '';
+		var rolesFound = [];
+
+		// u_user is a REFERENCE field -> query directly by sys_id
+		var grMap = new GlideRecord('x_birl3_clm_role_user_mapping');
+		grMap.addQuery('u_user', userSysId);
+		grMap.query();
+
+		var rowCount = 0;
+		while (grMap.next()) {
+			rowCount++;
+			// u_role is a STRING field -> getValue is enough, but try both to be safe
+			var roleVal = (grMap.getValue('u_role') || grMap.getDisplayValue('u_role') || '').toString().trim();
+			rolesFound.push(roleVal);
+
+			var roleUpper = roleVal.toUpperCase();
+			if (roleUpper === TSH_ROLE_VALUE.toUpperCase()) {
+				matchedRole = 'TSH';
+			} else if (roleUpper === NSH_ROLE_VALUE.toUpperCase() && matchedRole !== 'TSH') {
+				matchedRole = 'NSH';
+			}
+		}
+
+		data.debug.mappingRowCount = rowCount;
+		data.debug.rolesFound = rolesFound.join(', ');
+		data.debug.matchedRole = matchedRole;
+		data.role = matchedRole;
+
+		if (!matchedRole) {
+			data.message = 'You are not mapped to a TSH or NSH role in the system. Please contact your administrator to get access.';
+			return;
+		}
+
+		var targetWidgetId = (matchedRole === 'TSH') ? TSH_DASHBOARD_WIDGET_ID : NSH_DASHBOARD_WIDGET_ID;
+		data.debug.attemptedWidgetId = targetWidgetId;
+
+		// ---- STEP 1: Verify the widget actually exists in sp_widget table ----
+		var grWidget = new GlideRecord('sp_widget');
+		grWidget.addQuery('id', targetWidgetId);
+		grWidget.query();
+
+		if (!grWidget.next()) {
+			data.debug.widgetExistsInTable = 'false';
+			data.message = 'Your role (' + matchedRole + ') was detected, but no widget with ID "' +
+				targetWidgetId + '" exists in sp_widget. Open Studio, open the ' +
+				(matchedRole === 'TSH' ? 'TSH' : 'NSH') + ' dashboard widget, and copy its exact "ID" field value here.';
+			return;
+		}
+
+		data.debug.widgetExistsInTable = 'true';
+		data.debug.widgetTableSysId = grWidget.getUniqueValue();
+
+		// ---- STEP 2: Load the widget via $sp.getWidget() ----
+		var loadedWidget = $sp.getWidget(targetWidgetId);
+		data.debug.widgetLoaded = loadedWidget ? 'true' : 'false';
+
+		if (!loadedWidget) {
+			data.message = 'Widget "' + targetWidgetId + '" exists in the table, but $sp.getWidget() failed to load it. It may have a broken server script.';
+			return;
+		}
+
+		// ---- STEP 3: Validate the widget actually has a renderable template ----
+		var templateBody = loadedWidget.template || (loadedWidget.body ? loadedWidget.body : '');
+		data.debug.widgetHasTemplate = templateBody ? 'true' : 'false';
+		data.debug.templateLength = templateBody ? templateBody.length : 0;
+
+		if (!templateBody) {
+			data.message = 'Widget "' + targetWidgetId + '" loaded, but has no HTML template — nothing to render. Check the HTML tab of that widget in Studio.';
+			return;
+		}
+
+		// ---- All good: embed it ----
+		data.widget = loadedWidget;
+		data.widgetValid = true;
+
+	} catch (ex) {
+		data.debug.errorMsg = ex.message;
+		data.message = 'An error occurred while loading your dashboard. See debug info below.';
+		data.widget = null;
+		data.widgetValid = false;
+	}
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-13 07:28:10</sys_created_on>
+        <sys_id>ba20afa5970e4310be31fa17f053af28</sys_id>
+        <sys_mod_count>3</sys_mod_count>
+        <sys_name>clm_tsh_nsh_dashboard</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_ba20afa5970e4310be31fa17f053af28</sys_update_name>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-13 07:52:57</sys_updated_on>
+        <template><![CDATA[<div class="clm-role-router">
+
+  <div sp-widget="data.widget" ng-if="data.widget && data.widgetValid"></div>
+
+  <div class="clm-router-empty" ng-if="!data.widget || !data.widgetValid">
+    <div class="clm-router-empty-icon">&#9888;</div>
+    <div class="clm-router-empty-title">Access Restricted</div>
+    <div class="clm-router-empty-text">{{data.message}}</div>
+
+    <!-- DEBUG PANEL — remove this whole block once confirmed working -->
+    <div class="clm-router-debug">
+      <div class="clm-router-debug-title">Debug Info</div>
+      <div>Logged-in user sys_id: {{data.debug.userSysId}}</div>
+      <div>Logged-in username: {{data.debug.userName}}</div>
+      <div>Mapping rows found for this user: {{data.debug.mappingRowCount}}</div>
+      <div>Roles found: {{data.debug.rolesFound}}</div>
+      <div>Matched role: {{data.debug.matchedRole || '(none)'}}</div>
+      <div>Widget ID attempted: {{data.debug.attemptedWidgetId || '(none)'}}</div>
+      <div>Widget exists in sp_widget table: {{data.debug.widgetExistsInTable}}</div>
+      <div>Widget sys_id found: {{data.debug.widgetTableSysId || '(none)'}}</div>
+      <div>getWidget() returned object: {{data.debug.widgetLoaded}}</div>
+      <div>Returned widget has template body: {{data.debug.widgetHasTemplate}}</div>
+      <div>Template length: {{data.debug.templateLength}}</div>
+      <div ng-if="data.debug.errorMsg" class="clm-router-debug-error">Error: {{data.debug.errorMsg}}</div>
+    </div>
+  </div>
+
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>ba20afa5970e4310be31fa17f053af28</id>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-13 07:28:10</sys_created_on>
+        <sys_id>3e202be5970e4310be31fa17f053af7b</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-13 07:28:10</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_key_cc_crm</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function runMailScript(current, template, email, email_action, event) {
+    var seen = {};
+    var d = new GlideRecord('x_birl3_clm_p1_crm_site_draft');
+    d.addQuery('target_request', current.getUniqueValue());
+    d.addNotNullQuery('crm_gp_request');
+    d.query();
+    while (d.next()) {
+        var p = new GlideRecord('x_birl3_clm_clm_key_crm_gp_request');
+        if (!p.get(d.getValue('crm_gp_request'))) continue;
+        var uid = p.getValue('submitted_by');
+        if (!uid || seen[uid]) continue;
+        seen[uid] = true;
+        var u = new GlideRecord('sys_user');
+        if (u.get(uid) && u.getValue('email')) email.addAddress('cc', u.getValue('email'), u.getValue('name'));
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-03 10:09:20</sys_created_on>
+        <sys_id>d9a0c6822bd41b10335bf9fe4e91bff7</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_key_cc_crm</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_d9a0c6822bd41b10335bf9fe4e91bff7</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-03 10:09:20</sys_updated_on>
+    </sys_script_email>
+</record_update>

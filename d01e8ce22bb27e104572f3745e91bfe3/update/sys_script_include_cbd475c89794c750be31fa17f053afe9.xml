@@ -1,0 +1,335 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLMUserResolver</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLMUserResolver</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var CLMUserResolver = Class.create();
+CLMUserResolver.prototype = {
+
+    // ============================================================
+    //  ROLE ALIAS NORMALIZATION
+    // ============================================================
+    _ROLE_ALIAS_MAP: {
+        'CMO':          'BH',
+        'CMO_CFO':      'CFO',
+        'BH_CFO':       'CFO',
+        'HEAD_KEY_CCH': 'CCH',
+        'NSH_CCH':      'CCH',
+        'CCH_HBPD':     'CCH'
+    },
+
+    _normalizeRole: function(role) {
+        return this._ROLE_ALIAS_MAP[role] || role;
+    },
+
+    // ============================================================
+    //  MAIN ENTRY POINT
+    //  isCementBpd: pass true when resolving approvers for a
+    //  BPD-code request where PAN also has Cement codes.
+    //  In this case RHM/ZHM must be resolved from Cement hierarchy,
+    //  not BPD, using special region-only and RHM-zone chain logic.
+    // ============================================================
+    getUser: function(role, region, zone, segment, depot, isCementBpd) {
+
+        role        = (role    || '').trim();
+        region      = this._clean(region);
+        zone        = this._clean(zone);
+        segment     = (segment || '').trim();
+        depot       = this._clean(depot);
+        isCementBpd = (isCementBpd === true || isCementBpd === 'true');
+
+        var canonicalRole = this._normalizeRole(role);
+
+        gs.info('CLMUserResolver.getUser: role=' + role +
+                ' canonical=' + canonicalRole +
+                ' zone=' + zone + ' region=' + region +
+                ' depot=' + depot + ' segment=' + segment +
+                ' isCementBpd=' + isCementBpd);
+
+        // ── CEMENT+BPD special resolution ────────────────────────
+        // RHM Cement: look up using BPD code's region + segment=Cement (region only, no zone)
+        // ZHM Cement: look up using RHM's zone from mapping table + segment=Cement
+        if (isCementBpd && canonicalRole === 'RHM') {
+            return this._lookupRhmCementByRegionOnly(region);
+        }
+        if (isCementBpd && canonicalRole === 'ZHM') {
+            return this._lookupZhmCementViaRhm(region);
+        }
+if (canonicalRole === 'TSH' || canonicalRole === 'TSH_BPD' || canonicalRole === 'TSM') {
+    var tu = this._lookupDepot(canonicalRole, zone, region, depot, segment);
+    if (!tu && canonicalRole === 'TSM') tu = this._lookupRegion('TSM', zone, region, segment);
+    return tu;
+}
+if (canonicalRole === 'RHM' || canonicalRole === 'RH_CH_RMC') {
+    return this._lookupRegion(canonicalRole, zone, region, segment);
+}
+if (canonicalRole === 'ZHM' || canonicalRole === 'ZH_BPD' || canonicalRole === 'ZH_RMC') {
+    return this._lookupZone(canonicalRole, zone, region, segment);
+}
+if (canonicalRole === 'ZCH') return this._lookupZoneNoSegment(canonicalRole, zone);
+return this._lookupPanIndia(canonicalRole);
+    },
+
+    // ============================================================
+    //  CEMENT+BPD: RHM Cement lookup — region only, no zone
+    //  The BPD code's region is used to find the correct RHM
+    //  in the Cement hierarchy. Zone is intentionally excluded
+    //  because BPD zone codes may differ from Cement zone codes.
+    // ============================================================
+    _lookupRhmCementByRegionOnly: function(region) {
+        var gr = new GlideRecord('x_birl3_clm_role_user_mapping');
+        gr.addQuery('u_role',    'RHM');
+        gr.addQuery('u_active', 'true');
+        gr.addQuery('u_region',  region);
+        gr.addQuery('u_segment', 'Cement');
+        gr.setLimit(1);
+        gr.query();
+
+        if (gr.next()) {
+            gs.info('CLMUserResolver [CEMENT_BPD RHM FOUND]: region=' + region +
+                    ' user=' + gr.u_user.getDisplayValue());
+            return gr.u_user.toString();
+        }
+
+        gs.error('CLMUserResolver [CEMENT_BPD RHM NOT FOUND]: region=' + region);
+        return '';
+    },
+
+    // ============================================================
+    //  CEMENT+BPD: ZHM Cement lookup via RHM's zone
+    //  Step 1: Find RHM Cement mapping row for this region
+    //  Step 2: Read that RHM's u_zone value
+    //  Step 3: Use that zone to find ZHM Cement
+    //  This avoids cross-segment zone code mismatches.
+    // ============================================================
+    _lookupZhmCementViaRhm: function(region) {
+
+        // Step 1+2: Get RHM's zone from mapping table
+        var rhmGr = new GlideRecord('x_birl3_clm_role_user_mapping');
+        rhmGr.addQuery('u_role',    'RHM');
+        rhmGr.addQuery('u_active', 'true');
+        rhmGr.addQuery('u_region',  region);
+        rhmGr.addQuery('u_segment', 'Cement');
+        rhmGr.setLimit(1);
+        rhmGr.query();
+
+        if (!rhmGr.next()) {
+            gs.error('CLMUserResolver [CEMENT_BPD ZHM]: RHM not found for region=' + region +
+                     ' — cannot derive zone for ZHM lookup');
+            return '';
+        }
+
+        var rhmZone = this._clean(rhmGr.u_zone + '');
+        gs.info('CLMUserResolver [CEMENT_BPD ZHM]: RHM zone derived = ' + rhmZone);
+
+        if (!rhmZone) {
+            gs.error('CLMUserResolver [CEMENT_BPD ZHM]: RHM mapping row has no zone for region=' + region);
+            return '';
+        }
+
+        // Step 3: Find ZHM Cement using that zone
+              // Step 3a: Try ZHM Cement by zone + region (zones 60/70 have one ZHM per region)
+        var zhmGr = new GlideRecord('x_birl3_clm_role_user_mapping');
+        zhmGr.addQuery('u_role',    'ZHM');
+        zhmGr.addQuery('u_active', 'true');
+        zhmGr.addQuery('u_zone',    rhmZone);
+        zhmGr.addQuery('u_region',  region);
+        zhmGr.addQuery('u_segment', 'Cement');
+        zhmGr.setLimit(1);
+        zhmGr.query();
+
+        if (zhmGr.next()) {
+            gs.info('CLMUserResolver [CEMENT_BPD ZHM+REGION FOUND]: zone=' + rhmZone +
+                    ' region=' + region +
+                    ' user=' + zhmGr.u_user.getDisplayValue());
+            return zhmGr.u_user.toString();
+        }
+
+        // Step 3b: Fall back to ZHM Cement by zone only (zones 80/81/90/66)
+        var zhmGr2 = new GlideRecord('x_birl3_clm_role_user_mapping');
+        zhmGr2.addQuery('u_role',    'ZHM');
+        zhmGr2.addQuery('u_active', 'true');
+        zhmGr2.addQuery('u_zone',    rhmZone);
+        zhmGr2.addQuery('u_segment', 'Cement');
+        zhmGr2.setLimit(1);
+        zhmGr2.query();
+
+        if (zhmGr2.next()) {
+            gs.info('CLMUserResolver [CEMENT_BPD ZHM ZONE-ONLY FOUND]: zone=' + rhmZone +
+                    ' user=' + zhmGr2.u_user.getDisplayValue());
+            return zhmGr2.u_user.toString();
+        }
+
+        gs.error('CLMUserResolver [CEMENT_BPD ZHM NOT FOUND]: zone=' + rhmZone);
+        return '';
+    },
+
+    // ============================================================
+    //  LOOKUP: DEPOT level
+    // ============================================================
+    _lookupDepot: function(role, zone, region, depot, segment) {
+        var gr = new GlideRecord('x_birl3_clm_role_user_mapping');
+        gr.addQuery('u_role',    role);
+        gr.addQuery('u_active', 'true');
+        gr.addQuery('u_zone',    zone);
+        gr.addQuery('u_region',  region);
+        gr.addQuery('u_depot',   depot);
+        gr.addQuery('u_segment', segment);
+        gr.setLimit(1);
+        gr.query();
+
+        if (gr.next()) {
+            gs.info('CLMUserResolver [DEPOT FOUND]: role=' + role +
+                    ' zone=' + zone + ' region=' + region +
+                    ' depot=' + depot + ' segment=' + segment +
+                    ' user=' + gr.u_user.getDisplayValue());
+            return gr.u_user.toString();
+        }
+
+        gs.error('CLMUserResolver [DEPOT NOT FOUND]: role=' + role +
+                 ' zone=' + zone + ' region=' + region +
+                 ' depot=' + depot + ' segment=' + segment);
+        return '';
+    },
+
+    // ============================================================
+    //  LOOKUP: REGION level
+    // ============================================================
+    _lookupRegion: function(role, zone, region, segment) {
+        var gr = new GlideRecord('x_birl3_clm_role_user_mapping');
+        gr.addQuery('u_role',    role);
+        gr.addQuery('u_active', 'true');
+        gr.addQuery('u_zone',    zone);
+        gr.addQuery('u_region',  region);
+        gr.addQuery('u_segment', segment);
+        gr.setLimit(1);
+        gr.query();
+
+        if (gr.next()) {
+            gs.info('CLMUserResolver [REGION FOUND]: role=' + role +
+                    ' zone=' + zone + ' region=' + region + ' segment=' + segment +
+                    ' user=' + gr.u_user.getDisplayValue());
+            return gr.u_user.toString();
+        }
+
+        gs.error('CLMUserResolver [REGION NOT FOUND]: role=' + role +
+                 ' zone=' + zone + ' region=' + region + ' segment=' + segment);
+        return '';
+    },
+
+    // ============================================================
+    //  LOOKUP: ZONE level (with region fallback)
+    // ============================================================
+    _lookupZone: function(role, zone, region, segment) {
+
+        if (region) {
+            var gr1 = new GlideRecord('x_birl3_clm_role_user_mapping');
+            gr1.addQuery('u_role',    role);
+            gr1.addQuery('u_active', 'true');
+            gr1.addQuery('u_zone',    zone);
+            gr1.addQuery('u_region',  region);
+            gr1.addQuery('u_segment', segment);
+            gr1.setLimit(1);
+            gr1.query();
+
+            if (gr1.next()) {
+                gs.info('CLMUserResolver [ZONE+REGION FOUND]: role=' + role +
+                        ' zone=' + zone + ' region=' + region + ' segment=' + segment +
+                        ' user=' + gr1.u_user.getDisplayValue());
+                return gr1.u_user.toString();
+            }
+        }
+
+        var gr2 = new GlideRecord('x_birl3_clm_role_user_mapping');
+        gr2.addQuery('u_role',    role);
+        gr2.addQuery('u_active', 'true');
+        gr2.addQuery('u_zone',    zone);
+        gr2.addQuery('u_segment', segment);
+        gr2.setLimit(1);
+        gr2.query();
+
+        if (gr2.next()) {
+            gs.info('CLMUserResolver [ZONE-ONLY FOUND]: role=' + role +
+                    ' zone=' + zone + ' segment=' + segment +
+                    ' user=' + gr2.u_user.getDisplayValue());
+            return gr2.u_user.toString();
+        }
+
+        gs.error('CLMUserResolver [ZONE NOT FOUND]: role=' + role +
+                 ' zone=' + zone + ' region=' + region + ' segment=' + segment);
+        return '';
+    },
+
+    // ============================================================
+    //  LOOKUP: ZONE — NO SEGMENT, NO REGION (ZCH only)
+    // ============================================================
+    _lookupZoneNoSegment: function(role, zone) {
+        var gr = new GlideRecord('x_birl3_clm_role_user_mapping');
+        gr.addQuery('u_role',    role);
+        gr.addQuery('u_active', 'true');
+        gr.addQuery('u_zone',    zone);
+        gr.setLimit(1);
+        gr.query();
+
+        if (gr.next()) {
+            gs.info('CLMUserResolver [ZCH FOUND]: role=' + role +
+                    ' zone=' + zone +
+                    ' user=' + gr.u_user.getDisplayValue());
+            return gr.u_user.toString();
+        }
+
+        gs.error('CLMUserResolver [ZCH NOT FOUND]: role=' + role + ' zone=' + zone);
+        return '';
+    },
+
+    // ============================================================
+    //  LOOKUP: PAN INDIA (role only)
+    // ============================================================
+    _lookupPanIndia: function(role) {
+        var gr = new GlideRecord('x_birl3_clm_role_user_mapping');
+        gr.addQuery('u_role',    role);
+        gr.addQuery('u_active', 'true');
+        gr.setLimit(1);
+        gr.query();
+
+        if (gr.next()) {
+            gs.info('CLMUserResolver [PAN FOUND]: role=' + role +
+                    ' user=' + gr.u_user.getDisplayValue());
+            return gr.u_user.toString();
+        }
+
+        gs.error('CLMUserResolver [PAN NOT FOUND]: role=' + role);
+        return '';
+    },
+
+    // ============================================================
+    //  UTILITY
+    // ============================================================
+    _clean: function(val) {
+        if (!val) return '';
+        var s = (val + '').trim();
+        return (s === 'NA' || s === 'na' || s === 'null') ? '' : s;
+    },
+
+    type: 'CLMUserResolver'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-04-12 07:58:52</sys_created_on>
+        <sys_id>cbd475c89794c750be31fa17f053afe9</sys_id>
+        <sys_mod_count>16</sys_mod_count>
+        <sys_name>CLMUserResolver</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_cbd475c89794c750be31fa17f053afe9</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-17 06:56:18</sys_updated_on>
+    </sys_script_include>
+</record_update>

@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>false</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_clm_new_credit_request</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition table="x_birl3_clm_clm_new_credit_request">stateCHANGESTOSubmitted^EQ<item display_value="Submitted" endquery="false" field="state" goto="false" newquery="false" operator="CHANGESTO" or="false" value="Submitted"/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>BR for sequence</name>
+        <order>200</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous) {
+
+    if (current.customer_type + '' !== 'Trade') return;
+
+    try {
+
+        var resolver = new CLMUserResolver();
+        var router   = new CLMApprovalRouter();
+
+        // Step 1: Get target role
+        var result = router.getApprover(
+            current.segment,
+            current.customer_type,
+            current.net_exposure,
+            current.nod_days,
+            current.is_deviation,
+            current.implied_multiplier,
+            current.customer_vintage_days,
+            current.system_multiplier
+        );
+
+        var targetRole = result.role;
+
+        // Step 2: Get hierarchy
+        var key = current.segment + '_Trade';
+
+        if (!CLM_ROLE_HIERARCHIES[key]) {
+            gs.error('No hierarchy found for ' + key);
+            return;
+        }
+
+        var hierarchy = CLM_ROLE_HIERARCHIES[key];
+
+        // Step 3: Build sequence
+        var sequence = buildApproverSequence(
+            hierarchy,
+            targetRole,
+            resolver,
+            current.region,
+            current.zone,
+            current.segment,
+            current.depot
+        );
+
+        // Step 4: Store JSON
+        current.u_approver_sequence = JSON.stringify(sequence);
+        current.u_current_approver_order = 1;
+
+        gs.info('Sequence created: ' + current.u_approver_sequence);
+
+    } catch (e) {
+        gs.error('SEQ ERROR: ' + e.message);
+    }
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-05-04 12:25:18</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>8da4409b9724c318be31fa17f053af34</sys_id>
+        <sys_mod_count>3</sys_mod_count>
+        <sys_name>BR for sequence</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_8da4409b9724c318be31fa17f053af34</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-09 17:02:03</sys_updated_on>
+        <template/>
+        <when>before</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=8da4409b9724c318be31fa17f053af34"/>
+</record_update>

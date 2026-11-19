@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sn_aia_tool">
+    <sn_aia_tool action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <description>This tool create performance record into customer performance table</description>
+        <input_schema>[{"name":"company_name","description":"","mandatory":false},{"name":"final_recommendation","description":"","mandatory":false},{"name":"current_stock_price","description":"","mandatory":false},{"name":"key_news_highlights","description":"","mandatory":false},{"name":"market_stock_insight","description":"","mandatory":false},{"name":"output","description":"","mandatory":false}]</input_schema>
+        <name>Perform Record creation</name>
+        <record_type>custom</record_type>
+        <script><![CDATA[(function(inputs) {
+
+    var rec = new GlideRecord('x_birl3_clm_customer_performance');
+    rec.initialize();
+
+    rec.company_name = inputs.company_name;
+    rec.final_recommendation = inputs.final_recommendation;
+    rec.current_stock_price = inputs.current_stock_price;
+    rec.key_news_highlights = inputs.key_news_highlights;
+    rec.market_stock_insight = inputs.market_stock_insight;
+
+    var sysId = rec.insert();
+
+    return {
+        output: "Record created successfully",
+        company_name: inputs.company_name,
+        recommendation: inputs.final_recommendation,
+        record_sys_id: sysId
+    };
+
+})(inputs);]]></script>
+        <sys_class_name>sn_aia_tool</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-25 05:00:52</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>289f989e97fb3e90be31fa17f053af6a</sys_id>
+        <sys_mod_count>11</sys_mod_count>
+        <sys_name>Perform Record creation</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sn_aia_tool_289f989e97fb3e90be31fa17f053af6a</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-20 13:12:58</sys_updated_on>
+        <target_document/>
+        <target_document_table>sn_aia_tool</target_document_table>
+        <type>script</type>
+    </sn_aia_tool>
+</record_update>

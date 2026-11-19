@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>false</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>sys_email</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition/>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>CLM attachment</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous) {
+
+    try {
+
+        if (current.subject.indexOf('Action Required: CLM Approval') == -1)
+            return;
+
+        var approvalGR = new GlideRecord('sysapproval_approver');
+
+        if (!approvalGR.get(current.instance)) {
+            gs.info('CLM: Approval not found');
+            return;
+        }
+
+        var reqGR = new GlideRecord(approvalGR.source_table);
+
+        if (!reqGR.get(approvalGR.document_id)) {
+            gs.info('CLM: Request not found');
+            return;
+        }
+
+        gs.info('CLM: Request Found = ' + reqGR.number);
+
+        var copied = new GlideSysAttachment().copy(
+            approvalGR.source_table,
+            approvalGR.document_id.toString(),
+            'sys_email',
+            current.getUniqueValue()
+        );
+
+        gs.info('CLM: Copy Result = ' + copied);
+
+    } catch (e) {
+
+        gs.error('CLM Attachment Copy Error: ' + e);
+
+    }
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-09 11:10:49</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>4cec4d3a9759c710be31fa17f053af23</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>CLM attachment</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_4cec4d3a9759c710be31fa17f053af23</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-09 12:28:25</sys_updated_on>
+        <template/>
+        <when>after</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=4cec4d3a9759c710be31fa17f053af23"/>
+</record_update>

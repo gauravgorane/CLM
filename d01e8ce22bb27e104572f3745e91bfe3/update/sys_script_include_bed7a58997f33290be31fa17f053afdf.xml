@@ -1,0 +1,411 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLMApprovalRouter</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLMApprovalRouter</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var CLMApprovalRouter = Class.create();
+CLMApprovalRouter.prototype = {
+
+    initialize: function() {},
+
+    getApprover: function(segment, customerType, netExposure, nod, isDeviation, impliedMult, vintageDays, systemMultiplier, isCementBpd) {
+        netExposure      = parseFloat(netExposure)      || 0;
+        nod              = parseFloat(nod)              || 0;
+        isDeviation      = (isDeviation === true || isDeviation === 'true');
+        impliedMult      = parseFloat(impliedMult)      || 0;
+        vintageDays      = parseInt(vintageDays)        || 0;
+        systemMultiplier = parseFloat(systemMultiplier) || 1;
+        isCementBpd      = (isCementBpd === true || isCementBpd === 'true');
+
+        // ── CEMENT+BPD: special hybrid matrix when BPD code but PAN has Cement too ──
+        // Must be checked BEFORE the standard BPD branch below.
+        if (segment === 'BPD' && customerType === 'Trade' && isCementBpd) {
+            return this._getCementBpdApprover(netExposure, impliedMult, isDeviation, systemMultiplier);
+        }
+
+        if (segment === 'RMC' && customerType === 'Trade') {
+            return this._getRMCApprover(netExposure, impliedMult, isDeviation, systemMultiplier);
+        }
+        if (segment === 'BPD' && customerType === 'Trade') {
+            return this._getBPDApprover(netExposure, impliedMult, isDeviation, vintageDays, systemMultiplier);
+        }
+
+        // Cement Trade — route by net exposure only
+        var matrix = this._loadMatrix(segment, customerType);
+        var base   = this._getCementByAmount(matrix, netExposure, impliedMult);
+        if (!base) base = { role: 'MD', level_order: 99 };
+
+        if (isDeviation) {
+            var esc = this._escalate(base, matrix);
+            esc.escalated = true;
+            esc.reason    = 'Deviation — escalated from ' + base.role + ' to ' + esc.role;
+            return esc;
+        }
+        base.escalated = false;
+        return base;
+    },
+
+    // ── CEMENT+BPD HYBRID APPROVAL MATRIX ────────────────────
+    // Used when: segment=BPD, customerType=Trade, isCementBpd=true
+    // Matrix per BRD (request raised on BPD code, PAN has Cement too):
+    //   ₹0–30L   : TSH_BPD + ZH_BPD + RHM (all three, flat, no deviation check)
+    //   ₹30–50L  : ZHM Cement
+    //   ZCH + HO : triggered before NSH_CCH tier (Cement CV rule)
+    //   ₹50–100L : NSH_CCH
+    //   ₹100–250L: CMO
+    //   ₹250–500L: CMO_CFO (CFO)
+    //   >₹500L   : MD
+    //
+    // Deviation check (above ₹30L): uses Cement CG2-based impliedMult vs systemMultiplier
+    _getCementBpdApprover: function(netExp, impliedMult, isDeviation, systemMultiplier) {
+
+        // Band 1: flat routing up to ₹30L — no deviation check applies here
+        if (netExp <= 3000000) {
+            return {
+                role:        'RHM',       // RHM Cement is the final approver in this band
+                level_order: 3,           // after TSH_BPD(1) + ZH_BPD(2) + RHM(3)
+                escalated:   false,
+                cementBpdBand: 'flat_30L' // marker so buildApproverSequence knows to include all three
+            };
+        }
+
+        // Band 2+: Cement tiers apply with deviation check
+        // Tiers from ₹30L onwards follow Cement hierarchy
+        var tiers = [
+            { role: 'ZHM',     level: 4, maxExp: 5000000   },  // ₹30–50L
+            { role: 'NSH_CCH', level: 5, maxExp: 10000000  },  // ₹50–100L
+            { role: 'CMO',     level: 6, maxExp: 25000000  },  // ₹100–250L
+            { role: 'CMO_CFO', level: 7, maxExp: 50000000  },  // ₹250–500L
+            { role: 'MD',      level: 8, maxExp: 999999999 }   // >₹500L
+        ];
+
+        var base = tiers[tiers.length - 1];
+        for (var i = 0; i < tiers.length; i++) {
+            if (netExp <= tiers[i].maxExp) { base = tiers[i]; break; }
+        }
+
+        // Deviation: implied multiplier (PAN-level) vs Cement CG2 system multiplier
+        if (impliedMult > systemMultiplier) {
+            for (var j = 0; j < tiers.length; j++) {
+                if (tiers[j].level === base.level + 1) {
+                    return {
+                        role:        tiers[j].role,
+                        level_order: tiers[j].level,
+                        escalated:   true,
+                        cementBpdBand: 'cement',
+                        reason:      'CementBPD deviation — implied ' + impliedMult.toFixed(2) +
+                                     'x exceeds system ' + systemMultiplier + 'x. Escalated from ' +
+                                     base.role + ' to ' + tiers[j].role
+                    };
+                }
+            }
+            return { role: 'MD', level_order: 8, escalated: true, cementBpdBand: 'cement' };
+        }
+
+        return {
+            role:        base.role,
+            level_order: base.level,
+            escalated:   false,
+            cementBpdBand: 'cement'
+        };
+    },
+
+    _getCementByAmount: function(matrix, netExp, impliedMult) {
+        for (var i = 0; i < matrix.length; i++) {
+            if (netExp <= matrix[i].maxExp) {
+                return { role: matrix[i].role, level_order: matrix[i].level };
+            }
+        }
+        var last = matrix[matrix.length - 1];
+        return { role: last.role, level_order: last.level };
+    },
+
+_getBPDApprover: function(netExp, impliedMult, isDeviation, vintageDays, systemMultiplier) {
+        var tiers = [
+            { role: 'TSH_BPD',  level: 1, maxExp: 250000,    maxMult: 2 },
+            { role: 'ZH_BPD',   level: 2, maxExp: 1200000,   maxMult: 4 },
+            { role: 'HSBPD',    level: 3, maxExp: 2000000,   maxMult: 5 },
+            { role: 'HBPD',     level: 4, maxExp: 5000000,   maxMult: 5 },
+            { role: 'CCH_HBPD', level: 5, maxExp: 10000000,  maxMult: 5 },
+            { role: 'BH',       level: 6, maxExp: 25000000,  maxMult: 5 },
+            { role: 'CFO',      level: 7, maxExp: 50000000,  maxMult: 5 },
+            { role: 'MD',       level: 8, maxExp: 999999999, maxMult: 999 }
+        ];
+
+        // FRS Fix: BPD allows SDx5 only AFTER 6 months (180 days). Cap at 4x if newer.
+        for (var i = 0; i < tiers.length; i++) {
+            if (tiers[i].maxMult === 5 && vintageDays < 180) {
+                tiers[i].maxMult = 4;
+            }
+        }
+
+        var base = tiers[tiers.length - 1];
+        for (var i = 0; i < tiers.length; i++) {
+            if (netExp <= tiers[i].maxExp) { base = tiers[i]; break; }
+        }
+
+        if (impliedMult > base.maxMult) {
+            for (var j = 0; j < tiers.length; j++) {
+                if (tiers[j].level === base.level + 1)
+                    return {
+                        role: tiers[j].role,
+                        level_order: tiers[j].level,
+                        escalated: true,
+                        reason: 'BPD SD-multiple ' + impliedMult.toFixed(2) + 'x exceeds ' +
+                            base.role + ' allowed ' + base.maxMult + 'x'
+                    };
+            }
+            return { role: 'MD', level_order: 8, escalated: true };
+        }
+        return { role: base.role, level_order: base.level, escalated: false };
+    },
+
+_getRMCApprover: function(netExp, impliedMult, isDeviation, systemMultiplier) {
+              
+        var tiers = [
+            { role: 'TSM',             level: 1, maxExp: 400000,    maxMult: 1 },
+            { role: 'RH_CH_RMC',       level: 2, maxExp: 1100000,   maxMult: 2 },
+            { role: 'ZH_RMC',          level: 3, maxExp: 3200000,   maxMult: 3 },
+                       { role: 'HEAD_RMC',        level: 4, maxExp: 7500000,   maxMult: 4 },   // ≤₹75L: CH RMC → Head RMC
+            { role: 'HEAD_KEY_CCH',    level: 5, maxExp: 15000000,  maxMult: 4 },
+            { role: 'BH',              level: 6, maxExp: 25000000,  maxMult: 4 },
+            { role: 'BH_CFO',          level: 7, maxExp: 50000000,  maxMult: 4 },
+            { role: 'MD',              level: 8, maxExp: 999999999, maxMult: 999 }
+        ];
+        // ... rest of the function stays exactly the same
+
+        var base = tiers[tiers.length - 1];
+        for (var i = 0; i < tiers.length; i++) {
+            if (netExp <= tiers[i].maxExp) { base = tiers[i]; break; }
+        }
+
+        if (impliedMult > base.maxMult) {
+            for (var j = 0; j < tiers.length; j++) {
+                if (tiers[j].level === base.level + 1)
+                    return {
+                        role: tiers[j].role,
+                        level_order: tiers[j].level,
+                        escalated: true,
+                        reason: 'RMC SD-multiple ' + impliedMult.toFixed(2) + 'x exceeds ' +
+                            base.role + ' allowed ' + base.maxMult + 'x'
+                    };
+            }
+            return { role: 'MD', level_order: 8, escalated: true };
+			        }
+        return { role: base.role, level_order: base.level, escalated: false };
+    },
+
+    getAllowedMultipleForNetExposure: function(segment, netExp) {
+        netExp = parseFloat(netExp) || 0;
+        var tiers;
+
+        if (segment === 'RMC') {
+            tiers = [
+                { maxExp: 400000,    maxMult: 1 },
+                { maxExp: 1100000,   maxMult: 2 },
+                              { maxExp: 3200000,   maxMult: 3 },
+                { maxExp: 7500000,   maxMult: 4 },
+                { maxExp: 15000000,  maxMult: 4 },
+                { maxExp: 25000000,  maxMult: 4 },
+                { maxExp: 50000000,  maxMult: 4 },
+                { maxExp: 999999999, maxMult: 4 }
+            ];
+        } else if (segment === 'BPD') {
+            tiers = [
+                { maxExp: 250000,    maxMult: 2 },
+                { maxExp: 1200000,   maxMult: 4 },
+                { maxExp: 2000000,   maxMult: 5 },
+                { maxExp: 5000000,   maxMult: 5 },
+                { maxExp: 10000000,  maxMult: 5 },
+                { maxExp: 25000000,  maxMult: 5 },
+                { maxExp: 50000000,  maxMult: 5 },
+                { maxExp: 999999999, maxMult: 5 }
+            ];
+        } else {
+            return null;
+        }
+
+        for (var i = 0; i < tiers.length; i++) {
+            if (netExp <= tiers[i].maxExp) return tiers[i].maxMult;
+        }
+        return tiers[tiers.length - 1].maxMult;
+    },
+
+    _loadMatrix: function(segment, customerType) {
+        var gr = new GlideRecord('x_birl3_clm_clm_auth_matrix');
+        gr.addQuery('segment', segment);
+        gr.addQuery('customer_type', customerType);
+        gr.addQuery('is_active', true);
+        gr.orderBy('level_order');
+        gr.query();
+        var matrix = [];
+        while (gr.next()) {
+            matrix.push({
+                role:   gr.role + '',
+                level:  parseInt(gr.level_order)        || 0,
+                maxExp: parseFloat(gr.max_net_exposure) || 0,
+                maxNOD: parseFloat(gr.max_nod_days)     || 9999
+            });
+        }
+        if (matrix.length === 0 && segment === 'Cement') {
+            matrix = [
+                { role: 'TSH',     level: 1, maxExp: 1000000,   maxNOD: 9999 },
+                { role: 'RHM',     level: 2, maxExp: 3000000,   maxNOD: 9999 },
+                { role: 'ZHM',     level: 3, maxExp: 5000000,   maxNOD: 9999 },
+                { role: 'NSH_CCH', level: 4, maxExp: 10000000,  maxNOD: 9999 },
+                { role: 'CMO',     level: 5, maxExp: 25000000,  maxNOD: 9999 },
+                { role: 'CMO_CFO', level: 6, maxExp: 50000000,  maxNOD: 9999 },
+                { role: 'MD',      level: 7, maxExp: 999999999, maxNOD: 9999 }
+            ];
+        }
+        return matrix;
+    },
+
+    _getByNOD: function(matrix, nod) {
+        var hasNODCaps = false;
+        for (var h = 0; h < matrix.length; h++) {
+            if (matrix[h].maxNOD < 9999) { hasNODCaps = true; break; }
+        }
+        if (!hasNODCaps) return { role: matrix[0].role, level_order: matrix[0].level };
+
+        var nodExceedsAnyCap = false;
+        for (var e = 0; e < matrix.length; e++) {
+            if (matrix[e].maxNOD < 9999 && nod > matrix[e].maxNOD) {
+                nodExceedsAnyCap = true; break;
+            }
+        }
+        if (!nodExceedsAnyCap) return { role: matrix[0].role, level_order: matrix[0].level };
+
+        for (var i = 0; i < matrix.length; i++) {
+            if (matrix[i].maxNOD < 9999 && nod <= matrix[i].maxNOD)
+                return { role: matrix[i].role, level_order: matrix[i].level };
+        }
+
+        var highestLevel = 0, highestIdx = -1;
+        for (var j = 0; j < matrix.length; j++) {
+            if (matrix[j].maxNOD < 9999 && nod > matrix[j].maxNOD && matrix[j].level > highestLevel) {
+                highestLevel = matrix[j].level; highestIdx = j;
+            }
+        }
+        if (highestIdx >= 0) {
+            var targetLevel = matrix[highestIdx].level + 1;
+            for (var k = 0; k < matrix.length; k++) {
+                if (matrix[k].level === targetLevel)
+                    return { role: matrix[k].role, level_order: matrix[k].level };
+            }
+        }
+        var last = matrix[matrix.length - 1];
+        return { role: last.role, level_order: last.level };
+    },
+
+    _higher: function(a, b) {
+        if (!a && !b) return null;
+        if (!a) return b;
+        if (!b) return a;
+        return a.level_order >= b.level_order ? a : b;
+    },
+
+    _escalate: function(base, matrix) {
+        var next = (base.level_order || 0) + 1;
+        for (var i = 0; i < matrix.length; i++) {
+            if (matrix[i].level === next) return { role: matrix[i].role, level_order: matrix[i].level };
+        }
+        return { role: 'MD', level_order: 99 };
+    },
+
+    getEscalatedRole: function(segment, currentRole) {
+        var ladders = {
+            'Cement':    ['TSH','RHM','ZHM','NSH','NSH_CCH','CMO','CMO_CFO','MD'],
+                                 'RMC':       ['TSM','RH_CH_RMC','ZH_RMC','HEAD_RMC','HEAD_KEY_CCH','BH','BH_CFO','MD'],
+								 
+					           'BPD':       ['TSH_BPD','ZH_BPD','HSBPD','HBPD','CCH_HBPD','BH','CFO','MD'],
+            'CementBPD': ['TSH_BPD','ZH_BPD','RHM','ZHM','NSH_CCH','CMO','CMO_CFO','MD']
+        };
+        var ladder = ladders[segment] || ladders['Cement'];
+        var idx = ladder.indexOf(currentRole);
+        if (idx === -1 || idx >= ladder.length - 1) {
+            return { role: currentRole, level_order: idx + 1, changed: false };
+        }
+        return { role: ladder[idx + 1], level_order: idx + 2, changed: true };
+    },
+
+    // getCommercialValidationConfig: function(targetRole, segment, isCementBpd) {
+    //     segment     = (segment     || '').trim();
+    //     isCementBpd = (isCementBpd === true || isCementBpd === 'true');
+
+    //     // ── CEMENT+BPD hybrid ─────────────────────────────────
+    //     // CV (ZCH+HO) fires when chain reaches NSH_CCH tier —
+    //     // same as Cement CV rule. ZHM and below = Rule A, NSH_CCH+ = Rule B.
+    //     if (segment === 'BPD' && isCementBpd) {
+    //         var ruleA_CementBpd = ['TSH_BPD', 'ZH_BPD', 'RHM', 'ZHM'];
+    //         var ruleB_CementBpd = ['NSH_CCH', 'CMO', 'CMO_CFO', 'MD'];
+    //         if (ruleA_CementBpd.indexOf(targetRole) !== -1) {
+    //             return { needsZCH: true, needsHO: false, rule: 'A' };
+    //         }
+    //         return { needsZCH: true, needsHO: true, rule: 'B' };
+    //     }
+
+    //     // ── Cement ───────────────────────────────────────────
+    //     var ruleA_Cement = ['TSH', 'RHM', 'ZHM'];
+    //     var ruleB_Cement = ['NSH', 'NSH_CCH', 'CMO', 'CMO_CFO', 'MD'];
+
+    //     // ── RMC ──────────────────────────────────────────────
+    //     var ruleA_RMC = ['TSM', 'RH_CH_RMC', 'ZH_RMC'];
+    //     var ruleB_RMC = ['HEAD_RMC', 'HEAD_KEY_CH_RMC', 'HEAD_KEY_CCH', 'BH', 'BH_CFO', 'MD'];
+
+    //     // ── BPD ──────────────────────────────────────────────
+    //     var ruleA_BPD = ['TSH_BPD', 'ZH_BPD'];
+    //     var ruleB_BPD = ['HSBPD', 'HBPD', 'CCH_HBPD', 'BH', 'CFO', 'MD'];
+
+    //     if (segment === 'BPD') {
+    //         if (ruleA_BPD.indexOf(targetRole) !== -1) return { needsZCH: true, needsHO: false, rule: 'A' };
+    //         return { needsZCH: true, needsHO: true, rule: 'B' };
+    //     }
+    //     if (segment === 'RMC') {
+    //         if (ruleA_RMC.indexOf(targetRole) !== -1) return { needsZCH: true, needsHO: false, rule: 'A' };
+    //         return { needsZCH: true, needsHO: true, rule: 'B' };
+    //     }
+    //     // Cement (default)
+    //     if (ruleA_Cement.indexOf(targetRole) !== -1) return { needsZCH: true, needsHO: false, rule: 'A' };
+    //     return { needsZCH: true, needsHO: true, rule: 'B' };
+    // },
+
+	getCommercialValidationConfig: function(targetRole, segment, isCementBpd) {
+        var triggersCV = false;
+        
+        // Check if target role reaches CCH tier or higher
+        if (isCementBpd && segment === 'BPD') {
+            triggersCV = ['NSH_CCH', 'CMO', 'CMO_CFO', 'MD'].indexOf(targetRole) !== -1;
+        } else if (segment === 'Cement') {
+            triggersCV = ['NSH_CCH', 'CMO', 'CMO_CFO', 'MD'].indexOf(targetRole) !== -1;
+        } else if (segment === 'RMC') {
+            triggersCV = ['HEAD_KEY_CCH', 'BH', 'BH_CFO', 'MD'].indexOf(targetRole) !== -1;
+        } else if (segment === 'BPD') {
+            triggersCV = ['CCH_HBPD', 'BH', 'CFO', 'MD'].indexOf(targetRole) !== -1;
+        }
+        
+        return { triggersCV: triggersCV };
+    },
+
+    type: 'CLMApprovalRouter'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-21 13:04:59</sys_created_on>
+        <sys_id>bed7a58997f33290be31fa17f053afdf</sys_id>
+        <sys_mod_count>32</sys_mod_count>
+        <sys_name>CLMApprovalRouter</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_bed7a58997f33290be31fa17f053afdf</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-21 13:39:49</sys_updated_on>
+    </sys_script_include>
+</record_update>

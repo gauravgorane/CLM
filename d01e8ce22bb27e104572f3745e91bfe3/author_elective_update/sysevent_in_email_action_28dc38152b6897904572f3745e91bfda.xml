@@ -1,0 +1,563 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sysevent_in_email_action">
+    <sysevent_in_email_action action="DELETE">
+        <action>record_action</action>
+        <active>false</active>
+        <assignment_operator/>
+        <condition_script/>
+        <description/>
+        <event_name>email.read</event_name>
+        <filter_condition table="sys_email">subjectLIKENTPR^EQ<item endquery="false" field="subject" goto="false" newquery="false" operator="LIKE" or="false" value="NTPR"/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <from/>
+        <name>CLM: NT PAN Approval via Email</name>
+        <order>5</order>
+        <reply_email/>
+        <required_roles/>
+        <script><![CDATA[(function runAction(/*GlideRecord*/ current, /*GlideRecord*/ event, /*EmailWrapper*/ email, /*ScopedEmailLogger*/ logger, /*EmailClassifier*/ classifier) {
+
+    gs.info('CLM NT Email Approval: Triggered for approval ' + current.getUniqueValue() + ' | Subject: ' + email.subject);
+
+    // 1. Verify this approval belongs to a Non-Trade PAN Request; otherwise let later actions handle it
+    var panSysId = (current.getValue('document_id') || current.getValue('sysapproval') || '') + '';
+    var panGr    = new GlideRecord('x_birl3_clm_nt_pan_request');
+    if (!panSysId || !panGr.get(panSysId)) {
+        return;
+    }
+
+    // 2. Strip external warnings, watermark, quoted threads & signatures
+    function parseInboundReply(subjectStr, bodyStr) {
+        var txt = (bodyStr || '').toString().replace(/\r\n/g, '\n');
+
+        // Cut off ServiceNow watermark & quoted reply headers
+        txt = txt.split(/\n\s*(?:Ref\s*:|From\s*:|Sent\s*:|On .+ wrote:|-----Original Message-----|________________________________)/i)[0];
+
+        // Strip Microsoft / Checkpoint external email warning banners
+        txt = txt.replace(/^.*You don't often get email from[^\n]*\n?/gim, '');
+        txt = txt.replace(/^.*Learn why this is important[^\n]*\n?/gim, '');
+        txt = txt.replace(/^.*CAUTION:\s*This email originated from outside of the organization\.[^\n]*\n?/gim, '');
+        txt = txt.replace(/^.*Do not click links or open attachments unless you recognize the sender[^\n]*\n?/gim, '');
+        txt = txt.replace(/^.*\[?External(?:\s+Email)?\]?\s*:?\s*\n?/gim, '');
+
+        // Cut off email signature blocks
+        txt = txt.split(/\n\s*(?:Regards|Best\s+regards|Warm\s+regards|Kind\s+regards|Thanks(?:\s*(?:&|and)\s*regards)?|Thank\s+you|Sincerely|Cheers|--+|___+)\s*,?\s*(?:\n|$)/i)[0];
+        txt = txt.trim();
+
+        // Detect decision from subject OR cleaned body
+        var subj = (subjectStr || '').toString().toLowerCase();
+        var decision = '';
+        if (subj.indexOf('approve') > -1 || /^(?:approve|approved)\b/i.test(txt)) {
+            decision = 'approved';
+        } else if (subj.indexOf('reject') > -1 || /^(?:reject|rejected)\b/i.test(txt)) {
+            decision = 'rejected';
+        }
+
+        // Strip bare decision keyword so "Approved" alone isn't duplicated as a comment
+        var cleanComment = txt.replace(/^(?:approve|approved|reject|rejected)\s*[:\-–—.]?\s*/i, '').trim();
+
+        return {
+            decision: decision,
+            comment:  cleanComment
+        };
+    }
+
+    var parsed       = parseInboundReply(email.subject, email.body_text);
+    var decision     = parsed.decision;
+    var replyComment = parsed.comment;
+
+    if (!decision) {
+        gs.info('CLM NT Email Approval skipped: no approve/reject keyword found.');
+        return;
+    }
+
+    // 3. Verify sender is the assigned approver (or active delegate)
+    var senderId = email.from_sys_id;
+    if (senderId && current.getValue('approver') !== senderId) {
+        var nowUtc = new GlideDateTime().getValue();
+        var delGr  = new GlideRecord('sys_user_delegate');
+        delGr.addQuery('user', current.getValue('approver'));
+        delGr.addQuery('delegate', senderId);
+        delGr.addQuery('approvals', true);
+        delGr.addQuery('starts', '<=', nowUtc);
+        delGr.addQuery('ends', '>=', nowUtc);
+        delGr.setLimit(1);
+        delGr.query();
+        if (!delGr.hasNext()) {
+            gs.info('CLM NT Email Approval skipped: sender (' + email.from + ') is not approver or active delegate.');
+            return;
+        }
+    }
+
+    // 4. Limit Calculation & Allocation Helpers
+    function segKey(t) {
+        t = (t || '').toString().toLowerCase();
+        if (t.indexOf('cement') !== -1) return 'Cement';
+        if (t.indexOf('rmc') !== -1)    return 'RMC';
+        if (t.indexOf('bpd') !== -1)    return 'BPD';
+        return '';
+    }
+
+    function getSiteCode(sGr) {
+        var code = (sGr.getValue('customer_code') || '') + '';
+        if (!code && sGr.isValidField('customer_site_code') && sGr.customer_site_code) {
+            code = sGr.customer_site_code.customer_code_sap ? (sGr.customer_site_code.customer_code_sap + '') : '';
+        }
+        return code;
+    }
+
+    function getPanLimitContext(bId, panVal) {
+        var reqMap = {};
+        var sGr = new GlideRecord('x_birl3_clm_nt_site_request');
+        sGr.addQuery('pan_request', bId);
+        sGr.query();
+        while (sGr.next()) {
+            var code = getSiteCode(sGr);
+            var seg  = sGr.isValidField('segment') ? segKey(sGr.getDisplayValue('segment')) : '';
+            reqMap[code + '|' + seg] = parseFloat(sGr.getValue('requested_limit') || sGr.getValue('site_desired_limit')) || 0;
+        }
+
+        var other = 0, matched = 0;
+        var seen = {}, claimed = {};
+        var cGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        cGr.addQuery('pan', panVal);
+        cGr.addQuery('cg1', 'N01');
+        cGr.query();
+        while (cGr.next()) {
+            var cCode  = (cGr.getValue('customer_code_sap') || '') + '';
+            var cSeg   = segKey(cGr.getDisplayValue('segment'));
+            var dedupe = cCode ? (cCode + '|' + cSeg) : cGr.getUniqueValue();
+            if (seen[dedupe]) continue;
+            seen[dedupe] = true;
+
+            var key = cCode + '|' + cSeg;
+            if (reqMap[key] === undefined && reqMap[cCode + '|'] !== undefined) key = cCode + '|';
+            var isReq = (reqMap[key] !== undefined && !claimed[key]);
+
+            if (isReq) {
+                claimed[key] = true;
+                matched += reqMap[key];
+            } else {
+                other += parseFloat(cGr.getValue('cr_limit') || cGr.getValue('credit_limit')) || 0;
+            }
+        }
+
+        return {
+            minLimit: Math.round(other),
+            maxLimit: Math.round(other + matched)
+        };
+    }
+
+    function allocateInteger(items, pool) {
+        var n = items.length;
+        if (!n) return [];
+        var totReq = 0;
+        items.forEach(function(it) { totReq += it.req; });
+
+        var rows = items.map(function(it, i) {
+            var share = totReq > 0 ? it.req / totReq : 1 / n;
+            var raw   = pool * share;
+            var base  = Math.floor(raw);
+            return { i: i, base: base, frac: raw - base, req: it.req, code: it.code || '' };
+        });
+
+        var used = 0;
+        rows.forEach(function(r) { used += r.base; });
+        var left = pool - used;
+
+        var order = rows.slice().sort(function(a, b) {
+            if (Math.abs(a.frac - b.frac) > 1e-9) return b.frac - a.frac;
+            if (a.req !== b.req) return b.req - a.req;
+            return a.code < b.code ? -1 : (a.code > b.code ? 1 : 0);
+        });
+        for (var k = 0; k < left && k < order.length; k++) order[k].base += 1;
+
+        return rows.map(function(r) { return r.base; });
+    }
+
+    function distributeApprovedLimitToSites(bId, panApprovedVal, minLimit) {
+        var pool     = Math.max(0, Math.round(panApprovedVal - minLimit));
+        var siteList = [];
+        var sGr      = new GlideRecord('x_birl3_clm_nt_site_request');
+        sGr.addQuery('pan_request', bId);
+        sGr.query();
+        while (sGr.next()) {
+            var reqLim = parseFloat(sGr.getValue('requested_limit') || sGr.getValue('site_desired_limit')) || 0;
+            siteList.push({
+                sys_id: sGr.getUniqueValue(),
+                req:    Math.max(0, reqLim),
+                code:   getSiteCode(sGr)
+            });
+        }
+
+        var alloc = allocateInteger(siteList, pool);
+        for (var i = 0; i < siteList.length; i++) {
+            var siteUpd = new GlideRecord('x_birl3_clm_nt_site_request');
+            if (siteUpd.get(siteList[i].sys_id)) {
+                siteUpd.setValue('approved_limit', alloc[i]);
+                siteUpd.update();
+            }
+        }
+    }
+
+    var approverDisplay = current.approver ? current.approver.getDisplayValue() : 'Approver';
+
+    // 5. Execute Approval or Rejection
+    if (decision === 'approved') {
+        var panCtx      = getPanLimitContext(panSysId, (panGr.getValue('pan') || '') + '');
+        var approvedPan = panCtx.maxLimit;
+        if (approvedPan <= 0) {
+            approvedPan = Math.round(parseFloat(panGr.getValue('total_requested_limit') || panGr.getValue('total_desired_limit')) || 0);
+        }
+
+        var existingApproved = Math.round(parseFloat(panGr.getValue('total_approved_limit')) || 0);
+        if (existingApproved > 0 && existingApproved < approvedPan) {
+            approvedPan = existingApproved;
+        }
+
+        panGr.setValue('total_approved_limit', approvedPan);
+        var appNote = 'Email Approver Decision: Approved by ' + approverDisplay;
+        appNote    += '\nApproved PAN Limit: INR ' + approvedPan;
+        appNote    += '\nAllocated to requested sites: INR ' + Math.max(0, approvedPan - panCtx.minLimit);
+        if (replyComment) appNote += '\nComments: ' + replyComment;
+        panGr.comments = appNote;
+        panGr.update();
+
+        distributeApprovedLimitToSites(panSysId, approvedPan, panCtx.minLimit);
+
+        if (current.isValidField('approval_journal_column') && approvedPan > 0) {
+            current.approval_journal_column = approvedPan.toString();
+        }
+        current.comments = replyComment || 'Approved via Email';
+        current.setValue('state', 'approved');
+        current.update();
+        gs.info('CLM NT Email Approval: Successfully approved ' + panGr.getValue('number') + ' with limit ' + approvedPan);
+    } else if (decision === 'rejected') {
+        panGr.setValue('total_approved_limit', 0);
+        var rejNote = 'Email Approver Decision: Rejected by ' + approverDisplay;
+        if (replyComment) rejNote += '\nComments: ' + replyComment;
+        panGr.comments = rejNote;
+        panGr.update();
+
+        var sRej = new GlideRecord('x_birl3_clm_nt_site_request');
+        sRej.addQuery('pan_request', panSysId);
+        sRej.query();
+        while (sRej.next()) {
+            sRej.setValue('approved_limit', 0);
+            sRej.update();
+        }
+
+        current.comments = replyComment || 'Rejected via Email';
+        current.setValue('state', 'rejected');
+        current.update();
+        gs.info('CLM NT Email Approval: Successfully rejected ' + panGr.getValue('number'));
+    }
+
+    event.state = 'stop_processing';
+
+})(current, event, email, logger, classifier);]]></script>
+        <stop_processing>false</stop_processing>
+        <sys_class_name>sysevent_in_email_action</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-13 07:36:14</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>28dc38152b6897904572f3745e91bfda</sys_id>
+        <sys_mod_count>12</sys_mod_count>
+        <sys_name>CLM: NT PAN Approval via Email</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sysevent_in_email_action_28dc38152b6897904572f3745e91bfda</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 10:26:13</sys_updated_on>
+        <table>sysapproval_approver</table>
+        <template/>
+        <type>new</type>
+    </sysevent_in_email_action>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sysevent_in_email_action_28dc38152b6897904572f3745e91bfda</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sysevent_in_email_action"&gt;&lt;sysevent_in_email_action action="INSERT_OR_UPDATE"&gt;&lt;action&gt;record_action&lt;/action&gt;&lt;active&gt;false&lt;/active&gt;&lt;assignment_operator/&gt;&lt;condition_script/&gt;&lt;description/&gt;&lt;event_name&gt;email.read&lt;/event_name&gt;&lt;filter_condition table="sys_email"&gt;subjectLIKENTPR^EQ&lt;item endquery="false" field="subject" goto="false" newquery="false" operator="LIKE" or="false" value="NTPR"/&gt;&lt;item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/&gt;&lt;/filter_condition&gt;&lt;from/&gt;&lt;name&gt;CLM: NT PAN Approval via Email&lt;/name&gt;&lt;order&gt;5&lt;/order&gt;&lt;reply_email/&gt;&lt;required_roles/&gt;&lt;script&gt;&lt;![CDATA[(function runAction(/*GlideRecord*/ current, /*GlideRecord*/ event, /*EmailWrapper*/ email, /*ScopedEmailLogger*/ logger, /*EmailClassifier*/ classifier) {
+
+    gs.info('CLM NT Email Approval: Triggered for approval ' + current.getUniqueValue() + ' | Subject: ' + email.subject);
+
+    // 1. Verify this approval belongs to a Non-Trade PAN Request; otherwise let later actions handle it
+    var panSysId = (current.getValue('document_id') || current.getValue('sysapproval') || '') + '';
+    var panGr    = new GlideRecord('x_birl3_clm_nt_pan_request');
+    if (!panSysId || !panGr.get(panSysId)) {
+        return;
+    }
+
+    // 2. Strip external warnings, watermark, quoted threads &amp; signatures
+    function parseInboundReply(subjectStr, bodyStr) {
+        var txt = (bodyStr || '').toString().replace(/\r\n/g, '\n');
+
+        // Cut off ServiceNow watermark &amp; quoted reply headers
+        txt = txt.split(/\n\s*(?:Ref\s*:|From\s*:|Sent\s*:|On .+ wrote:|-----Original Message-----|________________________________)/i)[0];
+
+        // Strip Microsoft / Checkpoint external email warning banners
+        txt = txt.replace(/^.*You don't often get email from[^\n]*\n?/gim, '');
+        txt = txt.replace(/^.*Learn why this is important[^\n]*\n?/gim, '');
+        txt = txt.replace(/^.*CAUTION:\s*This email originated from outside of the organization\.[^\n]*\n?/gim, '');
+        txt = txt.replace(/^.*Do not click links or open attachments unless you recognize the sender[^\n]*\n?/gim, '');
+        txt = txt.replace(/^.*\[?External(?:\s+Email)?\]?\s*:?\s*\n?/gim, '');
+
+        // Cut off email signature blocks
+        txt = txt.split(/\n\s*(?:Regards|Best\s+regards|Warm\s+regards|Kind\s+regards|Thanks(?:\s*(?:&amp;|and)\s*regards)?|Thank\s+you|Sincerely|Cheers|--+|___+)\s*,?\s*(?:\n|$)/i)[0];
+        txt = txt.trim();
+
+        // Detect decision from subject OR cleaned body
+        var subj = (subjectStr || '').toString().toLowerCase();
+        var decision = '';
+        if (subj.indexOf('approve') &gt; -1 || /^(?:approve|approved)\b/i.test(txt)) {
+            decision = 'approved';
+        } else if (subj.indexOf('reject') &gt; -1 || /^(?:reject|rejected)\b/i.test(txt)) {
+            decision = 'rejected';
+        }
+
+        // Strip bare decision keyword so "Approved" alone isn't duplicated as a comment
+        var cleanComment = txt.replace(/^(?:approve|approved|reject|rejected)\s*[:\-–—.]?\s*/i, '').trim();
+
+        return {
+            decision: decision,
+            comment:  cleanComment
+        };
+    }
+
+    var parsed       = parseInboundReply(email.subject, email.body_text);
+    var decision     = parsed.decision;
+    var replyComment = parsed.comment;
+
+    if (!decision) {
+        gs.info('CLM NT Email Approval skipped: no approve/reject keyword found.');
+        return;
+    }
+
+    // 3. Verify sender is the assigned approver (or active delegate)
+    var senderId = email.from_sys_id;
+    if (senderId &amp;&amp; current.getValue('approver') !== senderId) {
+        var nowUtc = new GlideDateTime().getValue();
+        var delGr  = new GlideRecord('sys_user_delegate');
+        delGr.addQuery('user', current.getValue('approver'));
+        delGr.addQuery('delegate', senderId);
+        delGr.addQuery('approvals', true);
+        delGr.addQuery('starts', '&lt;=', nowUtc);
+        delGr.addQuery('ends', '&gt;=', nowUtc);
+        delGr.setLimit(1);
+        delGr.query();
+        if (!delGr.hasNext()) {
+            gs.info('CLM NT Email Approval skipped: sender (' + email.from + ') is not approver or active delegate.');
+            return;
+        }
+    }
+
+    // 4. Limit Calculation &amp; Allocation Helpers
+    function segKey(t) {
+        t = (t || '').toString().toLowerCase();
+        if (t.indexOf('cement') !== -1) return 'Cement';
+        if (t.indexOf('rmc') !== -1)    return 'RMC';
+        if (t.indexOf('bpd') !== -1)    return 'BPD';
+        return '';
+    }
+
+    function getSiteCode(sGr) {
+        var code = (sGr.getValue('customer_code') || '') + '';
+        if (!code &amp;&amp; sGr.isValidField('customer_site_code') &amp;&amp; sGr.customer_site_code) {
+            code = sGr.customer_site_code.customer_code_sap ? (sGr.customer_site_code.customer_code_sap + '') : '';
+        }
+        return code;
+    }
+
+    function getPanLimitContext(bId, panVal) {
+        var reqMap = {};
+        var sGr = new GlideRecord('x_birl3_clm_nt_site_request');
+        sGr.addQuery('pan_request', bId);
+        sGr.query();
+        while (sGr.next()) {
+            var code = getSiteCode(sGr);
+            var seg  = sGr.isValidField('segment') ? segKey(sGr.getDisplayValue('segment')) : '';
+            reqMap[code + '|' + seg] = parseFloat(sGr.getValue('requested_limit') || sGr.getValue('site_desired_limit')) || 0;
+        }
+
+        var other = 0, matched = 0;
+        var seen = {}, claimed = {};
+        var cGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        cGr.addQuery('pan', panVal);
+        cGr.addQuery('cg1', 'N01');
+        cGr.query();
+        while (cGr.next()) {
+            var cCode  = (cGr.getValue('customer_code_sap') || '') + '';
+            var cSeg   = segKey(cGr.getDisplayValue('segment'));
+            var dedupe = cCode ? (cCode + '|' + cSeg) : cGr.getUniqueValue();
+            if (seen[dedupe]) continue;
+            seen[dedupe] = true;
+
+            var key = cCode + '|' + cSeg;
+            if (reqMap[key] === undefined &amp;&amp; reqMap[cCode + '|'] !== undefined) key = cCode + '|';
+            var isReq = (reqMap[key] !== undefined &amp;&amp; !claimed[key]);
+
+            if (isReq) {
+                claimed[key] = true;
+                matched += reqMap[key];
+            } else {
+                other += parseFloat(cGr.getValue('cr_limit') || cGr.getValue('credit_limit')) || 0;
+            }
+        }
+
+        return {
+            minLimit: Math.round(other),
+            maxLimit: Math.round(other + matched)
+        };
+    }
+
+    function allocateInteger(items, pool) {
+        var n = items.length;
+        if (!n) return [];
+        var totReq = 0;
+        items.forEach(function(it) { totReq += it.req; });
+
+        var rows = items.map(function(it, i) {
+            var share = totReq &gt; 0 ? it.req / totReq : 1 / n;
+            var raw   = pool * share;
+            var base  = Math.floor(raw);
+            return { i: i, base: base, frac: raw - base, req: it.req, code: it.code || '' };
+        });
+
+        var used = 0;
+        rows.forEach(function(r) { used += r.base; });
+        var left = pool - used;
+
+        var order = rows.slice().sort(function(a, b) {
+            if (Math.abs(a.frac - b.frac) &gt; 1e-9) return b.frac - a.frac;
+            if (a.req !== b.req) return b.req - a.req;
+            return a.code &lt; b.code ? -1 : (a.code &gt; b.code ? 1 : 0);
+        });
+        for (var k = 0; k &lt; left &amp;&amp; k &lt; order.length; k++) order[k].base += 1;
+
+        return rows.map(function(r) { return r.base; });
+    }
+
+    function distributeApprovedLimitToSites(bId, panApprovedVal, minLimit) {
+        var pool     = Math.max(0, Math.round(panApprovedVal - minLimit));
+        var siteList = [];
+        var sGr      = new GlideRecord('x_birl3_clm_nt_site_request');
+        sGr.addQuery('pan_request', bId);
+        sGr.query();
+        while (sGr.next()) {
+            var reqLim = parseFloat(sGr.getValue('requested_limit') || sGr.getValue('site_desired_limit')) || 0;
+            siteList.push({
+                sys_id: sGr.getUniqueValue(),
+                req:    Math.max(0, reqLim),
+                code:   getSiteCode(sGr)
+            });
+        }
+
+        var alloc = allocateInteger(siteList, pool);
+        for (var i = 0; i &lt; siteList.length; i++) {
+            var siteUpd = new GlideRecord('x_birl3_clm_nt_site_request');
+            if (siteUpd.get(siteList[i].sys_id)) {
+                siteUpd.setValue('approved_limit', alloc[i]);
+                siteUpd.update();
+            }
+        }
+    }
+
+    var approverDisplay = current.approver ? current.approver.getDisplayValue() : 'Approver';
+
+    // 5. Execute Approval or Rejection
+    if (decision === 'approved') {
+        var panCtx      = getPanLimitContext(panSysId, (panGr.getValue('pan') || '') + '');
+        var approvedPan = panCtx.maxLimit;
+        if (approvedPan &lt;= 0) {
+            approvedPan = Math.round(parseFloat(panGr.getValue('total_requested_limit') || panGr.getValue('total_desired_limit')) || 0);
+        }
+
+        var existingApproved = Math.round(parseFloat(panGr.getValue('total_approved_limit')) || 0);
+        if (existingApproved &gt; 0 &amp;&amp; existingApproved &lt; approvedPan) {
+            approvedPan = existingApproved;
+        }
+
+        panGr.setValue('total_approved_limit', approvedPan);
+        var appNote = 'Email Approver Decision: Approved by ' + approverDisplay;
+        appNote    += '\nApproved PAN Limit: INR ' + approvedPan;
+        appNote    += '\nAllocated to requested sites: INR ' + Math.max(0, approvedPan - panCtx.minLimit);
+        if (replyComment) appNote += '\nComments: ' + replyComment;
+        panGr.comments = appNote;
+        panGr.update();
+
+        distributeApprovedLimitToSites(panSysId, approvedPan, panCtx.minLimit);
+
+        if (current.isValidField('approval_journal_column') &amp;&amp; approvedPan &gt; 0) {
+            current.approval_journal_column = approvedPan.toString();
+        }
+        current.comments = replyComment || 'Approved via Email';
+        current.setValue('state', 'approved');
+        current.update();
+        gs.info('CLM NT Email Approval: Successfully approved ' + panGr.getValue('number') + ' with limit ' + approvedPan);
+    } else if (decision === 'rejected') {
+        panGr.setValue('total_approved_limit', 0);
+        var rejNote = 'Email Approver Decision: Rejected by ' + approverDisplay;
+        if (replyComment) rejNote += '\nComments: ' + replyComment;
+        panGr.comments = rejNote;
+        panGr.update();
+
+        var sRej = new GlideRecord('x_birl3_clm_nt_site_request');
+        sRej.addQuery('pan_request', panSysId);
+        sRej.query();
+        while (sRej.next()) {
+            sRej.setValue('approved_limit', 0);
+            sRej.update();
+        }
+
+        current.comments = replyComment || 'Rejected via Email';
+        current.setValue('state', 'rejected');
+        current.update();
+        gs.info('CLM NT Email Approval: Successfully rejected ' + panGr.getValue('number'));
+    }
+
+    event.state = 'stop_processing';
+
+})(current, event, email, logger, classifier);]]&gt;&lt;/script&gt;&lt;stop_processing&gt;false&lt;/stop_processing&gt;&lt;sys_class_name&gt;sysevent_in_email_action&lt;/sys_class_name&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-11-13 07:36:14&lt;/sys_created_on&gt;&lt;sys_domain&gt;cacbc7742bb676104572f3745e91bf5a&lt;/sys_domain&gt;&lt;sys_domain_path&gt;!!!/!!(/&lt;/sys_domain_path&gt;&lt;sys_id&gt;28dc38152b6897904572f3745e91bfda&lt;/sys_id&gt;&lt;sys_mod_count&gt;12&lt;/sys_mod_count&gt;&lt;sys_name&gt;CLM: NT PAN Approval via Email&lt;/sys_name&gt;&lt;sys_overrides/&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sysevent_in_email_action_28dc38152b6897904572f3745e91bfda&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-11-16 10:26:13&lt;/sys_updated_on&gt;&lt;table&gt;sysapproval_approver&lt;/table&gt;&lt;template/&gt;&lt;type&gt;new&lt;/type&gt;&lt;/sysevent_in_email_action&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>-1655846744</payload_hash>
+        <record_name>CLM: NT PAN Approval via Email</record_name>
+        <reverted_from/>
+        <source>d386fafb973acb106bf93da0f053af20</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-16 10:26:14</sys_created_on>
+        <sys_id>63310d9e97289710be31fa17f053af8b</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a1e3e4a1b50000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 10:26:14</sys_updated_on>
+        <type>Inbound Email Actions</type>
+        <update_guid>63310d9e472897106cf5dbfc41e34f8a</update_guid>
+        <update_guid_history>63310d9e472897106cf5dbfc41e34f8a:-1655846744,ceb7f4d6dce49710e41727d309d3518f:229290989,848730d66ee497108446e44752b3af11:379786141,76773c964ce497105ec7090309b40583:-537372266,fa4eac963e64971062de7c527a8ab76d:995128709,e07c205235649710d1233358eebc210d:-1077174688,87a61852cbecdb90b2b4bdc245c8152d:-43892064,2046145e77acdb90c0e9eb60c4edcb40:913546839,7ee84cd2032cdb90e757ae26824d5344:-438045291,a8d808d2d02cdb90f16e406a19be4b25:1603796639,1d4eb4d52a689790e05751a9c3c253eb:-438045291,7afdbc95f368979073f2cf18a79d5ea9:931828794,2c9d30954e689790e9ab5e3764aa3e8b:-1889469913</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-16 11:49:37</sys_created_on>
+        <sys_db_object display_value="" name="sysevent_in_email_action">sysevent_in_email_action</sys_db_object>
+        <sys_id>109b79030d4e42a583cb642816796991</sys_id>
+        <sys_metadata>28dc38152b6897904572f3745e91bfda</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>CLM: NT PAN Approval via Email</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent display_value="Sysapproval Approver">ef475948876222103e5540460cbb351a</sys_parent>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sysevent_in_email_action_28dc38152b6897904572f3745e91bfda</sys_update_name>
+        <sys_update_version display_value="sysevent_in_email_action_28dc38152b6897904572f3745e91bfda">63310d9e97289710be31fa17f053af8b</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 11:49:37</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

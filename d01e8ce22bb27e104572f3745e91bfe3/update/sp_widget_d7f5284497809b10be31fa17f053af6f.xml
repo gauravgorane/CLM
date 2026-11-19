@@ -1,0 +1,2089 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function ($scope, spUtil, $q, $sce, $timeout) {
+	var c = this;
+
+	// State
+	c.selectedFiles      = [];
+	c.submitting          = false;
+	c.submitted           = false;
+	c.dragOver            = false;
+	c.submittedAppNumber = '';
+
+	// OTP & 5-Minute Cooldown State
+	c.showOTPModal       = false;
+	c.otpInput            = '';
+	c.otpError            = '';
+	c.verifying           = false;
+	c.cooldownSeconds    = 0;
+	var cooldownTimer    = null;
+
+	// Form Model
+	c.formData = {
+		customer_name        : c.data.customer_name || '',
+		proprietor_name      : '',
+		turnover_year1       : '',
+		turnover_year2       : '',
+		turnover_year3       : '',
+		additional_sd_offer  : '',
+		comments             : '',
+		declaration          : false,
+		pan_segments         : {},
+		sites                : []
+	};
+
+	// Initialize Segment-level PAN data repository
+	if (c.data.segments && c.data.segments.length > 0) {
+		angular.forEach(c.data.segments, function (seg) {
+			var meta = c.data.segmentMeta[seg] || { unit: 'MT' };
+			c.formData.pan_segments[seg] = {
+				segment              : seg,
+				unit                 : meta.unit,
+				pan_total_potential  : '',
+				pan_ut_sob            : '',
+				pan_ut_sob_per        : '0.00',
+				pan_expected_sob      : '',
+				pan_expected_sob_per : '0.00'
+			};
+		});
+	}
+
+	// Initialize Site Rows from Server Data (Rate & Credit Tenor removed)
+	if (c.data.sites && c.data.sites.length > 0) {
+		c.formData.sites = c.data.sites.map(function (s) {
+			return {
+				customer_master_sys_id : s.sys_id,
+				customer_code_sap      : s.customer_code_sap,
+				customer_name          : s.customer_name,
+				segment                : s.segment,
+				unit                   : s.unit,
+				site_total_potential   : '',
+				site_ut_sob            : '',
+				site_ut_sob_per        : '0.00',
+				site_expected_sob      : '',
+				site_expected_sob_per  : '0.00'
+			};
+		});
+	}
+
+	// Percentage Calculation Helper
+	function calcPct(sob, tot) {
+		var s = parseFloat(sob) || 0;
+		var t = parseFloat(tot) || 0;
+		if (t > 0) {
+			var p = (s / t) * 100;
+			return (p > 100 ? 100.00 : p).toFixed(2);
+		}
+		return '0.00';
+	}
+
+	// Calculation per Segment at PAN level
+	c.calcPanSob = function (panSeg) {
+		var tot = parseFloat(panSeg.pan_total_potential) || 0;
+		var sob = parseFloat(panSeg.pan_ut_sob) || 0;
+		var exp = parseFloat(panSeg.pan_expected_sob) || 0;
+
+		if (tot > 0) {
+			if (sob > tot) panSeg.pan_ut_sob = tot;
+			if (exp > tot) panSeg.pan_expected_sob = tot;
+		}
+
+		panSeg.pan_ut_sob_per = calcPct(panSeg.pan_ut_sob, panSeg.pan_total_potential);
+		panSeg.pan_expected_sob_per = calcPct(panSeg.pan_expected_sob, panSeg.pan_total_potential);
+	};
+
+	// Calculation per Site Row
+	c.calcSiteSob = function (site) {
+		var tot = parseFloat(site.site_total_potential) || 0;
+		var sob = parseFloat(site.site_ut_sob) || 0;
+		var exp = parseFloat(site.site_expected_sob) || 0;
+
+		if (tot > 0) {
+			if (sob > tot) site.site_ut_sob = tot;
+			if (exp > tot) site.site_expected_sob = tot;
+		}
+
+		site.site_ut_sob_per = calcPct(site.site_ut_sob, site.site_total_potential);
+		site.site_expected_sob_per = calcPct(site.site_expected_sob, site.site_total_potential);
+	};
+
+	// Auto-Sum Child Sites to PAN Segments (Strictly grouped by segment)
+	c.sumAllSitesToPan = function () {
+		angular.forEach(c.data.segments, function (segKey) {
+			var sumPot = 0;
+			var sumUt = 0;
+			var sumExp = 0;
+
+			for (var i = 0; i < c.formData.sites.length; i++) {
+				var st = c.formData.sites[i];
+				if (st.segment === segKey) {
+					sumPot += parseFloat(st.site_total_potential) || 0;
+					sumUt  += parseFloat(st.site_ut_sob) || 0;
+					sumExp += parseFloat(st.site_expected_sob) || 0;
+				}
+			}
+
+			var target = c.formData.pan_segments[segKey];
+			if (target) {
+				target.pan_total_potential = sumPot > 0 ? sumPot : '';
+				target.pan_ut_sob          = sumUt > 0 ? sumUt : '';
+				target.pan_expected_sob    = sumExp > 0 ? sumExp : '';
+				c.calcPanSob(target);
+			}
+		});
+		spUtil.addInfoMessage('PAN segment totals updated from site entries.');
+	};
+
+	// 5-Minute Timer Management
+	function startCooldown(seconds) {
+		c.cooldownSeconds = seconds;
+		if (cooldownTimer) $timeout.cancel(cooldownTimer);
+
+		function tick() {
+			if (c.cooldownSeconds > 0) {
+				cooldownTimer = $timeout(function () {
+					c.cooldownSeconds--;
+					tick();
+				}, 1000);
+			}
+		}
+		tick();
+	}
+
+	c.formatCooldown = function () {
+		var m = Math.floor(c.cooldownSeconds / 60);
+		var s = c.cooldownSeconds % 60;
+		return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+	};
+
+	// File Handling
+	c.onDragOver = function ($event) { $event.preventDefault(); c.dragOver = true; };
+	c.onDrop = function ($event) {
+		$event.preventDefault();
+		c.dragOver = false;
+		if ($event.dataTransfer && $event.dataTransfer.files) c.onFileSelect($event.dataTransfer.files);
+	};
+	c.triggerFileInput = function () {
+		var el = document.getElementById('clm-nt-file-input');
+		if (el) el.click();
+	};
+
+	c.getExt = function (name) { return (name || '').split('.').pop().toLowerCase(); };
+	c.getFileIconClass = function (name) {
+		var ext = c.getExt(name);
+		if (ext === 'pdf') return 'clm-icon-pdf';
+		if (['jpg', 'jpeg', 'png'].indexOf(ext) > -1) return 'clm-icon-img';
+		if (['doc', 'docx'].indexOf(ext) > -1) return 'clm-icon-word';
+		if (['xls', 'xlsx'].indexOf(ext) > -1) return 'clm-icon-excel';
+		return 'clm-icon-other';
+	};
+	c.getFileIcon = function (name) {
+		var ext = c.getExt(name);
+		var icons = { pdf: 'PDF', jpg: 'IMG', jpeg: 'IMG', png: 'IMG', doc: 'DOC', docx: 'DOC', xls: 'XLS', xlsx: 'XLS' };
+		return $sce.trustAsHtml(icons[ext] || 'FILE');
+	};
+	c.formatSize = function (bytes) {
+		if (!bytes) return '0 B';
+		if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+		return (bytes / 1048576).toFixed(1) + ' MB';
+	};
+
+	c.onFileSelect = function (fileList) {
+		var allowed = ['pdf', 'jpg', 'jpeg', 'png', 'doc', 'docx', 'xls', 'xlsx'];
+		var MAX_SIZE = 5 * 1024 * 1024;
+
+		for (var i = 0; i < fileList.length; i++) {
+			var f = fileList[i];
+			if (c.selectedFiles.some(function (x) { return x.name === f.name && x.size === f.size; })) continue;
+			if (allowed.indexOf(c.getExt(f.name)) === -1) { spUtil.addErrorMessage('Unsupported file format: ' + f.name); continue; }
+			if (f.size > MAX_SIZE) { spUtil.addErrorMessage('File exceeds 5 MB: ' + f.name); continue; }
+
+			f.status = null;
+			c.selectedFiles.push(f);
+		}
+		$timeout(angular.noop);
+	};
+
+	c.removeFile = function (idx) { c.selectedFiles.splice(idx, 1); };
+
+	c.toBase64 = function (file) {
+		var d = $q.defer();
+		var r = new FileReader();
+		r.onload = function (e) { d.resolve(e.target.result.split(',')[1]); };
+		r.onerror = function () { d.reject('Read error'); };
+		r.readAsDataURL(file);
+		return d.promise;
+	};
+
+	c.uploadSingleFile = function (file, primaryAppSysId) {
+		var d = $q.defer();
+		file.status = 'uploading';
+		c.toBase64(file).then(function (base64) {
+			c.server.get({
+				action: 'attachFile',
+				targetSysId: primaryAppSysId,
+				file_name: file.name,
+				content_type: file.type || 'application/octet-stream',
+				file_data: base64
+			}).then(function (resp) {
+				file.status = (resp.data && resp.data.success) ? 'done' : 'error';
+				d.resolve();
+			}, function () { file.status = 'error'; d.resolve(); });
+		}, function () { file.status = 'error'; d.resolve(); });
+		return d.promise;
+	};
+
+	// OTP Trigger (No fields mandatory; requires consent declaration only)
+	c.triggerOTP = function () {
+		if (!c.formData.declaration) return;
+
+		// If 5-minute timer is still active, reopen modal with the active session
+		if (c.cooldownSeconds > 0) {
+			c.otpInput = '';
+			c.otpError = '';
+			c.showOTPModal = true;
+			return;
+		}
+
+		c.submitting = true;
+		c.server.get({
+			action: 'generateOTP',
+			token: c.data.token,
+			pan: c.data.pan
+		}).then(function (resp) {
+			c.submitting = false;
+			if (resp.data.success) {
+				c.otpInput = '';
+				c.otpError = '';
+				c.showOTPModal = true;
+				startCooldown(resp.data.remaining_seconds || 300);
+				if (resp.data.already_active) {
+					spUtil.addInfoMessage(resp.data.message);
+				}
+			} else {
+				spUtil.addErrorMessage(resp.data.message || 'Failed to dispatch verification OTP. Try again.');
+			}
+		});
+	};
+
+	c.resendOTP = function () {
+		if (c.cooldownSeconds > 0) return;
+		c.triggerOTP();
+	};
+
+	c.cancelOTP = function () {
+		c.showOTPModal = false;
+	};
+
+	// Final Submit Request
+	c.submitRequest = function () {
+		if (!c.otpInput || c.otpInput.length < 6) {
+			c.otpError = 'Please enter a valid 6-digit OTP.';
+			return;
+		}
+
+		c.verifying = true;
+		c.otpError = '';
+
+		c.server.get({
+			action: 'verifyOTPAndSubmit',
+			token: c.data.token,
+			pan: c.data.pan,
+			otp: c.otpInput,
+			formData: angular.toJson(c.formData)
+		}).then(function (resp) {
+			if (resp.data.success) {
+				c.showOTPModal = false;
+				c.cooldownSeconds = 0;
+				if (cooldownTimer) $timeout.cancel(cooldownTimer);
+				c.submittedAppNumber = resp.data.application_number;
+				var primarySysId = resp.data.primaryFormSysId;
+
+				// Upload Pending Attachments
+				var pending = c.selectedFiles.filter(function (f) { return f.status !== 'done'; });
+				if (pending.length > 0 && primarySysId) {
+					var chain = $q.when();
+					pending.forEach(function (f) {
+						chain = chain.then(function () { return c.uploadSingleFile(f, primarySysId); });
+					});
+					chain.then(function () {
+						$timeout(function () {
+							c.verifying = false;
+							c.submitted = true;
+						});
+					});
+				} else {
+					$timeout(function () {
+						c.verifying = false;
+						c.submitted = true;
+					});
+				}
+			} else {
+				c.verifying = false;
+				c.otpError = resp.data.message || 'Invalid or expired OTP code.';
+			}
+		});
+	};
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+.clm-wrap *, .clm-wrap *::before, .clm-wrap *::after,
+.clm-overlay *, .clm-overlay *::before, .clm-overlay *::after {
+  box-sizing: border-box !important;
+}
+
+.clm-wrap {
+  background: #eff3f7 !important;
+  min-height: 100vh;
+  padding: 24px 16px 48px;
+  display: flex !important;
+  justify-content: center;
+  align-items: flex-start;
+  color: #1a1a1a;
+  font-family: 'Oxygen', Arial, sans-serif !important;
+}
+.clm-shell { width: 100%; max-width: 1300px; }
+.clm-hidden-input { display: none !important; }
+.clm-mt-16 { margin-top: 16px !important; }
+.clm-mt-20 { margin-top: 20px !important; }
+.clm-req { color: #E23D28; }
+
+/* ── State Cards ── */
+.clm-state-card {
+  background: #fff !important;
+  border: 1px solid #dde3ea;
+  border-radius: 12px !important;
+  padding: 48px 40px !important;
+  text-align: center;
+  max-width: 500px;
+  width: 100%;
+  box-shadow: 0 10px 28px rgba(120, 20, 15, 0.08);
+  margin-top: 60px;
+}
+.clm-state-icon {
+  font-size: 32px;
+  margin-bottom: 16px;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.clm-state-card h3 {
+  font-size: 20px !important;
+  font-weight: 700 !important;
+  margin: 0 0 8px !important;
+  color: #1a1a1a !important;
+}
+.clm-state-card p {
+  font-size: 14px !important;
+  color: #5a6a7a !important;
+  margin: 0 !important;
+  line-height: 1.5;
+}
+.clm-state-danger  .clm-state-icon { background: #fef5f4; color: #c0392b; }
+.clm-state-warn    .clm-state-icon { background: #fff4e0; color: #E87722; }
+.clm-state-success .clm-state-icon { background: #f4fbf6; color: #1e8449; }
+
+/* ── Page Header Hero (Crimson &amp; Red Theme) ── */
+.clm-hero {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px 24px;
+  flex-wrap: wrap;
+  padding: 26px 32px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #9b1111 0%, #b81e1e 45%, #e0301e 100%);
+  color: #ffffff;
+  box-shadow: 0 10px 28px rgba(120, 20, 15, 0.28);
+}
+.clm-hero::before, .clm-hero::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.clm-hero::before {
+  width: 340px;
+  height: 340px;
+  right: -90px;
+  top: -160px;
+  background: rgba(244, 123, 48, 0.55);
+}
+.clm-hero::after {
+  width: 240px;
+  height: 240px;
+  right: 140px;
+  bottom: -170px;
+  background: rgba(120, 15, 15, 0.45);
+}
+
+.clm-hero-text { position: relative; z-index: 1; }
+.clm-hero-bar {
+  width: 44px;
+  height: 6px;
+  border-radius: 3px;
+  background: #fff200;
+  margin-bottom: 12px;
+}
+.clm-hero-title {
+  font-size: 26px;
+  font-weight: 700;
+  color: #ffffff;
+  line-height: 1.25;
+}
+.clm-hero-accent { color: #fff200; }
+.clm-hero-sub {
+  margin-top: 6px;
+  font-size: 14.5px;
+  color: #ffeae4;
+}
+
+.clm-hero-stat {
+  position: relative;
+  z-index: 1;
+  padding-left: 24px;
+  border-left: 1px solid rgba(255, 255, 255, 0.3);
+  text-align: right;
+}
+.clm-hero-stat-v {
+  font-size: 26px;
+  font-weight: 700;
+  color: #fff200;
+  letter-spacing: 1.5px;
+  line-height: 1.1;
+  font-family: monospace;
+  text-shadow: 0 1px 3px rgba(80, 10, 10, 0.35);
+}
+.clm-hero-stat-k {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #ffd9cf;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+}
+
+/* ── Panel &amp; Blocks ── */
+.clm-panel {
+  margin-top: 18px;
+  padding: 8px 24px 24px;
+  background: #fff;
+  border: 1px solid #e0e6ed;
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+}
+.clm-block {
+  margin-top: 16px;
+  background: #fff;
+  border: 1px solid #dde3ea;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.clm-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  flex-wrap: wrap;
+  padding: 14px 20px;
+  background: #fafbfc;
+  border-bottom: 1px solid #dde3ea;
+}
+.clm-block-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a1a1a;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+}
+.clm-block-title::before {
+  content: "";
+  width: 4px;
+  height: 16px;
+  border-radius: 2px;
+  background: #F3D54E;
+  flex-shrink: 0;
+}
+.clm-block-sub {
+  margin: 4px 0 0 14px;
+  font-size: 12px;
+  color: #5a6a7a;
+}
+.clm-block-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.clm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #fff;
+  border: 1px solid #dde3ea;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1a1a1a;
+  white-space: nowrap;
+}
+.clm-chip-k { font-weight: 400; color: #5a6a7a; }
+.clm-du-body { padding: 18px 20px; }
+.clm-du-subhead {
+  font-size: 12px;
+  font-weight: 700;
+  color: #3a4451;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  margin-bottom: 10px;
+}
+
+/* ── Form Grids &amp; Inputs ── */
+.clm-grid-2 { display: grid !important; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 16px; }
+.clm-grid-3 { display: grid !important; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; }
+.clm-field { display: flex !important; flex-direction: column; gap: 6px; }
+.clm-field &gt; label {
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  color: #2b3440 !important;
+  margin: 0 !important;
+}
+.clm-input {
+  width: 100% !important;
+  height: 38px !important;
+  border: 1px solid #cdd4dc !important;
+  border-radius: 6px !important;
+  font-size: 13px !important;
+  color: #1a1a1a !important;
+  background: #fff !important;
+  padding: 0 12px !important;
+  outline: none !important;
+  transition: border-color .2s, box-shadow .2s;
+}
+.clm-input:focus {
+  border-color: #E87722 !important;
+  box-shadow: 0 0 0 3px rgba(232, 119, 34, .12) !important;
+}
+.clm-input.clm-readonly, .clm-input[readonly] {
+  background: #f4f6f9 !important;
+  color: #5a6a7a !important;
+  border-color: #dde3ea !important;
+  pointer-events: none;
+}
+.clm-input-wrap {
+  position: relative;
+  display: flex !important;
+  align-items: center;
+  width: 100%;
+}
+.clm-prefix, .clm-suffix {
+  position: absolute;
+  font-size: 11.5px !important;
+  color: #7f8c9a !important;
+  font-weight: 700;
+  pointer-events: none;
+  z-index: 1;
+}
+.clm-prefix { left: 10px; }
+.clm-suffix { right: 10px; }
+.clm-has-prefix { padding-left: 24px !important; }
+.clm-has-suffix { padding-right: 48px !important; }
+
+/* ── Tables ── */
+.clm-table-wrap {
+  overflow-x: auto;
+  background: #fff;
+  -webkit-overflow-scrolling: touch;
+}
+.clm-table-wrap::-webkit-scrollbar { height: 6px; }
+.clm-table-wrap::-webkit-scrollbar-track { background: #f1f3f7; }
+.clm-table-wrap::-webkit-scrollbar-thumb { background: #c5d0dc; border-radius: 3px; }
+.clm-table-wrap::-webkit-scrollbar-thumb:hover { background: #9aa7b7; }
+
+.clm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.clm-table th {
+  background: #eef1f5;
+  color: #2b3440;
+  padding: 11px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .6px;
+  text-align: center;
+  white-space: nowrap;
+  border: 1px solid #dde3ea;
+}
+.clm-table td {
+  padding: 12px;
+  color: #1a1a1a;
+  text-align: center;
+  border: 1px solid #e6eaef;
+  vertical-align: middle;
+}
+.clm-table tr &gt; :first-child { border-left: 0; text-align: left; }
+.clm-table tr &gt; :last-child  { border-right: 0; }
+.clm-table thead tr:first-child th { border-top: 0; }
+.clm-table tbody tr:last-child td  { border-bottom: 0; }
+.clm-table .grp { border-left: 2px solid #c9d1db !important; }
+.clm-table .tl { text-align: left; }
+.clm-table tr.super th { letter-spacing: 1px; line-height: 1.3; }
+
+/* Super column headers matching theme */
+.clm-table th.bg-blank  { background: #f7f8fa; }
+.clm-table th.bg-seg    { background: #f1f3f7; color: #3a4451; }
+.clm-table th.bg-assess { background: #fdeeed; color: #c0392b; }
+.clm-table th.bg-req    { background: #e6f4ea; color: #2e7d32; }
+
+.clm-du-trade { min-width: 740px; }
+
+/* ── Child Sites Entry Table ── */
+.clm-sites-entry-table {
+  width: 100%;
+  min-width: 680px;
+}
+.clm-sites-entry-table th { padding: 10px 12px !important; }
+.clm-sites-entry-table td { padding: 12px 10px !important; }
+.clm-subth {
+  font-size: 11px !important;
+  font-weight: 400 !important;
+  color: #5a6a7a !important;
+  padding: 6px 10px !important;
+}
+
+/* Sticky column */
+.clm-sites-entry-table .clm-sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  box-shadow: 2px 0 5px rgba(0, 0, 0, .04);
+}
+.clm-sites-entry-table th.clm-sticky-col {
+  background: #f7f8fa !important;
+  z-index: 3;
+}
+.clm-sites-entry-table td.clm-sticky-col {
+  background: #fff !important;
+}
+.clm-sites-entry-table tr:hover td.clm-sticky-col {
+  background: #fafbfc !important;
+}
+
+.clm-td-siteinfo {
+  white-space: normal !important;
+  max-width: 320px;
+}
+.clm-site-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 5px;
+}
+.clm-td-siteinfo .clm-cust-name {
+  white-space: normal !important;
+  word-break: break-word;
+  line-height: 1.35;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a1a1a;
+}
+
+.clm-sites-entry-table th.grp,
+.clm-sites-entry-table td.grp {
+  text-align: center !important;
+  vertical-align: middle !important;
+}
+
+.clm-cell-center {
+  margin: 0 auto !important;
+  max-width: 120px !important;
+  min-width: 95px !important;
+}
+
+.clm-inline-cell {
+  display: inline-flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 8px !important;
+  width: auto !important;
+}
+.clm-inline-cell .clm-input-wrap {
+  width: 95px !important;
+  min-width: 90px !important;
+  flex-shrink: 0 !important;
+}
+.clm-inline-cell .clm-input {
+  text-align: center !important;
+  padding-left: 6px !important;
+  padding-right: 34px !important;
+}
+
+/* Percentage Badges */
+.clm-inline-cell .clm-du-pct {
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+  min-width: 52px !important;
+  padding: 5px 8px !important;
+  font-size: 12px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  height: 36px !important;
+  box-sizing: border-box !important;
+}
+.clm-du-level-name { font-weight: 700; color: #1a1a1a; }
+.clm-du-level-sub  { font-size: 12px; color: #5a6a7a; margin-top: 2px; }
+.clm-du-pct {
+  display: inline-block;
+  min-width: 58px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #f4f6f9;
+  border: 1px solid #e6eaef;
+  font-size: 12px;
+  font-weight: 700;
+  color: #3a4451;
+}
+.clm-du-pct.is-exp {
+  color: #1e8449;
+  background: #eaf7ee;
+  border-color: #b9e3c6;
+}
+.clm-du-pct small { font-size: 10.5px; margin-left: 2px; }
+
+.clm-site-code-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  background: #f1f3f7;
+  border: 1px solid #dde3ea;
+  border-radius: 4px;
+  font-weight: 700;
+  color: #1a1a1a;
+  font-size: 12px;
+}
+
+/* Segment Pills */
+.clm-segment-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.clm-segment-pill.seg-rmc {
+  background: #f3e8ff;
+  color: #6b21a8;
+  border: 1px solid #e9d5ff;
+}
+.clm-segment-pill.seg-cement {
+  background: #e0f2fe;
+  color: #0369a1;
+  border: 1px solid #bae6fd;
+}
+
+/* ── Buttons (Orange CTA &amp; Theme Accents) ── */
+.clm-btn-helper {
+  padding: 5px 12px;
+  background: #fdf5f3;
+  border: 1px solid #f5cfca;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #b81e1e;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.clm-btn-helper:hover {
+  background: #b81e1e;
+  color: #ffffff;
+  border-color: #b81e1e;
+}
+
+.clm-btn {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 20px !important;
+  height: 40px !important;
+  border-radius: 6px !important;
+  font-size: 14px !important;
+  font-weight: 700 !important;
+  border: 1px solid transparent !important;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .2s;
+}
+.clm-btn-primary {
+  background: #E87722 !important;
+  border-color: #E87722 !important;
+  color: #ffffff !important;
+}
+.clm-btn-primary:hover:not([disabled]) {
+  background: #d35400 !important;
+  border-color: #d35400 !important;
+  color: #ffffff !important;
+}
+.clm-btn-primary[disabled] {
+  opacity: .5;
+  background: #eef1f5 !important;
+  border-color: #e0e6ed !important;
+  color: #9aa5b1 !important;
+  cursor: not-allowed !important;
+}
+.clm-btn-submit {
+  height: 44px !important;
+  padding: 0 32px !important;
+}
+.clm-btn-ghost {
+  background: #fff !important;
+  color: #1a1a1a !important;
+  border: 1px solid #cdd4dc !important;
+}
+.clm-btn-ghost:hover:not([disabled]) {
+  background: #1a1a1a !important;
+  border-color: #1a1a1a !important;
+  color: #F3D54E !important;
+}
+
+/* ── Suggested Docs &amp; Dropzone ── */
+.clm-du-docs {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #dde3ea;
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.clm-du-doc {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #fff;
+}
+.clm-du-doc + .clm-du-doc { border-top: 1px solid #eef1f5; }
+.clm-du-doc-num {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #F3D54E;
+  color: #1a1a1a;
+  font-size: 11.5px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.clm-du-doc-info { flex: 1; min-width: 0; }
+.clm-du-doc-t { font-size: 13px; font-weight: 700; color: #1a1a1a; }
+.clm-du-doc-s { margin-top: 2px; font-size: 12px; color: #5a6a7a; }
+.clm-du-pill-pdf {
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid #fdeeed;
+  background: #fdeeed;
+  color: #c0392b;
+  font-size: 10px;
+  font-weight: 700;
+}
+.clm-du-pill-opt {
+  padding: 2px 8px;
+  border-radius: 12px;
+  border: 1px solid #dde3ea;
+  background: #f7f8fa;
+  color: #5a6a7a;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.clm-dropzone {
+  border: 2px dashed #cdd4dc !important;
+  border-radius: 8px !important;
+  padding: 24px 20px !important;
+  text-align: center;
+  cursor: pointer;
+  background: #fafbfc !important;
+  transition: all .2s;
+}
+.clm-dropzone:hover, .clm-dropzone-active {
+  border-color: #E87722 !important;
+  background: #fefbf8 !important;
+}
+.clm-dz-icon { margin-bottom: 8px; }
+.clm-dz-text {
+  font-size: 14px !important;
+  font-weight: 700 !important;
+  color: #1a1a1a !important;
+}
+.clm-dz-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #5a6a7a;
+}
+
+/* ── Uploaded File Cards ── */
+.clm-file-grid {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+.clm-file-card {
+  border: 1px solid #dde3ea !important;
+  border-radius: 8px !important;
+  padding: 10px 14px !important;
+  background: #fff !important;
+  display: flex !important;
+  align-items: center;
+  gap: 12px;
+  transition: all .15s ease;
+}
+.clm-file-card:hover {
+  background: #ffffff !important;
+  border-color: #c5d0dc !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+.clm-file-card.clm-file-done {
+  border-color: #b9e3c6 !important;
+  background: #f4fbf6 !important;
+}
+.clm-file-card.clm-file-error {
+  border-color: #f5c2bc !important;
+  background: #fef5f4 !important;
+}
+.clm-file-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px !important;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  flex-shrink: 0;
+}
+.clm-icon-pdf   { background: #fdeeed !important; color: #c0392b !important; }
+.clm-icon-img   { background: #fdf2e9 !important; color: #d35400 !important; }
+.clm-icon-word  { background: #eaf3fb !important; color: #1f6fa5 !important; }
+.clm-icon-excel { background: #eaf7ee !important; color: #1e8449 !important; }
+.clm-icon-other { background: #f1f3f7 !important; color: #5a6a7a !important; }
+.clm-file-info { flex: 1; min-width: 0; }
+.clm-file-name {
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  color: #1a1a1a !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.clm-file-meta { margin-top: 2px; font-size: 11px !important; color: #7f8c9a !important; }
+.clm-file-status { font-size: 11.5px !important; }
+.clm-status-done { color: #1e8449 !important; font-weight: 700 !important; }
+.clm-status-error { color: #c0392b !important; }
+.clm-file-remove {
+  background: none;
+  border: none;
+  color: #7f8c9a;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px;
+}
+.clm-file-remove:hover { color: #AF272F; }
+
+/* ── Declaration &amp; Checkbox ── */
+.clm-du-decl-block.is-checked { border-color: #E87722; }
+.clm-declaration {
+  display: flex !important;
+  align-items: flex-start;
+  gap: 12px;
+  cursor: pointer;
+  margin: 0 !important;
+  padding: 14px 16px;
+  background: #fffcf0;
+  border: 1px solid #f1e2a0;
+  border-radius: 8px;
+}
+.clm-checkbox { display: none !important; }
+.clm-checkbox-box {
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  border: 2px solid #8a96a3 !important;
+  border-radius: 4px !important;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  background: #fff !important;
+  transition: all .15s;
+}
+.clm-checkbox:checked + .clm-checkbox-box {
+  background: #E87722 !important;
+  border-color: #E87722 !important;
+}
+.clm-checkbox:checked + .clm-checkbox-box::after {
+  content: '✓';
+  color: #ffffff !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+}
+.clm-checkbox-text {
+  font-size: 13px !important;
+  color: #1a1a1a !important;
+  line-height: 1.5;
+}
+.clm-du-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  flex-wrap: wrap;
+  padding: 14px 20px;
+  background: #fafbfc;
+  border-top: 1px solid #dde3ea;
+}
+.clm-du-foot-hint { font-size: 12.5px; color: #5a6a7a; flex: 1; }
+
+/* ── OTP Modal (Orange top accent &amp; Crimson Header) ── */
+.clm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(26, 26, 26, .55);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.clm-otp-modal {
+  background: #fff;
+  width: 440px;
+  max-width: 100%;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 20px 48px rgba(0,0,0,.25);
+  border-top: 4px solid #E87722;
+}
+.clm-otp-head {
+  padding: 22px 28px 18px;
+  background: linear-gradient(135deg, #9b1111 0%, #b81e1e 45%, #e0301e 100%);
+  color: #ffffff;
+}
+.clm-otp-head .clm-hero-bar {
+  background: #fff200;
+  margin-bottom: 8px;
+}
+.clm-otp-head h3 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #ffffff;
+}
+.clm-otp-body {
+  padding: 24px 28px;
+  text-align: center;
+}
+.clm-otp-body p {
+  font-size: 13px;
+  color: #3a4451;
+  margin: 0 0 16px;
+  line-height: 1.5;
+  text-align: left;
+}
+.clm-otp-input {
+  text-align: center;
+  font-size: 24px !important;
+  letter-spacing: 6px;
+  font-weight: 700;
+  height: 50px !important;
+  margin-bottom: 8px;
+}
+.clm-otp-timer-box {
+  font-size: 12.5px;
+  color: #5a6a7a;
+  margin-top: 6px;
+  margin-bottom: 12px;
+}
+.clm-otp-timer-text strong { color: #AF272F; }
+.clm-resend-link {
+  color: #AF272F;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+  transition: color .15s;
+}
+.clm-resend-link:hover { color: #9b1111; }
+.clm-otp-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 18px;
+}
+.clm-otp-actions .clm-btn { flex: 1; }
+.clm-err-msg {
+  color: #c0392b;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+/* ── Spinners ── */
+.clm-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #dde3ea;
+  border-top-color: #E87722;
+  border-radius: 50%;
+  animation: clm-spin .7s infinite linear;
+  vertical-align: middle;
+}
+.clm-spinner-light {
+  border-color: rgba(255, 255, 255, .3) !important;
+  border-top-color: #ffffff !important;
+}
+@keyframes clm-spin { to { transform: rotate(360deg); } }
+
+/* ── Responsive Adaptations ── */
+@media (max-width: 768px) {
+  .clm-grid-2, .clm-grid-3, .clm-file-grid { grid-template-columns: 1fr !important; }
+  .clm-hero { flex-direction: column; text-align: center; align-items: center; }
+  .clm-hero-stat {
+    border-left: none;
+    padding-left: 0;
+    border-top: 1px solid rgba(255, 255, 255, .22);
+    padding-top: 10px;
+    width: 100%;
+    text-align: center;
+  }
+  .clm-du-trade { min-width: 740px; }
+  .clm-sites-entry-table { min-width: 680px !important; }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>uclm_non-trade_document_submission_form</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Non-Trade Document Submission Form</name>
+        <option_schema/>
+        <public>true</public>
+        <roles/>
+        <script><![CDATA[(function () {
+
+	// =========================================================================
+	// 1. CONFIGURATION & SCHEMA CONSTANTS
+	// =========================================================================
+	var CONFIG = {
+		TABLE_MASTER: 'x_birl3_clm_clm_customer_master1',
+		TABLE_CUSTOMER_FORM: 'x_birl3_clm_customer_form',
+		TABLE_USER: 'sys_user',
+		LINK_EXPIRY_DAYS: 3,
+		OTP_COOLDOWN_MINUTES: 5,
+		EVENT_OTP: 'x_birl3_clm.nt_customer_otp',
+		EVENT_SUBMISSION: 'x_birl3_clm.nt_submission_notification',
+		FIELD_LINK_SENDER: 'link_sent_by' // Reference field pointing to sys_user
+	};
+
+	data.token = $sp.getParameter('token');
+	data.validToken = false;
+	data.updateAllowed = false;
+
+	function maskPan(pan) {
+		if (!pan) return '—';
+		var str = String(pan).trim().toUpperCase();
+		if (str.length >= 10) {
+			return str.substring(0, 5) + '****' + str.slice(-1);
+		}
+		return str;
+	}
+
+	function maskEmail(email) {
+		if (!email || email.indexOf('@') === -1) return 'your registered email';
+		var parts = email.split('@');
+		var name = parts[0];
+		var domain = parts[1];
+		var visible = name.length > 3 ? name.substring(0, 3) : name.substring(0, 1);
+		return visible + '***@' + domain;
+	}
+
+	function getUnit(seg) {
+		if (!seg) return 'MT';
+		return (String(seg).trim().toUpperCase() === 'RMC' ? 'CuM' : 'MT');
+	}
+
+	// Helper 1: Resolve customer email with PAN-wide fallback
+	function resolveCustomerEmail(masterGr, corporatePan) {
+		var email = (masterGr.getValue('last_sent_email') || masterGr.getValue('email_id') || masterGr.getValue('email') || '').trim();
+		if (!email && corporatePan) {
+			var altGr = new GlideRecord(CONFIG.TABLE_MASTER);
+			altGr.addQuery('cg1', 'N01');
+			altGr.addQuery('pan', corporatePan);
+			altGr.addNotNullQuery('last_sent_email');
+			altGr.setLimit(1);
+			altGr.query();
+			if (altGr.next()) {
+				email = (altGr.getValue('last_sent_email') || '').trim();
+			}
+		}
+		return email;
+	}
+
+	// Helper 2: Resolve TSH User via Reference Field (link_sent_by -> sys_user)
+	function resolveTshUser(masterGr, corporatePan) {
+		var userSysId = '';
+
+		// Priority 1: Check link_sent_by on the current master record
+		if (masterGr.isValidField(CONFIG.FIELD_LINK_SENDER) && masterGr.getValue(CONFIG.FIELD_LINK_SENDER)) {
+			userSysId = masterGr.getValue(CONFIG.FIELD_LINK_SENDER);
+		} else if (masterGr.isValidField('u_link_sent_by') && masterGr.getValue('u_link_sent_by')) {
+			userSysId = masterGr.getValue('u_link_sent_by');
+		}
+
+		// Priority 2: Check sibling child site records under the same PAN
+		if (!userSysId && corporatePan) {
+			var sibGr = new GlideRecord(CONFIG.TABLE_MASTER);
+			sibGr.addQuery('cg1', 'N01');
+			sibGr.addQuery('pan', corporatePan);
+			sibGr.addNotNullQuery(CONFIG.FIELD_LINK_SENDER);
+			sibGr.setLimit(1);
+			sibGr.query();
+			if (sibGr.next()) {
+				userSysId = sibGr.getValue(CONFIG.FIELD_LINK_SENDER);
+			}
+		}
+
+		// Query sys_user using the reference field's sys_id
+		if (userSysId) {
+			var uGr = new GlideRecord(CONFIG.TABLE_USER);
+			if (uGr.get(userSysId)) {
+				var repEmail = uGr.getValue('email');
+				if (repEmail) {
+					return {
+						sysId: uGr.getUniqueValue(),
+						userName: uGr.getValue('user_name'),
+						name: uGr.getValue('name') || uGr.getDisplayValue('name') || 'TSH Team',
+						email: repEmail
+					};
+				}
+			}
+		}
+
+		// Priority 3: Fallback to sys_updated_by if reference wasn't set
+		var updatedBy = masterGr.getValue('sys_updated_by');
+		if (updatedBy && updatedBy !== 'system' && updatedBy !== 'guest') {
+			var fbUser = new GlideRecord(CONFIG.TABLE_USER);
+			if (fbUser.get('user_name', updatedBy) && fbUser.getValue('email')) {
+				return {
+					sysId: fbUser.getUniqueValue(),
+					userName: fbUser.getValue('user_name'),
+					name: fbUser.getValue('name') || 'TSH Team',
+					email: fbUser.getValue('email')
+				};
+			}
+		}
+
+		return null;
+	}
+
+	// =========================================================================
+	// 2. INITIALIZATION: VALIDATE TOKEN & PULL PAN PORTFOLIO SITES & SEGMENTS
+	// =========================================================================
+	if (data.token && !input) {
+		var tokenGr = new GlideRecord(CONFIG.TABLE_MASTER);
+		tokenGr.addQuery('cg1', 'N01');
+		tokenGr.addQuery('token', data.token);
+		tokenGr.setLimit(1);
+		tokenGr.query();
+
+		if (tokenGr.next()) {
+			var nowNumeric = new GlideDateTime().getNumericValue();
+			var sentOn = tokenGr.getValue('link_sent_on');
+			var isExpired = false;
+
+			if (sentOn) {
+				var sentTime = new GlideDateTime(sentOn).getNumericValue();
+				if ((nowNumeric - sentTime) >= (CONFIG.LINK_EXPIRY_DAYS * 86400000)) {
+					isExpired = true;
+				}
+			}
+
+			if (!isExpired) {
+				data.validToken = true;
+				var uVal = tokenGr.getValue('update_allowed');
+				data.updateAllowed = (uVal === 'true' || uVal === '1' || uVal === true || uVal === 1);
+
+				var corporatePan = String(tokenGr.getValue('pan') || '').trim().toUpperCase();
+				data.pan = corporatePan;
+				data.maskedPan = maskPan(corporatePan);
+				data.customer_name = tokenGr.getValue('customer_name') || 'Non-Trade Customer';
+				data.rawEmail = resolveCustomerEmail(tokenGr, corporatePan);
+				data.maskedEmail = maskEmail(data.rawEmail);
+
+				// Query ALL child sites mapped under this Corporate PAN
+				data.sites = [];
+				var segmentMap = {};
+				var segmentList = [];
+
+				var siteGr = new GlideRecord(CONFIG.TABLE_MASTER);
+				siteGr.addQuery('cg1', 'N01');
+				siteGr.addQuery('pan', corporatePan);
+				siteGr.orderBy('customer_code_sap');
+				siteGr.query();
+
+				while (siteGr.next()) {
+					var rawSeg = (siteGr.getValue('segment') || 'Cement').trim();
+					var segUnit = getUnit(rawSeg);
+
+					if (!segmentMap[rawSeg]) {
+						segmentMap[rawSeg] = {
+							name: rawSeg,
+							unit: segUnit,
+							site_count: 0
+						};
+						segmentList.push(rawSeg);
+					}
+					segmentMap[rawSeg].site_count++;
+
+					data.sites.push({
+						sys_id: siteGr.getUniqueValue(),
+						customer_code_sap: siteGr.getValue('customer_code_sap') || '—',
+						customer_name: siteGr.getValue('customer_name') || '—',
+						segment: rawSeg,
+						unit: segUnit,
+						zone: siteGr.getValue('zone_name') || siteGr.getValue('zone') || '—',
+						region: siteGr.getValue('region_name') || siteGr.getValue('region') || '—',
+						depot: siteGr.getValue('depot_name') || siteGr.getValue('depot') || '—'
+					});
+				}
+
+				data.segments = segmentList;
+				data.segmentMeta = segmentMap;
+			}
+		}
+		return;
+	}
+
+	// =========================================================================
+	// 3. ACTION: GENERATE & STORE OTP AND TRIGGER EVENT (ON CUSTOMER MASTER)
+	// =========================================================================
+	if (input && input.action === 'generateOTP') {
+		var targetPan = String(input.pan || '').trim().toUpperCase();
+
+		var authGr = new GlideRecord(CONFIG.TABLE_MASTER);
+		authGr.addQuery('cg1', 'N01');
+		authGr.addQuery('token', input.token);
+		authGr.addQuery('pan', targetPan);
+		authGr.setLimit(1);
+		authGr.query();
+
+		if (authGr.next()) {
+			var nowNumeric = new GlideDateTime().getNumericValue();
+			var cooldownMs = CONFIG.OTP_COOLDOWN_MINUTES * 60 * 1000;
+
+			var activeOtpGr = new GlideRecord(CONFIG.TABLE_CUSTOMER_FORM);
+			activeOtpGr.addQuery('application_number', targetPan);
+			activeOtpGr.addQuery('application_status', 'otp_pending');
+			activeOtpGr.orderByDesc('sys_created_on');
+			activeOtpGr.setLimit(1);
+			activeOtpGr.query();
+
+			if (activeOtpGr.next()) {
+				var createdMs = new GlideDateTime(activeOtpGr.getValue('sys_created_on')).getNumericValue();
+				var elapsedMs = nowNumeric - createdMs;
+
+				if (elapsedMs < cooldownMs) {
+					var remainingSec = Math.ceil((cooldownMs - elapsedMs) / 1000);
+					data.success = true;
+					data.already_active = true;
+					data.remaining_seconds = remainingSec;
+					data.message = 'An OTP was already sent. Please use it or wait ' + remainingSec + ' seconds before requesting a new one.';
+					return;
+				} else {
+					activeOtpGr.deleteRecord();
+				}
+			}
+
+			// Clean up any remaining stale pending rows
+			var staleOtpGr = new GlideRecord(CONFIG.TABLE_CUSTOMER_FORM);
+			staleOtpGr.addQuery('application_number', targetPan);
+			staleOtpGr.addQuery('application_status', 'otp_pending');
+			staleOtpGr.query();
+			while (staleOtpGr.next()) {
+				staleOtpGr.deleteRecord();
+			}
+
+			// Generate new 6-digit OTP
+			var generatedOTP = Math.floor(100000 + Math.random() * 900000).toString();
+			var targetEmail = resolveCustomerEmail(authGr, targetPan);
+
+			// Store temporary OTP in customer form
+			var tempFormGr = new GlideRecord(CONFIG.TABLE_CUSTOMER_FORM);
+			tempFormGr.initialize();
+			tempFormGr.setValue('application_number', targetPan);
+			tempFormGr.setValue('application_status', 'otp_pending');
+			tempFormGr.setValue('otp', generatedOTP);
+			tempFormGr.setValue('customer', authGr.getUniqueValue());
+			if (tempFormGr.isValidField('pan')) tempFormGr.setValue('pan', targetPan);
+			tempFormGr.insert();
+
+			// Trigger OTP Email on CUSTOMER MASTER (authGr) so the record remains persistent
+			if (targetEmail) {
+				gs.eventQueue(CONFIG.EVENT_OTP, authGr, targetEmail, generatedOTP);
+			}
+
+			data.success = true;
+			data.already_active = false;
+			data.remaining_seconds = CONFIG.OTP_COOLDOWN_MINUTES * 60;
+		} else {
+			data.success = false;
+			data.message = 'Unable to verify upload session.';
+		}
+		return;
+	}
+
+	// =========================================================================
+	// 4. ACTION: VERIFY OTP, INSERT ROWS & TRIGGER TSH EVENT (ON CUSTOMER MASTER)
+	// =========================================================================
+	if (input && input.action === 'verifyOTPAndSubmit') {
+		var targetPan = String(input.pan || '').trim().toUpperCase();
+
+		// 1. Verify link validity against customer master
+		var verifyGr = new GlideRecord(CONFIG.TABLE_MASTER);
+		verifyGr.addQuery('cg1', 'N01');
+		verifyGr.addQuery('token', input.token);
+		verifyGr.addQuery('pan', targetPan);
+		verifyGr.setLimit(1);
+		verifyGr.query();
+
+		if (!verifyGr.next()) {
+			data.success = false;
+			data.message = 'Verification failed. Link is no longer valid.';
+			return;
+		}
+
+		// 2. Fetch and verify OTP from x_birl3_clm_customer_form
+		var otpRecordGr = new GlideRecord(CONFIG.TABLE_CUSTOMER_FORM);
+		otpRecordGr.addQuery('application_number', targetPan);
+		otpRecordGr.addQuery('application_status', 'otp_pending');
+		otpRecordGr.orderByDesc('sys_created_on');
+		otpRecordGr.setLimit(1);
+		otpRecordGr.query();
+
+		if (!otpRecordGr.next()) {
+			data.success = false;
+			data.message = 'No active OTP session found. Please request an OTP.';
+			return;
+		}
+
+		var nowNumeric = new GlideDateTime().getNumericValue();
+		var createdTime = new GlideDateTime(otpRecordGr.getValue('sys_created_on')).getNumericValue();
+		var elapsedMs = nowNumeric - createdTime;
+
+		if (elapsedMs > (CONFIG.OTP_COOLDOWN_MINUTES * 60 * 1000)) {
+			otpRecordGr.deleteRecord();
+			data.success = false;
+			data.message = 'OTP has expired (validity: 5 minutes). Please request a new OTP.';
+			return;
+		}
+
+		if (otpRecordGr.getValue('otp') !== input.otp) {
+			data.success = false;
+			data.message = 'Invalid OTP. Please check and try again.';
+			return;
+		}
+
+		// 3. Delete temporary OTP draft record
+		otpRecordGr.deleteRecord();
+
+		var appNumber = targetPan;
+		var formData = JSON.parse(input.formData || '{}');
+		var panSegments = formData.pan_segments || {};
+		var companyName = verifyGr.getValue('customer_name') || 'Non-Trade Customer';
+
+		// Resolve TSH via the Reference Field on Customer Master
+		var tsh = resolveTshUser(verifyGr, targetPan);
+
+		// Format Financials & Comments
+		var notes = (formData.comments || formData.comment || '').trim();
+		var finDetails = 'Turnover: Y1=' + (formData.turnover_year1 || '0') + 'L, Y2=' + (formData.turnover_year2 || '0') + 'L, Y3=' + (formData.turnover_year3 || '0') + 'L' +
+			(formData.additional_sd_offer ? ' | Addl SD: ₹' + formData.additional_sd_offer : '');
+		var combinedComments = notes ? (finDetails + ' | Notes: ' + notes) : finDetails;
+
+		var insertedSysIds = [];
+		var sites = formData.sites || [];
+
+		// 4. Insert submitted records for each mapped site code
+		for (var i = 0; i < sites.length; i++) {
+			var st = sites[i];
+			var formRow = new GlideRecord(CONFIG.TABLE_CUSTOMER_FORM);
+			formRow.initialize();
+
+			formRow.setValue('application_number', appNumber);
+			formRow.setValue('application_status', 'submitted');
+			formRow.setValue('customer', st.customer_master_sys_id || st.customer_code_sap);
+			if (formRow.isValidField('pan')) formRow.setValue('pan', targetPan);
+			if (formRow.isValidField('segment')) formRow.setValue('segment', st.segment);
+			formRow.setValue('proprietor_name', formData.proprietor_name || '');
+			formRow.setValue('declaration', true);
+			formRow.setValue('otp', input.otp);
+
+			// Link TSH on child rows if field exists
+			if (tsh && tsh.sysId) {
+				if (formRow.isValidField('link_sent_by')) formRow.setValue('link_sent_by', tsh.sysId);
+				else if (formRow.isValidField('u_link_sent_by')) formRow.setValue('u_link_sent_by', tsh.sysId);
+				else if (formRow.isValidField('tsh')) formRow.setValue('tsh', tsh.sysId);
+			}
+
+			if (formRow.isValidField('comments')) {
+				formRow.setValue('comments', combinedComments);
+			} else if (formRow.isValidField('comment')) {
+				formRow.setValue('comment', combinedComments);
+			} else if (formRow.isValidField('u_comments')) {
+				formRow.setValue('u_comments', combinedComments);
+			} else {
+				formRow.setValue('comments', combinedComments);
+			}
+
+			// Match PAN segment metrics
+			var panSegData = panSegments[st.segment] || {};
+			formRow.setValue('pan_total_potential', panSegData.pan_total_potential || '');
+			formRow.setValue('pan_ut_sob', panSegData.pan_ut_sob || '');
+			formRow.setValue('pan_ut_sob_per', panSegData.pan_ut_sob_per || '0.00');
+			formRow.setValue('pan_expected_sob', panSegData.pan_expected_sob || '');
+			formRow.setValue('pan_expected_sob_per', panSegData.pan_expected_sob_per || '0.00');
+
+			// Site-Specific Operational Metrics
+			formRow.setValue('site_total_potential', st.site_total_potential || '');
+			formRow.setValue('site_ut_sob', st.site_ut_sob || '');
+			formRow.setValue('site_ut_sob_per', st.site_ut_sob_per || '0.00');
+			formRow.setValue('site_expected_sob', st.site_expected_sob || '');
+			formRow.setValue('site_expected_sob_per', st.site_expected_sob_per || '0.00');
+
+			var rowId = formRow.insert();
+			if (rowId) insertedSysIds.push(rowId);
+		}
+
+		// 5. Batch update all site records under this PAN in Customer Master
+		var masterBatchGr = new GlideRecord(CONFIG.TABLE_MASTER);
+		masterBatchGr.addQuery('cg1', 'N01');
+		masterBatchGr.addQuery('pan', targetPan);
+		masterBatchGr.query();
+
+		while (masterBatchGr.next()) {
+			masterBatchGr.setValue('update_allowed', false);
+			masterBatchGr.setValue('link_status', 'Submitted');
+			masterBatchGr.update();
+		}
+
+		// 6. Trigger Notification Event for TSH on CUSTOMER MASTER (verifyGr)
+		if (tsh && tsh.email) {
+			var eventPayload = JSON.stringify({
+				repName: tsh.name,
+				companyName: companyName,
+				maskedPan: maskPan(targetPan),
+				siteCount: sites.length
+			});
+			gs.eventQueue(CONFIG.EVENT_SUBMISSION, verifyGr, tsh.email, eventPayload);
+		}
+
+		data.success = true;
+		data.application_number = appNumber;
+		data.primaryFormSysId = insertedSysIds[0] || null;
+		return;
+	}
+
+	// =========================================================================
+	// 5. ACTION: ATTACH FILES TO SUBMITTED FORM RECORD
+	// =========================================================================
+	if (input && input.action === 'attachFile') {
+		try {
+			var formRec = new GlideRecord(CONFIG.TABLE_CUSTOMER_FORM);
+			if (formRec.get(input.targetSysId)) {
+				var attSysId = new GlideSysAttachment().writeBase64(
+					formRec,
+					input.file_name,
+					input.content_type || 'application/octet-stream',
+					input.file_data
+				);
+				data.success = !!attSysId;
+			} else {
+				data.success = false;
+			}
+		} catch (eAtt) {
+			data.success = false;
+		}
+		return;
+	}
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-15 12:09:26</sys_created_on>
+        <sys_id>d7f5284497809b10be31fa17f053af6f</sys_id>
+        <sys_mod_count>22</sys_mod_count>
+        <sys_name>UCLM Non-Trade Document Submission Form</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_d7f5284497809b10be31fa17f053af6f</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-31 10:57:41</sys_updated_on>
+        <template><![CDATA[<div class="clm-wrap">
+
+  <!-- ===== State Card: Invalid or Expired Link ===== -->
+  <div ng-if="!c.data.validToken" class="clm-state-card clm-state-danger">
+    <div class="clm-state-icon">⚠</div>
+    <h3>Invalid or Expired Link</h3>
+    <p>This document submission link is either invalid or has expired.<br>Please contact your UltraTech territory sales executive.</p>
+  </div>
+
+  <!-- ===== State Card: Already Submitted ===== -->
+  <div ng-if="c.data.validToken && !c.data.updateAllowed && !c.submitted" class="clm-state-card clm-state-warn">
+    <div class="clm-state-icon">]]>🔒<![CDATA[</div>
+    <h3>Application Already Submitted</h3>
+    <p>Information and documents for PAN <strong>{{c.data.maskedPan}}</strong> have already been submitted.<br>
+       Contact your UltraTech sales executive if you need to resubmit.</p>
+  </div>
+
+  <!-- ===== State Card: Success ===== -->
+  <div ng-if="c.submitted" class="clm-state-card clm-state-success">
+    <div class="clm-state-icon">✓</div>
+    <h3>Application Submitted Successfully!</h3>
+    <p>Your Non-Trade application (PAN: <strong>{{c.submittedAppNumber}}</strong>) and supporting documents have been received.<br>Thank you!</p>
+  </div>
+
+  <!-- ===== Main Submission Form ===== -->
+  <div ng-if="c.data.validToken && c.data.updateAllowed && !c.submitted" class="clm-shell">
+
+    <!-- Header Hero Banner -->
+    <div class="clm-hero">
+      <div class="clm-hero-text">
+        <div class="clm-hero-bar"></div>
+        <div class="clm-hero-title">Non-Trade Document <span class="clm-hero-accent">Submission Form</span></div>
+        <div class="clm-hero-sub">Corporate PAN portfolio submission covering all active operating sites and segments</div>
+      </div>
+      <div class="clm-hero-stat">
+        <div class="clm-hero-stat-v">{{c.data.maskedPan}}</div>
+        <div class="clm-hero-stat-k">Corporate PAN</div>
+      </div>
+    </div>
+
+    <div class="clm-panel">
+
+      <!-- 1. Entity & Corporate PAN Details -->
+      <div class="clm-block">
+        <div class="clm-block-head">
+          <div class="clm-block-heading">
+            <div class="clm-block-title">Entity &amp; PAN Details</div>
+            <div class="clm-block-sub">Entity details pre-filled from customer master records</div>
+          </div>
+          <div class="clm-block-meta">
+            <span class="clm-chip"><span class="clm-chip-k">Mapped Sites</span> {{c.data.sites.length}} Sites</span>
+            <span class="clm-chip"><span class="clm-chip-k">Segments</span> {{c.data.segments.join(', ')}}</span>
+          </div>
+        </div>
+        <div class="clm-du-body">
+          <div class="clm-grid-3">
+            <div class="clm-field">
+              <label>Corporate Entity / Company Name</label>
+              <input type="text" class="clm-input clm-readonly" ng-model="c.formData.customer_name" readonly>
+            </div>
+            <div class="clm-field">
+              <label>Corporate PAN</label>
+              <input type="text" class="clm-input clm-readonly" ng-model="c.data.maskedPan" readonly>
+            </div>
+            <div class="clm-field">
+              <label>Proprietor / Authorized Signatory Name <span class="clm-req">*</span></label>
+              <input type="text" class="clm-input" ng-model="c.formData.proprietor_name" placeholder="Full legal name of signatory">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. PAN-Level Consolidated Share of Business by Segment -->
+      <div class="clm-block">
+        <div class="clm-block-head">
+          <div class="clm-block-heading">
+            <div class="clm-block-title">Consolidated PAN Level — Share of Business by Segment</div>
+            <div class="clm-block-sub">Overall monthly volume potential across all sites grouped by operating segment (MT / CuM). SOB % is calculated automatically.</div>
+          </div>
+          <div class="clm-block-meta">
+            <button type="button" class="clm-btn-helper" ng-click="c.sumAllSitesToPan()" title="Auto-calculate PAN totals from site code entries below for all segments">
+              ↻ Auto-Sum from Child Sites
+            </button>
+            <span class="clm-chip"><span class="clm-chip-k">Segments</span> {{c.data.segments.length}} Active</span>
+          </div>
+        </div>
+
+        <div class="clm-table-wrap">
+          <table class="clm-table clm-du-trade">
+            <thead>
+              <tr class="super">
+                <th class="bg-blank" rowspan="2" style="width: 22%;">Segment Portfolio</th>
+                <th class="bg-seg grp" style="width: 24%;">Expected Monthly Sales</th>
+                <th class="bg-assess grp" colspan="2" style="width: 27%;">Current UltraTech SOB</th>
+                <th class="bg-req grp" colspan="2" style="width: 27%;">Expected UltraTech SOB</th>
+              </tr>
+              <tr>
+                <th class="grp">Total Potential</th>
+                <th class="grp">Qty</th>
+                <th>SOB %</th>
+                <th class="grp">Qty</th>
+                <th>SOB %</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr ng-repeat="segKey in c.data.segments track by segKey">
+                <td class="clm-du-level">
+                  <div class="clm-du-level-name">PAN Level — {{segKey}}</div>
+                  <div class="clm-du-level-sub">
+                    Unit: <strong>{{c.formData.pan_segments[segKey].unit}}</strong> &bull; Covers {{c.data.segmentMeta[segKey].site_count}} Site{{c.data.segmentMeta[segKey].site_count > 1 ? 's' : ''}}
+                  </div>
+                </td>
+                <td class="grp" data-label="Total Potential">
+                  <div class="clm-input-wrap">
+                    <input type="number" min="0" class="clm-input clm-has-suffix"
+                           ng-model="c.formData.pan_segments[segKey].pan_total_potential"
+                           ng-change="c.calcPanSob(c.formData.pan_segments[segKey])"
+                           placeholder="0">
+                    <span class="clm-suffix">{{c.formData.pan_segments[segKey].unit}}</span>
+                  </div>
+                </td>
+                <td class="grp" data-label="Current SOB Qty">
+                  <div class="clm-input-wrap">
+                    <input type="number" min="0" class="clm-input clm-has-suffix"
+                           ng-model="c.formData.pan_segments[segKey].pan_ut_sob"
+                           ng-change="c.calcPanSob(c.formData.pan_segments[segKey])"
+                           placeholder="0">
+                    <span class="clm-suffix">{{c.formData.pan_segments[segKey].unit}}</span>
+                  </div>
+                </td>
+                <td data-label="Current SOB %">
+                  <span class="clm-du-pct">{{c.formData.pan_segments[segKey].pan_ut_sob_per}}<small>%</small></span>
+                </td>
+                <td class="grp" data-label="Expected SOB Qty">
+                  <div class="clm-input-wrap">
+                    <input type="number" min="0" class="clm-input clm-has-suffix"
+                           ng-model="c.formData.pan_segments[segKey].pan_expected_sob"
+                           ng-change="c.calcPanSob(c.formData.pan_segments[segKey])"
+                           placeholder="0">
+                    <span class="clm-suffix">{{c.formData.pan_segments[segKey].unit}}</span>
+                  </div>
+                </td>
+                <td data-label="Expected SOB %">
+                  <span class="clm-du-pct is-exp">{{c.formData.pan_segments[segKey].pan_expected_sob_per}}<small>%</small></span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 3. Site Code Level Breakdown with Segment Display -->
+      <div class="clm-block">
+        <div class="clm-block-head">
+          <div class="clm-block-heading">
+            <div class="clm-block-title">Child Site Code Level Operational Breakdown by Segment</div>
+            <div class="clm-block-sub">Individual operational figures for each mapped customer code under this PAN</div>
+          </div>
+          <div class="clm-block-meta">
+            <span class="clm-chip">{{c.data.sites.length}} Sites Active</span>
+          </div>
+        </div>
+
+        <div class="clm-table-wrap">
+          <table class="clm-table clm-sites-entry-table">
+            <thead>
+              <tr class="super">
+                <th class="bg-blank tl clm-sticky-col" style="width: 37%; min-width: 220px;">Customer Site Information</th>
+                <th class="bg-seg grp" style="width: 21%; min-width: 140px;">Monthly Potential</th>
+                <th class="bg-assess grp" style="width: 21%; min-width: 140px;">Current UltraTech SOB</th>
+                <th class="bg-req grp" style="width: 21%; min-width: 140px;">Expected UltraTech SOB</th>
+              </tr>
+              <tr>
+                <th class="tl clm-sticky-col clm-subth">Site Code &bull; Segment &bull; Name</th>
+                <th class="grp clm-subth">Total Potential</th>
+                <th class="grp clm-subth">Quantity &amp; SOB %</th>
+                <th class="grp clm-subth">Quantity &amp; SOB %</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr ng-repeat="site in c.formData.sites track by site.customer_code_sap">
+                <td data-label="Site Info" class="tl clm-sticky-col clm-td-siteinfo">
+                  <div class="clm-site-meta-row">
+                    <span class="clm-site-code-badge">{{site.customer_code_sap}}</span>
+                    <span class="clm-segment-pill" ng-class="site.segment === 'RMC' ? 'seg-rmc' : 'seg-cement'">
+                      {{site.segment}}
+                    </span>
+                  </div>
+                  <div class="clm-cust-name">{{site.customer_name}}</div>
+                </td>
+
+                <td class="grp text-center" data-label="Site Potential">
+                  <div class="clm-input-wrap clm-cell-center">
+                    <input type="number" min="0" class="clm-input clm-has-suffix" ng-model="site.site_total_potential" ng-change="c.calcSiteSob(site)" placeholder="0">
+                    <span class="clm-suffix">{{site.unit}}</span>
+                  </div>
+                </td>
+
+                <td class="grp text-center" data-label="Current SOB">
+                  <div class="clm-inline-cell">
+                    <div class="clm-input-wrap">
+                      <input type="number" min="0" class="clm-input clm-has-suffix" ng-model="site.site_ut_sob" ng-change="c.calcSiteSob(site)" placeholder="0">
+                      <span class="clm-suffix">{{site.unit}}</span>
+                    </div>
+                    <span class="clm-du-pct">{{site.site_ut_sob_per}}<small>%</small></span>
+                  </div>
+                </td>
+
+                <td class="grp text-center" data-label="Expected SOB">
+                  <div class="clm-inline-cell">
+                    <div class="clm-input-wrap">
+                      <input type="number" min="0" class="clm-input clm-has-suffix" ng-model="site.site_expected_sob" ng-change="c.calcSiteSob(site)" placeholder="0">
+                      <span class="clm-suffix">{{site.unit}}</span>
+                    </div>
+                    <span class="clm-du-pct is-exp">{{site.site_expected_sob_per}}<small>%</small></span>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 4. Financial Details & Security Deposit -->
+      <div class="clm-block">
+        <div class="clm-block-head">
+          <div class="clm-block-heading">
+            <div class="clm-block-title">Financial Details &amp; Additional Security</div>
+            <div class="clm-block-sub">Turnover for the last 3 financial years and security deposit offer</div>
+          </div>
+        </div>
+        <div class="clm-du-body">
+          <div class="clm-du-subhead">Turnover (₹ in Lakhs)</div>
+          <div class="clm-grid-3">
+            <div class="clm-field">
+              <label>Year 1 Turnover</label>
+              <div class="clm-input-wrap">
+                <span class="clm-prefix">₹</span>
+                <input type="number" min="0" class="clm-input clm-has-prefix clm-has-suffix" ng-model="c.formData.turnover_year1" placeholder="0.00">
+                <span class="clm-suffix">L</span>
+              </div>
+            </div>
+            <div class="clm-field">
+              <label>Year 2 Turnover</label>
+              <div class="clm-input-wrap">
+                <span class="clm-prefix">₹</span>
+                <input type="number" min="0" class="clm-input clm-has-prefix clm-has-suffix" ng-model="c.formData.turnover_year2" placeholder="0.00">
+                <span class="clm-suffix">L</span>
+              </div>
+            </div>
+            <div class="clm-field">
+              <label>Year 3 Turnover</label>
+              <div class="clm-input-wrap">
+                <span class="clm-prefix">₹</span>
+                <input type="number" min="0" class="clm-input clm-has-prefix clm-has-suffix" ng-model="c.formData.turnover_year3" placeholder="0.00">
+                <span class="clm-suffix">L</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="clm-du-subhead clm-mt-20">Security Deposit &amp; Remarks</div>
+          <div class="clm-grid-2">
+            <div class="clm-field">
+              <label>Additional Security Deposit Offer (₹)</label>
+              <div class="clm-input-wrap">
+                <span class="clm-prefix">₹</span>
+                <input type="number" min="0" class="clm-input clm-has-prefix" ng-model="c.formData.additional_sd_offer" placeholder="0.00">
+              </div>
+            </div>
+            <div class="clm-field">
+              <label>Comments / Operational Notes</label>
+              <input type="text" class="clm-input" ng-model="c.formData.comments" placeholder="Additional details or justification...">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5. Supporting Documents Upload -->
+      <div class="clm-block"
+           ng-init="suggestedDocs = [
+             {t:'Income Tax Return (ITR)', s:'Last 3 financial years'},
+             {t:'Audited Balance Sheet & P&L Statement', s:'Last 3 financial years'},
+             {t:'GST Returns (GSTR-3B / GSTR-1)', s:'Last 12 months'}
+           ]">
+        <div class="clm-block-head">
+          <div class="clm-block-heading">
+            <div class="clm-block-title">Supporting Documents</div>
+            <div class="clm-block-sub">Upload financial statements, GST filings, and business records</div>
+          </div>
+          <div class="clm-block-meta">
+            <span class="clm-chip">Optional</span>
+          </div>
+        </div>
+        <div class="clm-du-body">
+          <div class="clm-du-subhead">Suggested checklist</div>
+          <div class="clm-du-docs">
+            <div class="clm-du-doc" ng-repeat="d in suggestedDocs">
+              <div class="clm-du-doc-num">{{$index + 1}}</div>
+              <div class="clm-du-doc-info">
+                <div class="clm-du-doc-t">{{d.t}}</div>
+                <div class="clm-du-doc-s">{{d.s}}</div>
+              </div>
+              <span class="clm-du-pill-pdf">PDF</span>
+              <span class="clm-du-pill-opt">Optional</span>
+            </div>
+          </div>
+
+          <div class="clm-dropzone"
+               ng-class="{'clm-dropzone-active': c.dragOver}"
+               ng-dragover="c.onDragOver($event)"
+               ng-dragleave="c.dragOver=false"
+               ng-drop="c.onDrop($event)"
+               ng-click="c.triggerFileInput()">
+            <div class="clm-dz-icon">
+              <svg width="36" height="36" viewBox="0 0 40 40" fill="none">
+                <path d="M20 8V26M20 8L13 15M20 8L27 15" stroke="#b81e1e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M8 30H32" stroke="#b81e1e" stroke-width="2.5" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <div class="clm-dz-text">Click or drag files here to upload</div>
+            <div class="clm-dz-hint">PDF, JPG, PNG, DOC, or XLS (Max 5 MB per file)</div>
+            <input type="file" id="clm-nt-file-input" class="clm-hidden-input" multiple
+                   accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx"
+                   onchange="angular.element(this).scope().c.onFileSelect(this.files); this.value='';">
+          </div>
+
+          <div class="clm-file-grid" ng-if="c.selectedFiles.length">
+            <div class="clm-file-card"
+                 ng-repeat="file in c.selectedFiles track by $index"
+                 ng-class="{'clm-file-done': file.status==='done', 'clm-file-uploading': file.status==='uploading', 'clm-file-error': file.status==='error'}">
+              <div class="clm-file-icon" ng-class="c.getFileIconClass(file.name)">
+                <span ng-bind-html="c.getFileIcon(file.name)"></span>
+              </div>
+              <div class="clm-file-info">
+                <div class="clm-file-name" title="{{file.name}}">{{file.name}}</div>
+                <div class="clm-file-meta"><span class="clm-file-size">{{c.formatSize(file.size)}}</span></div>
+              </div>
+              <div class="clm-file-status">
+                <span ng-if="!file.status" class="clm-status-pending">Queued</span>
+                <span ng-if="file.status==='uploading'" class="clm-status-uploading"><span class="clm-spinner"></span></span>
+                <span ng-if="file.status==='done'" class="clm-status-done">✓ Attached</span>
+                <span ng-if="file.status==='error'" class="clm-status-error">✗ Failed</span>
+              </div>
+              <button class="clm-file-remove" ng-if="file.status !== 'uploading' && file.status !== 'done'"
+                      ng-click="c.removeFile($index); $event.stopPropagation()" title="Remove">✕</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 6. Declaration & Verification -->
+      <div class="clm-block clm-du-decl-block" ng-class="{'is-checked': c.formData.declaration}">
+        <div class="clm-block-head">
+          <div class="clm-block-heading">
+            <div class="clm-block-title">Declaration &amp; Verification</div>
+            <div class="clm-block-sub">Confirm accuracy of operational figures across all mapped child site codes and segments</div>
+          </div>
+        </div>
+        <div class="clm-du-body">
+          <label class="clm-declaration">
+            <input type="checkbox" class="clm-checkbox" ng-model="c.formData.declaration">
+            <span class="clm-checkbox-box"></span>
+            <span class="clm-checkbox-text">
+              I/We hereby declare that the particulars provided above across all mapped sites under Corporate PAN <strong>{{c.data.maskedPan}}</strong> are true, accurate, and complete to the best of my/our knowledge.
+            </span>
+          </label>
+        </div>
+        <div class="clm-du-foot">
+          <div class="clm-du-foot-hint">
+            <span ng-if="!c.formData.declaration">Tick the declaration checkbox above to enable OTP verification.</span>
+            <span ng-if="c.formData.declaration && c.cooldownSeconds === 0">A 6-digit OTP will be sent to <strong>{{c.data.maskedEmail}}</strong> to authenticate.</span>
+            <span ng-if="c.formData.declaration && c.cooldownSeconds > 0" class="text-primary">
+              <i class="fa fa-clock-o"></i> Active OTP sent to <strong>{{c.data.maskedEmail}}</strong> (Valid for {{c.formatCooldown()}}).
+            </span>
+          </div>
+          <button type="button" class="clm-btn clm-btn-primary clm-btn-submit"
+                  ng-click="c.triggerOTP()"
+                  ng-disabled="c.submitting || !c.formData.declaration">
+            <span ng-if="!c.submitting && c.cooldownSeconds === 0">Verify &amp; Submit Application</span>
+            <span ng-if="!c.submitting && c.cooldownSeconds > 0">Enter Sent OTP ({{c.formatCooldown()}})</span>
+            <span ng-if="c.submitting"><span class="clm-spinner clm-spinner-light"></span> Processing...</span>
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ===== OTP Modal ===== -->
+<div class="clm-overlay" ng-if="c.showOTPModal">
+  <div class="clm-otp-modal">
+    <div class="clm-otp-head">
+      <div class="clm-hero-bar"></div>
+      <h3>Authentication OTP</h3>
+    </div>
+    <div class="clm-otp-body">
+      <p>We've dispatched a 6-digit security OTP to your registered corporate email (<strong>{{c.data.maskedEmail}}</strong>). Please enter it below to confirm submission.</p>
+
+      <input type="text" class="clm-input clm-otp-input" ng-model="c.otpInput" placeholder="6-Digit OTP" maxlength="6" autocomplete="off">
+      <div class="clm-err-msg" ng-show="c.otpError">{{c.otpError}}</div>
+
+      <!-- Cooldown & Resend Info -->
+      <div class="clm-otp-timer-box">
+        <span ng-if="c.cooldownSeconds > 0" class="clm-otp-timer-text">
+          <i class="fa fa-hourglass-half"></i> OTP valid &bull; Resend available in: <strong>{{c.formatCooldown()}}</strong>
+        </span>
+        <span ng-if="c.cooldownSeconds === 0">
+          Didn't receive code? <a href="javascript:void(0)" class="clm-resend-link" ng-click="c.resendOTP()">Resend OTP Now</a>
+        </span>
+      </div>
+
+      <div class="clm-otp-actions">
+        <button type="button" class="clm-btn clm-btn-ghost" ng-click="c.cancelOTP()" ng-disabled="c.verifying">Cancel</button>
+        <button type="button" class="clm-btn clm-btn-primary" ng-click="c.submitRequest()" ng-disabled="c.verifying || !c.otpInput || c.otpInput.length < 6">
+          <span ng-if="!c.verifying">Verify &amp; Submit</span>
+          <span ng-if="c.verifying"><span class="clm-spinner clm-spinner-light"></span> Submitting...</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>d7f5284497809b10be31fa17f053af6f</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-15 12:09:26</sys_created_on>
+        <sys_id>93f5208497809b10be31fa17f053afc2</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-15 12:09:26</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm.rfi.answered.details</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm.rfi.answered.details
+// Notification table: x_birl3_clm_clm_new_credit_request (also works if the notification is on x_birl3_clm_clm_rfi)
+// Event: parm1 = RFI raiser (recipient, sys_id or email), parm2 = response text (used only as a fallback)
+(function runMailScript(current, template, email, email_action, event) {
+
+    // ── Resolve request + RFI ─────────────────────────────────────────
+    var rec = null, rfi = null;
+    if (current.getTableName() === 'x_birl3_clm_clm_rfi') {
+        rfi = current;
+        rec = current.u_request.getRefRecord();
+    } else {
+        rec = current;
+    }
+    if (!rec || !rec.isValidRecord()) {
+        template.print("<div style='font-family: Arial, sans-serif; color: #d9534f;'>Record not available (Preview limitation)</div>");
+        return;
+    }
+    var reqId = rec.getUniqueValue();
+
+    // Recipient = the person who raised the RFI
+    var recipId = '', recipName = 'User';
+    var p1 = (event && event.parm1) ? (event.parm1 + '').split(',')[0].trim() : '';
+    if (p1) {
+        var u = new GlideRecord('sys_user');
+        var found = false;
+        if (p1.indexOf('@') > -1) { u.addQuery('email', p1); u.setLimit(1); u.query(); found = u.next(); }
+        else { found = u.get(p1); }
+        if (found) { recipId = u.getUniqueValue(); recipName = u.getValue('name') || recipName; }
+    }
+
+    // Most recently answered RFI raised by this recipient (fallback: most recently answered on the request)
+    function latestAnswered(byUser) {
+        var r = new GlideRecord('x_birl3_clm_clm_rfi');
+        r.addQuery('u_request', reqId);
+        r.addQuery('u_status', 'answered');
+        if (byUser) r.addQuery('u_raised_by', byUser);
+        r.orderByDesc('sys_updated_on');
+        r.setLimit(1);
+        r.query();
+        return r.next() ? r : null;
+    }
+    if (!rfi) rfi = (recipId && latestAnswered(recipId)) || latestAnswered('');
+
+    var link = gs.getProperty('glide.servlet.uri') + 'uclm?id=clmapprover&sys_id=' + reqId;
+
+    var customerGR = rec.customer.getRefRecord();
+    var custValid  = customerGR && customerGR.isValidRecord();
+    var custName   = custValid ? (customerGR.getValue('customer_name') || '') : rec.getDisplayValue('customer');
+
+    email.setSubject('Information Received: CLM Request | ' + rec.getValue('number') + ' | ' + custName);
+
+    // ── Helpers (same as clm.approver.details) ────────────────────────
+    function esc(s) { return GlideStringUtil.escapeHTML(s || ''); }
+    function num(gr, f) { var v = parseFloat(gr.getValue(f)); return isNaN(v) ? 0 : v; }
+    function inr(n) {
+        var s = Math.round(Math.abs(n)).toString();
+        var last = s.slice(-3), rest = s.slice(0, -3);
+        if (rest) last = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last;
+        return last;
+    }
+    function rupee(n) { return '&#8377; ' + inr(n); }
+
+    var TD_K = 'padding:8px 0; color:#5a6a7a; border-bottom:1px solid #eef1f5;';
+    var TD_V = 'padding:8px 0; color:#1a1a1a; border-bottom:1px solid #eef1f5;';
+    var TILE = 'border:1px solid #e0e6ed; border-radius:6px; padding:12px 14px; background-color:#fafbfc;';
+    var TILE_K = 'font-size:10px; text-transform:uppercase; letter-spacing:.8px; color:#5a6a7a; font-weight:700;';
+    function sec(title, top) {
+        return '<h3 style="margin:' + (top || 24) + 'px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">' + title + '</h3>';
+    }
+    function kv(label, value, last, bold) {
+        return '<tr><td width="38%" style="' + (last ? 'padding:8px 0; color:#5a6a7a;' : TD_K) + '">' + label + '</td>' +
+               '<td style="' + (last ? 'padding:8px 0; color:#1a1a1a;' : TD_V) + (bold ? ' font-weight:700;' : '') + '">' + value + '</td></tr>';
+    }
+    function button(url, text) {
+        return '<table role="presentation" border="0" cellspacing="0" cellpadding="0" style="margin-top:22px;"><tbody><tr>' +
+               '<td align="center" bgcolor="#27ae60" style="border-radius:8px;">' +
+               '<a href="' + url + '" target="_blank" rel="noopener" style="display:inline-block; padding:12px 28px; font-family:\'Segoe UI\', Tahoma, Geneva, Verdana, sans-serif; ' +
+               'font-size:15px; font-weight:bold; color:#ffffff; text-decoration:none; border-radius:8px; text-transform:uppercase; letter-spacing:.5px;">' + text + '</a>' +
+               '</td></tr></tbody></table>';
+    }
+
+    var isTrade  = ((rec.getValue('customer_type') || '') + '').toLowerCase() === 'trade';
+    var existing = num(rec, 'u_code_level_current_limit');
+    var change   = num(rec, 'u_requested_additional_limit');
+    var newLimit = num(rec, 'u_code_level_total_requested');
+    var changeText  = (change > 0 ? '+' : (change < 0 ? '-' : '')) + rupee(change);
+    var changeColor = change < 0 ? '#E23D28' : '#1e8449';
+
+    var pill = '<span style="display:inline-block; background-color:#d6eaf8; color:#2980b9; border:1px solid #aed6f1; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">Information Received</span>';
+
+    var h = '';
+
+    // ── Greeting + headline + banner ──────────────────────────────────
+    h += '<p style="margin:0 0 4px 0; font-size:14px; color:#5a6a7a;">Dear ' + esc(recipName) + ',</p>';
+    h += '<h1 style="margin:10px 0 6px 0; font-size:22px; line-height:1.3; color:#1a1a1a; font-weight:700;">Your information request has been answered</h1>';
+    h += '<p style="margin:0 0 20px 0; font-size:14px; color:#5a6a7a;">Please review the response and continue with the approval.</p>';
+
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px;"><tbody><tr>';
+    h += '<td style="padding:12px 16px;"><div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#5a6a7a; font-weight:700;">Request Number</div>';
+    h += '<div style="font-size:18px; font-weight:700; color:#1a1a1a;">' + esc(rec.getValue('number')) + '</div>';
+    h += '<div style="font-size:12px; padding-top:3px;"><a href="' + link + '" style="color:#AF272F; font-weight:700; text-decoration:none;">Review in CredX &rarr;</a></div></td>';
+    h += '<td align="right" valign="middle" style="padding:12px 16px;">' + pill + '</td>';
+    h += '</tr></tbody></table>';
+
+    // ── Question & response ───────────────────────────────────────────
+    h += sec('Response', 28);
+    var question = rfi ? rfi.getValue('u_question') : '';
+    var response = (rfi && rfi.getValue('u_response')) || ((event && event.parm2) ? event.parm2 + '' : '');
+    var who = rfi ? rfi.getDisplayValue('u_target_user') + (rfi.getValue('u_target_role') ? ' (' + rfi.getValue('u_target_role') + ')' : '') : '';
+    var when = rfi ? (rfi.getDisplayValue('u_responded_on') || rfi.getDisplayValue('sys_updated_on')) : '';
+
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f4f9fb; border-left:4px solid #3498db; border-radius:4px;"><tbody><tr><td style="padding:14px 16px;">';
+    if (who) h += '<div style="font-size:12px; color:#5a6a7a; padding-bottom:8px; border-bottom:1px solid #e1e8ed;"><b style="color:#1a1a1a;">' + esc(who) + '</b> responded' + (when ? ' on ' + esc(when) : '') + '</div>';
+    if (question) h += '<div style="font-size:13px; line-height:1.5; padding-top:10px; color:#5a6a7a; white-space:pre-wrap; word-break:break-word;"><b>Q:</b> ' + esc(question) + '</div>';
+    h += '<div style="font-size:15px; line-height:1.6; padding-top:8px; color:#1a1a1a; white-space:pre-wrap; word-break:break-word;"><b style="color:#2c3e50;">A:</b> ' + (response ? esc(response) : '<span style="color:#8a96a3;">&mdash;</span>') + '</div>';
+    h += '</td></tr></tbody></table>';
+
+    // ── Request summary ───────────────────────────────────────────────
+    h += sec('Request Summary');
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+    h += kv('Customer Name', esc(custName), false, true);
+    if (custValid) h += kv('Customer Code', esc(customerGR.getValue('customer_code_sap')));
+    h += kv('Segment', esc(rec.getDisplayValue('segment')), true);
+    h += '</tbody></table>';
+
+    if (isTrade) {
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:12px;"><tbody><tr>';
+        h += '<td width="33%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Existing Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(existing) + '</div></div></td>';
+        h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Requested Change</div><div style="font-size:17px; font-weight:700; color:' + changeColor + '; padding-top:3px;">' + changeText + '</div></div></td>';
+        h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + '">New Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(newLimit) + '</div></div></td>';
+        h += '</tr></tbody></table>';
+    } else {
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px; margin-top:8px;"><tbody>';
+        h += kv('Current Credit Limit', rupee(num(rec, 'current_credit_limit')));
+        h += kv('Requested Limit', rupee(num(rec, 'requested_limit')), true, true);
+        h += '</tbody></table>';
+    }
+
+    h += button(link, 'Open Request in CredX');
+
+    template.print(h);
+
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-23 06:07:42</sys_created_on>
+        <sys_id>22ef142297881b10be31fa17f053af46</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm.rfi.answered.details</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_22ef142297881b10be31fa17f053af46</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-23 06:07:42</sys_updated_on>
+    </sys_script_email>
+</record_update>

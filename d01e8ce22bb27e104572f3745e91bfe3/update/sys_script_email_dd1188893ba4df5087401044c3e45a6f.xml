@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_nt_bg_expiry_script</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm_nt_bg_expiry_script
+// Notification table: x_birl3_clm_clm_customer_master1
+// Aligns Non-Trade Bank Guarantee Expiry Reminder UI with CredX Review Date Expiry Reminders
+(function runMailScript(current, template, email, email_action, event) {
+    try {
+        // --- 1. Helpers & Parsers ---
+        function s(v) { return (v === null || v === undefined) ? '' : String(v).trim(); }
+
+        function parseNum(v) {
+            if (!v && v !== 0) return 0;
+            var strVal = String(v);
+            if (strVal.indexOf(';') > -1) strVal = strVal.split(';')[1];
+            var num = parseFloat(strVal);
+            return isNaN(num) ? 0 : num;
+        }
+
+        function formatINR(val) {
+            var n = parseNum(val);
+            if (n === 0) return '&#8377; 0';
+            var isNeg = n < 0;
+            n = Math.abs(Math.round(n));
+            var str = n.toString();
+            var lastThree = str.substring(str.length - 3);
+            var otherNumbers = str.substring(0, str.length - 3);
+            if (otherNumbers !== '') {
+                lastThree = ',' + lastThree;
+            }
+            var res = otherNumbers.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + lastThree;
+            return (isNeg ? '- &#8377; ' : '&#8377; ') + res;
+        }
+
+        function esc(str) {
+            return s(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        // Format yyyy-MM-dd -> dd-MMM-yyyy (aligned with CredX Expiry Reminder UI)
+        function formatNiceDate(dtStr) {
+            var clean = s(dtStr).split(' ')[0];
+            var p = clean.split('-');
+            if (p.length === 3 && p[0].length === 4) {
+                var mn = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+                var mIdx = parseInt(p[1], 10) - 1;
+                if (mIdx >= 0 && mIdx < 12) {
+                    return p[2] + '-' + mn[mIdx] + '-' + p[0];
+                }
+            }
+            return clean || '&mdash;';
+        }
+
+        // --- 2. Parse Event Payload Safely ---
+        var payload = {};
+        if (event && event.parm2) {
+            try {
+                payload = JSON.parse(String(event.parm2));
+            } catch (e) {
+                gs.warn('clm_nt_bg_expiry_script: Failed to parse parm2 JSON, falling back to current record.');
+            }
+        }
+
+        var msCode     = s(payload.code) || 'T30';
+        var daysLeft   = (payload.daysLeft !== undefined) ? parseInt(payload.daysLeft, 10) : 30;
+        var expiryDate = s(payload.expiryDate) || s(current.getValue('bg_expiry_date')).split(' ')[0];
+        var panStr     = s(payload.pan) || s(current.getValue('pan'));
+        var zoneCode   = s(payload.zone) || s(current.getValue('zone'));
+        var siteSysIds = (payload.siteSysIds && payload.siteSysIds.length)
+            ? payload.siteSysIds
+            : [current.getUniqueValue()];
+
+        // --- 3. Query Live Site Records for Accurate Figures ---
+        var sites = [];
+        var bySeg = {};
+        var totalBgAmount = 0;
+        var totalCrLimit = 0;
+        var groupCustomerName = '';
+        var zoneDisplay = zoneCode;
+
+        var siteGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        siteGr.addQuery('sys_id', 'IN', siteSysIds.join(','));
+        siteGr.orderBy('customer_code_sap');
+        siteGr.query();
+
+        while (siteGr.next()) {
+            var cCode = s(siteGr.getValue('customer_code_sap'));
+            var cName = s(siteGr.getValue('customer_name'));
+            var gName = s(siteGr.getValue('group_customer_name'));
+            var seg   = s(siteGr.getDisplayValue('segment')) || s(siteGr.getValue('segment')) || 'Non-Trade';
+            var bgVal = parseNum(siteGr.getValue('bank_guarantee') || siteGr.getValue('security_deposit'));
+            var clVal = parseNum(siteGr.getValue('cr_limit'));
+            var expDt = s(siteGr.getValue('bg_expiry_date')).split(' ')[0] || expiryDate;
+
+            if (!groupCustomerName) {
+                groupCustomerName = gName || cName || 'Corporate Group';
+            }
+            if (!zoneDisplay || zoneDisplay === zoneCode) {
+                var zDisp = s(siteGr.getDisplayValue('zone'));
+                if (zDisp && zDisp !== zoneCode) zoneDisplay = zDisp + ' (' + zoneCode + ')';
+            }
+
+            bySeg[seg] = (bySeg[seg] || 0) + 1;
+            totalBgAmount += bgVal;
+            totalCrLimit += clVal;
+
+            sites.push({
+                code: cCode,
+                name: cName,
+                segment: seg,
+                bgAmount: bgVal,
+                crLimit: clVal,
+                expiryDate: expDt
+            });
+        }
+
+        if (!groupCustomerName) {
+            groupCustomerName = s(current.getValue('group_customer_name')) || s(current.getValue('customer_name')) || 'Corporate Group';
+        }
+
+        // --- 4. Urgency Accent, Timing Wording & Subject Line ---
+        var isExpired = (msCode === 'EXP' || daysLeft <= 0);
+        var niceDate  = formatNiceDate(expiryDate);
+        var whenText  = isExpired
+            ? 'today'
+            : (daysLeft === 1 ? 'tomorrow' : 'in ' + daysLeft + ' days');
+
+        // Urgency color palette matching CredX Review Date Expiry Reminders
+        var accent = (isExpired || daysLeft <= 1)
+            ? '#c0392b'
+            : (daysLeft <= 7 || msCode === 'T7')
+                ? '#E87722'
+                : (daysLeft <= 15 || msCode === 'T15')
+                    ? '#b58105'
+                    : '#1782c5';
+
+        var idLabel = panStr ? (groupCustomerName + ' - PAN: ' + panStr) : groupCustomerName;
+        if (isExpired) {
+            email.setSubject('[CredX] ACTION REQUIRED: Bank Guarantee Expired Today - ' + idLabel + ' (Zone ' + zoneCode + ')');
+        } else {
+            email.setSubject('[CredX] BG Expiry Reminder (' + daysLeft + ' Days Left) - ' + idLabel + ' (Zone ' + zoneCode + ')');
+        }
+
+        // Target Portal URL (Non-Trade BG Expiry Monitor)
+        var instanceUrl = s(gs.getProperty('glide.servlet.uri'));
+        if (instanceUrl && !instanceUrl.endsWith('/')) instanceUrl += '/';
+        var portalUrl = instanceUrl + 'uclm?id=uclm_nt_bank_guarantee_monitor';
+
+        // Subline metadata for the callout card
+        var segTxt = Object.keys(bySeg).map(function(k) { return esc(k) + ': ' + bySeg[k]; }).join(' &middot; ');
+        var metaParts = [esc(whenText)];
+        if (zoneDisplay) metaParts.push('Zone: ' + esc(zoneDisplay));
+        if (segTxt) metaParts.push(segTxt);
+        metaParts.push('Affected BG: ' + formatINR(totalBgAmount));
+        metaParts.push('Current Limit: ' + formatINR(totalCrLimit));
+
+        // --- 5. Render HTML Body (Aligned with CredX Expiry Reminder UI) ---
+        var h = [];
+
+        // Greeting
+        h.push('<p style="margin:0 0 4px 0;font-size:14px;color:#5a6a7a;">Dear Zone Commercial Head,</p>');
+
+        // Empty-state guard (if BG dates were already renewed)
+        if (sites.length === 0) {
+            h.push('<p style="margin:12px 0;font-size:14px;color:#1a1a1a;">The Bank Guarantee expiry dates due on <b>' + esc(niceDate) + '</b> have since been updated. No action is needed.</p>');
+            template.print(h.join(''));
+            return;
+        }
+
+        // Context Copy
+        if (isExpired) {
+            h.push('<p style="margin:12px 0 16px 0;font-size:14px;line-height:1.6;color:#1a1a1a;">The Bank Guarantee(s) for <b>' + sites.length +
+                   ' site(s)</b> under <b>' + esc(groupCustomerName) + '</b>' + (panStr ? ' (PAN: <b>' + esc(panStr) + '</b>)' : '') +
+                   ' in zone <b>' + esc(zoneDisplay || '&mdash;') + '</b> expired <b>today</b>. Please review net exposure and update the customer credit limit in the <b>Bank Guarantee Monitor</b>.</p>');
+        } else {
+            h.push('<p style="margin:12px 0 16px 0;font-size:14px;line-height:1.6;color:#1a1a1a;">The Bank Guarantee(s) for <b>' + sites.length +
+                   ' site(s)</b> under <b>' + esc(groupCustomerName) + '</b>' + (panStr ? ' (PAN: <b>' + esc(panStr) + '</b>)' : '') +
+                   ' in zone <b>' + esc(zoneDisplay || '&mdash;') + '</b> expire <b>' + esc(whenText) + '</b>. Please coordinate BG renewal or review the credit limit in the <b>Bank Guarantee Monitor</b>.</p>');
+        }
+
+        // Left-Bordered Expiry Callout Card (Matches CredX Expiry Callout Card)
+        h.push('<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #e0e6ed;border-left:5px solid ' + accent +
+               ';border-radius:6px;background-color:#fafbfc;margin:0 0 18px 0;"><tr><td style="padding:14px 18px;">' +
+               '<div style="font-size:11px;letter-spacing:.8px;text-transform:uppercase;color:#5a6a7a;font-weight:bold;">' +
+               (isExpired ? 'Bank guarantee expired' : 'Bank guarantee expiry') + '</div>' +
+               '<div style="font-size:22px;font-weight:bold;color:' + accent + ';margin-top:4px;">' + esc(niceDate) + '</div>' +
+               '<div style="font-size:12px;color:#5a6a7a;margin-top:4px;">' +
+               '<b>' + esc(groupCustomerName) + '</b>' + (panStr ? ' &middot; PAN: <span style="font-family:monospace;font-weight:bold;color:#1a1a1a;">' + esc(panStr) + '</span>' : '') +
+               '</div>' +
+               '<div style="font-size:12px;color:#5a6a7a;margin-top:2px;">' + metaParts.join(' &middot; ') + '</div>' +
+               '</td></tr></table>');
+
+        // Bordered Site Breakdown Table (Matches CredX Reminder Table Styling)
+        var th  = 'style="background-color:#eef1f5;color:#2b3440;padding:9px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;text-align:left;border:1px solid #dde3ea;"';
+        var thR = 'style="background-color:#eef1f5;color:#2b3440;padding:9px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;text-align:right;border:1px solid #dde3ea;"';
+        var td  = 'style="padding:9px 10px;font-size:13px;color:#1a1a1a;border:1px solid #e6eaef;vertical-align:top;"';
+        var tdR = 'style="padding:9px 10px;font-size:13px;color:#1a1a1a;border:1px solid #e6eaef;vertical-align:top;text-align:right;white-space:nowrap;"';
+
+        h.push('<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:0 0 8px 0;"><thead><tr>' +
+               '<th ' + th + '>Customer Site</th>' +
+               '<th ' + th + '>Segment</th>' +
+               '<th ' + thR + '>Existing Limit</th>' +
+               '<th ' + thR + '>BG Amount</th>' +
+               '<th ' + th + '>Expiry Date</th>' +
+               '</tr></thead><tbody>');
+
+        for (var i = 0; i < sites.length; i++) {
+            var st = sites[i];
+            h.push('<tr>' +
+                   '<td ' + td + '><b>' + esc(st.name || 'Site') + '</b><br><span style="font-size:12px;color:#5a6a7a;font-family:monospace;">(' + esc(st.code || 'N/A') + ')</span></td>' +
+                   '<td ' + td + '>' + esc(st.segment) + '</td>' +
+                   '<td ' + tdR + '>' + formatINR(st.crLimit) + '</td>' +
+                   '<td ' + tdR + '><b>' + formatINR(st.bgAmount) + '</b></td>' +
+                   '<td style="padding:9px 10px;font-size:13px;border:1px solid #e6eaef;vertical-align:top;white-space:nowrap;color:' + (isExpired ? '#c0392b' : '#1a1a1a') + ';font-weight:' + (isExpired ? 'bold' : 'normal') + ';">' + esc(formatNiceDate(st.expiryDate)) + '</td>' +
+                   '</tr>');
+        }
+
+        h.push('</tbody></table>');
+
+        // Left-Aligned CTA Button (Matches CredX Expiry Reminder Button)
+        h.push('<p style="margin:16px 0 0 0;"><a href="' + portalUrl + '" target="_blank" style="display:inline-block;background-color:#E87722;color:#ffffff;font-weight:bold;' +
+               'font-size:14px;text-decoration:none;padding:10px 22px;border-radius:6px;">Open Bank Guarantee Monitor</a></p>');
+
+        template.print(h.join(''));
+
+    } catch (ex) {
+        gs.error('CLM MailScript clm_nt_bg_expiry_script error: ' + ex.message);
+        template.print('<div style="font-family: Arial, sans-serif; color: #d9534f;">Error rendering Bank Guarantee expiry reminder details.</div>');
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-12 08:55:26</sys_created_on>
+        <sys_id>dd1188893ba4df5087401044c3e45a6f</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>clm_nt_bg_expiry_script</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_dd1188893ba4df5087401044c3e45a6f</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-17 07:28:18</sys_updated_on>
+    </sys_script_email>
+</record_update>

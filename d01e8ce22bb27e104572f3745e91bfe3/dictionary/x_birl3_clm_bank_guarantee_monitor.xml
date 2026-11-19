@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?><database>
+    <element attributes="enforce_dot_walk_cross_scope_access=true" db_object_id="0fef4dd92b885310335bf9fe4e91bf12" label="Bank Guarantee Monitor" max_length="40" name="x_birl3_clm_bank_guarantee_monitor" type="collection">
+        <element label="Credit Segment" max_length="40" name="credit_segment" type="string"/>
+        <element label="Old Credit Limit" max_length="38" name="old_credit_limit" type="decimal"/>
+        <element default="cacbc7742bb676104572f3745e91bf5a" label="Domain" max_length="32" name="sys_domain" type="domain_id"/>
+        <element choice="3" label="Customer Type" max_length="40" name="customer_type" type="choice">
+            <choice>
+                <element inactive_on_update="false" label="Non-Trade" sequence="0" value="non_trade"/>
+                <element inactive_on_update="false" label="Key" sequence="1" value="key"/>
+            </choice>
+        </element>
+        <element label="Credit Limit" max_length="38" name="credit_limit" type="decimal"/>
+        <element attributes="edge_encryption_enabled=true" default="javascript:global.getNextObjNumberPadded();" label="Number" max_length="40" name="number" type="string"/>
+        <element label="Description" max_length="4000" name="description" type="string"/>
+        <element default="!!!/!!(/" label="Domain Path" max_length="255" name="sys_domain_path" type="domain_path"/>
+        <element label="Next Review Date" max_length="40" name="next_review_date" type="glide_date"/>
+        <element label="Customer Site Code" max_length="32" name="customer_site_code" reference="x_birl3_clm_clm_customer_master1" type="reference"/>
+        <index name="index">
+            <element name="sys_domain_path"/>
+        </index>
+        <index name="index2">
+            <element name="sys_domain"/>
+        </index>
+        <index name="index3">
+            <element name="customer_site_code"/>
+        </index>
+    </element>
+</database>

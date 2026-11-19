@@ -1,0 +1,1932 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $filter, $location, spUtil, $window) {
+  var c = this;
+
+  c.data.selectedSwap = null;
+  c.data.swapDetails = null;
+  c.data.isLoadingDetails = false;
+  c.data.isCancelling = false;
+  c.data.isUploadingAttachment = false; // Tracking UI Attachment Upload State
+  
+  // OOB Widget Tracking
+  c.data.ticketWidget = null;
+  c.data.attachmentWidget = null; 
+  c.data.isLoadingWidget = false;
+  
+  c.searchSwap = ''; 
+  c.listFilter = 'all';
+
+  // Pagination Config
+  c.currentPage = 1;
+  c.itemsPerPage = 10;
+
+  // INR Formatting Utility Engine
+  c.formatINR = function(val) {
+      if (val === undefined || val === null || val === '') return '0.00';
+      var num = parseFloat(val);
+      if (isNaN(num)) return '0.00';
+      return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+
+  // URL Parameter Deep Linking
+  var initUrlNumber = $location.search().number;
+  if (initUrlNumber) {
+      c.server.update().then(function() {
+          var targetSwap = c.data.list.find(function(s) { return s.number === initUrlNumber; });
+          if (targetSwap) {
+              c.viewDetails(targetSwap);
+          }
+      });
+  }
+
+  c.setFilter = function(filterType) { 
+    c.listFilter = filterType; 
+    c.currentPage = 1; 
+  };
+
+  c.getFilteredSwaps = function() {
+    var arr = c.data.list || [];
+    if (c.listFilter === 'pending') {
+      arr = arr.filter(function(b) { return b.internalState === 'pending' || b.internalState === 'work'; });
+    } else if (c.listFilter === 'completed') {
+      arr = arr.filter(function(b) { return b.internalState === 'approved' || b.internalState === 'rejected' || b.internalState === 'cancelled'; });
+    }
+    return $filter('filter')(arr, c.searchSwap);
+  };
+
+  c.getPaginatedSwaps = function() {
+    var filtered = c.getFilteredSwaps();
+    var startIndex = (c.currentPage - 1) * c.itemsPerPage;
+    return filtered.slice(startIndex, startIndex + c.itemsPerPage);
+  };
+
+  c.totalPages = function() {
+    return Math.ceil(c.getFilteredSwaps().length / c.itemsPerPage) || 1;
+  };
+
+  c.getMathMin = function(a, b) {
+    return Math.min(a, b);
+  };
+
+  // View Drill-down
+  c.viewDetails = function(swap) {
+    c.data.selectedSwap = swap;
+    c.data.isLoadingDetails = true;
+    c.data.ticketWidget = null;
+    c.data.attachmentWidget = null; // Clear prev states
+    
+    // Update the URL natively without reloading page
+    $location.search('number', swap.number);
+    
+    // HIGHLIGHT: GET VALUE - Send request to Server Script for specific Swap details
+    c.server.get({
+      action: 'get_swap_details',
+      swapSysId: swap.sys_id
+    }).then(function(response) {
+      // HIGHLIGHT: BINDING - Applying the returned mapped Geo Data and Metrics back to the Frontend View
+      c.data.swapDetails = {
+        approvals: response.data.approvalData,
+        extended: response.data.extendedDetails
+      };
+      c.data.isLoadingDetails = false;
+      
+      c.data.isLoadingWidget = true;
+
+      // 1. Inject Native OOB Ticket Attachments Widget
+      spUtil.get('ticket-attachments', {
+          sys_id: swap.sys_id,
+          table: 'x_birl3_clm_nt_limit_swap_request'
+      }).then(function(attWidget) {
+          c.data.attachmentWidget = attWidget;
+
+          // 2. Inject Native OOB Ticket Conversation Widget
+          spUtil.get('widget-ticket-conversation', {
+              sys_id: swap.sys_id,
+              table: 'x_birl3_clm_nt_limit_swap_request', 
+              btnLabel: 'Post Reply'
+          }).then(function(convoWidget) {
+              c.data.ticketWidget = convoWidget;
+              c.data.isLoadingWidget = false;
+          });
+      });
+
+    });
+  };
+
+  // HIGHLIGHT: SET VALUE - New Functionality to Process File Uploads natively for Ticket Activity
+  c.attachFileToStream = function(inputElement) {
+      if (!inputElement.files || inputElement.files.length === 0) return;
+      var file = inputElement.files[0];
+      
+      c.data.isUploadingAttachment = true;
+      $scope.$applyAsync(); // Force Angular Digest for UI Spinner
+
+      var reader = new FileReader();
+      reader.onload = function(e) {
+          var base64Data = e.target.result.split(',')[1];
+          
+          c.server.get({
+              action: 'upload_attachment',
+              swapSysId: c.data.selectedSwap.sys_id,
+              fileName: file.name,
+              contentType: file.type,
+              fileData: base64Data
+          }).then(function(response) {
+              c.data.isUploadingAttachment = false;
+              if (response.data.success) {
+                  spUtil.addInfoMessage("File '"+ file.name +"' securely attached to the request.");
+                  // Re-trigger the Drilldown to natively refresh both Conversation and Attachment widgets
+                  c.viewDetails(c.data.selectedSwap); 
+              } else {
+                  spUtil.addErrorMessage("System Error: Unable to upload attachment securely.");
+              }
+          });
+      };
+      reader.readAsDataURL(file);
+  };
+
+  // Cancel Swap Request
+  c.cancelRequest = function(swap) {
+      if(confirm("Are you sure you want to cancel this Limit Swap request? This action will permanently halt all backend workflows.")) {
+          c.data.isCancelling = true;
+          
+          c.server.get({
+              action: 'cancel_swap',
+              swapSysId: swap.sys_id
+          }).then(function(response) {
+              c.data.isCancelling = false;
+              if (response.data.success) {
+                  spUtil.addInfoMessage("Swap Request " + swap.number + " has been successfully cancelled.");
+                  c.goBack();
+                  c.server.update(); // Refresh grid
+              } else {
+                  spUtil.addErrorMessage("Error: Unable to cancel the request.");
+              }
+          });
+      }
+  };
+
+  c.goBack = function() {
+    c.data.selectedSwap = null;
+    c.data.swapDetails = null;
+    c.data.ticketWidget = null;
+    c.data.attachmentWidget = null;
+    $location.search('number', null);
+  };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* Premium Enterprise Container Styling */
+.abg-widget-container { 
+  background-color: #FFFFFF; 
+  padding: 35px; 
+  border-radius: 6px; 
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05); 
+  font-family: 'Oxygen', "Helvetica Neue", Arial, sans-serif; 
+}
+
+/* Structural Core &amp; Alignment tools */
+.d-flex { display: flex; }
+.justify-content-between { justify-content: space-between; }
+.align-items-center { align-items: center; }
+.border-bottom { border-bottom: 1px solid #EAEAEA; }
+.border-top { border-top: 1px solid #EAEAEA; }
+.border { border: 1px solid #EAEAEA; }
+.rounded { border-radius: 6px; }
+.m-b-none { margin-bottom: 0 !important; }
+.m-b-xs { margin-bottom: 6px !important; }
+.m-b-sm { margin-bottom: 10px !important; }
+.m-b-md { margin-bottom: 20px !important; }
+.m-b-lg { margin-bottom: 30px !important; }
+.m-t-xs { margin-top: 6px !important; }
+.m-t-sm { margin-top: 10px !important; }
+.m-t-md { margin-top: 20px !important; }
+.p-l-0 { padding-left: 0 !important; }
+.p-t-xs { padding-top: 6px !important; }
+.p-l-xs { padding-left: 6px !important; }
+.p-sm { padding: 10px !important; }
+.p-md { padding: 15px !important; }
+.p-b-md { padding-bottom: 15px !important; }
+.p-xl { padding: 40px !important; }
+.m-r-xs { margin-right: 6px !important; }
+.m-l-sm { margin-left: 10px !important; }
+.m-l-md { margin-left: 20px !important; }
+.m-r-sm { margin-right: 10px !important; }
+.font-weight-bold { font-weight: 700 !important; }
+.vertical-middle { vertical-align: middle !important; }
+.text-muted { color: #718096 !important; }
+.text-success { color: #2E7D32 !important; }
+.text-danger { color: #C8102E !important; }
+.text-xs { font-size: 11px !important; letter-spacing: 0.3px; }
+.text-sm { font-size: 13px !important; }
+
+.bg-white { background-color: #FFFFFF !important; }
+.abg-header h2 { color: #2D3748; font-weight: 700; margin-top: 0; font-size: 24px; }
+.header-divider { border-bottom: 2px solid #F7FAFC; padding-bottom: 20px; margin-bottom: 25px; }
+.hover-red { transition: color 0.2s ease; }
+.hover-red:hover { color: #C8102E !important; text-decoration: none; }
+.section-title { font-size: 12.5px; color: #4A5568; letter-spacing: 0.8px; margin-bottom: 15px; }
+.clm-id-tag { background: #EDF2F7; color: #2B6CB0; padding: 3px 8px; border-radius: 4px; font-family: monospace; font-size: 13px; }
+.segment-badge { background-color: #4A5568; padding: 2px 6px; font-size: 10px; border-radius: 3px; display: inline-block; margin-top: 4px; color: #FFF; }
+.bg-light { background-color: #f8f9fa; }
+
+/* Flexgrid Configurations */
+.flex-align-center { display: flex; flex-wrap: wrap; align-items: center; }
+.flex-cards { display: flex; flex-wrap: wrap; margin-left: -12px; margin-right: -12px; } 
+.flex-cards &gt; div { display: flex; flex-direction: column; margin-bottom: 24px; padding-left: 12px; padding-right: 12px; }
+
+/* Header Actions */
+.header-actions-panel { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 15px; }
+.abg-pills { display: flex; list-style: none; margin: 0; padding: 0; }
+.abg-pills &gt; li &gt; a { display: inline-block; border-radius: 30px; color: #4A5568; font-weight: 700; padding: 6px 18px; margin-left: 8px; border: 1px solid #E2E8F0; font-size: 13px; background: #FFF; transition: all 0.2s; text-decoration: none; }
+.abg-pills &gt; li:first-child &gt; a { margin-left: 0; }
+.abg-pills &gt; li &gt; a:hover { background-color: #EDF2F7; color: #2D3748; }
+.abg-pills &gt; li.active &gt; a { background-color: #C8102E !important; color: #FFF !important; border-color: #C8102E; box-shadow: 0 3px 6px rgba(200, 16, 46, 0.25); }
+
+/* Search Box */
+.search-box { width: 250px; display: flex; align-items: stretch; }
+.search-box .input-group-addon { background: #FFFFFF; border: 1px solid #CBD5E0; border-right: none; border-radius: 4px 0 0 4px; display: flex; align-items: center; padding: 0 12px; }
+.search-box .form-control { height: 36px; font-size: 13px; border: 1px solid #CBD5E0; border-left: none; border-radius: 0 4px 4px 0; box-shadow: none; }
+.search-box .form-control:focus { border-color: #C8102E; box-shadow: inset 0 -2px 0 rgba(200, 16, 46, 0.1); }
+
+/* Main Table */
+.widget-table-wrapper { border-radius: 6px; border: 1px solid #E2E8F0; margin: 15px 0 25px 0; }
+.abg-table { margin-bottom: 0; width: 100%; }
+.abg-table thead th { background-color: #F7FAFC; color: #4A5568; font-weight: 700; text-transform: uppercase; font-size: 11.5px; border-bottom: 2px solid #E2E8F0; padding: 14px 12px; white-space: nowrap; }
+.abg-table tbody tr { transition: background 0.15s ease; }
+.abg-table tbody tr:hover { background-color: #FFF5F5 !important; }
+
+/* Status Badges */
+.status-pill { padding: 5px 14px; border-radius: 30px; font-size: 11.5px; font-weight: 700; display: inline-block; white-space: nowrap; text-transform: uppercase; letter-spacing: 0.5px; }
+.status-pending { background-color: #FEF3C7; color: #D97706; border: 1px solid #FCD34D; }
+.status-approved { background-color: #D1FAE5; color: #065F46; border: 1px solid #34D399; }
+.status-rejected { background-color: #FEE2E2; color: #991B1B; border: 1px solid #F87171; }
+.status-cancelled { background-color: #F3F4F6; color: #4B5563; border: 1px solid #D1D5DB; }
+.status-work { background-color: #DBEAFE; color: #1E40AF; border: 1px solid #60A5FA; }
+
+/* Buttons */
+.abg-btn-outline { background: transparent; border: 1px solid #C8102E; color: #C8102E; font-weight: 700; border-radius: 4px; padding: 6px 14px; transition: all 0.2s; white-space: nowrap; cursor: pointer; }
+.abg-btn-outline:hover:not([disabled]) { background: #C8102E; color: #FFF; box-shadow: 0 4px 8px rgba(200, 16, 46, 0.15); }
+.abg-btn-outline[disabled] { opacity: 0.6; cursor: not-allowed; }
+.btn-danger { background-color: #C8102E; border-color: #A00D25; }
+.btn-danger:hover { background-color: #A00D25; }
+
+/* Profile Panels */
+.abg-profile-panel { background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.02); width: 100%; display: flex; flex-direction: column; }
+.border-top-success { border-top: 4px solid #2E7D32; }
+.border-top-danger { border-top: 4px solid #C8102E; }
+
+.panel-profile-header { padding: 20px 24px; border-bottom: 1px solid #EDF2F7; background: #FDFDFD; }
+.panel-profile-header .indicator-marker { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.panel-profile-header h3 { margin: 0; font-size: 22px; font-weight: 700; color: #1A202C; letter-spacing: -0.5px; }
+
+.panel-profile-body { padding: 10px 0; }
+.abg-profile-table { margin-bottom: 0; width: 100%; }
+.abg-profile-table tbody tr td { padding: 14px 24px !important; border-top: 1px solid #F0F4F8; color: #2D3748; font-size: 14px; vertical-align: middle; }
+.abg-profile-table tbody tr th { padding: 14px 24px !important; border-top: 1px solid #F0F4F8; color: #718096; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; vertical-align: middle; font-weight: 700; }
+
+.highlight-row-success { background-color: #F4FBF6; }
+.highlight-row-danger { background-color: #FFF5F5; }
+.highlight-total-success { background-color: #E6F4EA; border-top: 1px dashed #2E7D32 !important; }
+.highlight-total-danger { background-color: #FCE8EA; border-top: 1px dashed #C8102E !important; }
+.highlight-total-success td, .highlight-total-success th,
+.highlight-total-danger td, .highlight-total-danger th { font-size: 16px !important; padding: 16px 24px !important; color: #1a1a1a; }
+
+/* Excel Bucket History Table */
+.abg-history-table { border: 1px solid #E2E8F0; width: 100%; }
+.abg-history-table th { background-color: #EDF2F7; color: #4A5568; font-size: 10px; text-transform: uppercase; padding: 8px 6px !important; border-bottom: 1px solid #E2E8F0; vertical-align: middle; text-align: center; }
+.abg-history-table th.text-left { text-align: left; padding-left: 12px !important;}
+.abg-history-table th.text-right { text-align: right; padding-right: 12px !important;}
+.abg-history-table td { padding: 8px 6px !important; font-size: 11.5px; color: #1A202C; border-top: 1px solid #E2E8F0; vertical-align: middle; text-align: center; white-space: nowrap; }
+.abg-history-table td.text-left { text-align: left; padding-left: 12px !important;}
+.abg-history-table td.text-right { text-align: right; padding-right: 12px !important;}
+
+/* Horizontal Stepper */
+.approval-stepper-wrapper { background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 6px; padding: 24px; box-shadow: 0 2px 4px rgba(0,0,0,0.01); }
+.approval-stepper { display: flex; justify-content: space-between; align-items: flex-start; position: relative; width: 100%; overflow-x: auto; padding: 10px 0; -webkit-overflow-scrolling: touch; }
+.approval-stepper::before { content: ''; position: absolute; top: 25px; left: 5%; right: 5%; height: 3px; background: #E2E8F0; z-index: 1; width: 90%; }
+.stepper-item { text-align: center; position: relative; z-index: 2; flex: 1; min-width: 120px; padding: 0 8px; }
+.stepper-icon { width: 34px; height: 34px; border-radius: 50%; background: #FFF; border: 3px solid #CBD5E0; margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; color: #A0AEC0; font-weight: 700; transition: all 0.2s ease; }
+.stepper-label { font-size: 13px; font-weight: 700; color: #2D3748; line-height: 1.3; margin-bottom: 2px; }
+.stepper-sub { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+
+.stepper-item.completed .stepper-icon { background: #2E7D32; border-color: #2E7D32; color: #FFF; }
+.stepper-item.current .stepper-icon { background: #FFF; border-color: #D97706; color: #D97706; box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.15); }
+.stepper-item.rejected .stepper-icon { background: #C8102E; border-color: #C8102E; color: #FFF; }
+
+/* OOB TICKET CONVERSATION WIDGET FIXES */
+.ticket-panel { border-radius: 6px; border: 1px solid #E2E8F0; overflow: hidden; }
+.ticket-body { padding: 30px 24px; min-height: 250px; }
+.timeline-container { padding: 0 !important; }
+.timeline-container .panel { box-shadow: none !important; border: none !important; }
+.timeline-container .panel-heading { display: none !important; }
+
+/* New Attachment Fixes */
+.ticket-attachments-wrapper .panel { background-color: transparent !important; margin-bottom: 0; }
+.ticket-attachments-wrapper .panel-heading { display: block !important; padding: 0 0 10px 0; background: transparent; border-bottom: 1px dashed #D1D5DB; }
+.ticket-attachments-wrapper .panel-title { font-size: 13px; font-weight: 700; color: #4A5568; }
+
+/* Utilities &amp; Animations */
+.shadow-sm { box-shadow: 0 4px 12px rgba(0,0,0,0.03); }
+.slide-down { animation: slideDownFade 0.25s ease-out; }
+@keyframes slideDownFade { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+.page-size-box { width: 110px; }
+.page-size-box .form-control { height: 30px; padding: 4px 8px; font-size: 12px; }
+.page-size-box .input-group-addon { padding: 4px 8px; font-size: 12px; }
+
+/* Mobile Responsiveness */
+@media (max-width: 991px) { .header-actions-panel .search-box { width: 180px; } }
+@media (max-width: 767px) {
+  .abg-widget-container { padding: 20px 15px; }
+  .flex-align-center { flex-direction: column; align-items: stretch; }
+  .m-b-sm-mobile { margin-bottom: 15px !important; }
+  .mobile-left { text-align: left !important; }
+  .header-actions-panel { flex-direction: column; align-items: stretch; margin-top: 15px; gap: 12px; }
+  .abg-pills { justify-content: space-between; width: 100%; margin-right: 0; }
+  .abg-pills &gt; li { flex-grow: 1; margin: 0 2px; }
+  .abg-pills &gt; li &gt; a { display: block; text-align: center; margin: 0; padding: 8px 4px; font-size: 11px; }
+  .search-box { width: 100% !important; }
+  .abg-profile-table tbody tr td, .abg-profile-table tbody tr th { padding: 12px 14px !important; font-size: 13px !important; }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id/>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Limit Swap View Request</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+    // Global Segment Mapping Enforcer
+    var segmentMapping = { 'UTCL': 'Cement', 'URMX': 'RMC', 'GIL': 'BPD' };
+
+    function getInternalState(stateStr) {
+        var s = (stateStr || '').toLowerCase();
+        if (s.indexOf('pending') > -1 || s.indexOf('requested') > -1) return 'pending';
+        if (s.indexOf('approved') > -1 || s.indexOf('complete') > -1 || s.indexOf('3') > -1) return 'approved';
+        if (s.indexOf('reject') > -1 || s.indexOf('4') > -1) return 'rejected';
+        if (s.indexOf('cancel') > -1) return 'cancelled';
+        return 'work';
+    }
+
+    // HIGHLIGHT: GET VALUE - New Helper to fetch Geography as Name(Code) dynamically for Drilldown
+    function getFormattedGeo(gr, nameField, codeField) {
+        var name = gr.getValue(nameField) || '';
+        var code = gr.getValue(codeField) || '';
+        if (name && code) return name + ' (' + code + ')';
+        if (name) return name;
+        if (code) return code;
+        return 'N/A';
+    }
+
+    // HIGHLIGHT: GET VALUE - New Helper to fetch Geography as Name(Code) dynamically for Master List referencing
+    function formatRefGeo(grRecord, nameField, codeField) {
+        var name = grRecord.getElement(nameField).toString() || '';
+        var code = grRecord.getElement(codeField).toString() || '';
+        if (name && code) return name + ' (' + code + ')';
+        if (name) return name;
+        if (code) return code;
+        return 'N/A';
+    }
+
+    // --- 1. DRILL-DOWN CLICKS ACTION ---
+    if (input && input.action == 'get_swap_details') {
+
+        // A. Approvers & Role Extraction
+        data.approvalData = [];
+        var grApp = new GlideRecord('sysapproval_approver');
+        var qc = grApp.addQuery('sysapproval', input.swapSysId);
+        qc.addOrCondition('document_id', input.swapSysId); 
+        grApp.orderBy('sys_created_on');
+        grApp.query();
+
+        while(grApp.next()) {
+            var customRole = grApp.getValue('u_role') || grApp.getValue('u_approval_level') || grApp.getValue('approval_journal_column') || 'Approver';
+            if (customRole && customRole.length > 25) { customRole = 'Approver'; } 
+            
+            data.approvalData.push({
+                approver: grApp.getDisplayValue('approver'),
+                state:    grApp.getDisplayValue('state'),
+                role:     customRole,
+                updated:  grApp.getValue('sys_updated_on') || ''
+            });
+        }
+
+        // B. Enriched Un-Squished Site Profile Metrics Lookups
+        data.extendedDetails = {};
+        var swapGr = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+        
+        if (swapGr.get(input.swapSysId)) {
+
+            var doneeId = swapGr.getValue('donee_site_code'); 
+            var donorId = swapGr.getValue('donor_site_code'); 
+
+            // Explicit function mapping the detailed hierarchies & bucket aging
+            function getCustDetails(sysId) {
+                // HIGHLIGHT: SET VALUE - Initializing variables without City mapping
+                var details = { name: 'N/A', code: 'N/A', zone: 'N/A', region: 'N/A', depot: 'N/A', segment: 'N/A', limit: 0, outstanding: 0, history: [] };
+                
+                var cGr = new GlideRecord('x_birl3_clm_customer');
+                if (cGr.get(sysId)) {
+                    details.name    = cGr.getValue('name') || 'N/A';
+                    details.code    = cGr.getValue('customer_code') || 'N/A';
+                    
+                    // HIGHLIGHT: SET VALUE - Binding the constructed Name(Code) fields
+                    details.zone    = getFormattedGeo(cGr, 'zone_name', 'customer_group');
+                    details.region  = getFormattedGeo(cGr, 'region_name', 'cg4'); 
+                    details.depot   = getFormattedGeo(cGr, 'depot_name', 'sales_office');
+                    
+                    var compCode    = cGr.getValue('company_code') || '';
+                    details.segment = segmentMapping[compCode] || cGr.getDisplayValue('company_code') || 'N/A';
+                    details.limit   = parseFloat(cGr.getValue('credit_limit') || 0);
+
+                    // Fetch associated 6-month outstanding exposure array
+                    var outRec = new GlideRecord('x_birl3_clm_customer_outstanding');
+                    outRec.addQuery('customer', details.code);
+                    outRec.orderByDesc('created_on');
+                    outRec.setLimit(6);
+                    outRec.query();
+                    
+                    var isFirst = true;
+                    while (outRec.next()) {
+                        var outVal = parseFloat(outRec.getValue('outstanding') || 0);
+                        if (isFirst) {
+                            details.outstanding = outVal;
+                            isFirst = false;
+                        }
+                        
+                        var rawDate = outRec.getDisplayValue('created_on') || '';
+                        details.history.push({
+                            date:   rawDate.split(' ')[0], 
+                            total:  outVal,
+                            a0_3:   parseFloat(outRec.getValue('ageing0_3') || 0),
+                            a4_7:   parseFloat(outRec.getValue('ageing4_7') || 0),
+                            a8_21:  parseFloat(outRec.getValue('ageing8_21') || 0),
+                            a22_30: parseFloat(outRec.getValue('ageing22_30') || 0),
+                            a31_45: parseFloat(outRec.getValue('ageing31_45') || 0),
+                            a46_60: parseFloat(outRec.getValue('ageing46_60') || 0),
+                            a61_75: parseFloat(outRec.getValue('ageing61_75') || 0),
+                            a76_90: parseFloat(outRec.getValue('ageing76_90') || 0),
+                            a_gt90: parseFloat(outRec.getValue('ageing_gt90') || 0)
+                        });
+                    }
+                }
+                return details;
+            }
+
+            data.extendedDetails.donee = getCustDetails(doneeId);
+            data.extendedDetails.donor = getCustDetails(donorId);
+        }
+        
+        return;
+    }
+
+    // --- 2. CANCEL REQUEST ACTION ---
+    if (input && input.action == 'cancel_swap') {
+        var cancelGr = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+        if (cancelGr.get(input.swapSysId)) {
+            cancelGr.setValue('state', 4); // Task Closed Incomplete / Cancelled
+            cancelGr.setValue('approval', 'cancelled');
+            cancelGr.update();
+            data.success = true;
+        }
+        return;
+    }
+
+    // HIGHLIGHT: ACTION - Custom Native Attachment Handler for the Activity Stream
+    if (input && input.action == 'upload_attachment') {
+        try {
+            var swapGrAttach = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+            if (swapGrAttach.get(input.swapSysId)) {
+                
+                // Write base64 data to the attachment table linked to this Swap Record
+                var attachSysId = new GlideSysAttachment().writeBase64(
+                    swapGrAttach,
+                    input.fileName,
+                    input.contentType || 'application/octet-stream',
+                    input.fileData
+                );
+                
+                if (attachSysId) {
+                    // Pushing a note into the comments will natively trigger the OOB Activity Stream refresh 
+                    swapGrAttach.comments = "]]>📎<![CDATA[ Attachment uploaded natively via portal: " + input.fileName;
+                    swapGrAttach.update();
+                    data.success = true;
+                } else {
+                    data.success = false;
+                }
+            }
+        } catch(e) {
+            data.success = false;
+        }
+        return;
+    }
+
+    // --- 3. MASTER RECORD LIST INITIALIZATION ---
+    if (!input) {
+        data.list = [];
+        var userId = gs.getUserID();
+
+        // TARGETING NEW TABLE
+        var swapGR = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+        
+        var uQuery = swapGR.addQuery('sys_created_by', gs.getUserName());
+        uQuery.addOrCondition('requested_by', userId); 
+        
+        swapGR.orderByDesc('sys_created_on');
+        swapGR.query();
+
+        while (swapGR.next()) {
+            var stateDisplay = swapGR.getDisplayValue('approval');
+
+            var doneeCode = swapGR.donee_site_code.customer_code || '';
+            var doneeName = swapGR.donee_site_code.name || swapGR.getDisplayValue('donee_site_code') || '';
+            var doneeCombined = doneeCode ? (doneeCode + ' — ' + doneeName) : doneeName;
+
+            var donorCode = swapGR.donor_site_code.customer_code || '';
+            var donorName = swapGR.donor_site_code.name || swapGR.getDisplayValue('donor_site_code') || '';
+            var donorCombined = donorCode ? (donorCode + ' — ' + donorName) : donorName;
+
+            var rawDoneeSeg = swapGR.getValue('donee_segment') || swapGR.donee_site_code.company_code || '';
+            var rawDonorSeg = swapGR.getValue('donor_segment') || swapGR.donor_site_code.company_code || '';
+
+            // HIGHLIGHT: GET VALUE - Formatting Master Array directly with the new formatRefGeo engine
+            var fDoneeZone   = formatRefGeo(swapGR, 'donee_site_code.zone_name', 'donee_site_code.customer_group');
+            var fDoneeRegion = formatRefGeo(swapGR, 'donee_site_code.region_name', 'donee_site_code.cg4');
+            var fDoneeDepot  = formatRefGeo(swapGR, 'donee_site_code.depot_name', 'donee_site_code.sales_office');
+
+            var fDonorZone   = formatRefGeo(swapGR, 'donor_site_code.zone_name', 'donor_site_code.customer_group');
+            var fDonorRegion = formatRefGeo(swapGR, 'donor_site_code.region_name', 'donor_site_code.cg4');
+            var fDonorDepot  = formatRefGeo(swapGR, 'donor_site_code.depot_name', 'donor_site_code.sales_office');
+
+            // HIGHLIGHT: SET VALUE - Pushing cleaned payload to the client side
+            data.list.push({
+                sys_id:             swapGR.getUniqueValue(),
+                number:             swapGR.getValue('number') || '',
+                pan:                swapGR.getDisplayValue('donee_site_code.pan') || swapGR.getDisplayValue('donor_site_code.pan') || 'N/A',
+                
+                donee_site:         doneeCombined,
+                donee_segment:      segmentMapping[rawDoneeSeg] || rawDoneeSeg,
+                donee_zone:         fDoneeZone,
+                donee_region:       fDoneeRegion,
+                donee_depot:        fDoneeDepot,
+                
+                donor_site:         donorCombined,
+                donor_segment:      segmentMapping[rawDonorSeg] || rawDonorSeg,
+                donor_zone:         fDonorZone,
+                donor_region:       fDonorRegion,
+                donor_depot:        fDonorDepot,
+                
+                amount:             parseFloat(swapGR.getValue('requested_amount') || swapGR.getValue('donee_amount') || 0),
+                state:              stateDisplay,
+                internalState:      getInternalState(stateDisplay),
+                created_on:         swapGR.getDisplayValue('sys_created_on').split(' ')[0],
+                sys_created_on:     swapGR.getDisplayValue('sys_created_on')
+            });
+        }
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>sounder.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-02 09:56:39</sys_created_on>
+        <sys_id>0af838202b1dcb504572f3745e91bfd5</sys_id>
+        <sys_mod_count>88</sys_mod_count>
+        <sys_name>UCLM Limit Swap View Request</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_0af838202b1dcb504572f3745e91bfd5</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 06:28:41</sys_updated_on>
+        <template><![CDATA[<div class="abg-widget-container">
+
+  <div ng-if="!c.data.selectedSwap">
+    
+    <div class="abg-header row flex-align-center m-b-md">
+      <div class="col-xs-12 col-sm-5 col-md-5 m-b-sm-mobile">
+        <h2>My Submitted Limit Swaps</h2>
+        <p class="m-b-none text-muted">Track and review your real-time limit reallocations.</p>
+      </div>
+      <div class="col-xs-12 col-sm-7 col-md-7">
+        <div class="header-actions-panel">
+          
+          <ul class="abg-pills">
+            <li ng-class="{'active': c.listFilter == 'all'}">
+              <a href="javascript:void(0)" ng-click="c.setFilter('all')">All</a>
+            </li>
+            <li ng-class="{'active': c.listFilter == 'pending'}">
+              <a href="javascript:void(0)" ng-click="c.setFilter('pending')">Pending</a>
+            </li>
+            <li ng-class="{'active': c.listFilter == 'completed'}">
+              <a href="javascript:void(0)" ng-click="c.setFilter('completed')">Completed</a>
+            </li>
+          </ul>
+          
+          <div class="search-box">
+            <span class="input-group-addon"><i class="fa fa-search text-muted"></i></span>
+            <input type="text" class="form-control" ng-model="c.searchSwap" ng-change="c.currentPage = 1" placeholder="Search PAN or Number...">
+          </div>
+          
+        </div>
+      </div>
+    </div>
+
+    <div class="table-responsive shadow-sm widget-table-wrapper">
+      <table class="table abg-table table-hover m-b-none">
+        <thead>
+          <tr>
+            <th width="18%">Swap Request Details</th>
+            <th width="24%">Donee (Receiving Unit)</th>
+            <th width="24%">Donor (Deducting Unit)</th>
+            <th width="12%">Transfer Amount</th>
+            <th width="10%">Status</th>
+            <th width="12%" class="text-center">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr ng-if="c.getFilteredSwaps().length == 0">
+            <td colspan="6" class="text-center text-muted p-xl">
+              <i class="fa fa-folder-open-o fa-3x m-b-sm" style="color:#ddd;"></i><br>
+              No limit swap requests found matching your criteria.
+            </td>
+          </tr>
+          <tr ng-repeat="swap in c.getPaginatedSwaps()">
+            <td class="vertical-middle">
+              <span class="clm-id-tag font-weight-bold">{{::swap.number}}</span><br>
+              <small class="text-muted font-weight-bold">PAN: {{::swap.pan}}</small><br>
+              <small class="text-muted"><i class="fa fa-calendar m-r-xs"></i> {{::swap.created_on}}</small>
+            </td>
+            <td class="vertical-middle">
+              <strong class="text-success" style="font-size:13.5px;">{{::swap.donee_site}}</strong><br>
+              <div class="text-xs text-muted m-t-xs m-b-xs">
+                <i class="fa fa-map-marker text-success m-r-xs"></i> {{::swap.donee_zone}} | {{::swap.donee_region}} | {{::swap.donee_depot}}
+              </div>
+              <span class="badge segment-badge" ng-if="swap.donee_segment">{{::swap.donee_segment}}</span>
+            </td>
+            <td class="vertical-middle">
+              <strong class="text-danger" style="font-size:13.5px;">{{::swap.donor_site}}</strong><br>
+              <div class="text-xs text-muted m-t-xs m-b-xs">
+                <i class="fa fa-map-marker text-danger m-r-xs"></i> {{::swap.donor_zone}} | {{::swap.donor_region}} | {{::swap.donor_depot}}
+              </div>
+              <span class="badge segment-badge" ng-if="swap.donor_segment">{{::swap.donor_segment}}</span>
+            </td>
+            <td class="vertical-middle"><strong style="font-size: 15px; color:#1a1a1a;">₹ {{::c.formatINR(swap.amount)}}</strong></td>
+            <td class="vertical-middle">
+              <span class="status-pill status-{{swap.internalState}}">{{::swap.state}}</span>
+            </td>
+            <td class="vertical-middle text-center">
+              <button class="btn abg-btn-outline btn-sm" ng-click="c.viewDetails(swap)">View Details</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="row flex-align-center m-t-md" ng-if="c.getFilteredSwaps().length > 0">
+      <div class="col-xs-12 col-sm-4 col-md-4 m-b-sm-mobile">
+        <div class="input-group page-size-box">
+          <span class="input-group-addon bg-light">Show</span>
+          <select class="form-control" ng-model="c.itemsPerPage" ng-change="c.currentPage = 1" ng-options="size for size in [5, 10, 25, 50, 100]"></select>
+        </div>
+      </div>
+      <div class="col-xs-12 col-sm-4 col-md-4 text-center text-muted hidden-xs">
+        Showing {{ (c.currentPage - 1) * c.itemsPerPage + 1 }} to 
+        {{ c.getMathMin(c.currentPage * c.itemsPerPage, c.getFilteredSwaps().length) }} 
+        of {{ c.getFilteredSwaps().length }} entries
+      </div>
+      <div class="col-xs-12 col-sm-4 col-md-4 text-right text-center-mobile m-t-sm-mobile">
+        <button class="btn btn-default btn-sm" ng-click="c.currentPage = c.currentPage - 1" ng-disabled="c.currentPage == 1"><i class="fa fa-chevron-left"></i> Prev</button>
+        <span class="m-l-sm m-r-sm font-weight-bold">Page {{c.currentPage}} / {{c.totalPages()}}</span>
+        <button class="btn btn-default btn-sm" ng-click="c.currentPage = c.currentPage + 1" ng-disabled="c.currentPage == c.totalPages()">Next <i class="fa fa-chevron-right"></i></button>
+      </div>
+    </div>
+  </div>
+
+
+  <div class="slide-down" ng-if="c.data.selectedSwap">
+    
+    <div class="abg-header header-divider">
+      <button class="btn btn-link text-muted p-l-0 m-b-sm hover-red font-weight-bold" ng-click="c.goBack()">&#8592; Back to Request Overview</button>
+      <div class="row flex-align-center">
+        <div class="col-xs-12 col-sm-7 col-md-7">
+          <h2 class="m-b-xs">{{c.data.selectedSwap.number}} <small style="color:#C8102E; font-weight:700;">| Corporate PAN: {{c.data.selectedSwap.pan}}</small></h2>
+          <p class="m-b-none text-muted"><i class="fa fa-clock-o m-r-xs"></i> Submitted for processing on: {{c.data.selectedSwap.sys_created_on}}</p>
+        </div>
+        <div class="col-xs-12 col-sm-5 col-md-5 text-right mobile-left m-t-sm-mobile">
+          
+          <button class="btn btn-danger btn-sm m-r-sm font-weight-bold" 
+                  ng-if="c.data.selectedSwap.internalState == 'pending'" 
+                  ng-click="c.cancelRequest(c.data.selectedSwap)" 
+                  ng-disabled="c.data.isCancelling">
+            <i class="fa fa-times-circle m-r-xs" ng-if="!c.data.isCancelling"></i>
+            <i class="fa fa-spinner fa-spin m-r-xs" ng-if="c.data.isCancelling"></i>
+            {{c.data.isCancelling ? 'Cancelling...' : 'Cancel Request'}}
+          </button>
+          
+          <span class="status-pill status-{{c.data.selectedSwap.internalState}}" style="font-size: 14px; padding: 6px 18px; font-weight:700;">
+            Status: {{c.data.selectedSwap.state}}
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="text-center p-xl" ng-if="c.data.isLoadingDetails">
+       <i class="fa fa-spinner fa-spin fa-3x text-muted m-b-sm"></i>
+       <p class="text-muted">Resolving operational site profiles & authorization traces...</p>
+    </div>
+
+    <div ng-if="!c.data.isLoadingDetails">
+
+      <div class="approval-stepper-wrapper m-b-lg slide-down">
+        <h4 class="font-weight-bold m-b-md text-uppercase section-title"><i class="fa fa-sitemap m-r-xs"></i> Authorization Pipeline</h4>
+
+        <div class="text-center text-muted p-md shadow-inner bg-light rounded" ng-if="c.data.swapDetails.approvals.length == 0">
+          <i class="fa fa-info-circle m-b-xs"></i> Systemic approval workflows are either routing or not required for this request.
+        </div>
+
+        <div class="approval-stepper" ng-if="c.data.swapDetails.approvals.length > 0">
+          <div class="stepper-item" ng-class="{'completed': app.state == 'Approved', 'current': app.state == 'Requested', 'rejected': app.state == 'Rejected'}" ng-repeat="app in c.data.swapDetails.approvals">
+            <div class="stepper-icon">
+              <i class="fa fa-check" ng-if="app.state == 'Approved'"></i>
+              <i class="fa fa-spinner fa-spin" ng-if="app.state == 'Requested'"></i>
+              <i class="fa fa-times" ng-if="app.state == 'Rejected'"></i>
+              <i class="fa fa-circle" ng-if="app.state != 'Approved' && app.state != 'Requested' && app.state != 'Rejected'"></i>
+            </div>
+            <div class="stepper-label text-dark">{{::app.role}}</div>
+            <div class="stepper-sub text-muted m-b-xs">{{::app.approver}}</div>
+            <div class="stepper-sub" ng-class="{'text-success': app.state == 'Approved', 'text-warning': app.state == 'Requested', 'text-danger': app.state == 'Rejected'}">
+              {{::app.state}}
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <h4 class="font-weight-bold m-b-md text-uppercase section-title slide-down" style="animation-delay: 0.1s; animation-fill-mode: both;"><i class="fa fa-database m-r-xs"></i> Customer Entity Profile Matrix</h4>
+      
+      <div class="row flex-cards m-b-lg slide-down" style="animation-delay: 0.15s; animation-fill-mode: both;">
+        
+        <div class="col-xs-12 col-sm-6">
+          <div class="abg-profile-panel border-top-success">
+            <div class="panel-profile-header">
+               <span class="indicator-marker text-success"><i class="fa fa-arrow-circle-down"></i> Receiving Unit (Donee Site)</span>
+               <div class="d-flex justify-content-between align-items-center">
+                 <h3>{{c.data.swapDetails.extended.donee.code || 'N/A'}} - {{c.data.swapDetails.extended.donee.name}}</h3>
+                 <span class="badge" style="background:#4A5568; font-size:12px;">{{c.data.swapDetails.extended.donee.segment}}</span>
+               </div>
+            </div>
+            <div class="panel-profile-body">
+              <table class="table abg-profile-table">
+                <tbody>
+                  <tr><th width="40%">Zone</th><td>{{c.data.swapDetails.extended.donee.zone}}</td></tr>
+                  <tr><th>Region</th><td>{{c.data.swapDetails.extended.donee.region}}</td></tr>
+                  <tr><th>Depot</th><td>{{c.data.swapDetails.extended.donee.depot}}</td></tr>
+                  
+                  <tr class="highlight-row-success"><th>Current Limit</th><td><strong>₹ {{c.formatINR(c.data.swapDetails.extended.donee.limit)}}</strong></td></tr>
+                  <tr class="highlight-row-success"><th>Total Outstanding</th><td><strong>₹ {{c.formatINR(c.data.swapDetails.extended.donee.outstanding)}}</strong></td></tr>
+                  <tr class="highlight-total-success">
+                     <th>Allocation Impact</th>
+                     <td><span class="text-success font-weight-bold">+ ₹ {{c.formatINR(c.data.selectedSwap.amount)}}</span></td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <div class="bg-light p-sm border-top">
+                 <div class="text-xs text-uppercase font-weight-bold text-muted m-b-sm m-l-sm m-t-sm">
+                    <i class="fa fa-history m-r-xs"></i> 6-Month Bucket-Wise Aging Trend
+                 </div>
+                 <div class="table-responsive p-sm">
+                   <table class="table table-bordered abg-history-table m-b-none text-center" ng-if="c.data.swapDetails.extended.donee.history.length > 0">
+                     <thead>
+                       <tr>
+                         <th class="text-left" style="min-width: 90px;">Date</th>
+                         <th>0-3 D</th>
+                         <th>4-7 D</th>
+                         <th>8-21 D</th>
+                         <th>22-30 D</th>
+                         <th>31-45 D</th>
+                         <th>46-60 D</th>
+                         <th>61-75 D</th>
+                         <th>76-90 D</th>
+                         <th>>90 D</th>
+                         <th class="text-right">Total Out.</th>
+                       </tr>
+                     </thead>
+                     <tbody>
+                       <tr ng-repeat="hist in c.data.swapDetails.extended.donee.history">
+                         <td class="text-left font-weight-bold">{{::hist.date}}</td>
+                         <td>{{::c.formatINR(hist.a0_3)}}</td>
+                         <td>{{::c.formatINR(hist.a4_7)}}</td>
+                         <td>{{::c.formatINR(hist.a8_21)}}</td>
+                         <td>{{::c.formatINR(hist.a22_30)}}</td>
+                         <td>{{::c.formatINR(hist.a31_45)}}</td>
+                         <td>{{::c.formatINR(hist.a46_60)}}</td>
+                         <td ng-class="{'text-warning font-weight-bold': hist.a61_75 > 0}">{{::c.formatINR(hist.a61_75)}}</td>
+                         <td ng-class="{'text-danger font-weight-bold': hist.a76_90 > 0}">{{::c.formatINR(hist.a76_90)}}</td>
+                         <td ng-class="{'text-danger font-weight-bold': hist.a_gt90 > 0}">{{::c.formatINR(hist.a_gt90)}}</td>
+                         <td class="text-right font-weight-bold text-dark" style="background: #EAEAEA;">₹ {{::c.formatINR(hist.total)}}</td>
+                       </tr>
+                     </tbody>
+                   </table>
+                   <div ng-if="c.data.swapDetails.extended.donee.history.length == 0" class="text-muted text-xs p-t-xs p-l-xs">
+                      No historical outstanding data available.
+                   </div>
+                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-xs-12 col-sm-6">
+          <div class="abg-profile-panel border-top-danger">
+            <div class="panel-profile-header">
+               <span class="indicator-marker text-danger"><i class="fa fa-arrow-circle-up"></i> Deducting Unit (Donor Site)</span>
+               <div class="d-flex justify-content-between align-items-center">
+                 <h3>{{c.data.swapDetails.extended.donor.code || 'N/A'}} - {{c.data.swapDetails.extended.donor.name}}</h3>
+                 <span class="badge" style="background:#4A5568; font-size:12px;">{{c.data.swapDetails.extended.donor.segment}}</span>
+               </div>
+            </div>
+            <div class="panel-profile-body">
+              <table class="table abg-profile-table">
+                <tbody>
+                  <tr><th width="40%">Zone</th><td>{{c.data.swapDetails.extended.donor.zone}}</td></tr>
+                  <tr><th>Region</th><td>{{c.data.swapDetails.extended.donor.region}}</td></tr>
+                  <tr><th>Depot</th><td>{{c.data.swapDetails.extended.donor.depot}}</td></tr>
+                  
+                  <tr class="highlight-row-danger"><th>Current Limit</th><td><strong>₹ {{c.formatINR(c.data.swapDetails.extended.donor.limit)}}</strong></td></tr>
+                  <tr class="highlight-row-danger"><th>Total Outstanding</th><td><strong>₹ {{c.formatINR(c.data.swapDetails.extended.donor.outstanding)}}</strong></td></tr>
+                  <tr class="highlight-total-danger">
+                     <th>Allocation Impact</th>
+                     <td><span class="text-danger font-weight-bold">- ₹ {{c.formatINR(c.data.selectedSwap.amount)}}</span></td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <div class="bg-light p-sm border-top">
+                 <div class="text-xs text-uppercase font-weight-bold text-muted m-b-sm m-l-sm m-t-sm">
+                    <i class="fa fa-history m-r-xs"></i> 6-Month Bucket-Wise Aging Trend
+                 </div>
+                 <div class="table-responsive p-sm">
+                   <table class="table table-bordered abg-history-table m-b-none text-center" ng-if="c.data.swapDetails.extended.donor.history.length > 0">
+                     <thead>
+                       <tr>
+                         <th class="text-left" style="min-width: 90px;">Date</th>
+                         <th>0-3 D</th>
+                         <th>4-7 D</th>
+                         <th>8-21 D</th>
+                         <th>22-30 D</th>
+                         <th>31-45 D</th>
+                         <th>46-60 D</th>
+                         <th>61-75 D</th>
+                         <th>76-90 D</th>
+                         <th>>90 D</th>
+                         <th class="text-right">Total Out.</th>
+                       </tr>
+                     </thead>
+                     <tbody>
+                       <tr ng-repeat="hist in c.data.swapDetails.extended.donor.history">
+                         <td class="text-left font-weight-bold">{{::hist.date}}</td>
+                         <td>{{::c.formatINR(hist.a0_3)}}</td>
+                         <td>{{::c.formatINR(hist.a4_7)}}</td>
+                         <td>{{::c.formatINR(hist.a8_21)}}</td>
+                         <td>{{::c.formatINR(hist.a22_30)}}</td>
+                         <td>{{::c.formatINR(hist.a31_45)}}</td>
+                         <td>{{::c.formatINR(hist.a46_60)}}</td>
+                         <td ng-class="{'text-warning font-weight-bold': hist.a61_75 > 0}">{{::c.formatINR(hist.a61_75)}}</td>
+                         <td ng-class="{'text-danger font-weight-bold': hist.a76_90 > 0}">{{::c.formatINR(hist.a76_90)}}</td>
+                         <td ng-class="{'text-danger font-weight-bold': hist.a_gt90 > 0}">{{::c.formatINR(hist.a_gt90)}}</td>
+                         <td class="text-right font-weight-bold text-dark" style="background: #EAEAEA;">₹ {{::c.formatINR(hist.total)}}</td>
+                       </tr>
+                     </tbody>
+                   </table>
+                   <div ng-if="c.data.swapDetails.extended.donor.history.length == 0" class="text-muted text-xs p-t-xs p-l-xs">
+                      No historical outstanding data available.
+                   </div>
+                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <h4 class="font-weight-bold m-b-sm text-uppercase section-title slide-down" style="animation-delay: 0.2s; animation-fill-mode: both;"><i class="fa fa-comments-o m-r-xs"></i> Collaborative Audit & Communication Stream</h4>
+      <div class="panel panel-default shadow-sm ticket-panel slide-down" style="animation-delay: 0.25s; animation-fill-mode: both;">
+         <div class="panel-body ticket-body bg-light timeline-container">
+             
+             <div ng-if="c.data.isLoadingWidget" class="text-center p-xl">
+                 <i class="fa fa-spinner fa-spin fa-2x text-muted m-b-sm"></i>
+                 <p class="text-muted">Loading secure communication stream & attachment interfaces...</p>
+             </div>
+             
+             <div ng-if="!c.data.isLoadingWidget" class="m-b-sm p-sm bg-white border rounded shadow-sm d-flex align-items-center">
+                 <label class="btn abg-btn-outline btn-sm m-b-none" ng-disabled="c.data.isUploadingAttachment">
+                     <i class="fa fa-paperclip m-r-xs"></i> Upload Attachment
+                     <input type="file" style="display:none" onchange="angular.element(this).scope().c.attachFileToStream(this)" multiple>
+                 </label>
+                 <span class="m-l-md text-muted text-sm" ng-if="c.data.isUploadingAttachment">
+                     <i class="fa fa-spinner fa-spin text-danger m-r-xs"></i> Processing secure upload...
+                 </span>
+                 <span class="m-l-md text-muted text-xs" ng-if="!c.data.isUploadingAttachment">
+                     Supported formats: PDF, DOCX, XLSX, JPEG, PNG
+                 </span>
+             </div>
+
+             <div ng-if="!c.data.isLoadingWidget" class="m-b-md p-b-md border-bottom ticket-attachments-wrapper">
+                 <sp-widget widget="c.data.attachmentWidget"></sp-widget>
+             </div>
+
+             <sp-widget widget="c.data.ticketWidget" ng-if="!c.data.isLoadingWidget"></sp-widget>
+
+         </div>
+      </div>
+      
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>0af838202b1dcb504572f3745e91bfd5</id>
+        <sys_created_by>sounder.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-02 09:56:39</sys_created_on>
+        <sys_id>96f838202b1dcb504572f3745e91bfdc</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>sounder.k@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-02 09:56:39</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_0af838202b1dcb504572f3745e91bfd5</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function($scope, $filter, $location, spUtil, $window) {
+  var c = this;
+
+  c.data.selectedSwap = null;
+  c.data.swapDetails = null;
+  c.data.isLoadingDetails = false;
+  c.data.isCancelling = false;
+  c.data.isUploadingAttachment = false; // Tracking UI Attachment Upload State
+  
+  // OOB Widget Tracking
+  c.data.ticketWidget = null;
+  c.data.attachmentWidget = null; 
+  c.data.isLoadingWidget = false;
+  
+  c.searchSwap = ''; 
+  c.listFilter = 'all';
+
+  // Pagination Config
+  c.currentPage = 1;
+  c.itemsPerPage = 10;
+
+  // INR Formatting Utility Engine
+  c.formatINR = function(val) {
+      if (val === undefined || val === null || val === '') return '0.00';
+      var num = parseFloat(val);
+      if (isNaN(num)) return '0.00';
+      return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+
+  // URL Parameter Deep Linking
+  var initUrlNumber = $location.search().number;
+  if (initUrlNumber) {
+      c.server.update().then(function() {
+          var targetSwap = c.data.list.find(function(s) { return s.number === initUrlNumber; });
+          if (targetSwap) {
+              c.viewDetails(targetSwap);
+          }
+      });
+  }
+
+  c.setFilter = function(filterType) { 
+    c.listFilter = filterType; 
+    c.currentPage = 1; 
+  };
+
+  c.getFilteredSwaps = function() {
+    var arr = c.data.list || [];
+    if (c.listFilter === 'pending') {
+      arr = arr.filter(function(b) { return b.internalState === 'pending' || b.internalState === 'work'; });
+    } else if (c.listFilter === 'completed') {
+      arr = arr.filter(function(b) { return b.internalState === 'approved' || b.internalState === 'rejected' || b.internalState === 'cancelled'; });
+    }
+    return $filter('filter')(arr, c.searchSwap);
+  };
+
+  c.getPaginatedSwaps = function() {
+    var filtered = c.getFilteredSwaps();
+    var startIndex = (c.currentPage - 1) * c.itemsPerPage;
+    return filtered.slice(startIndex, startIndex + c.itemsPerPage);
+  };
+
+  c.totalPages = function() {
+    return Math.ceil(c.getFilteredSwaps().length / c.itemsPerPage) || 1;
+  };
+
+  c.getMathMin = function(a, b) {
+    return Math.min(a, b);
+  };
+
+  // View Drill-down
+  c.viewDetails = function(swap) {
+    c.data.selectedSwap = swap;
+    c.data.isLoadingDetails = true;
+    c.data.ticketWidget = null;
+    c.data.attachmentWidget = null; // Clear prev states
+    
+    // Update the URL natively without reloading page
+    $location.search('number', swap.number);
+    
+    // HIGHLIGHT: GET VALUE - Send request to Server Script for specific Swap details
+    c.server.get({
+      action: 'get_swap_details',
+      swapSysId: swap.sys_id
+    }).then(function(response) {
+      // HIGHLIGHT: BINDING - Applying the returned mapped Geo Data and Metrics back to the Frontend View
+      c.data.swapDetails = {
+        approvals: response.data.approvalData,
+        extended: response.data.extendedDetails
+      };
+      c.data.isLoadingDetails = false;
+      
+      c.data.isLoadingWidget = true;
+
+      // 1. Inject Native OOB Ticket Attachments Widget
+      spUtil.get('ticket-attachments', {
+          sys_id: swap.sys_id,
+          table: 'x_birl3_clm_nt_limit_swap_request'
+      }).then(function(attWidget) {
+          c.data.attachmentWidget = attWidget;
+
+          // 2. Inject Native OOB Ticket Conversation Widget
+          spUtil.get('widget-ticket-conversation', {
+              sys_id: swap.sys_id,
+              table: 'x_birl3_clm_nt_limit_swap_request', 
+              btnLabel: 'Post Reply'
+          }).then(function(convoWidget) {
+              c.data.ticketWidget = convoWidget;
+              c.data.isLoadingWidget = false;
+          });
+      });
+
+    });
+  };
+
+  // HIGHLIGHT: SET VALUE - New Functionality to Process File Uploads natively for Ticket Activity
+  c.attachFileToStream = function(inputElement) {
+      if (!inputElement.files || inputElement.files.length === 0) return;
+      var file = inputElement.files[0];
+      
+      c.data.isUploadingAttachment = true;
+      $scope.$applyAsync(); // Force Angular Digest for UI Spinner
+
+      var reader = new FileReader();
+      reader.onload = function(e) {
+          var base64Data = e.target.result.split(',')[1];
+          
+          c.server.get({
+              action: 'upload_attachment',
+              swapSysId: c.data.selectedSwap.sys_id,
+              fileName: file.name,
+              contentType: file.type,
+              fileData: base64Data
+          }).then(function(response) {
+              c.data.isUploadingAttachment = false;
+              if (response.data.success) {
+                  spUtil.addInfoMessage("File '"+ file.name +"' securely attached to the request.");
+                  // Re-trigger the Drilldown to natively refresh both Conversation and Attachment widgets
+                  c.viewDetails(c.data.selectedSwap); 
+              } else {
+                  spUtil.addErrorMessage("System Error: Unable to upload attachment securely.");
+              }
+          });
+      };
+      reader.readAsDataURL(file);
+  };
+
+  // Cancel Swap Request
+  c.cancelRequest = function(swap) {
+      if(confirm("Are you sure you want to cancel this Limit Swap request? This action will permanently halt all backend workflows.")) {
+          c.data.isCancelling = true;
+          
+          c.server.get({
+              action: 'cancel_swap',
+              swapSysId: swap.sys_id
+          }).then(function(response) {
+              c.data.isCancelling = false;
+              if (response.data.success) {
+                  spUtil.addInfoMessage("Swap Request " + swap.number + " has been successfully cancelled.");
+                  c.goBack();
+                  c.server.update(); // Refresh grid
+              } else {
+                  spUtil.addErrorMessage("Error: Unable to cancel the request.");
+              }
+          });
+      }
+  };
+
+  c.goBack = function() {
+    c.data.selectedSwap = null;
+    c.data.swapDetails = null;
+    c.data.ticketWidget = null;
+    c.data.attachmentWidget = null;
+    $location.search('number', null);
+  };
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;/* Premium Enterprise Container Styling */
+.abg-widget-container { 
+  background-color: #FFFFFF; 
+  padding: 35px; 
+  border-radius: 6px; 
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05); 
+  font-family: 'Oxygen', "Helvetica Neue", Arial, sans-serif; 
+}
+
+/* Structural Core &amp;amp; Alignment tools */
+.d-flex { display: flex; }
+.justify-content-between { justify-content: space-between; }
+.align-items-center { align-items: center; }
+.border-bottom { border-bottom: 1px solid #EAEAEA; }
+.border-top { border-top: 1px solid #EAEAEA; }
+.border { border: 1px solid #EAEAEA; }
+.rounded { border-radius: 6px; }
+.m-b-none { margin-bottom: 0 !important; }
+.m-b-xs { margin-bottom: 6px !important; }
+.m-b-sm { margin-bottom: 10px !important; }
+.m-b-md { margin-bottom: 20px !important; }
+.m-b-lg { margin-bottom: 30px !important; }
+.m-t-xs { margin-top: 6px !important; }
+.m-t-sm { margin-top: 10px !important; }
+.m-t-md { margin-top: 20px !important; }
+.p-l-0 { padding-left: 0 !important; }
+.p-t-xs { padding-top: 6px !important; }
+.p-l-xs { padding-left: 6px !important; }
+.p-sm { padding: 10px !important; }
+.p-md { padding: 15px !important; }
+.p-b-md { padding-bottom: 15px !important; }
+.p-xl { padding: 40px !important; }
+.m-r-xs { margin-right: 6px !important; }
+.m-l-sm { margin-left: 10px !important; }
+.m-l-md { margin-left: 20px !important; }
+.m-r-sm { margin-right: 10px !important; }
+.font-weight-bold { font-weight: 700 !important; }
+.vertical-middle { vertical-align: middle !important; }
+.text-muted { color: #718096 !important; }
+.text-success { color: #2E7D32 !important; }
+.text-danger { color: #C8102E !important; }
+.text-xs { font-size: 11px !important; letter-spacing: 0.3px; }
+.text-sm { font-size: 13px !important; }
+
+.bg-white { background-color: #FFFFFF !important; }
+.abg-header h2 { color: #2D3748; font-weight: 700; margin-top: 0; font-size: 24px; }
+.header-divider { border-bottom: 2px solid #F7FAFC; padding-bottom: 20px; margin-bottom: 25px; }
+.hover-red { transition: color 0.2s ease; }
+.hover-red:hover { color: #C8102E !important; text-decoration: none; }
+.section-title { font-size: 12.5px; color: #4A5568; letter-spacing: 0.8px; margin-bottom: 15px; }
+.clm-id-tag { background: #EDF2F7; color: #2B6CB0; padding: 3px 8px; border-radius: 4px; font-family: monospace; font-size: 13px; }
+.segment-badge { background-color: #4A5568; padding: 2px 6px; font-size: 10px; border-radius: 3px; display: inline-block; margin-top: 4px; color: #FFF; }
+.bg-light { background-color: #f8f9fa; }
+
+/* Flexgrid Configurations */
+.flex-align-center { display: flex; flex-wrap: wrap; align-items: center; }
+.flex-cards { display: flex; flex-wrap: wrap; margin-left: -12px; margin-right: -12px; } 
+.flex-cards &amp;gt; div { display: flex; flex-direction: column; margin-bottom: 24px; padding-left: 12px; padding-right: 12px; }
+
+/* Header Actions */
+.header-actions-panel { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 15px; }
+.abg-pills { display: flex; list-style: none; margin: 0; padding: 0; }
+.abg-pills &amp;gt; li &amp;gt; a { display: inline-block; border-radius: 30px; color: #4A5568; font-weight: 700; padding: 6px 18px; margin-left: 8px; border: 1px solid #E2E8F0; font-size: 13px; background: #FFF; transition: all 0.2s; text-decoration: none; }
+.abg-pills &amp;gt; li:first-child &amp;gt; a { margin-left: 0; }
+.abg-pills &amp;gt; li &amp;gt; a:hover { background-color: #EDF2F7; color: #2D3748; }
+.abg-pills &amp;gt; li.active &amp;gt; a { background-color: #C8102E !important; color: #FFF !important; border-color: #C8102E; box-shadow: 0 3px 6px rgba(200, 16, 46, 0.25); }
+
+/* Search Box */
+.search-box { width: 250px; display: flex; align-items: stretch; }
+.search-box .input-group-addon { background: #FFFFFF; border: 1px solid #CBD5E0; border-right: none; border-radius: 4px 0 0 4px; display: flex; align-items: center; padding: 0 12px; }
+.search-box .form-control { height: 36px; font-size: 13px; border: 1px solid #CBD5E0; border-left: none; border-radius: 0 4px 4px 0; box-shadow: none; }
+.search-box .form-control:focus { border-color: #C8102E; box-shadow: inset 0 -2px 0 rgba(200, 16, 46, 0.1); }
+
+/* Main Table */
+.widget-table-wrapper { border-radius: 6px; border: 1px solid #E2E8F0; margin: 15px 0 25px 0; }
+.abg-table { margin-bottom: 0; width: 100%; }
+.abg-table thead th { background-color: #F7FAFC; color: #4A5568; font-weight: 700; text-transform: uppercase; font-size: 11.5px; border-bottom: 2px solid #E2E8F0; padding: 14px 12px; white-space: nowrap; }
+.abg-table tbody tr { transition: background 0.15s ease; }
+.abg-table tbody tr:hover { background-color: #FFF5F5 !important; }
+
+/* Status Badges */
+.status-pill { padding: 5px 14px; border-radius: 30px; font-size: 11.5px; font-weight: 700; display: inline-block; white-space: nowrap; text-transform: uppercase; letter-spacing: 0.5px; }
+.status-pending { background-color: #FEF3C7; color: #D97706; border: 1px solid #FCD34D; }
+.status-approved { background-color: #D1FAE5; color: #065F46; border: 1px solid #34D399; }
+.status-rejected { background-color: #FEE2E2; color: #991B1B; border: 1px solid #F87171; }
+.status-cancelled { background-color: #F3F4F6; color: #4B5563; border: 1px solid #D1D5DB; }
+.status-work { background-color: #DBEAFE; color: #1E40AF; border: 1px solid #60A5FA; }
+
+/* Buttons */
+.abg-btn-outline { background: transparent; border: 1px solid #C8102E; color: #C8102E; font-weight: 700; border-radius: 4px; padding: 6px 14px; transition: all 0.2s; white-space: nowrap; cursor: pointer; }
+.abg-btn-outline:hover:not([disabled]) { background: #C8102E; color: #FFF; box-shadow: 0 4px 8px rgba(200, 16, 46, 0.15); }
+.abg-btn-outline[disabled] { opacity: 0.6; cursor: not-allowed; }
+.btn-danger { background-color: #C8102E; border-color: #A00D25; }
+.btn-danger:hover { background-color: #A00D25; }
+
+/* Profile Panels */
+.abg-profile-panel { background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.02); width: 100%; display: flex; flex-direction: column; }
+.border-top-success { border-top: 4px solid #2E7D32; }
+.border-top-danger { border-top: 4px solid #C8102E; }
+
+.panel-profile-header { padding: 20px 24px; border-bottom: 1px solid #EDF2F7; background: #FDFDFD; }
+.panel-profile-header .indicator-marker { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.panel-profile-header h3 { margin: 0; font-size: 22px; font-weight: 700; color: #1A202C; letter-spacing: -0.5px; }
+
+.panel-profile-body { padding: 10px 0; }
+.abg-profile-table { margin-bottom: 0; width: 100%; }
+.abg-profile-table tbody tr td { padding: 14px 24px !important; border-top: 1px solid #F0F4F8; color: #2D3748; font-size: 14px; vertical-align: middle; }
+.abg-profile-table tbody tr th { padding: 14px 24px !important; border-top: 1px solid #F0F4F8; color: #718096; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; vertical-align: middle; font-weight: 700; }
+
+.highlight-row-success { background-color: #F4FBF6; }
+.highlight-row-danger { background-color: #FFF5F5; }
+.highlight-total-success { background-color: #E6F4EA; border-top: 1px dashed #2E7D32 !important; }
+.highlight-total-danger { background-color: #FCE8EA; border-top: 1px dashed #C8102E !important; }
+.highlight-total-success td, .highlight-total-success th,
+.highlight-total-danger td, .highlight-total-danger th { font-size: 16px !important; padding: 16px 24px !important; color: #1a1a1a; }
+
+/* Excel Bucket History Table */
+.abg-history-table { border: 1px solid #E2E8F0; width: 100%; }
+.abg-history-table th { background-color: #EDF2F7; color: #4A5568; font-size: 10px; text-transform: uppercase; padding: 8px 6px !important; border-bottom: 1px solid #E2E8F0; vertical-align: middle; text-align: center; }
+.abg-history-table th.text-left { text-align: left; padding-left: 12px !important;}
+.abg-history-table th.text-right { text-align: right; padding-right: 12px !important;}
+.abg-history-table td { padding: 8px 6px !important; font-size: 11.5px; color: #1A202C; border-top: 1px solid #E2E8F0; vertical-align: middle; text-align: center; white-space: nowrap; }
+.abg-history-table td.text-left { text-align: left; padding-left: 12px !important;}
+.abg-history-table td.text-right { text-align: right; padding-right: 12px !important;}
+
+/* Horizontal Stepper */
+.approval-stepper-wrapper { background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 6px; padding: 24px; box-shadow: 0 2px 4px rgba(0,0,0,0.01); }
+.approval-stepper { display: flex; justify-content: space-between; align-items: flex-start; position: relative; width: 100%; overflow-x: auto; padding: 10px 0; -webkit-overflow-scrolling: touch; }
+.approval-stepper::before { content: ''; position: absolute; top: 25px; left: 5%; right: 5%; height: 3px; background: #E2E8F0; z-index: 1; width: 90%; }
+.stepper-item { text-align: center; position: relative; z-index: 2; flex: 1; min-width: 120px; padding: 0 8px; }
+.stepper-icon { width: 34px; height: 34px; border-radius: 50%; background: #FFF; border: 3px solid #CBD5E0; margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; color: #A0AEC0; font-weight: 700; transition: all 0.2s ease; }
+.stepper-label { font-size: 13px; font-weight: 700; color: #2D3748; line-height: 1.3; margin-bottom: 2px; }
+.stepper-sub { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+
+.stepper-item.completed .stepper-icon { background: #2E7D32; border-color: #2E7D32; color: #FFF; }
+.stepper-item.current .stepper-icon { background: #FFF; border-color: #D97706; color: #D97706; box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.15); }
+.stepper-item.rejected .stepper-icon { background: #C8102E; border-color: #C8102E; color: #FFF; }
+
+/* OOB TICKET CONVERSATION WIDGET FIXES */
+.ticket-panel { border-radius: 6px; border: 1px solid #E2E8F0; overflow: hidden; }
+.ticket-body { padding: 30px 24px; min-height: 250px; }
+.timeline-container { padding: 0 !important; }
+.timeline-container .panel { box-shadow: none !important; border: none !important; }
+.timeline-container .panel-heading { display: none !important; }
+
+/* New Attachment Fixes */
+.ticket-attachments-wrapper .panel { background-color: transparent !important; margin-bottom: 0; }
+.ticket-attachments-wrapper .panel-heading { display: block !important; padding: 0 0 10px 0; background: transparent; border-bottom: 1px dashed #D1D5DB; }
+.ticket-attachments-wrapper .panel-title { font-size: 13px; font-weight: 700; color: #4A5568; }
+
+/* Utilities &amp;amp; Animations */
+.shadow-sm { box-shadow: 0 4px 12px rgba(0,0,0,0.03); }
+.slide-down { animation: slideDownFade 0.25s ease-out; }
+@keyframes slideDownFade { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+.page-size-box { width: 110px; }
+.page-size-box .form-control { height: 30px; padding: 4px 8px; font-size: 12px; }
+.page-size-box .input-group-addon { padding: 4px 8px; font-size: 12px; }
+
+/* Mobile Responsiveness */
+@media (max-width: 991px) { .header-actions-panel .search-box { width: 180px; } }
+@media (max-width: 767px) {
+  .abg-widget-container { padding: 20px 15px; }
+  .flex-align-center { flex-direction: column; align-items: stretch; }
+  .m-b-sm-mobile { margin-bottom: 15px !important; }
+  .mobile-left { text-align: left !important; }
+  .header-actions-panel { flex-direction: column; align-items: stretch; margin-top: 15px; gap: 12px; }
+  .abg-pills { justify-content: space-between; width: 100%; margin-right: 0; }
+  .abg-pills &amp;gt; li { flex-grow: 1; margin: 0 2px; }
+  .abg-pills &amp;gt; li &amp;gt; a { display: block; text-align: center; margin: 0; padding: 8px 4px; font-size: 11px; }
+  .search-box { width: 100% !important; }
+  .abg-profile-table tbody tr td, .abg-profile-table tbody tr th { padding: 12px 14px !important; font-size: 13px !important; }
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id/&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;UCLM Limit Swap View Request&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+
+    // Global Segment Mapping Enforcer
+    var segmentMapping = { 'UTCL': 'Cement', 'URMX': 'RMC', 'GIL': 'BPD' };
+
+    function getInternalState(stateStr) {
+        var s = (stateStr || '').toLowerCase();
+        if (s.indexOf('pending') &gt; -1 || s.indexOf('requested') &gt; -1) return 'pending';
+        if (s.indexOf('approved') &gt; -1 || s.indexOf('complete') &gt; -1 || s.indexOf('3') &gt; -1) return 'approved';
+        if (s.indexOf('reject') &gt; -1 || s.indexOf('4') &gt; -1) return 'rejected';
+        if (s.indexOf('cancel') &gt; -1) return 'cancelled';
+        return 'work';
+    }
+
+    // HIGHLIGHT: GET VALUE - New Helper to fetch Geography as Name(Code) dynamically for Drilldown
+    function getFormattedGeo(gr, nameField, codeField) {
+        var name = gr.getValue(nameField) || '';
+        var code = gr.getValue(codeField) || '';
+        if (name &amp;&amp; code) return name + ' (' + code + ')';
+        if (name) return name;
+        if (code) return code;
+        return 'N/A';
+    }
+
+    // HIGHLIGHT: GET VALUE - New Helper to fetch Geography as Name(Code) dynamically for Master List referencing
+    function formatRefGeo(grRecord, nameField, codeField) {
+        var name = grRecord.getElement(nameField).toString() || '';
+        var code = grRecord.getElement(codeField).toString() || '';
+        if (name &amp;&amp; code) return name + ' (' + code + ')';
+        if (name) return name;
+        if (code) return code;
+        return 'N/A';
+    }
+
+    // --- 1. DRILL-DOWN CLICKS ACTION ---
+    if (input &amp;&amp; input.action == 'get_swap_details') {
+
+        // A. Approvers &amp; Role Extraction
+        data.approvalData = [];
+        var grApp = new GlideRecord('sysapproval_approver');
+        var qc = grApp.addQuery('sysapproval', input.swapSysId);
+        qc.addOrCondition('document_id', input.swapSysId); 
+        grApp.orderBy('sys_created_on');
+        grApp.query();
+
+        while(grApp.next()) {
+            var customRole = grApp.getValue('u_role') || grApp.getValue('u_approval_level') || grApp.getValue('approval_journal_column') || 'Approver';
+            if (customRole &amp;&amp; customRole.length &gt; 25) { customRole = 'Approver'; } 
+            
+            data.approvalData.push({
+                approver: grApp.getDisplayValue('approver'),
+                state:    grApp.getDisplayValue('state'),
+                role:     customRole,
+                updated:  grApp.getValue('sys_updated_on') || ''
+            });
+        }
+
+        // B. Enriched Un-Squished Site Profile Metrics Lookups
+        data.extendedDetails = {};
+        var swapGr = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+        
+        if (swapGr.get(input.swapSysId)) {
+
+            var doneeId = swapGr.getValue('donee_site_code'); 
+            var donorId = swapGr.getValue('donor_site_code'); 
+
+            // Explicit function mapping the detailed hierarchies &amp; bucket aging
+            function getCustDetails(sysId) {
+                // HIGHLIGHT: SET VALUE - Initializing variables without City mapping
+                var details = { name: 'N/A', code: 'N/A', zone: 'N/A', region: 'N/A', depot: 'N/A', segment: 'N/A', limit: 0, outstanding: 0, history: [] };
+                
+                var cGr = new GlideRecord('x_birl3_clm_customer');
+                if (cGr.get(sysId)) {
+                    details.name    = cGr.getValue('name') || 'N/A';
+                    details.code    = cGr.getValue('customer_code') || 'N/A';
+                    
+                    // HIGHLIGHT: SET VALUE - Binding the constructed Name(Code) fields
+                    details.zone    = getFormattedGeo(cGr, 'zone_name', 'customer_group');
+                    details.region  = getFormattedGeo(cGr, 'region_name', 'cg4'); 
+                    details.depot   = getFormattedGeo(cGr, 'depot_name', 'sales_office');
+                    
+                    var compCode    = cGr.getValue('company_code') || '';
+                    details.segment = segmentMapping[compCode] || cGr.getDisplayValue('company_code') || 'N/A';
+                    details.limit   = parseFloat(cGr.getValue('credit_limit') || 0);
+
+                    // Fetch associated 6-month outstanding exposure array
+                    var outRec = new GlideRecord('x_birl3_clm_customer_outstanding');
+                    outRec.addQuery('customer', details.code);
+                    outRec.orderByDesc('created_on');
+                    outRec.setLimit(6);
+                    outRec.query();
+                    
+                    var isFirst = true;
+                    while (outRec.next()) {
+                        var outVal = parseFloat(outRec.getValue('outstanding') || 0);
+                        if (isFirst) {
+                            details.outstanding = outVal;
+                            isFirst = false;
+                        }
+                        
+                        var rawDate = outRec.getDisplayValue('created_on') || '';
+                        details.history.push({
+                            date:   rawDate.split(' ')[0], 
+                            total:  outVal,
+                            a0_3:   parseFloat(outRec.getValue('ageing0_3') || 0),
+                            a4_7:   parseFloat(outRec.getValue('ageing4_7') || 0),
+                            a8_21:  parseFloat(outRec.getValue('ageing8_21') || 0),
+                            a22_30: parseFloat(outRec.getValue('ageing22_30') || 0),
+                            a31_45: parseFloat(outRec.getValue('ageing31_45') || 0),
+                            a46_60: parseFloat(outRec.getValue('ageing46_60') || 0),
+                            a61_75: parseFloat(outRec.getValue('ageing61_75') || 0),
+                            a76_90: parseFloat(outRec.getValue('ageing76_90') || 0),
+                            a_gt90: parseFloat(outRec.getValue('ageing_gt90') || 0)
+                        });
+                    }
+                }
+                return details;
+            }
+
+            data.extendedDetails.donee = getCustDetails(doneeId);
+            data.extendedDetails.donor = getCustDetails(donorId);
+        }
+        
+        return;
+    }
+
+    // --- 2. CANCEL REQUEST ACTION ---
+    if (input &amp;&amp; input.action == 'cancel_swap') {
+        var cancelGr = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+        if (cancelGr.get(input.swapSysId)) {
+            cancelGr.setValue('state', 4); // Task Closed Incomplete / Cancelled
+            cancelGr.setValue('approval', 'cancelled');
+            cancelGr.update();
+            data.success = true;
+        }
+        return;
+    }
+
+    // HIGHLIGHT: ACTION - Custom Native Attachment Handler for the Activity Stream
+    if (input &amp;&amp; input.action == 'upload_attachment') {
+        try {
+            var swapGrAttach = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+            if (swapGrAttach.get(input.swapSysId)) {
+                
+                // Write base64 data to the attachment table linked to this Swap Record
+                var attachSysId = new GlideSysAttachment().writeBase64(
+                    swapGrAttach,
+                    input.fileName,
+                    input.contentType || 'application/octet-stream',
+                    input.fileData
+                );
+                
+                if (attachSysId) {
+                    // Pushing a note into the comments will natively trigger the OOB Activity Stream refresh 
+                    swapGrAttach.comments = "]]&gt;📎&lt;![CDATA[ Attachment uploaded natively via portal: " + input.fileName;
+                    swapGrAttach.update();
+                    data.success = true;
+                } else {
+                    data.success = false;
+                }
+            }
+        } catch(e) {
+            data.success = false;
+        }
+        return;
+    }
+
+    // --- 3. MASTER RECORD LIST INITIALIZATION ---
+    if (!input) {
+        data.list = [];
+        var userId = gs.getUserID();
+
+        // TARGETING NEW TABLE
+        var swapGR = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+        
+        var uQuery = swapGR.addQuery('sys_created_by', gs.getUserName());
+        uQuery.addOrCondition('requested_by', userId); 
+        
+        swapGR.orderByDesc('sys_created_on');
+        swapGR.query();
+
+        while (swapGR.next()) {
+            var stateDisplay = swapGR.getDisplayValue('approval');
+
+            var doneeCode = swapGR.donee_site_code.customer_code || '';
+            var doneeName = swapGR.donee_site_code.name || swapGR.getDisplayValue('donee_site_code') || '';
+            var doneeCombined = doneeCode ? (doneeCode + ' — ' + doneeName) : doneeName;
+
+            var donorCode = swapGR.donor_site_code.customer_code || '';
+            var donorName = swapGR.donor_site_code.name || swapGR.getDisplayValue('donor_site_code') || '';
+            var donorCombined = donorCode ? (donorCode + ' — ' + donorName) : donorName;
+
+            var rawDoneeSeg = swapGR.getValue('donee_segment') || swapGR.donee_site_code.company_code || '';
+            var rawDonorSeg = swapGR.getValue('donor_segment') || swapGR.donor_site_code.company_code || '';
+
+            // HIGHLIGHT: GET VALUE - Formatting Master Array directly with the new formatRefGeo engine
+            var fDoneeZone   = formatRefGeo(swapGR, 'donee_site_code.zone_name', 'donee_site_code.customer_group');
+            var fDoneeRegion = formatRefGeo(swapGR, 'donee_site_code.region_name', 'donee_site_code.cg4');
+            var fDoneeDepot  = formatRefGeo(swapGR, 'donee_site_code.depot_name', 'donee_site_code.sales_office');
+
+            var fDonorZone   = formatRefGeo(swapGR, 'donor_site_code.zone_name', 'donor_site_code.customer_group');
+            var fDonorRegion = formatRefGeo(swapGR, 'donor_site_code.region_name', 'donor_site_code.cg4');
+            var fDonorDepot  = formatRefGeo(swapGR, 'donor_site_code.depot_name', 'donor_site_code.sales_office');
+
+            // HIGHLIGHT: SET VALUE - Pushing cleaned payload to the client side
+            data.list.push({
+                sys_id:             swapGR.getUniqueValue(),
+                number:             swapGR.getValue('number') || '',
+                pan:                swapGR.getDisplayValue('donee_site_code.pan') || swapGR.getDisplayValue('donor_site_code.pan') || 'N/A',
+                
+                donee_site:         doneeCombined,
+                donee_segment:      segmentMapping[rawDoneeSeg] || rawDoneeSeg,
+                donee_zone:         fDoneeZone,
+                donee_region:       fDoneeRegion,
+                donee_depot:        fDoneeDepot,
+                
+                donor_site:         donorCombined,
+                donor_segment:      segmentMapping[rawDonorSeg] || rawDonorSeg,
+                donor_zone:         fDonorZone,
+                donor_region:       fDonorRegion,
+                donor_depot:        fDonorDepot,
+                
+                amount:             parseFloat(swapGR.getValue('requested_amount') || swapGR.getValue('donee_amount') || 0),
+                state:              stateDisplay,
+                internalState:      getInternalState(stateDisplay),
+                created_on:         swapGR.getDisplayValue('sys_created_on').split(' ')[0],
+                sys_created_on:     swapGR.getDisplayValue('sys_created_on')
+            });
+        }
+    }
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;sounder.k@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-06-02 09:56:39&lt;/sys_created_on&gt;&lt;sys_id&gt;0af838202b1dcb504572f3745e91bfd5&lt;/sys_id&gt;&lt;sys_mod_count&gt;88&lt;/sys_mod_count&gt;&lt;sys_name&gt;UCLM Limit Swap View Request&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_0af838202b1dcb504572f3745e91bfd5&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-09-08 06:28:41&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="abg-widget-container"&gt;
+
+  &lt;div ng-if="!c.data.selectedSwap"&gt;
+    
+    &lt;div class="abg-header row flex-align-center m-b-md"&gt;
+      &lt;div class="col-xs-12 col-sm-5 col-md-5 m-b-sm-mobile"&gt;
+        &lt;h2&gt;My Submitted Limit Swaps&lt;/h2&gt;
+        &lt;p class="m-b-none text-muted"&gt;Track and review your real-time limit reallocations.&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class="col-xs-12 col-sm-7 col-md-7"&gt;
+        &lt;div class="header-actions-panel"&gt;
+          
+          &lt;ul class="abg-pills"&gt;
+            &lt;li ng-class="{'active': c.listFilter == 'all'}"&gt;
+              &lt;a href="javascript:void(0)" ng-click="c.setFilter('all')"&gt;All&lt;/a&gt;
+            &lt;/li&gt;
+            &lt;li ng-class="{'active': c.listFilter == 'pending'}"&gt;
+              &lt;a href="javascript:void(0)" ng-click="c.setFilter('pending')"&gt;Pending&lt;/a&gt;
+            &lt;/li&gt;
+            &lt;li ng-class="{'active': c.listFilter == 'completed'}"&gt;
+              &lt;a href="javascript:void(0)" ng-click="c.setFilter('completed')"&gt;Completed&lt;/a&gt;
+            &lt;/li&gt;
+          &lt;/ul&gt;
+          
+          &lt;div class="search-box"&gt;
+            &lt;span class="input-group-addon"&gt;&lt;i class="fa fa-search text-muted"&gt;&lt;/i&gt;&lt;/span&gt;
+            &lt;input type="text" class="form-control" ng-model="c.searchSwap" ng-change="c.currentPage = 1" placeholder="Search PAN or Number..."&gt;
+          &lt;/div&gt;
+          
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="table-responsive shadow-sm widget-table-wrapper"&gt;
+      &lt;table class="table abg-table table-hover m-b-none"&gt;
+        &lt;thead&gt;
+          &lt;tr&gt;
+            &lt;th width="18%"&gt;Swap Request Details&lt;/th&gt;
+            &lt;th width="24%"&gt;Donee (Receiving Unit)&lt;/th&gt;
+            &lt;th width="24%"&gt;Donor (Deducting Unit)&lt;/th&gt;
+            &lt;th width="12%"&gt;Transfer Amount&lt;/th&gt;
+            &lt;th width="10%"&gt;Status&lt;/th&gt;
+            &lt;th width="12%" class="text-center"&gt;Action&lt;/th&gt;
+          &lt;/tr&gt;
+        &lt;/thead&gt;
+        &lt;tbody&gt;
+          &lt;tr ng-if="c.getFilteredSwaps().length == 0"&gt;
+            &lt;td colspan="6" class="text-center text-muted p-xl"&gt;
+              &lt;i class="fa fa-folder-open-o fa-3x m-b-sm" style="color:#ddd;"&gt;&lt;/i&gt;&lt;br&gt;
+              No limit swap requests found matching your criteria.
+            &lt;/td&gt;
+          &lt;/tr&gt;
+          &lt;tr ng-repeat="swap in c.getPaginatedSwaps()"&gt;
+            &lt;td class="vertical-middle"&gt;
+              &lt;span class="clm-id-tag font-weight-bold"&gt;{{::swap.number}}&lt;/span&gt;&lt;br&gt;
+              &lt;small class="text-muted font-weight-bold"&gt;PAN: {{::swap.pan}}&lt;/small&gt;&lt;br&gt;
+              &lt;small class="text-muted"&gt;&lt;i class="fa fa-calendar m-r-xs"&gt;&lt;/i&gt; {{::swap.created_on}}&lt;/small&gt;
+            &lt;/td&gt;
+            &lt;td class="vertical-middle"&gt;
+              &lt;strong class="text-success" style="font-size:13.5px;"&gt;{{::swap.donee_site}}&lt;/strong&gt;&lt;br&gt;
+              &lt;div class="text-xs text-muted m-t-xs m-b-xs"&gt;
+                &lt;i class="fa fa-map-marker text-success m-r-xs"&gt;&lt;/i&gt; {{::swap.donee_zone}} | {{::swap.donee_region}} | {{::swap.donee_depot}}
+              &lt;/div&gt;
+              &lt;span class="badge segment-badge" ng-if="swap.donee_segment"&gt;{{::swap.donee_segment}}&lt;/span&gt;
+            &lt;/td&gt;
+            &lt;td class="vertical-middle"&gt;
+              &lt;strong class="text-danger" style="font-size:13.5px;"&gt;{{::swap.donor_site}}&lt;/strong&gt;&lt;br&gt;
+              &lt;div class="text-xs text-muted m-t-xs m-b-xs"&gt;
+                &lt;i class="fa fa-map-marker text-danger m-r-xs"&gt;&lt;/i&gt; {{::swap.donor_zone}} | {{::swap.donor_region}} | {{::swap.donor_depot}}
+              &lt;/div&gt;
+              &lt;span class="badge segment-badge" ng-if="swap.donor_segment"&gt;{{::swap.donor_segment}}&lt;/span&gt;
+            &lt;/td&gt;
+            &lt;td class="vertical-middle"&gt;&lt;strong style="font-size: 15px; color:#1a1a1a;"&gt;₹ {{::c.formatINR(swap.amount)}}&lt;/strong&gt;&lt;/td&gt;
+            &lt;td class="vertical-middle"&gt;
+              &lt;span class="status-pill status-{{swap.internalState}}"&gt;{{::swap.state}}&lt;/span&gt;
+            &lt;/td&gt;
+            &lt;td class="vertical-middle text-center"&gt;
+              &lt;button class="btn abg-btn-outline btn-sm" ng-click="c.viewDetails(swap)"&gt;View Details&lt;/button&gt;
+            &lt;/td&gt;
+          &lt;/tr&gt;
+        &lt;/tbody&gt;
+      &lt;/table&gt;
+    &lt;/div&gt;
+
+    &lt;div class="row flex-align-center m-t-md" ng-if="c.getFilteredSwaps().length &gt; 0"&gt;
+      &lt;div class="col-xs-12 col-sm-4 col-md-4 m-b-sm-mobile"&gt;
+        &lt;div class="input-group page-size-box"&gt;
+          &lt;span class="input-group-addon bg-light"&gt;Show&lt;/span&gt;
+          &lt;select class="form-control" ng-model="c.itemsPerPage" ng-change="c.currentPage = 1" ng-options="size for size in [5, 10, 25, 50, 100]"&gt;&lt;/select&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="col-xs-12 col-sm-4 col-md-4 text-center text-muted hidden-xs"&gt;
+        Showing {{ (c.currentPage - 1) * c.itemsPerPage + 1 }} to 
+        {{ c.getMathMin(c.currentPage * c.itemsPerPage, c.getFilteredSwaps().length) }} 
+        of {{ c.getFilteredSwaps().length }} entries
+      &lt;/div&gt;
+      &lt;div class="col-xs-12 col-sm-4 col-md-4 text-right text-center-mobile m-t-sm-mobile"&gt;
+        &lt;button class="btn btn-default btn-sm" ng-click="c.currentPage = c.currentPage - 1" ng-disabled="c.currentPage == 1"&gt;&lt;i class="fa fa-chevron-left"&gt;&lt;/i&gt; Prev&lt;/button&gt;
+        &lt;span class="m-l-sm m-r-sm font-weight-bold"&gt;Page {{c.currentPage}} / {{c.totalPages()}}&lt;/span&gt;
+        &lt;button class="btn btn-default btn-sm" ng-click="c.currentPage = c.currentPage + 1" ng-disabled="c.currentPage == c.totalPages()"&gt;Next &lt;i class="fa fa-chevron-right"&gt;&lt;/i&gt;&lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+
+  &lt;div class="slide-down" ng-if="c.data.selectedSwap"&gt;
+    
+    &lt;div class="abg-header header-divider"&gt;
+      &lt;button class="btn btn-link text-muted p-l-0 m-b-sm hover-red font-weight-bold" ng-click="c.goBack()"&gt;&amp;#8592; Back to Request Overview&lt;/button&gt;
+      &lt;div class="row flex-align-center"&gt;
+        &lt;div class="col-xs-12 col-sm-7 col-md-7"&gt;
+          &lt;h2 class="m-b-xs"&gt;{{c.data.selectedSwap.number}} &lt;small style="color:#C8102E; font-weight:700;"&gt;| Corporate PAN: {{c.data.selectedSwap.pan}}&lt;/small&gt;&lt;/h2&gt;
+          &lt;p class="m-b-none text-muted"&gt;&lt;i class="fa fa-clock-o m-r-xs"&gt;&lt;/i&gt; Submitted for processing on: {{c.data.selectedSwap.sys_created_on}}&lt;/p&gt;
+        &lt;/div&gt;
+        &lt;div class="col-xs-12 col-sm-5 col-md-5 text-right mobile-left m-t-sm-mobile"&gt;
+          
+          &lt;button class="btn btn-danger btn-sm m-r-sm font-weight-bold" 
+                  ng-if="c.data.selectedSwap.internalState == 'pending'" 
+                  ng-click="c.cancelRequest(c.data.selectedSwap)" 
+                  ng-disabled="c.data.isCancelling"&gt;
+            &lt;i class="fa fa-times-circle m-r-xs" ng-if="!c.data.isCancelling"&gt;&lt;/i&gt;
+            &lt;i class="fa fa-spinner fa-spin m-r-xs" ng-if="c.data.isCancelling"&gt;&lt;/i&gt;
+            {{c.data.isCancelling ? 'Cancelling...' : 'Cancel Request'}}
+          &lt;/button&gt;
+          
+          &lt;span class="status-pill status-{{c.data.selectedSwap.internalState}}" style="font-size: 14px; padding: 6px 18px; font-weight:700;"&gt;
+            Status: {{c.data.selectedSwap.state}}
+          &lt;/span&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="text-center p-xl" ng-if="c.data.isLoadingDetails"&gt;
+       &lt;i class="fa fa-spinner fa-spin fa-3x text-muted m-b-sm"&gt;&lt;/i&gt;
+       &lt;p class="text-muted"&gt;Resolving operational site profiles &amp; authorization traces...&lt;/p&gt;
+    &lt;/div&gt;
+
+    &lt;div ng-if="!c.data.isLoadingDetails"&gt;
+
+      &lt;div class="approval-stepper-wrapper m-b-lg slide-down"&gt;
+        &lt;h4 class="font-weight-bold m-b-md text-uppercase section-title"&gt;&lt;i class="fa fa-sitemap m-r-xs"&gt;&lt;/i&gt; Authorization Pipeline&lt;/h4&gt;
+
+        &lt;div class="text-center text-muted p-md shadow-inner bg-light rounded" ng-if="c.data.swapDetails.approvals.length == 0"&gt;
+          &lt;i class="fa fa-info-circle m-b-xs"&gt;&lt;/i&gt; Systemic approval workflows are either routing or not required for this request.
+        &lt;/div&gt;
+
+        &lt;div class="approval-stepper" ng-if="c.data.swapDetails.approvals.length &gt; 0"&gt;
+          &lt;div class="stepper-item" ng-class="{'completed': app.state == 'Approved', 'current': app.state == 'Requested', 'rejected': app.state == 'Rejected'}" ng-repeat="app in c.data.swapDetails.approvals"&gt;
+            &lt;div class="stepper-icon"&gt;
+              &lt;i class="fa fa-check" ng-if="app.state == 'Approved'"&gt;&lt;/i&gt;
+              &lt;i class="fa fa-spinner fa-spin" ng-if="app.state == 'Requested'"&gt;&lt;/i&gt;
+              &lt;i class="fa fa-times" ng-if="app.state == 'Rejected'"&gt;&lt;/i&gt;
+              &lt;i class="fa fa-circle" ng-if="app.state != 'Approved' &amp;&amp; app.state != 'Requested' &amp;&amp; app.state != 'Rejected'"&gt;&lt;/i&gt;
+            &lt;/div&gt;
+            &lt;div class="stepper-label text-dark"&gt;{{::app.role}}&lt;/div&gt;
+            &lt;div class="stepper-sub text-muted m-b-xs"&gt;{{::app.approver}}&lt;/div&gt;
+            &lt;div class="stepper-sub" ng-class="{'text-success': app.state == 'Approved', 'text-warning': app.state == 'Requested', 'text-danger': app.state == 'Rejected'}"&gt;
+              {{::app.state}}
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      
+      &lt;h4 class="font-weight-bold m-b-md text-uppercase section-title slide-down" style="animation-delay: 0.1s; animation-fill-mode: both;"&gt;&lt;i class="fa fa-database m-r-xs"&gt;&lt;/i&gt; Customer Entity Profile Matrix&lt;/h4&gt;
+      
+      &lt;div class="row flex-cards m-b-lg slide-down" style="animation-delay: 0.15s; animation-fill-mode: both;"&gt;
+        
+        &lt;div class="col-xs-12 col-sm-6"&gt;
+          &lt;div class="abg-profile-panel border-top-success"&gt;
+            &lt;div class="panel-profile-header"&gt;
+               &lt;span class="indicator-marker text-success"&gt;&lt;i class="fa fa-arrow-circle-down"&gt;&lt;/i&gt; Receiving Unit (Donee Site)&lt;/span&gt;
+               &lt;div class="d-flex justify-content-between align-items-center"&gt;
+                 &lt;h3&gt;{{c.data.swapDetails.extended.donee.code || 'N/A'}} - {{c.data.swapDetails.extended.donee.name}}&lt;/h3&gt;
+                 &lt;span class="badge" style="background:#4A5568; font-size:12px;"&gt;{{c.data.swapDetails.extended.donee.segment}}&lt;/span&gt;
+               &lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class="panel-profile-body"&gt;
+              &lt;table class="table abg-profile-table"&gt;
+                &lt;tbody&gt;
+                  &lt;tr&gt;&lt;th width="40%"&gt;Zone&lt;/th&gt;&lt;td&gt;{{c.data.swapDetails.extended.donee.zone}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;th&gt;Region&lt;/th&gt;&lt;td&gt;{{c.data.swapDetails.extended.donee.region}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;th&gt;Depot&lt;/th&gt;&lt;td&gt;{{c.data.swapDetails.extended.donee.depot}}&lt;/td&gt;&lt;/tr&gt;
+                  
+                  &lt;tr class="highlight-row-success"&gt;&lt;th&gt;Current Limit&lt;/th&gt;&lt;td&gt;&lt;strong&gt;₹ {{c.formatINR(c.data.swapDetails.extended.donee.limit)}}&lt;/strong&gt;&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-row-success"&gt;&lt;th&gt;Total Outstanding&lt;/th&gt;&lt;td&gt;&lt;strong&gt;₹ {{c.formatINR(c.data.swapDetails.extended.donee.outstanding)}}&lt;/strong&gt;&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-total-success"&gt;
+                     &lt;th&gt;Allocation Impact&lt;/th&gt;
+                     &lt;td&gt;&lt;span class="text-success font-weight-bold"&gt;+ ₹ {{c.formatINR(c.data.selectedSwap.amount)}}&lt;/span&gt;&lt;/td&gt;
+                  &lt;/tr&gt;
+                &lt;/tbody&gt;
+              &lt;/table&gt;
+
+              &lt;div class="bg-light p-sm border-top"&gt;
+                 &lt;div class="text-xs text-uppercase font-weight-bold text-muted m-b-sm m-l-sm m-t-sm"&gt;
+                    &lt;i class="fa fa-history m-r-xs"&gt;&lt;/i&gt; 6-Month Bucket-Wise Aging Trend
+                 &lt;/div&gt;
+                 &lt;div class="table-responsive p-sm"&gt;
+                   &lt;table class="table table-bordered abg-history-table m-b-none text-center" ng-if="c.data.swapDetails.extended.donee.history.length &gt; 0"&gt;
+                     &lt;thead&gt;
+                       &lt;tr&gt;
+                         &lt;th class="text-left" style="min-width: 90px;"&gt;Date&lt;/th&gt;
+                         &lt;th&gt;0-3 D&lt;/th&gt;
+                         &lt;th&gt;4-7 D&lt;/th&gt;
+                         &lt;th&gt;8-21 D&lt;/th&gt;
+                         &lt;th&gt;22-30 D&lt;/th&gt;
+                         &lt;th&gt;31-45 D&lt;/th&gt;
+                         &lt;th&gt;46-60 D&lt;/th&gt;
+                         &lt;th&gt;61-75 D&lt;/th&gt;
+                         &lt;th&gt;76-90 D&lt;/th&gt;
+                         &lt;th&gt;&gt;90 D&lt;/th&gt;
+                         &lt;th class="text-right"&gt;Total Out.&lt;/th&gt;
+                       &lt;/tr&gt;
+                     &lt;/thead&gt;
+                     &lt;tbody&gt;
+                       &lt;tr ng-repeat="hist in c.data.swapDetails.extended.donee.history"&gt;
+                         &lt;td class="text-left font-weight-bold"&gt;{{::hist.date}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a0_3)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a4_7)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a8_21)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a22_30)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a31_45)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a46_60)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-warning font-weight-bold': hist.a61_75 &gt; 0}"&gt;{{::c.formatINR(hist.a61_75)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-danger font-weight-bold': hist.a76_90 &gt; 0}"&gt;{{::c.formatINR(hist.a76_90)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-danger font-weight-bold': hist.a_gt90 &gt; 0}"&gt;{{::c.formatINR(hist.a_gt90)}}&lt;/td&gt;
+                         &lt;td class="text-right font-weight-bold text-dark" style="background: #EAEAEA;"&gt;₹ {{::c.formatINR(hist.total)}}&lt;/td&gt;
+                       &lt;/tr&gt;
+                     &lt;/tbody&gt;
+                   &lt;/table&gt;
+                   &lt;div ng-if="c.data.swapDetails.extended.donee.history.length == 0" class="text-muted text-xs p-t-xs p-l-xs"&gt;
+                      No historical outstanding data available.
+                   &lt;/div&gt;
+                 &lt;/div&gt;
+              &lt;/div&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="col-xs-12 col-sm-6"&gt;
+          &lt;div class="abg-profile-panel border-top-danger"&gt;
+            &lt;div class="panel-profile-header"&gt;
+               &lt;span class="indicator-marker text-danger"&gt;&lt;i class="fa fa-arrow-circle-up"&gt;&lt;/i&gt; Deducting Unit (Donor Site)&lt;/span&gt;
+               &lt;div class="d-flex justify-content-between align-items-center"&gt;
+                 &lt;h3&gt;{{c.data.swapDetails.extended.donor.code || 'N/A'}} - {{c.data.swapDetails.extended.donor.name}}&lt;/h3&gt;
+                 &lt;span class="badge" style="background:#4A5568; font-size:12px;"&gt;{{c.data.swapDetails.extended.donor.segment}}&lt;/span&gt;
+               &lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class="panel-profile-body"&gt;
+              &lt;table class="table abg-profile-table"&gt;
+                &lt;tbody&gt;
+                  &lt;tr&gt;&lt;th width="40%"&gt;Zone&lt;/th&gt;&lt;td&gt;{{c.data.swapDetails.extended.donor.zone}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;th&gt;Region&lt;/th&gt;&lt;td&gt;{{c.data.swapDetails.extended.donor.region}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;th&gt;Depot&lt;/th&gt;&lt;td&gt;{{c.data.swapDetails.extended.donor.depot}}&lt;/td&gt;&lt;/tr&gt;
+                  
+                  &lt;tr class="highlight-row-danger"&gt;&lt;th&gt;Current Limit&lt;/th&gt;&lt;td&gt;&lt;strong&gt;₹ {{c.formatINR(c.data.swapDetails.extended.donor.limit)}}&lt;/strong&gt;&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-row-danger"&gt;&lt;th&gt;Total Outstanding&lt;/th&gt;&lt;td&gt;&lt;strong&gt;₹ {{c.formatINR(c.data.swapDetails.extended.donor.outstanding)}}&lt;/strong&gt;&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-total-danger"&gt;
+                     &lt;th&gt;Allocation Impact&lt;/th&gt;
+                     &lt;td&gt;&lt;span class="text-danger font-weight-bold"&gt;- ₹ {{c.formatINR(c.data.selectedSwap.amount)}}&lt;/span&gt;&lt;/td&gt;
+                  &lt;/tr&gt;
+                &lt;/tbody&gt;
+              &lt;/table&gt;
+
+              &lt;div class="bg-light p-sm border-top"&gt;
+                 &lt;div class="text-xs text-uppercase font-weight-bold text-muted m-b-sm m-l-sm m-t-sm"&gt;
+                    &lt;i class="fa fa-history m-r-xs"&gt;&lt;/i&gt; 6-Month Bucket-Wise Aging Trend
+                 &lt;/div&gt;
+                 &lt;div class="table-responsive p-sm"&gt;
+                   &lt;table class="table table-bordered abg-history-table m-b-none text-center" ng-if="c.data.swapDetails.extended.donor.history.length &gt; 0"&gt;
+                     &lt;thead&gt;
+                       &lt;tr&gt;
+                         &lt;th class="text-left" style="min-width: 90px;"&gt;Date&lt;/th&gt;
+                         &lt;th&gt;0-3 D&lt;/th&gt;
+                         &lt;th&gt;4-7 D&lt;/th&gt;
+                         &lt;th&gt;8-21 D&lt;/th&gt;
+                         &lt;th&gt;22-30 D&lt;/th&gt;
+                         &lt;th&gt;31-45 D&lt;/th&gt;
+                         &lt;th&gt;46-60 D&lt;/th&gt;
+                         &lt;th&gt;61-75 D&lt;/th&gt;
+                         &lt;th&gt;76-90 D&lt;/th&gt;
+                         &lt;th&gt;&gt;90 D&lt;/th&gt;
+                         &lt;th class="text-right"&gt;Total Out.&lt;/th&gt;
+                       &lt;/tr&gt;
+                     &lt;/thead&gt;
+                     &lt;tbody&gt;
+                       &lt;tr ng-repeat="hist in c.data.swapDetails.extended.donor.history"&gt;
+                         &lt;td class="text-left font-weight-bold"&gt;{{::hist.date}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a0_3)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a4_7)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a8_21)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a22_30)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a31_45)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a46_60)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-warning font-weight-bold': hist.a61_75 &gt; 0}"&gt;{{::c.formatINR(hist.a61_75)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-danger font-weight-bold': hist.a76_90 &gt; 0}"&gt;{{::c.formatINR(hist.a76_90)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-danger font-weight-bold': hist.a_gt90 &gt; 0}"&gt;{{::c.formatINR(hist.a_gt90)}}&lt;/td&gt;
+                         &lt;td class="text-right font-weight-bold text-dark" style="background: #EAEAEA;"&gt;₹ {{::c.formatINR(hist.total)}}&lt;/td&gt;
+                       &lt;/tr&gt;
+                     &lt;/tbody&gt;
+                   &lt;/table&gt;
+                   &lt;div ng-if="c.data.swapDetails.extended.donor.history.length == 0" class="text-muted text-xs p-t-xs p-l-xs"&gt;
+                      No historical outstanding data available.
+                   &lt;/div&gt;
+                 &lt;/div&gt;
+              &lt;/div&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+      &lt;/div&gt;
+
+      &lt;h4 class="font-weight-bold m-b-sm text-uppercase section-title slide-down" style="animation-delay: 0.2s; animation-fill-mode: both;"&gt;&lt;i class="fa fa-comments-o m-r-xs"&gt;&lt;/i&gt; Collaborative Audit &amp; Communication Stream&lt;/h4&gt;
+      &lt;div class="panel panel-default shadow-sm ticket-panel slide-down" style="animation-delay: 0.25s; animation-fill-mode: both;"&gt;
+         &lt;div class="panel-body ticket-body bg-light timeline-container"&gt;
+             
+             &lt;div ng-if="c.data.isLoadingWidget" class="text-center p-xl"&gt;
+                 &lt;i class="fa fa-spinner fa-spin fa-2x text-muted m-b-sm"&gt;&lt;/i&gt;
+                 &lt;p class="text-muted"&gt;Loading secure communication stream &amp; attachment interfaces...&lt;/p&gt;
+             &lt;/div&gt;
+             
+             &lt;div ng-if="!c.data.isLoadingWidget" class="m-b-sm p-sm bg-white border rounded shadow-sm d-flex align-items-center"&gt;
+                 &lt;label class="btn abg-btn-outline btn-sm m-b-none" ng-disabled="c.data.isUploadingAttachment"&gt;
+                     &lt;i class="fa fa-paperclip m-r-xs"&gt;&lt;/i&gt; Upload Attachment
+                     &lt;input type="file" style="display:none" onchange="angular.element(this).scope().c.attachFileToStream(this)" multiple&gt;
+                 &lt;/label&gt;
+                 &lt;span class="m-l-md text-muted text-sm" ng-if="c.data.isUploadingAttachment"&gt;
+                     &lt;i class="fa fa-spinner fa-spin text-danger m-r-xs"&gt;&lt;/i&gt; Processing secure upload...
+                 &lt;/span&gt;
+                 &lt;span class="m-l-md text-muted text-xs" ng-if="!c.data.isUploadingAttachment"&gt;
+                     Supported formats: PDF, DOCX, XLSX, JPEG, PNG
+                 &lt;/span&gt;
+             &lt;/div&gt;
+
+             &lt;div ng-if="!c.data.isLoadingWidget" class="m-b-md p-b-md border-bottom ticket-attachments-wrapper"&gt;
+                 &lt;sp-widget widget="c.data.attachmentWidget"&gt;&lt;/sp-widget&gt;
+             &lt;/div&gt;
+
+             &lt;sp-widget widget="c.data.ticketWidget" ng-if="!c.data.isLoadingWidget"&gt;&lt;/sp-widget&gt;
+
+         &lt;/div&gt;
+      &lt;/div&gt;
+      
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;0af838202b1dcb504572f3745e91bfd5&lt;/id&gt;&lt;sys_created_by&gt;sounder.k@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-06-02 09:56:39&lt;/sys_created_on&gt;&lt;sys_id&gt;96f838202b1dcb504572f3745e91bfdc&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;sounder.k@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-06-02 09:56:39&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>-1330045329</payload_hash>
+        <record_name>UCLM Limit Swap View Request</record_name>
+        <reverted_from/>
+        <source>0d1e00262bb27e104572f3745e91bf51</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-08 06:28:41</sys_created_on>
+        <sys_id>db2534cc97d74b10be31fa17f053af05</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a07fb45a2c0000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 06:28:41</sys_updated_on>
+        <type>Widget</type>
+        <update_guid>5f2534ccdcd74b106e463af50b67e604</update_guid>
+        <update_guid_history>5f2534ccdcd74b106e463af50b67e604:-1330045329,228b7b21e30e031089b35e86ce40cca9:1975979705,437bf721dd0e03103cd711e746fc9802:1700805893,ce2bfbedd3ca0310d548561de17555fd:1975979705,5d7f6ee1728e03100205ac563b6c2ef0:1099850832,189433a4e78e4750f195dba79b0f622f:-1538845848,22743f646d8e47505d550ddf295d396f:-1561977237,c83137a8c54e47506798f0b2b44d0c5d:1867177307,5a21bf68cc4e4750e8ef859c7e0665cf:1123138661,1c21bf681f4e47500c86a9c6fac49364:-1279868533,3d113f68794e47504b9040183d730ca0:1887971146,134be3e4290e4750b4f609a3457d8074:-709516583,fb3b23e44f0e475058473efd92dfe0f3:-1615872685,c03bafa4340e4750333f54e5359827bd:634361881,b70bab648b0e475077b9d3514b9e8b9f:1842064623,0799abac37ca4750be024b49784e3f53:1057912937,5419236cf6ca47500a50991015ca094d:1182408142,a9c7af2828ca4750128bb567083c66b4:-165149898,c94865a33721c710ebb038b60fb649b5:1508737214,bcdd5d93ee290710714f02ad22fab9af:-729623051,79cd1d933b29071002d060337c8a9a79:1135238170,839d5593bd29071095019b91b13edef2:1362474106,c6fcd91366290710a592416bc166aad4:-589357442,a7db6c5f86adc310070449098bf1015b:-1965602339,047ba81f14adc3108e4f2eb0e8fb12e6:1508474941,186be41fe4adc310df4e251704007347:1693999762,695b641fcdadc310b7227347f5c30014:1504229819,f33be8db9aadc3109d3db597af6299e9:-1283991172,ffda64dbaaadc31015617c603f0bb930:1693999762,54caec9b89adc310e231de1dc3b60a5e:-2014174789,e9ba6c9bcbadc310ed2c1eaa591f52e5:-569206949,3ab9a41be9adc310c393104c3be5cda2:-2014174789,e98864577cadc3102c1f26df9fb87f9a:624929204,7e86a09f6d6dc31046a69f80a2c6f87d:761727450,0f7020db7c2dc310f7d994fd05bba33a:284648326,09514c93ade5c310db0c381f6b96a380:1510446870,aec8a083226d031028b7e57826734f07:373084985,db96e84f8d2d03109ee2acb0f3b45e9e:-2134112659,5184e84baa2d031046c5e2fc8c55a022:165180658,0164a44b852d0310a663ebc80d037bc2:-632552149,32b0144fd5690310d9e3d4001a6a1b58:-1941314749,bb9f4c4b4f69031025bb0261eace2254:760346877,799fc84b226903100a3aa463c9509b5d:1951651082,bb8f884b8c69031001ff71931fa6bb3a:459997565,898fc40bdd690310a70791b3c98df7d1:235861311,7e7144c308e50310d212b78f5b38876b:1876185834,7de0cc0302e503100cbcd1959ab5d638:-109928711,dc8137ba8b2503103af5a2cc7ee14fb0:-606285541,743cef7ec8e10310290b876837569484:-530804820,846b233ed8e10310c51f902b503be861:1161228294,a899ab3a49e103103d501ede8cc68cab:-3900628,8c5d77efa39943506831fcaf86f1708f:76612821,a63db3ef3f9943501daf6226c85255e6:-2058328992,5b1d7faf6f99435054534946836c9ff0:1054989815,4ffc7bafbe994350df7fa660d9058af3:-260848029,12ecb7afc39943500131c2b07c01ba9c:-952455527,b0ecf3af3199435046c282acb3776316:128833435,d6ccff6f1d9943508610f7846ee50271:-952455527,de9c3b6fd6994350326249739fcf3a43:-1241907765,f97c736f79994350ac79ef3c08d6c20d:1998907602,f45c772f64994350d3309d1be9722bbe:-224693255,3a3c3febf399435038c9dd93ffef444e:1499544329,6d0c3beb239943509f8d3216dcaca391:-2140696287,84fbb7eb129943509958a21fc0603372:-1564092363,a22bb76bf79943500a2a98b73349e892:1054989815,650bbf2b2d9943506eb960f753c98a40:-1459092894,d73abbe76c994350a67aac963ca0e81f:-725964619,3d0a73e7ac9943505485836281e676fd:-886451586,08297367f199435058c23b9d209e9b67:-493372362,cdf83b27be99435067fefc500fd97cde:332595399,8eb8bfe3e7994350a02cbe8b5567f68c:-1337750748,b8a6f7ef1959435005044149a039c01c:787586548,af06f3af375943505e8275f046bf5c9f:868982825,d7d5bf6ff0594350068235157a3f9e29:-1047909709,3243bba73d59435078ab76772d805020:1921907097,d1337fe764594350466387eee8a455ef:-1725955273,0100cab861d5cb50dee19b1ecfcb5bd5:-2018557958,3e7eb8ec091dcb50ff6ef0188d5ef6bf:115464157,217e38ec6f1dcb50902ac3bafcadf2f7:693141021,6f6efc6c4e1dcb5034fb937767c4430f:115464157,606e74ecbe1dcb50d516fce3b9540677:1367195743,435ef0ecfe1dcb508a1f501af406e59b:-973301780,db1eb8ac7c1dcb50c47e23eafb2b242b:-1580112490,f30dfce89c1dcb50a3c1df248bc015fa:-2004970816,7e0d7ce8021dcb50d3c99f1b8e35d7e1:-76465010,b40dfce81c1dcb50728bdb419dcd5ec1:-2004970816,efec7ce8061dcb50d90960900979f53a:526951215,e1197c205d1dcb500495c86270222a70:2132067432,92f83820531dcb505c95ac07381b66da:-786734782</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="">f855f8cc97d74b10be31fa17f053af3e</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-08 06:29:20</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>7272a221b63a4730958a9644e2fb7240</sys_id>
+        <sys_metadata>0af838202b1dcb504572f3745e91bfd5</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>UCLM Limit Swap View Request</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_0af838202b1dcb504572f3745e91bfd5</sys_update_name>
+        <sys_update_version display_value="sp_widget_0af838202b1dcb504572f3745e91bfd5">db2534cc97d74b10be31fa17f053af05</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 06:29:20</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

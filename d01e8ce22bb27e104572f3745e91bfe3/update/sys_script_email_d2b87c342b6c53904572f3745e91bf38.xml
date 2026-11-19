@@ -1,0 +1,412 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_nt_cl_request_status_script</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm_nt_cl_request_status_script
+// Notification table: x_birl3_clm_nt_pan_request
+// Handles Submitted, Approved, and Rejected states with unified CredX UI
+(function runMailScript(current, template, email, email_action, event) {
+    try {
+        // ── 1. Helpers & Value Parsers ───────────────────────────────────────
+        function s(v) { return (v === null || v === undefined) ? '' : String(v).trim(); }
+
+        function parseNum(v) {
+            if (!v && v !== 0) return 0;
+            var strVal = String(v);
+            if (strVal.indexOf(';') > -1) strVal = strVal.split(';')[1];
+            var num = parseFloat(strVal);
+            return isNaN(num) ? 0 : num;
+        }
+
+        function inr(n) {
+            var str = Math.round(Math.abs(parseNum(n))).toString();
+            var last = str.slice(-3), rest = str.slice(0, -3);
+            if (rest) last = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last;
+            return last;
+        }
+
+        function rupee(n) {
+            var num = parseNum(n);
+            return (num < 0 ? '- &#8377; ' : '&#8377; ') + inr(num);
+        }
+
+        function esc(str) {
+            return GlideStringUtil.escapeHTML(s(str));
+        }
+
+        // ── PAN-Level Calculation & Approver Recommended CL Helpers ──────────
+        function segKey(t) {
+            t = (t || '').toString().toLowerCase();
+            if (t.indexOf('cement') !== -1) return 'Cement';
+            if (t.indexOf('rmc') !== -1) return 'RMC';
+            if (t.indexOf('bpd') !== -1) return 'BPD';
+            return '';
+        }
+
+        function getSiteCode(sGr) {
+            var code = s(sGr.getValue('customer_code'));
+            if (!code && sGr.isValidField('customer_site_code') && sGr.customer_site_code) {
+                code = sGr.customer_site_code.customer_code_sap ? s(sGr.customer_site_code.customer_code_sap) : '';
+            }
+            return code;
+        }
+
+        // Computes PAN-level Requested Limit (requested sites + unrequested sites' current limits)
+        // and PAN-level Total Outstanding across all N01 sites under the PAN
+        function getPanListFigures(panSysId, panVal) {
+            var reqMap = {};
+            var sGr = new GlideRecord('x_birl3_clm_nt_site_request');
+            sGr.addQuery('pan_request', panSysId);
+            sGr.query();
+            while (sGr.next()) {
+                var code = getSiteCode(sGr);
+                var seg = sGr.isValidField('segment') ? segKey(sGr.getDisplayValue('segment')) : '';
+                reqMap[code + '|' + seg] = {
+                    requested: parseNum(sGr.getValue('requested_limit') || sGr.getValue('site_desired_limit')),
+                    os: parseNum(sGr.getValue('existing_outstanding'))
+                };
+            }
+
+            var snapOs = {};
+            var snGr = new GlideRecord('x_birl3_clm_nt_pan_request_outstanding');
+            snGr.addQuery('pan_request', panSysId);
+            snGr.orderByDesc('snapshot_month');
+            snGr.orderByDesc('sys_created_on');
+            snGr.query();
+            while (snGr.next()) {
+                var sk = s(snGr.getValue('customer_site_code') || snGr.getValue('customer'));
+                var ck = s(snGr.getValue('customer_code'));
+                if ((sk && snapOs[sk] === undefined) || (ck && snapOs[ck] === undefined)) {
+                    var isLeg = snGr.isValidField('bucket_0_21_days') && snGr.getValue('bucket_0_21_days') !== null;
+                    var b03   = parseNum(isLeg ? snGr.getValue('bucket_0_21_days')  : snGr.getValue('bucket_0_30_days'));
+                    var b47   = parseNum(isLeg ? snGr.getValue('bucket_22_30_days') : snGr.getValue('bucket_31_45_days'));
+                    var b821  = parseNum(isLeg ? snGr.getValue('bucket_31_45_days') : snGr.getValue('bucket_46_60_days'));
+                    var b22   = parseNum(isLeg ? snGr.getValue('bucket_46_60_days') : snGr.getValue('bucket_61_75_days'));
+                    var b31   = parseNum(isLeg ? snGr.getValue('bucket_61_75_days') : snGr.getValue('bucket_76_90_days'));
+                    var bgt   = parseNum(snGr.getValue('bucket_gt120_days')) + parseNum(snGr.getValue('bucket_91_120_days'));
+                    var tot   = parseNum(snGr.getValue('total_outstanding')) || (b03 + b47 + b821 + b22 + b31 + bgt);
+                    if (sk && snapOs[sk] === undefined) snapOs[sk] = tot;
+                    if (ck && snapOs[ck] === undefined) snapOs[ck] = tot;
+                }
+            }
+
+            var requestedPan = 0, outstanding = 0;
+            var seen = {}, claimed = {};
+            var cGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+            cGr.addQuery('pan', panVal);
+            cGr.addQuery('cg1', 'N01');
+            cGr.query();
+            while (cGr.next()) {
+                var cId = cGr.getUniqueValue();
+                var cCode = s(cGr.getValue('customer_code_sap'));
+                var cSeg = segKey(cGr.getDisplayValue('segment'));
+                var dedupe = cCode ? (cCode + '|' + cSeg) : cId;
+                if (seen[dedupe]) continue;
+                seen[dedupe] = true;
+
+                var key = cCode + '|' + cSeg;
+                if (reqMap[key] === undefined && reqMap[cCode + '|'] !== undefined) key = cCode + '|';
+                var line = (reqMap[key] !== undefined && !claimed[key]) ? reqMap[key] : null;
+                if (line) claimed[key] = true;
+
+                var curCl = parseNum(cGr.getValue('cr_limit') || cGr.getValue('credit_limit'));
+                requestedPan += line ? line.requested : curCl;
+
+                if (snapOs[cId] !== undefined) outstanding += snapOs[cId];
+                else if (cCode && snapOs[cCode] !== undefined) outstanding += snapOs[cCode];
+                else outstanding += line ? line.os : parseNum(cGr.getValue('outstanding'));
+            }
+
+            return { requestedPan: requestedPan, outstanding: outstanding };
+        }
+
+        // Fallback reader for PAN-level Recommended CL on sysapproval_approver.approval_journal_column
+        function getLatestRecommendedCl(panSysId) {
+            var apGr = new GlideRecord('sysapproval_approver');
+            var q = apGr.addQuery('sysapproval', panSysId);
+            q.addOrCondition('document_id', panSysId);
+            apGr.addQuery('state', 'approved');
+            apGr.orderByDesc('sys_updated_on');
+            apGr.setLimit(1);
+            apGr.query();
+            if (!apGr.next() || !apGr.isValidField('approval_journal_column')) return 0;
+
+            var raw = '';
+            try {
+                var el = apGr.getElement('approval_journal_column');
+                if (el) raw = el.getJournalEntry(1) || '';
+            } catch (e) { raw = ''; }
+            if (!raw) raw = apGr.getValue('approval_journal_column') || '';
+            if (!raw) return 0;
+
+            var lines = String(raw).split('\n');
+            if (lines.length > 1 && /^\d{4}-\d{2}-\d{2}|^[^:]+:\s*\d{4}-\d{2}-\d{2}/.test(lines[0])) lines.shift();
+            var txt = lines.join(' ').replace(/[,₹\s]/g, '');
+            var m = txt.match(/\d+(\.\d+)?/);
+            return m ? (parseFloat(m[0]) || 0) : 0;
+        }
+
+        // ── Shared CredX UI Component Builders (Aligned with Trade Scripts) ──
+        var TD_K   = 'padding:8px 0; color:#5a6a7a; border-bottom:1px solid #eef1f5;';
+        var TD_V   = 'padding:8px 0; color:#1a1a1a; border-bottom:1px solid #eef1f5;';
+        var TILE   = 'border:1px solid #e0e6ed; border-radius:6px; padding:12px 14px; background-color:#fafbfc;';
+        var TILE_K = 'font-size:10px; text-transform:uppercase; letter-spacing:.8px; color:#5a6a7a; font-weight:700;';
+
+        function sec(title, top) {
+            return '<h3 style="margin:' + (top || 24) + 'px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">' + title + '</h3>';
+        }
+
+        function kv(label, value, last, bold) {
+            return '<tr><td width="38%" style="' + (last ? 'padding:8px 0; color:#5a6a7a;' : TD_K) + '">' + label + '</td>' +
+                   '<td style="' + (last ? 'padding:8px 0; color:#1a1a1a;' : TD_V) + (bold ? ' font-weight:700;' : '') + '">' + value + '</td></tr>';
+        }
+
+        // ── 2. Determine Action State & Visual Styling (NT Logic Preserved) ──
+        var rawState    = s(current.getValue('state')).toLowerCase();
+        var rawApproval = s(current.getValue('approval')).toLowerCase();
+
+        var isApproved  = (rawState === '4');
+        var isRejected  = (rawApproval === 'rejected');
+        var isSubmitted = !isApproved && !isRejected;
+
+        var statusTitle  = 'Credit Limit Request Submitted';
+        var headlineText = 'Your credit limit request has been submitted';
+        var sublineText  = 'Your Non-Trade credit limit request has been logged and routed for approval.';
+        var bannerStyle  = 'background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px;';
+        var statusPill   = '<span style="display:inline-block; background-color:#eaf4fb; color:#1a5276; border:1px solid #aed6f1; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">Submitted</span>';
+
+        if (isApproved) {
+            statusTitle  = 'Credit Limit Request Approved';
+            headlineText = 'Your credit limit request has been approved';
+            sublineText  = 'The approved PAN and site-level limits have been finalized and queued for SAP update.';
+            bannerStyle  = 'background-color:#eafaf1; border:1px solid #a9dfbf; border-radius:6px;';
+            statusPill   = '<span style="display:inline-block; background-color:#eafaf1; color:#1e8449; border:1px solid #a9dfbf; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">&#10004; Approved</span>';
+        } else if (isRejected) {
+            statusTitle  = 'Credit Limit Request Rejected';
+            headlineText = 'Your credit limit request has been rejected';
+            sublineText  = 'Please review the approver remarks below for details regarding this decision.';
+            bannerStyle  = 'background-color:#FDEDEC; border:1px solid #f5b7b1; border-radius:6px;';
+            statusPill   = '<span style="display:inline-block; background-color:#FDEDEC; color:#C8102E; border:1px solid #f5b7b1; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">&#10006; Rejected</span>';
+        }
+
+        // ── 3. Resolve Customer Name from Master ─────────────────────────────
+        var panStr    = s(current.getValue('pan'));
+        var reqNumber = s(current.getValue('number'));
+        var custName  = 'Corporate Group';
+
+        if (panStr) {
+            var custGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+            custGr.addQuery('pan', panStr);
+            custGr.setLimit(1);
+            custGr.query();
+            if (custGr.next()) {
+                custName = custGr.getValue('group_customer_name') || custGr.getValue('customer_name') || custGr.getValue('name') || custName;
+            }
+        }
+
+        email.setSubject('[CredX] ' + statusTitle + ' - ' + reqNumber + ' (' + (custName !== 'Corporate Group' ? custName : panStr) + ')');
+
+        // ── 4. Metrics Extraction (PAN-Level Aligned) ────────────────────────
+        var panSysId       = current.getUniqueValue();
+        var segment        = current.getDisplayValue('segment') || s(current.getValue('segment')) || 'Non-Trade';
+        var panFigs        = panStr ? getPanListFigures(panSysId, panStr) : { requestedPan: 0, outstanding: 0 };
+        var requestedLimit = panFigs.requestedPan || parseNum(current.getValue('total_requested_limit') || current.getValue('total_desired_limit'));
+        var safeLimit      = parseNum(current.getValue('total_safe_allowable_limit'));
+        var approvedLimit  = parseNum(current.getValue('total_approved_limit') || current.getValue('approved_limit'));
+        if (isApproved && approvedLimit <= 0) {
+            approvedLimit = getLatestRecommendedCl(panSysId);
+        }
+        var outstanding    = panFigs.outstanding || parseNum(current.getValue('total_existing_outstanding'));
+        var isDeviation    = (current.getValue('is_deviation') == 1 || current.getValue('is_deviation') == 'true');
+
+        var devPill = isDeviation
+            ? ' <span style="display:inline-block; background-color:#E23D28; color:#ffffff; border:1px solid #b82b1c; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">Deviation</span>'
+            : ' <span style="display:inline-block; background-color:#eafaf1; color:#1e8449; border:1px solid #a9dfbf; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">Standard</span>';
+
+        var instanceUrl = gs.getProperty('glide.servlet.uri');
+        if (!instanceUrl.endsWith('/')) instanceUrl += '/';
+        var portalUrl = instanceUrl + 'uclm?id=uclm_non_trade_view_request&number=' + encodeURIComponent(reqNumber);
+
+        // ── 5. Render HTML Output (Trade UI System) ──────────────────────────
+        var h = '';
+
+        // Headline + Subtitle + Request Banner
+        h += '<h1 style="margin:0 0 6px 0; font-size:22px; line-height:1.3; color:#1a1a1a; font-weight:700;">' + esc(headlineText) + '</h1>';
+        h += '<p style="margin:0 0 20px 0; font-size:14px; color:#5a6a7a;">' + esc(sublineText) + '</p>';
+
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="' + bannerStyle + '"><tbody><tr>';
+        h += '<td style="padding:12px 16px;">';
+        h += '<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#5a6a7a; font-weight:700;">Request Number</div>';
+        h += '<div style="font-size:18px; font-weight:700; color:#1a1a1a;">' + esc(reqNumber) + '</div>';
+        h += '<div style="font-size:12px; padding-top:3px;"><a href="' + portalUrl + '" style="color:#AF272F; font-weight:700; text-decoration:none;">View in CredX &rarr;</a></div>';
+        h += '</td>';
+        h += '<td align="right" valign="middle" style="padding:12px 16px;">' + statusPill + devPill + '</td>';
+        h += '</tr></tbody></table>';
+
+        // Rejection Remarks Callout (Rendered only on Rejection)
+        if (isRejected) {
+            var rejectComment = '';
+
+            var apprGr = new GlideRecord('sysapproval_approver');
+            var q = apprGr.addQuery('sysapproval', current.getUniqueValue());
+            q.addOrCondition('document_id', current.getUniqueValue());
+            apprGr.addQuery('state', 'rejected');
+            apprGr.orderByDesc('sys_updated_on');
+            apprGr.setLimit(1);
+            apprGr.query();
+
+            if (apprGr.next()) {
+                var jfGr = new GlideRecord('sys_journal_field');
+                jfGr.addQuery('element_id', apprGr.getUniqueValue());
+                jfGr.addQuery('element', 'comments');
+                jfGr.orderByDesc('sys_created_on');
+                jfGr.setLimit(1);
+                jfGr.query();
+                if (jfGr.next()) {
+                    rejectComment = s(jfGr.getValue('value'));
+                }
+
+                if (!rejectComment && apprGr.comments) {
+                    var apprEntry = s(apprGr.comments.getJournalEntry(1));
+                    if (apprEntry) {
+                        var lines = apprEntry.split('\n');
+                        if (lines.length > 1) {
+                            lines.shift();
+                            rejectComment = lines.join('\n').trim();
+                        } else {
+                            rejectComment = apprEntry.trim();
+                        }
+                    }
+                }
+
+                if (!rejectComment) {
+                    rejectComment = s(apprGr.getValue('comments')) || s(apprGr.getValue('approval_reason'));
+                }
+            }
+
+            if (!rejectComment) {
+                var taskEntry = s(current.comments.getJournalEntry(1));
+                if (taskEntry) {
+                    var tLines = taskEntry.split('\n');
+                    if (tLines.length > 1) {
+                        tLines.shift();
+                        rejectComment = tLines.join('\n').trim();
+                    } else {
+                        rejectComment = taskEntry.trim();
+                    }
+                }
+            }
+
+            if (!rejectComment) {
+                rejectComment = 'No specific comments provided by the approver.';
+            }
+
+            h += sec('Rejection Remarks', 28);
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#FDEDEC; border-left:4px solid #E23D28; border-radius:4px;"><tbody><tr><td style="padding:14px 16px;">';
+            h += '<div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; color:#b3261e; margin-bottom:6px;">&#9888; Reason for Rejection / Approver Comments</div>';
+            h += '<div style="font-size:14px; line-height:1.6; color:#1a1a1a; white-space:pre-wrap; word-break:break-word;">' + esc(rejectComment) + '</div>';
+            h += '</td></tr></tbody></table>';
+        }
+
+        // 3-Tile KPI Limit Strip
+        h += sec(isApproved ? 'Approved Limit (PAN Level)' : 'Credit Limit (PAN Level)', 28);
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+        h += '<td width="33%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Safe Allowable Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(safeLimit) + '</div></div></td>';
+        h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Requested PAN Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(requestedLimit) + '</div></div></td>';
+
+        if (isApproved) {
+            h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#eafaf1; border:1px solid #27ae60; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + ' color:#1e8449;">Total Approved Limit</div><div style="font-size:17px; font-weight:700; color:#1e8449; padding-top:3px;">' + rupee(approvedLimit) + '</div></div></td>';
+        } else if (isRejected) {
+            h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#FDEDEC; border:1px solid #f5b7b1; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + ' color:#C8102E;">Total Approved Limit</div><div style="font-size:17px; font-weight:700; color:#C8102E; padding-top:3px;">Rejected</div></div></td>';
+        } else {
+            h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + '">Total Approved Limit</div><div style="font-size:17px; font-weight:700; color:#856404; padding-top:3px;">Pending Action</div></div></td>';
+        }
+        h += '</tr></tbody></table>';
+
+        // Request Summary (Clean 38% / 62% Key-Value Table)
+        h += sec('Request Summary');
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+        h += kv('Customer Group', esc(custName), false, true);
+        h += kv('Corporate PAN', '<span style="font-family:monospace; font-weight:700;">' + esc(panStr || '&mdash;') + '</span>');
+        h += kv('Customer Type', 'Non-Trade');
+        h += kv('Segment', esc(segment));
+        h += kv('Deviation Status', isDeviation
+            ? '<span style="font-weight:700; color:#E23D28;">&#9888; Requires Deviation Approval</span>'
+            : '<span style="font-weight:700; color:#1e8449;">Standard (Safe Limit Aligned)</span>');
+        h += kv('Total PAN Outstanding', rupee(outstanding), true, true);
+        h += '</tbody></table>';
+
+        // ── 6. Child Sites Line-Item Table (Trade Table Styling) ─────────────
+        var siteGr = new GlideRecord('x_birl3_clm_nt_site_request');
+        siteGr.addQuery('pan_request', current.getUniqueValue());
+        siteGr.orderBy('customer_site_code');
+        siteGr.query();
+
+        var TH   = 'padding:9px 12px; background-color:#eef1f5; color:#2b3440; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; text-align:left; border-bottom:1px solid #dde3ea;';
+        var TH_R = 'padding:9px 12px; background-color:#eef1f5; color:#2b3440; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; text-align:right; border-bottom:1px solid #dde3ea;';
+        var TD   = 'padding:10px 12px; font-size:13px; color:#1a1a1a; border-bottom:1px solid #eef1f5; vertical-align:top;';
+        var TD_R = 'padding:10px 12px; font-size:13px; color:#1a1a1a; border-bottom:1px solid #eef1f5; vertical-align:top; text-align:right; white-space:nowrap;';
+
+        var siteRows = '', siteCount = 0;
+        while (siteGr.next()) {
+            siteCount++;
+            var sCode       = getSiteCode(siteGr) || siteGr.getDisplayValue('customer_site_code') || siteGr.getValue('customer_code_sap') || 'N/A';
+            var sName       = (siteGr.customer_site_code && siteGr.customer_site_code.customer_name)
+                ? (siteGr.customer_site_code.customer_name.getValue() || 'Site')
+                : 'Site';
+            var sReqLimit   = parseNum(siteGr.getValue('requested_limit') || siteGr.getValue('site_desired_limit'));
+            var sAppLimit   = parseNum(siteGr.getValue('approved_limit'));
+            var sReviewDate = siteGr.getDisplayValue('proposed_next_review') || siteGr.getDisplayValue('next_review_date') || '&mdash;';
+
+            siteRows += '<tr>';
+            siteRows += '<td style="' + TD + ' font-family:monospace; font-weight:700; white-space:nowrap;">' + esc(sCode) + '</td>';
+            siteRows += '<td style="' + TD + '">' + esc(sName) + '</td>';
+            siteRows += '<td style="' + TD_R + ' font-weight:600;">' + rupee(sReqLimit) + '</td>';
+            if (isApproved) {
+                siteRows += '<td style="' + TD_R + ' color:#1e8449; font-weight:700;">' + rupee(sAppLimit) + '</td>';
+                siteRows += '<td style="' + TD + ' color:#5a6a7a; white-space:nowrap;">' + esc(sReviewDate) + '</td>';
+            }
+            siteRows += '</tr>';
+        }
+
+        if (siteCount) {
+            h += sec('Operating Site Breakdown <span style="display:inline-block; background-color:#eef1f5; border:1px solid #dde3ea; border-radius:10px; padding:0 8px; font-size:11px; letter-spacing:0; color:#2b3440;">' + siteCount + '</span>');
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #dde3ea; border-radius:6px;"><thead><tr>';
+            h += '<th style="' + TH + '">Site Code</th>';
+            h += '<th style="' + TH + '">Customer Site Name</th>';
+            h += '<th style="' + TH_R + '">Requested Limit</th>';
+            if (isApproved) {
+                h += '<th style="' + TH_R + '">Approved Limit</th>';
+                h += '<th style="' + TH + '">Review Date</th>';
+            }
+            h += '</tr></thead><tbody>' + siteRows + '</tbody></table>';
+        }
+
+        // ── 7. CTA Button (Trade Charcoal + Yellow Accent Style) ─────────────
+        h += '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:28px;"><tbody><tr>';
+        h += '<td align="center" style="background-color:#1a1a1a; border-radius:6px; border-bottom:3px solid #F3D54E;">';
+        h += '<a href="' + portalUrl + '" target="_blank" style="display:inline-block; padding:12px 28px; font-size:13px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; color:#ffffff; text-decoration:none;">Open Request in CredX</a>';
+        h += '</td></tr></tbody></table>';
+        h += '<p style="margin:14px 0 0 0; font-size:12px; color:#8a96a3;">Open the request in CredX to view full details and approval history.</p>';
+
+        template.print(h);
+
+    } catch (ex) {
+        gs.error('CLM MailScript clm_nt_cl_request_status_script error: ' + ex.message);
+        template.print('<div style="font-family: Arial, sans-serif; color: #d9534f;">Error loading request summary details.</div>');
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-11 17:58:25</sys_created_on>
+        <sys_id>d2b87c342b6c53904572f3745e91bf38</sys_id>
+        <sys_mod_count>14</sys_mod_count>
+        <sys_name>clm_nt_cl_request_status_script</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_d2b87c342b6c53904572f3745e91bf38</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-13 06:52:47</sys_updated_on>
+    </sys_script_email>
+</record_update>

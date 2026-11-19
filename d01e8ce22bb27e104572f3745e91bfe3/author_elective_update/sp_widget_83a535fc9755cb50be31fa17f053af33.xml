@@ -1,0 +1,884 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $window, $filter) {
+  var c = this;
+
+  c.searchText = '';
+  c.itemsPerPage = "5"; 
+  c.currentPage = 1;
+  c.sortField = 'closed_at';
+  c.sortReverse = true; 
+
+  c.filteredList = [];
+  c.pagedList = [];
+  c.pages = [];
+
+  c.updatePagination = function() {
+    c.filteredList = $filter('filter')(c.data.list, c.searchText);
+    c.filteredList = $filter('orderBy')(c.filteredList, c.sortField, c.sortReverse);
+
+    var perPage = parseInt(c.itemsPerPage, 10);
+    c.totalPages = Math.ceil(c.filteredList.length / perPage) || 1;
+    
+    if (c.currentPage > c.totalPages) {
+      c.currentPage = c.totalPages;
+    }
+
+    c.startEntry = c.filteredList.length === 0 ? 0 : (c.currentPage - 1) * perPage + 1;
+    c.endEntry = Math.min(c.currentPage * perPage, c.filteredList.length);
+    c.pagedList = c.filteredList.slice(c.startEntry - 1, c.endEntry);
+
+    c.pages = [];
+    for (var i = 1; i <= c.totalPages; i++) {
+      c.pages.push(i);
+    }
+  };
+
+  c.changeSort = function(field) {
+    if (c.sortField === field) {
+      c.sortReverse = !c.sortReverse;
+    } else {
+      c.sortField = field;
+      c.sortReverse = false;
+    }
+    c.updatePagination();
+  };
+
+  c.setPage = function(pageNumber) {
+    if (pageNumber >= 1 && pageNumber <= c.totalPages) {
+      c.currentPage = pageNumber;
+      c.updatePagination();
+    }
+  };
+
+  c.goBack = function() {
+    $window.location.href = '/uclm?id=uclm_limit_swap_dashboard';
+  };
+
+  if (c.data.list) {
+    c.updatePagination();
+  }
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.clm-dashboard-container {
+  padding: 32px 24px;
+  max-width: 1360px;
+  margin: 0 auto;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #1e293b;
+  background-color: #f8fafc;
+}
+.clm-header-flex {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+@media (min-width: 768px) {
+  .clm-header-flex {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: flex-start;
+  }
+}
+.clm-title-block h2 {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #0f172a;
+  margin: 0 0 6px 0;
+}
+.clm-title-block p {
+  margin: 0;
+  font-size: 14px;
+  color: #64748b;
+}
+.btn-clm-secondary {
+  display: inline-flex;
+  align-items: center;
+  background-color: #ffffff;
+  color: #334155;
+  border: 1px solid #cbd5e1;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition: all 0.2s ease;
+}
+.btn-clm-secondary:hover {
+  background-color: #f1f5f9;
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+.clm-card-panel {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.02);
+  overflow: hidden;
+}
+.clm-panel-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border-bottom: 1px solid #f1f5f9;
+  background-color: #ffffff;
+}
+@media (min-width: 576px) {
+  .clm-panel-controls {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+}
+.control-label {
+  font-size: 13.5px;
+  color: #475569;
+  font-weight: 500;
+  margin: 0;
+}
+.clm-select-sm {
+  display: inline-block;
+  height: 34px;
+  padding: 0 28px 0 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #1e293b;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+}
+.clm-search-wrapper {
+  position: relative;
+  width: 100%;
+}
+@media (min-width: 576px) {
+  .clm-search-wrapper { width: 260px; }
+}
+.clm-search-wrapper .search-icon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #94a3b8;
+  pointer-events: none;
+}
+.clm-input-sm {
+  width: 100%;
+  height: 36px;
+  padding: 6px 12px 6px 36px;
+  font-size: 13.5px;
+  color: #0f172a;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  box-sizing: border-box;
+}
+.clm-table-responsive {
+  width: 100%;
+  overflow-x: auto;
+}
+.clm-data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.clm-data-table th {
+  background-color: #f8fafc;
+  color: #475569;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid #e2e8f0;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.clm-data-table th.sort-th {
+  cursor: pointer;
+  user-select: none;
+}
+.sort-indicator {
+  margin-left: 4px;
+  font-size: 9px;
+  color: #3b82f6;
+}
+.clm-data-table td {
+  padding: 16px 20px;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 14px;
+  color: #334155;
+  white-space: nowrap;
+}
+.clm-data-table tbody tr:hover {
+  background-color: #f8fafc;
+}
+.col-highlight { color: #2563eb; font-weight: 600; }
+.col-weight-medium { font-weight: 600; color: #0f172a; }
+.mono-text { font-family: monospace; font-size: 13px; color: #475569; }
+.clm-text-muted { color: #64748b; font-size: 13.5px; }
+.clm-text-truncated {
+  display: block;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.clm-panel-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border-top: 1px solid #e2e8f0;
+  background-color: #ffffff;
+}
+@media (min-width: 768px) {
+  .clm-panel-footer {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+}
+.clm-footer-info { font-size: 13.5px; color: #64748b; }
+.clm-pagination-row {
+  display: flex;
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+}
+.page-nav-item { margin: 0 2px; }
+.page-nav-item button {
+  background-color: #ffffff;
+  border: 1px solid #cbd5e1;
+  color: #475569;
+  padding: 6px 12px;
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.page-nav-item.active button {
+  background-color: #2563eb;
+  border-color: #2563eb;
+  color: #ffffff;
+}
+.page-nav-item.disabled button {
+  color: #cbd5e1;
+  background-color: #f8fafc;
+  cursor: not-allowed;
+}
+.clm-empty-state { text-align: center; padding: 48px 24px; }
+.empty-icon-box { color: #94a3b8; margin-bottom: 14px; }
+.clm-empty-state h3 { font-size: 16px; font-weight: 600; color: #0f172a; margin: 0 0 6px 0; }
+.clm-empty-state p { color: #64748b; font-size: 14px; margin: 0; }</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>uclm_limit_swap_approved_dashboard</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>uclm_limit_swap_approved_dashboard</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+  data.list = [];
+  var userId = gs.getUserID();
+  
+  var swapGR = new GlideRecord('x_birl3_clm_limit_swap');
+  
+  // CRITICAL: This line forces the database to ONLY return records where state is 'approved'
+  swapGR.addQuery('state', 'approved'); 
+  
+  swapGR.orderByDesc('closed_at'); 
+  swapGR.query();
+
+  while (swapGR.next()) {
+    data.list.push({
+      sys_id: swapGR.getUniqueValue(),
+      number: swapGR.getValue('number') || '',
+      pan: swapGR.getDisplayValue('pan') || '',
+      donee_site: swapGR.getDisplayValue('donee_site') || '',
+      donee_amount: parseFloat(swapGR.getValue('donee_amount') || 0),
+      donor_site: swapGR.getDisplayValue('donor_site') || '',
+      requested_by: swapGR.getDisplayValue('requested_by') || '',
+      closed_at: swapGR.getDisplayValue('closed_at') || swapGR.getDisplayValue('sys_updated_on')
+    });
+  }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>sounder.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-03 09:00:20</sys_created_on>
+        <sys_id>83a535fc9755cb50be31fa17f053af33</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_name>uclm_limit_swap_approved_dashboard</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_83a535fc9755cb50be31fa17f053af33</sys_update_name>
+        <sys_updated_by>sounder.k@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-03 09:45:29</sys_updated_on>
+        <template><![CDATA[<div class="clm-dashboard-container">
+  
+  <div class="clm-header-flex">
+    <div class="clm-title-block">
+      <h2>Approved Limit Swap Requests</h2>
+      <p>View historic records of limit swap requests you have personally authorized.</p>
+    </div>
+    <div class="clm-action-block">
+      <button class="btn-clm-secondary" ng-click="c.goBack()" aria-label="Navigate back to dashboard">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="margin-right: 6px;"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+        Back to Dashboard
+      </button>
+    </div>
+  </div>
+
+  <div class="clm-card-panel">
+    
+    <div class="clm-panel-controls">
+      <div class="control-group-left">
+        <label class="control-label">
+          Entries
+          <select ng-model="c.itemsPerPage" ng-change="c.updatePagination()" class="clm-select-sm">
+            <option value="5">5</option>
+            <option value="10">10</option>
+            <option value="15">15</option>
+          </select> 
+        </label>
+      </div>
+      <div class="control-group-right">
+        <div class="clm-search-wrapper">
+          <svg class="search-icon" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          <input type="text" ng-model="c.searchText" ng-change="c.updatePagination()" class="clm-input-sm" placeholder="Search approved history...">
+        </div>
+      </div>
+    </div>
+
+    <div ng-if="c.filteredList.length === 0" class="clm-empty-state">
+      <div class="empty-icon-box">
+        <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>
+      </div>
+      <h3>No Approved Archives</h3>
+      <p>There are no historical logs of requests approved under your account authority.</p>
+    </div>
+
+    <div class="clm-table-responsive" ng-if="c.filteredList.length > 0">
+      <table class="clm-data-table">
+        <thead>
+          <tr>
+            <th ng-click="c.changeSort('number')" class="sort-th">
+              Request No. <span class="sort-indicator" ng-show="c.sortField === 'number'">{{c.sortReverse ? '▼' : '▲'}}</span>
+            </th>
+            <th ng-click="c.changeSort('pan')" class="sort-th">
+              PAN Number <span class="sort-indicator" ng-show="c.sortField === 'pan'">{{c.sortReverse ? '▼' : '▲'}}</span>
+            </th>
+            <th ng-click="c.changeSort('donee_site')" class="sort-th">
+              Donee Site <span class="sort-indicator" ng-show="c.sortField === 'donee_site'">{{c.sortReverse ? '▼' : '▲'}}</span>
+            </th>
+            <th ng-click="c.changeSort('donee_amount')" class="sort-th">
+              Amount <span class="sort-indicator" ng-show="c.sortField === 'donee_amount'">{{c.sortReverse ? '▼' : '▲'}}</span>
+            </th>
+            <th ng-click="c.changeSort('donor_site')" class="sort-th">
+              Donor Site <span class="sort-indicator" ng-show="c.sortField === 'donor_site'">{{c.sortReverse ? '▼' : '▲'}}</span>
+            </th>
+            <th ng-click="c.changeSort('requested_by')" class="sort-th">
+              Requested By <span class="sort-indicator" ng-show="c.sortField === 'requested_by'">{{c.sortReverse ? '▼' : '▲'}}</span>
+            </th>
+            <th ng-click="c.changeSort('closed_at')" class="sort-th">
+              Approved Date <span class="sort-indicator" ng-show="c.sortField === 'closed_at'">{{c.sortReverse ? '▼' : '▲'}}</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr ng-repeat="item in c.pagedList">
+            <td class="col-highlight"><strong>{{item.number}}</strong></td>
+            <td><span class="mono-text">{{item.pan}}</span></td>
+            <td><span class="clm-text-truncated" title="{{item.donee_site}}">{{item.donee_site}}</span></td>
+            <td class="col-weight-medium">{{item.donee_amount | currency:'₹'}}</td>
+            <td><span class="clm-text-truncated" title="{{item.donor_site}}">{{item.donor_site}}</span></td>
+            <td>{{item.requested_by}}</td>
+            <td class="clm-text-muted">{{item.closed_at}}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="clm-panel-footer" ng-if="c.filteredList.length > 0">
+      <div class="clm-footer-info">
+        Showing <strong>{{c.startEntry}}</strong> to <strong>{{c.endEntry}}</strong> of <strong>{{c.filteredList.length}}</strong> entries
+      </div>
+      <div class="clm-pagination-nav">
+        <ul class="clm-pagination-row">
+          <li class="page-nav-item" ng-class="{disabled: c.currentPage === 1}">
+            <button ng-disabled="c.currentPage === 1" ng-click="c.setPage(c.currentPage - 1)">Previous</button>
+          </li>
+          <li ng-repeat="page in c.pages" class="page-nav-item" ng-class="{active: c.currentPage === page}">
+            <button ng-click="c.setPage(page)">{{page}}</button>
+          </li>
+          <li class="page-nav-item" ng-class="{disabled: c.currentPage === c.totalPages}">
+            <button ng-disabled="c.currentPage === c.totalPages" ng-click="c.setPage(c.currentPage + 1)">Next</button>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>83a535fc9755cb50be31fa17f053af33</id>
+        <sys_created_by>sounder.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-03 09:00:20</sys_created_on>
+        <sys_id>43a535fc9755cb50be31fa17f053af39</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>sounder.k@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-03 09:00:20</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_83a535fc9755cb50be31fa17f053af33</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function($scope, $window, $filter) {
+  var c = this;
+
+  c.searchText = '';
+  c.itemsPerPage = "5"; 
+  c.currentPage = 1;
+  c.sortField = 'closed_at';
+  c.sortReverse = true; 
+
+  c.filteredList = [];
+  c.pagedList = [];
+  c.pages = [];
+
+  c.updatePagination = function() {
+    c.filteredList = $filter('filter')(c.data.list, c.searchText);
+    c.filteredList = $filter('orderBy')(c.filteredList, c.sortField, c.sortReverse);
+
+    var perPage = parseInt(c.itemsPerPage, 10);
+    c.totalPages = Math.ceil(c.filteredList.length / perPage) || 1;
+    
+    if (c.currentPage &gt; c.totalPages) {
+      c.currentPage = c.totalPages;
+    }
+
+    c.startEntry = c.filteredList.length === 0 ? 0 : (c.currentPage - 1) * perPage + 1;
+    c.endEntry = Math.min(c.currentPage * perPage, c.filteredList.length);
+    c.pagedList = c.filteredList.slice(c.startEntry - 1, c.endEntry);
+
+    c.pages = [];
+    for (var i = 1; i &lt;= c.totalPages; i++) {
+      c.pages.push(i);
+    }
+  };
+
+  c.changeSort = function(field) {
+    if (c.sortField === field) {
+      c.sortReverse = !c.sortReverse;
+    } else {
+      c.sortField = field;
+      c.sortReverse = false;
+    }
+    c.updatePagination();
+  };
+
+  c.setPage = function(pageNumber) {
+    if (pageNumber &gt;= 1 &amp;&amp; pageNumber &lt;= c.totalPages) {
+      c.currentPage = pageNumber;
+      c.updatePagination();
+    }
+  };
+
+  c.goBack = function() {
+    $window.location.href = '/uclm?id=uclm_limit_swap_dashboard';
+  };
+
+  if (c.data.list) {
+    c.updatePagination();
+  }
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;.clm-dashboard-container {
+  padding: 32px 24px;
+  max-width: 1360px;
+  margin: 0 auto;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #1e293b;
+  background-color: #f8fafc;
+}
+.clm-header-flex {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+@media (min-width: 768px) {
+  .clm-header-flex {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: flex-start;
+  }
+}
+.clm-title-block h2 {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #0f172a;
+  margin: 0 0 6px 0;
+}
+.clm-title-block p {
+  margin: 0;
+  font-size: 14px;
+  color: #64748b;
+}
+.btn-clm-secondary {
+  display: inline-flex;
+  align-items: center;
+  background-color: #ffffff;
+  color: #334155;
+  border: 1px solid #cbd5e1;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition: all 0.2s ease;
+}
+.btn-clm-secondary:hover {
+  background-color: #f1f5f9;
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+.clm-card-panel {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.02);
+  overflow: hidden;
+}
+.clm-panel-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border-bottom: 1px solid #f1f5f9;
+  background-color: #ffffff;
+}
+@media (min-width: 576px) {
+  .clm-panel-controls {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+}
+.control-label {
+  font-size: 13.5px;
+  color: #475569;
+  font-weight: 500;
+  margin: 0;
+}
+.clm-select-sm {
+  display: inline-block;
+  height: 34px;
+  padding: 0 28px 0 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #1e293b;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+}
+.clm-search-wrapper {
+  position: relative;
+  width: 100%;
+}
+@media (min-width: 576px) {
+  .clm-search-wrapper { width: 260px; }
+}
+.clm-search-wrapper .search-icon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #94a3b8;
+  pointer-events: none;
+}
+.clm-input-sm {
+  width: 100%;
+  height: 36px;
+  padding: 6px 12px 6px 36px;
+  font-size: 13.5px;
+  color: #0f172a;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  box-sizing: border-box;
+}
+.clm-table-responsive {
+  width: 100%;
+  overflow-x: auto;
+}
+.clm-data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.clm-data-table th {
+  background-color: #f8fafc;
+  color: #475569;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid #e2e8f0;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.clm-data-table th.sort-th {
+  cursor: pointer;
+  user-select: none;
+}
+.sort-indicator {
+  margin-left: 4px;
+  font-size: 9px;
+  color: #3b82f6;
+}
+.clm-data-table td {
+  padding: 16px 20px;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 14px;
+  color: #334155;
+  white-space: nowrap;
+}
+.clm-data-table tbody tr:hover {
+  background-color: #f8fafc;
+}
+.col-highlight { color: #2563eb; font-weight: 600; }
+.col-weight-medium { font-weight: 600; color: #0f172a; }
+.mono-text { font-family: monospace; font-size: 13px; color: #475569; }
+.clm-text-muted { color: #64748b; font-size: 13.5px; }
+.clm-text-truncated {
+  display: block;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.clm-panel-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border-top: 1px solid #e2e8f0;
+  background-color: #ffffff;
+}
+@media (min-width: 768px) {
+  .clm-panel-footer {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+}
+.clm-footer-info { font-size: 13.5px; color: #64748b; }
+.clm-pagination-row {
+  display: flex;
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+}
+.page-nav-item { margin: 0 2px; }
+.page-nav-item button {
+  background-color: #ffffff;
+  border: 1px solid #cbd5e1;
+  color: #475569;
+  padding: 6px 12px;
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.page-nav-item.active button {
+  background-color: #2563eb;
+  border-color: #2563eb;
+  color: #ffffff;
+}
+.page-nav-item.disabled button {
+  color: #cbd5e1;
+  background-color: #f8fafc;
+  cursor: not-allowed;
+}
+.clm-empty-state { text-align: center; padding: 48px 24px; }
+.empty-icon-box { color: #94a3b8; margin-bottom: 14px; }
+.clm-empty-state h3 { font-size: 16px; font-weight: 600; color: #0f172a; margin: 0 0 6px 0; }
+.clm-empty-state p { color: #64748b; font-size: 14px; margin: 0; }&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id&gt;uclm_limit_swap_approved_dashboard&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;uclm_limit_swap_approved_dashboard&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+  data.list = [];
+  var userId = gs.getUserID();
+  
+  var swapGR = new GlideRecord('x_birl3_clm_limit_swap');
+  
+  // CRITICAL: This line forces the database to ONLY return records where state is 'approved'
+  swapGR.addQuery('state', 'approved'); 
+  
+  swapGR.orderByDesc('closed_at'); 
+  swapGR.query();
+
+  while (swapGR.next()) {
+    data.list.push({
+      sys_id: swapGR.getUniqueValue(),
+      number: swapGR.getValue('number') || '',
+      pan: swapGR.getDisplayValue('pan') || '',
+      donee_site: swapGR.getDisplayValue('donee_site') || '',
+      donee_amount: parseFloat(swapGR.getValue('donee_amount') || 0),
+      donor_site: swapGR.getDisplayValue('donor_site') || '',
+      requested_by: swapGR.getDisplayValue('requested_by') || '',
+      closed_at: swapGR.getDisplayValue('closed_at') || swapGR.getDisplayValue('sys_updated_on')
+    });
+  }
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;sounder.k@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-06-03 09:00:20&lt;/sys_created_on&gt;&lt;sys_id&gt;83a535fc9755cb50be31fa17f053af33&lt;/sys_id&gt;&lt;sys_mod_count&gt;4&lt;/sys_mod_count&gt;&lt;sys_name&gt;uclm_limit_swap_approved_dashboard&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_83a535fc9755cb50be31fa17f053af33&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;sounder.k@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-06-03 09:45:29&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="clm-dashboard-container"&gt;
+  
+  &lt;div class="clm-header-flex"&gt;
+    &lt;div class="clm-title-block"&gt;
+      &lt;h2&gt;Approved Limit Swap Requests&lt;/h2&gt;
+      &lt;p&gt;View historic records of limit swap requests you have personally authorized.&lt;/p&gt;
+    &lt;/div&gt;
+    &lt;div class="clm-action-block"&gt;
+      &lt;button class="btn-clm-secondary" ng-click="c.goBack()" aria-label="Navigate back to dashboard"&gt;
+        &lt;svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="margin-right: 6px;"&gt;&lt;line x1="19" y1="12" x2="5" y2="12"&gt;&lt;/line&gt;&lt;polyline points="12 19 5 12 12 5"&gt;&lt;/polyline&gt;&lt;/svg&gt;
+        Back to Dashboard
+      &lt;/button&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;div class="clm-card-panel"&gt;
+    
+    &lt;div class="clm-panel-controls"&gt;
+      &lt;div class="control-group-left"&gt;
+        &lt;label class="control-label"&gt;
+          Entries
+          &lt;select ng-model="c.itemsPerPage" ng-change="c.updatePagination()" class="clm-select-sm"&gt;
+            &lt;option value="5"&gt;5&lt;/option&gt;
+            &lt;option value="10"&gt;10&lt;/option&gt;
+            &lt;option value="15"&gt;15&lt;/option&gt;
+          &lt;/select&gt; 
+        &lt;/label&gt;
+      &lt;/div&gt;
+      &lt;div class="control-group-right"&gt;
+        &lt;div class="clm-search-wrapper"&gt;
+          &lt;svg class="search-icon" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"&gt;&lt;circle cx="11" cy="11" r="8"&gt;&lt;/circle&gt;&lt;line x1="21" y1="21" x2="16.65" y2="16.65"&gt;&lt;/line&gt;&lt;/svg&gt;
+          &lt;input type="text" ng-model="c.searchText" ng-change="c.updatePagination()" class="clm-input-sm" placeholder="Search approved history..."&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div ng-if="c.filteredList.length === 0" class="clm-empty-state"&gt;
+      &lt;div class="empty-icon-box"&gt;
+        &lt;svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"&gt;&lt;path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"&gt;&lt;/path&gt;&lt;/svg&gt;
+      &lt;/div&gt;
+      &lt;h3&gt;No Approved Archives&lt;/h3&gt;
+      &lt;p&gt;There are no historical logs of requests approved under your account authority.&lt;/p&gt;
+    &lt;/div&gt;
+
+    &lt;div class="clm-table-responsive" ng-if="c.filteredList.length &gt; 0"&gt;
+      &lt;table class="clm-data-table"&gt;
+        &lt;thead&gt;
+          &lt;tr&gt;
+            &lt;th ng-click="c.changeSort('number')" class="sort-th"&gt;
+              Request No. &lt;span class="sort-indicator" ng-show="c.sortField === 'number'"&gt;{{c.sortReverse ? '▼' : '▲'}}&lt;/span&gt;
+            &lt;/th&gt;
+            &lt;th ng-click="c.changeSort('pan')" class="sort-th"&gt;
+              PAN Number &lt;span class="sort-indicator" ng-show="c.sortField === 'pan'"&gt;{{c.sortReverse ? '▼' : '▲'}}&lt;/span&gt;
+            &lt;/th&gt;
+            &lt;th ng-click="c.changeSort('donee_site')" class="sort-th"&gt;
+              Donee Site &lt;span class="sort-indicator" ng-show="c.sortField === 'donee_site'"&gt;{{c.sortReverse ? '▼' : '▲'}}&lt;/span&gt;
+            &lt;/th&gt;
+            &lt;th ng-click="c.changeSort('donee_amount')" class="sort-th"&gt;
+              Amount &lt;span class="sort-indicator" ng-show="c.sortField === 'donee_amount'"&gt;{{c.sortReverse ? '▼' : '▲'}}&lt;/span&gt;
+            &lt;/th&gt;
+            &lt;th ng-click="c.changeSort('donor_site')" class="sort-th"&gt;
+              Donor Site &lt;span class="sort-indicator" ng-show="c.sortField === 'donor_site'"&gt;{{c.sortReverse ? '▼' : '▲'}}&lt;/span&gt;
+            &lt;/th&gt;
+            &lt;th ng-click="c.changeSort('requested_by')" class="sort-th"&gt;
+              Requested By &lt;span class="sort-indicator" ng-show="c.sortField === 'requested_by'"&gt;{{c.sortReverse ? '▼' : '▲'}}&lt;/span&gt;
+            &lt;/th&gt;
+            &lt;th ng-click="c.changeSort('closed_at')" class="sort-th"&gt;
+              Approved Date &lt;span class="sort-indicator" ng-show="c.sortField === 'closed_at'"&gt;{{c.sortReverse ? '▼' : '▲'}}&lt;/span&gt;
+            &lt;/th&gt;
+          &lt;/tr&gt;
+        &lt;/thead&gt;
+        &lt;tbody&gt;
+          &lt;tr ng-repeat="item in c.pagedList"&gt;
+            &lt;td class="col-highlight"&gt;&lt;strong&gt;{{item.number}}&lt;/strong&gt;&lt;/td&gt;
+            &lt;td&gt;&lt;span class="mono-text"&gt;{{item.pan}}&lt;/span&gt;&lt;/td&gt;
+            &lt;td&gt;&lt;span class="clm-text-truncated" title="{{item.donee_site}}"&gt;{{item.donee_site}}&lt;/span&gt;&lt;/td&gt;
+            &lt;td class="col-weight-medium"&gt;{{item.donee_amount | currency:'₹'}}&lt;/td&gt;
+            &lt;td&gt;&lt;span class="clm-text-truncated" title="{{item.donor_site}}"&gt;{{item.donor_site}}&lt;/span&gt;&lt;/td&gt;
+            &lt;td&gt;{{item.requested_by}}&lt;/td&gt;
+            &lt;td class="clm-text-muted"&gt;{{item.closed_at}}&lt;/td&gt;
+          &lt;/tr&gt;
+        &lt;/tbody&gt;
+      &lt;/table&gt;
+    &lt;/div&gt;
+
+    &lt;div class="clm-panel-footer" ng-if="c.filteredList.length &gt; 0"&gt;
+      &lt;div class="clm-footer-info"&gt;
+        Showing &lt;strong&gt;{{c.startEntry}}&lt;/strong&gt; to &lt;strong&gt;{{c.endEntry}}&lt;/strong&gt; of &lt;strong&gt;{{c.filteredList.length}}&lt;/strong&gt; entries
+      &lt;/div&gt;
+      &lt;div class="clm-pagination-nav"&gt;
+        &lt;ul class="clm-pagination-row"&gt;
+          &lt;li class="page-nav-item" ng-class="{disabled: c.currentPage === 1}"&gt;
+            &lt;button ng-disabled="c.currentPage === 1" ng-click="c.setPage(c.currentPage - 1)"&gt;Previous&lt;/button&gt;
+          &lt;/li&gt;
+          &lt;li ng-repeat="page in c.pages" class="page-nav-item" ng-class="{active: c.currentPage === page}"&gt;
+            &lt;button ng-click="c.setPage(page)"&gt;{{page}}&lt;/button&gt;
+          &lt;/li&gt;
+          &lt;li class="page-nav-item" ng-class="{disabled: c.currentPage === c.totalPages}"&gt;
+            &lt;button ng-disabled="c.currentPage === c.totalPages" ng-click="c.setPage(c.currentPage + 1)"&gt;Next&lt;/button&gt;
+          &lt;/li&gt;
+        &lt;/ul&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+  &lt;/div&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;83a535fc9755cb50be31fa17f053af33&lt;/id&gt;&lt;sys_created_by&gt;sounder.k@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-06-03 09:00:20&lt;/sys_created_on&gt;&lt;sys_id&gt;43a535fc9755cb50be31fa17f053af39&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;sounder.k@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-06-03 09:00:20&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>44899601</payload_hash>
+        <record_name>uclm_limit_swap_approved_dashboard</record_name>
+        <reverted_from/>
+        <source>0d1e00262bb27e104572f3745e91bf51</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>sounder.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-03 09:45:29</sys_created_on>
+        <sys_id>1c008ab897d5cb50be31fa17f053af4f</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>19e8cdfaba80000001</sys_recorded_at>
+        <sys_updated_by>sounder.k@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-03 09:45:29</sys_updated_on>
+        <type>Widget</type>
+        <update_guid>50008ab822d5cb502bed68828d19b74f</update_guid>
+        <update_guid_history>50008ab822d5cb502bed68828d19b74f:44899601,3ee6b5b0d895cb50a1a38bea755c2b71:-1013974578,7956fd309a95cb50a4b74d627df2bda9:-1490391289,22d53dfc9b55cb504cb4b4fd8c38a59f:-1764321749,83a535fca155cb5020ee851dd9e7cb37:1490249378</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="">04d6d42b2b4307104572f3745e91bf5b</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>sounder.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-06 14:59:04</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>4f5cb68cfed84774baceb41be8ce6ce4</sys_id>
+        <sys_metadata>83a535fc9755cb50be31fa17f053af33</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>uclm_limit_swap_approved_dashboard</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_83a535fc9755cb50be31fa17f053af33</sys_update_name>
+        <sys_update_version display_value="sp_widget_83a535fc9755cb50be31fa17f053af33">1c008ab897d5cb50be31fa17f053af4f</sys_update_version>
+        <sys_updated_by>sounder.k@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-06 14:59:04</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

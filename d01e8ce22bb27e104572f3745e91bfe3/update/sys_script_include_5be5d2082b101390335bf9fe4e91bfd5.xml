@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLMBusinessAccess</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLMBusinessAccess</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var CLMBusinessAccess = Class.create();
+CLMBusinessAccess.prototype = {
+    initialize: function() {},
+
+    TABLES: {
+        roleMap: 'x_birl3_clm_role_user_mapping',      // fields: u_user, u_role
+        matrix:  'x_birl3_clm_approval_matrix'         // fields: approver_user, role_name
+    },
+
+    // source 'roleMap' = Trade table, 'matrix' = approval matrix. roles = [] -> never granted (not built yet)
+    CONFIG: {
+		CFO: {
+            trade:    { source: 'roleMap', roles: ['CFO'] },
+            nonTrade: { source: 'matrix',  roles: ['CFO', 'BH_CFO', 'CMO_CFO'] },
+            key:      { source: 'matrix',  roles: [] }
+        },
+		CCH: {
+            trade:    { source: 'roleMap', roles: ['CCH'] },
+            nonTrade: { source: 'matrix',  roles: ['CCH', 'NSH_CCH', 'HEAD_KEY_CCH', 'CCH_HBPD'] },
+            key:      { source: 'matrix',  roles: [] }
+        },
+		BH: {
+            trade:    { source: 'roleMap', roles: ['BH'] },
+            nonTrade: { source: 'matrix',  roles: ['BH', 'CMO'] },
+            key:      { source: 'matrix',  roles: [] }
+        },
+        MD: {
+            trade:    { source: 'roleMap', roles: ['MD', 'MD1'] },
+            nonTrade: { source: 'matrix',  roles: ['MD'] },
+            key:      { source: 'matrix',  roles: ['MD'] }
+        },
+        NSH: {
+            trade:    { source: 'roleMap', roles: ['NSH', 'HEAD_RMC', 'HEAD_KEY_CH_RMC', 'HSBPD', 'HBPD'] },
+            nonTrade: { source: 'matrix',  roles: ['NT CEMENT NSH', 'NT RMC HEAD RMC', 'NT RMC NATIONAL HEAD KEY', 'NT BPD HBPD'] },
+            key:      { source: 'matrix',  roles: ['HBPD', 'HSBPD', 'ZK HBPD', 'Head KA', 'HK', 'Head Key & RMC', 'Head RMC'] }
+        },
+		ZHM: {
+            trade:    { source: 'roleMap', roles: ['ZHM', 'ZH_RMC', 'ZH_BPD', 'ZCH'] },
+            nonTrade: { source: 'matrix',  roles: ['NT BPD ZCH', 'NT BPD ZH BPD', 'NT CEMENT ZCH', 'NT CEMENT ZHM', 'NT RMC ZCH', 'NT RMC ZH'] },
+            key:      { source: 'matrix',  roles: ['ZCH', 'ZH Key', 'ZH', 'ZK HBPD'] }
+        },
+		RHM: {trade: {source: 'roleMap', roles: ['RHM', 'RH_CH_RMC']}, 
+		nonTrade: {source: 'matrix', roles: ['NT CEMENT RHM', 'NT RMC RH CH']},
+		key:      { source: 'matrix',  roles:['RH','CRM']}
+		},
+		
+TSH: {
+    trade:    { source: 'roleMap', roles: ['TSH', 'TSM', 'TSH_BPD'] },
+    nonTrade: { source: 'matrix',  roles: ['NT CEMENT TSH', 'NT BPD TSH', 'NT RMC TSM'] },
+    key:      { source: 'matrix',  roles: ['TSM'] }
+}
+		
+    },
+
+    _norm: function(s) {
+        return String(s || '').toUpperCase().replace(/[_\s]+/g, ' ').trim();
+    },
+
+    _userRoles: function(table, userField, roleField) {
+        var set = {};
+        var gr = new GlideRecord(table);
+        if (!gr.isValid()) return set;
+        gr.addQuery(userField, gs.getUserID());
+        gr.query();
+        while (gr.next()) {
+            set[this._norm(gr.getValue(roleField))] = true;
+            set[this._norm(gr.getDisplayValue(roleField))] = true;
+        }
+        return set;
+    },
+
+    // Returns { trade: bool, nonTrade: bool, key: bool }
+    getAccess: function(persona) {
+        var cfg = this.CONFIG[persona] || {};
+        var held = {
+            roleMap: this._userRoles(this.TABLES.roleMap, 'u_user', 'u_role'),
+            matrix:  this._userRoles(this.TABLES.matrix, 'approver_user', 'role_name')
+        };
+        var out = {};
+        for (var biz in cfg) {
+            var c = cfg[biz], ok = false;
+            for (var i = 0; i < c.roles.length; i++) {
+                if (held[c.source][this._norm(c.roles[i])]) { ok = true; break; }
+            }
+            out[biz] = ok;
+        }
+        gs.info('CLMBusinessAccess ' + persona + ' user=' + gs.getUserName() + ' -> ' + JSON.stringify(out) +
+                ' | matrix roles: ' + Object.keys(held.matrix).join(' / '));
+        return out;
+    },
+
+    type: 'CLMBusinessAccess'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>gayatri.bhandge@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-28 06:34:42</sys_created_on>
+        <sys_id>5be5d2082b101390335bf9fe4e91bfd5</sys_id>
+        <sys_mod_count>13</sys_mod_count>
+        <sys_name>CLMBusinessAccess</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy>read</sys_policy>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_5be5d2082b101390335bf9fe4e91bfd5</sys_update_name>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 15:49:16</sys_updated_on>
+    </sys_script_include>
+</record_update>

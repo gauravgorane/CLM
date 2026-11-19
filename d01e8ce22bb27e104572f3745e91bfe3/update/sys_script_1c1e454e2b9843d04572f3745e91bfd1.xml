@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>false</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_clm_new_credit_request</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition table="x_birl3_clm_clm_new_credit_request">state=Submitted^customer_type=Trade^EQ<item display_value="Submitted" endquery="false" field="state" goto="false" newquery="false" operator="=" or="false" value="Submitted"/>
+            <item display_value="Trade" endquery="false" field="customer_type" goto="false" newquery="false" operator="=" or="false" value="Trade"/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>CLM Set Approver Sequence</name>
+        <order>300</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[// // (function executeRule(current, previous) {
+
+// //     if (current.customer_type + '' !== 'Trade') return;
+// //     if (current.state + '' !== 'Submitted') return;
+
+// //     gs.info('CLM SeqBR: firing for ' + current.request_number);
+
+// //     try {
+// //         // ── Read sequence JSON passed from Before BR ───────────
+// //         var seqJson = gs.getSession().getClientData('clm_approver_sequence');
+// //         gs.info('CLM SeqBR: got from session = [' + seqJson + ']');
+
+// //         if (!seqJson || seqJson === '' || seqJson === 'null') {
+// //             gs.error('CLM SeqBR: no sequence in session, skipping');
+// //             return;
+// //         }
+
+// //         // ── Write to the record ────────────────────────────────
+// //         var updateGr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+// //         if (updateGr.get(current.sys_id + '')) {
+// //             updateGr.setValue('u_approver_sequence',      seqJson);
+// //             updateGr.setValue('u_current_approver_order', 1);
+// //             updateGr.setWorkflow(false);
+// //             updateGr.autoSysFields(false);
+// //             updateGr.update();
+// //             gs.info('CLM SeqBR: SAVED SUCCESSFULLY for ' + current.request_number);
+
+// //             // Clear session data
+// //             gs.getSession().putClientData('clm_approver_sequence', '');
+// //         } else {
+// //             gs.error('CLM SeqBR: record not found: ' + current.sys_id);
+// //         }
+
+// //     } catch(e) {
+// //         gs.error('CLM SeqBR ERROR: ' + e.message);
+// //     }
+
+// // })(current, previous);
+
+
+// (function executeRule(current, previous) {
+
+//     if (current.customer_type + '' !== 'Trade') return;
+//     if (current.state + '' !== 'Submitted') return;
+
+//     var resolver = new CLMUserResolver();
+//     var router   = new CLMApprovalRouter();
+
+//     // Step 1: Get target approver
+//     var result = router.getApprover(
+//         current.segment,
+//         current.customer_type,
+//         current.net_exposure,
+//         current.nod_days,
+//         current.is_deviation,
+//         current.implied_multiplier,
+//         current.customer_vintage_days,
+//         current.system_multiplier
+//     );
+
+//     var targetRole = result.role;
+
+//     // Step 2: Build sequence
+//     var hierarchy = CLM_ROLE_HIERARCHIES[current.segment + '_Trade'];
+
+//     var sequence = buildApproverSequence(
+//         hierarchy,
+//         targetRole,
+//         resolver,
+//         current.region,
+//         current.zone,
+//         current.segment,
+//         current.depot
+//     );
+
+//     // Step 3: SAVE DIRECTLY (no session ❌)
+//     current.u_approver_sequence = JSON.stringify(sequence);
+//     current.u_current_approver_order = 1;
+
+// })(current, previous);
+
+// ============================================================
+//  CLM AFTER BUSINESS RULE
+//  Table  : x_birl3_clm_clm_new_credit_request
+//  When   : After Insert (state = Submitted)
+//  Purpose: 1. Save approver sequence JSON to the record
+//           2. Notify first approver
+// ============================================================
+
+(function executeRule(current, previous) {
+
+    if (current.customer_type + '' !== 'Trade') return;
+    if (current.state         + '' !== 'Submitted') return;
+
+    try {
+        // ── 1. Read sequence built by Before BR ─────────────────
+        var seqJson = gs.getSession().getClientData('clm_approver_sequence');
+        gs.info('CLM After BR: got from session = [' + seqJson + ']');
+
+        if (!seqJson || seqJson === '' || seqJson === 'null') {
+            gs.error('CLM After BR: no sequence in session, skipping');
+            return;
+        }
+
+        // ── 2. Write sequence + role-field values to record ─────
+        var updateGr = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        if (!updateGr.get(current.sys_id + '')) {
+            gs.error('CLM After BR: record not found: ' + current.sys_id);
+            return;
+        }
+
+        // Save the sequence JSON
+        updateGr.setValue('u_approver_sequence',      seqJson);
+        updateGr.setValue('u_current_approver_order', 1);
+
+        // ── 3. Also write individual role fields via After BR ────
+        //    (Belt-and-suspenders: Before BR sets them on current,
+        //     but After BR re-reads the resolver to guarantee they
+        //     are persisted on the saved record.)
+
+        var resolver = new CLMUserResolver();
+        var router   = new CLMApprovalRouter();
+        var segment  = updateGr.segment  + '';
+        var region   = updateGr.region   + '';
+        var zone     = updateGr.zone     + '';
+        var depot    = updateGr.depot    + '';
+
+        var ROLE_TO_FIELD = {
+            // Cement
+            'TSH':              'u_approver_tsh',
+            'RHM':              'u_approver_rhm',
+            'ZHM':              'u_approver_zhm',
+            'ZCH':              'u_approver_zch',
+            'HO':               'u_approver_ho',
+            'NSH':              'u_approver_nsh',
+            'NSH_CCH':          'u_approver_nsh_cch',
+            'CMO':              'u_approver_cmo',
+            'CMO_CFO':          'u_approver_cmo_cfo',
+            'CFO':              'u_approver_cfo',
+            'MD':               'u_approver_md',
+            // RMC
+            'TSM':              'u_approver_tsm',
+            'RH_CH_RMC':        'u_approver_rh_ch_rmc',
+            'ZH_RMC':           'u_approver_zh_rmc',
+            'HEAD_RMC':         'u_approver_head_rmc',
+            'HEAD_KEY_CH_RMC':  'u_approver_head_key_ch_rmc',
+            'HEAD_KEY_CCH':     'u_approver_head_key_cch',
+            'BH':               'u_approver_bh',
+            'BH_CFO':           'u_approver_bh_cfo',
+            // BPD
+            'TSH_BPD':          'u_approver_tsh_bpd',
+            'ZH_BPD':           'u_approver_zh_bpd',
+            'HSBPD':            'u_approver_hsbpd',
+            'HBPD':             'u_approver_hbpd',
+            'CCH_HBPD':         'u_approver_cch_hbpd'
+        };
+
+        // Parse sequence and set each role field
+        var seq = [];
+        try { seq = JSON.parse(seqJson); } catch(e) {}
+
+        for (var i = 0; i < seq.length; i++) {
+            var step      = seq[i];
+            var fieldName = ROLE_TO_FIELD[step.role];
+            if (fieldName && step.user_sys_id) {
+                updateGr.setValue(fieldName, step.user_sys_id);
+                gs.info('CLM After BR: set ' + fieldName + ' = ' + step.user_sys_id +
+                        ' (' + step.role + ')');
+            }
+        }
+
+        updateGr.setWorkflow(false);
+        updateGr.autoSysFields(false);
+        updateGr.update();
+
+        gs.info('CLM After BR: SAVED sequence + role fields for ' + updateGr.request_number);
+
+        // ── 4. Clear session ─────────────────────────────────────
+        gs.getSession().putClientData('clm_approver_sequence', '');
+
+        // ── 5. Notify first approver ─────────────────────────────
+        if (seq.length > 0 && seq[0].user_sys_id) {
+            var seqHelper = new CLMSequentialApproval();
+            seqHelper._sendApprovalNotification(
+                current.sys_id + '',
+                seq[0].user_sys_id,
+                seq[0].role
+            );
+            gs.info('CLM After BR: notified first approver ' + seq[0].role);
+        }
+
+    } catch (e) {
+        gs.error('CLM After BR ERROR: ' + e.message);
+    }
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-04-18 10:18:04</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>1c1e454e2b9843d04572f3745e91bfd1</sys_id>
+        <sys_mod_count>6</sys_mod_count>
+        <sys_name>CLM Set Approver Sequence</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_1c1e454e2b9843d04572f3745e91bfd1</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-05-10 09:36:20</sys_updated_on>
+        <template/>
+        <when>after</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=1c1e454e2b9843d04572f3745e91bfd1"/>
+</record_update>

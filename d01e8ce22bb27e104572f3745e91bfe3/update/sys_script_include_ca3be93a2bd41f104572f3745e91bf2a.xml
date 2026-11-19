@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>public</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLM_ApprovalUtil</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLM_ApprovalUtil</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var CLM_ApprovalUtil = Class.create();
+CLM_ApprovalUtil.prototype = {
+    initialize: function() {},
+
+    /**
+     * Aggregates approvers across all child site requests and updates the parent PAN request.
+     * @param {string} panRequestSysId - sys_id of x_birl3_clm_nt_pan_request
+     * @returns {boolean} - true if successful, false otherwise
+     */
+    populateApprovers: function(panRequestSysId) {
+        if (!panRequestSysId) {
+            gs.error('[CLM_ApprovalUtil] Missing panRequestSysId');
+            return false;
+        }
+
+        var panGr = new GlideRecord('x_birl3_clm_nt_pan_request');
+        if (!panGr.get(panRequestSysId)) {
+            gs.error('[CLM_ApprovalUtil] PAN Request not found: ' + panRequestSysId);
+            return false;
+        }
+
+        var segment = (panGr.getValue('segment') || '').toLowerCase();
+
+        // Safely parse exposure amounts
+        var rawPanExp = panGr.getValue('total_net_exposure') || '0';
+        var panNetExposure = parseFloat(rawPanExp.toString().replace(/[^0-9.-]+/g, ''));
+        var isPanOverride = (panNetExposure > 15000000); // PAN roles trigger if > 1.5 Cr[cite: 16]
+        var isDeviation = (panGr.getValue('is_deviation') == '1' || panGr.getValue('is_deviation') == 'true');
+
+        // 1. Initialize Deduplication Arrays for every GlideList field[cite: 16]
+        var fields = {
+            nt_cement_rhm: [],
+            nt_cement_zhm: [],
+            nt_cement_zch: [],
+            nt_cement_nsh: [],
+            nt_rmc_tsm: [],
+            nt_rmc_rh_ch: [],
+            nt_rmc_zh: [],
+            nt_rmc_zch: [],
+            nt_rmc_head_rmc: [],
+            nt_rmc_national_head_key: [],
+            nt_rmc_ch_rmc: [],
+            nt_bpd_tsh: [],
+            nt_bpd_zh_bpd: [],
+            nt_bpd_hs_bpd: [],
+            nt_bpd_zch: [],
+            nt_bpd_h_bpd: [],
+            pan_ho: [],
+            pan_cch: [],
+            pan_cmo_bh: [],
+            pan_cfo: [],
+            pan_md: []
+        };
+
+        // Tracks approvers globally to prevent duplicate approvals across tiers
+        var globalApprovers = [];
+
+        function addUnique(arrayKey, userId) {
+            if (userId) {
+                var uid = userId.toString();
+                if (fields[arrayKey].indexOf(uid) === -1 && globalApprovers.indexOf(uid) === -1) {
+                    fields[arrayKey].push(uid);
+                    globalApprovers.push(uid);
+                }
+            }
+        }
+
+        function mapRole(role, approver) {
+            switch (role) {
+                // Cement Roles
+                case 'NT CEMENT RHM':
+                    addUnique('nt_cement_rhm', approver);
+                    break;
+                case 'NT CEMENT ZHM':
+                    addUnique('nt_cement_zhm', approver);
+                    break;
+                case 'NT CEMENT ZCH':
+                    addUnique('nt_cement_zch', approver);
+                    break;
+                case 'NT CEMENT NSH':
+                    addUnique('nt_cement_nsh', approver);
+                    break;
+
+                    // RMC Roles
+                case 'NT RMC TSM':
+                    addUnique('nt_rmc_tsm', approver);
+                    break;
+                case 'NT RMC RH CH':
+                    addUnique('nt_rmc_rh_ch', approver);
+                    break;
+                case 'NT RMC ZCH':
+                    addUnique('nt_rmc_zch', approver);
+                    break;
+                case 'NT RMC ZH':
+                    addUnique('nt_rmc_zh', approver);
+                    break;
+                case 'NT RMC HEAD RMC':
+                    addUnique('nt_rmc_head_rmc', approver);
+                    break;
+                case 'NT RMC NATIONAL HEAD KEY':
+                    addUnique('nt_rmc_national_head_key', approver);
+                    break;
+                case 'NT RMC CH RMC':
+                    addUnique('nt_rmc_ch_rmc', approver);
+                    break;
+
+                    // BPD Roles
+                case 'NT BPD TSH':
+                    addUnique('nt_bpd_tsh', approver);
+                    break;
+                case 'NT BPD ZH BPD':
+                    addUnique('nt_bpd_zh_bpd', approver);
+                    break;
+                case 'NT BPD HS BPD':
+                    addUnique('nt_bpd_hs_bpd', approver);
+                    break;
+                case 'NT BPD ZCH':
+                    addUnique('nt_bpd_zch', approver);
+                    break;
+                case 'NT BPD HBPD':
+                    addUnique('nt_bpd_h_bpd', approver);
+                    break;
+
+                    // PAN Roles
+                case 'HO':
+                    addUnique('pan_ho', approver);
+                    break;
+                case 'CCH':
+                    addUnique('pan_cch', approver);
+                    break;
+                case 'CMO BH':
+                    addUnique('pan_cmo_bh', approver);
+                    break;
+                case 'CFO':
+                    addUnique('pan_cfo', approver);
+                    break;
+                case 'MD':
+                    addUnique('pan_md', approver);
+                    break;
+            }
+        }
+
+        // 2. Query all Child Site Requests
+        var siteGr = new GlideRecord('x_birl3_clm_nt_site_request');
+        siteGr.addQuery('pan_request', panRequestSysId);
+        siteGr.query();
+
+        while (siteGr.next()) {
+            var rawSiteExp = panGr.getValue('segment_net_exposure') || '0';
+            var siteExposure = parseFloat(rawSiteExp.toString().replace(/[^0-9.-]+/g, ''));
+            var siteNod = parseInt(siteGr.getValue('nod'), 10) || 0;
+
+            var zone = siteGr.customer_site_code.zone || '';
+            var region = siteGr.customer_site_code.region || '';
+            var depot = siteGr.customer_site_code.depot || '';
+
+            var requiresEscalation = isDeviation;
+
+            // 3. Query Master Matrix with Geographic and Role Hierarchy Rollup[cite: 16]
+            var mxGr = new GlideRecord('x_birl3_clm_approval_matrix');
+            mxGr.addQuery('customer_type', 'non_trade');
+
+            var encodedQuery = 'segment=' + segment + '^ORsegmentISEMPTY';
+            encodedQuery += '^zone=' + zone + '^ORzoneISEMPTY';
+            encodedQuery += '^region=' + region + '^ORregionISEMPTY';
+            encodedQuery += '^depot=' + depot + '^ORdepotISEMPTY';
+
+            mxGr.addEncodedQuery(encodedQuery);
+            mxGr.orderBy('sequence_order'); // Evaluates lowest to highest tier[cite: 16]
+            mxGr.query();
+
+            while (mxGr.next()) {
+                var role = mxGr.getValue('role_name');
+                var approver = mxGr.getValue('approver_user');
+                var minAmt = parseFloat(mxGr.getValue('min_amount')) || 0;
+                var matrixNod = parseInt(mxGr.getValue('number_of_days'), 10) || 0;
+                var isPanIndia = (mxGr.getValue('pan_india') == '1' || mxGr.getValue('pan_india') == 'true');
+
+                if (!approver) continue;
+
+                var amountBreached = (siteExposure > minAmt);
+                var nodBreached = (matrixNod > 0 && siteNod > matrixNod);
+                var thresholdMet = (amountBreached || nodBreached);
+
+                // 4. Matrix Threshold Check FOR SEGMENTS
+                if (thresholdMet && !isPanIndia) {
+                    mapRole(role, approver);
+                } else if (requiresEscalation && !isPanIndia) {
+                    mapRole(role, approver);
+                    requiresEscalation = false;
+                }
+
+                // 5. PAN-Level Override Check[cite: 16]
+                if (isPanOverride && isPanIndia && (panNetExposure > minAmt)) {
+                    mapRole(role, approver);
+                } else if (requiresEscalation && isPanIndia) {
+                    mapRole(role, approver);
+                    requiresEscalation = false;
+                }
+            }
+        }
+
+        // 6. Write approver arrays back to the PAN Request record[cite: 16]
+        for (var key in fields) {
+            if (panGr.isValidField(key)) {
+                panGr.setValue(key, fields[key].join(','));
+            }
+        }
+
+        // 7. Transition state to 2 (Work in Progress / Submitted)
+        panGr.setValue('state', '1');
+
+        panGr.update();
+        return true;
+    },
+
+    type: 'CLM_ApprovalUtil'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-05 16:34:39</sys_created_on>
+        <sys_id>ca3be93a2bd41f104572f3745e91bf2a</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>CLM_ApprovalUtil</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy>read</sys_policy>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_ca3be93a2bd41f104572f3745e91bf2a</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-06 07:02:14</sys_updated_on>
+    </sys_script_include>
+</record_update>

@@ -1,0 +1,408 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLMReviewDateWriteback</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLMReviewDateWriteback</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[/*
+  CLMReviewDateWriteback — batched version
+  ----------------------------------------
+  - Sends up to BATCH_SIZE customers per SAP call (ZfsdCustCrLimitAutomation)
+  - SAP can return several ItOutput messages per Kunnr:
+      * every line is a rejection  -> Failed (business error, no retry)
+      * every line is "successfully changed" -> Success (read-back optional, VERIFY_AFTER_SUCCESS)
+      * mixed / none -> read back from SAP (followUpDate) and decide
+  - Transport / HTTP failure on a batch -> every row in that batch goes to connection retry
+  - Duplicate pending rows for the same customer: newest wins, older ones marked Failed (Superseded)
+
+  Scheduled job:  new CLMReviewDateWriteback().processQueue();
+
+  NOTE: confirm these columns exist on x_birl3_clm_clm_review_date_update_queue
+        (System Definition > Tables > Columns, not the list view):
+        last_error, connection_retry_count, processed_on
+*/
+var CLMReviewDateWriteback = Class.create();
+CLMReviewDateWriteback.prototype = {
+    initialize: function() {
+        this.QUEUE            = 'x_birl3_clm_clm_review_date_update_queue';
+        this.MAX_ATTEMPTS     = 3;     // verification mismatches before Failed (keep in sync with widget)
+        this.MAX_CONN_RETRIES = 10;    // connection failures before Failed
+        this.BATCH_SIZE       = 50;    // customers per SAP call
+        this.MAX_PER_RUN      = 500;   // cap rows per job run
+        this.SUCCESS_RE       = /customer\s+successfully\s+changed/i;
+        // true  = always read back followUpDate from SAP (previous behaviour)
+        // false = trust SAP when every message for the Kunnr is a success message
+        this.VERIFY_AFTER_SUCCESS = false;
+        this.SEG_MAP          = { 'Cement': 'GIL', 'RMC': 'URMC', 'BPD': 'GIL' };
+
+        this.ENDPOINT = 'http://vs4grqapqas.abgplanet.abg.com:8000/sap/bc/srt/rfc/sap/zfsd_cust_cr_limit_automation/300/zfsd_cust_cr_limit_automation/zfsd_cust_cr_limit_automation';
+        this.SOAP_ACTION = 'urn:sap-com:document:sap:soap:functions:mc-style:ZFSD_CUST_CR_LIMIT_AUTOMATION:ZfsdCustCrLimitAutomationRequest';
+        this.AUTH_PROFILE = '9b873b49977d8f50be31fa17f053af59';
+        // dev uses linux-mid-server-dev-1; set this property per instance
+        this.MID_SERVER = gs.getProperty('x_birl3_clm.review_date.mid_server', 'linux-mid-server-dev-1');
+    },
+
+    /* ================= Entry point ================= */
+    processQueue: function() {
+        var rows = [];
+        var seen = {};
+        var claimed = [];
+        var helper = new CLMReviewDateHelper();
+
+        this._releaseStale();
+
+        // 1. Claim rows (Pending -> Processing) so an overlapping run
+        //    (manual + scheduled) cannot pick up the same rows
+        var gr = new GlideRecord(this.QUEUE);
+        gr.addQuery('status', 'Pending');
+        gr.addQuery('u_attempt_count', '<', this.MAX_ATTEMPTS);
+        gr.orderByDesc('requested_on');           // newest first, so duplicates are older
+        gr.setLimit(this.MAX_PER_RUN);
+        gr.query();
+
+        while (gr.next()) {
+            var custId = gr.getValue('customer_code');
+            if (seen[custId]) {
+                this._markResult(gr, 'Failed', 'Superseded by a newer review date update for this customer');
+                continue;
+            }
+            seen[custId] = true;
+
+            gr.status = 'Processing';
+            gr.processed_on = new GlideDateTime();
+            gr.update();
+            claimed.push(gr.getUniqueValue());
+        }
+
+        // 2. Prepare each claimed row (live credit limit fetch)
+        for (var c = 0; c < claimed.length; c++) {
+            var q = new GlideRecord(this.QUEUE);
+            if (!q.get(claimed[c])) continue;
+            var row = this._prepareRow(q, helper);
+            if (row) rows.push(row);
+        }
+
+        gs.info('CLMReviewDateWriteback: ' + rows.length + ' row(s) ready, batch size ' + this.BATCH_SIZE);
+
+        for (var i = 0; i < rows.length; i += this.BATCH_SIZE) {
+            this._sendBatch(rows.slice(i, i + this.BATCH_SIZE));
+        }
+    },
+
+    // A run that crashed can leave rows stuck in Processing; put them back after 30 min
+    _releaseStale: function() {
+        var cutoff = new GlideDateTime();
+        cutoff.addSeconds(-30 * 60);
+        var st = new GlideRecord(this.QUEUE);
+        st.addQuery('status', 'Processing');
+        st.addQuery('processed_on', '<', cutoff);
+        st.query();
+        while (st.next()) {
+            st.status = 'Pending';
+            st.last_error = 'Released after a stalled run';
+            st.update();
+        }
+    },
+
+    // Keep the widget's "Current (Last Sync)" column in step with SAP right away
+    _updateCustomerCache: function(gr, newDate) {
+        var cust = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        if (cust.get(gr.getValue('customer_code'))) {
+            cust.setValue('next_review_date', newDate);   // YYYY-MM-DD
+            cust.update();
+        }
+    },
+
+    /* ================= Build one payload row ================= */
+    // Returns a plain object, or null if the row was already marked.
+    _prepareRow: function(gr, helper) {
+        var kunnr       = String(gr.getDisplayValue('customer_code') || '').trim();
+        var creditSgmnt = this.SEG_MAP[String(gr.getValue('segment') || '').trim()] || '';
+        var salesOrg    = String(gr.customer_code.salesorg || '').trim();
+        var nextReDate  = this._toSapDate(gr.getValue('new_review_date'));
+
+        if (!kunnr || !creditSgmnt || !nextReDate) {
+            this._markResult(gr, 'Failed', 'Missing mandatory field(s) - Kunnr/CreditSgmnt/NextReDate');
+            return null;
+        }
+
+        // CrLimit must be the CURRENT live limit, otherwise SAP would overwrite it
+        var live = helper.fetchLiveDetails(kunnr);
+        if (!live) {
+            this._markConnectionFailure(gr, 'Could not fetch live credit limit before writeback');
+            return null;
+        }
+
+        // customer master has no review date cache, so record SAP's current date as the old date
+        if (!gr.getValue('old_review_date') && live.currentReviewDate) {
+            gr.old_review_date = live.currentReviewDate;   // YYYY-MM-DD from SAP
+            gr.update();
+        }
+
+        return {
+            sysId: gr.getUniqueValue(),
+            kunnr: kunnr,
+            creditSgmnt: creditSgmnt,
+            crLimit: String(live.creditLimit || '0').trim(),
+            nextReDate: nextReDate,
+            salesOrg: salesOrg
+        };
+    },
+
+    // getValue() on a date field can come back as MM-DD-YYYY or YYYY-MM-DD
+    _toSapDate: function(raw) {
+        raw = String(raw || '').trim();
+        if (raw.match(/^\d{2}-\d{2}-\d{4}/)) {
+            var p = raw.substring(0, 10).split('-');
+            return p[2] + '-' + p[0] + '-' + p[1];
+        }
+        if (raw.match(/^\d{4}-\d{2}-\d{2}/)) return raw.substring(0, 10);
+        return '';
+    },
+
+    /* ================= One SAP call for up to BATCH_SIZE rows ================= */
+    _sendBatch: function(batch) {
+        var items = '';
+        for (var i = 0; i < batch.length; i++) {
+            var r = batch[i];
+            items +=
+                '<item>' +
+                '<Kunnr>' + this._xmlEscape(r.kunnr) + '</Kunnr>' +
+                '<CreditSgmnt>' + this._xmlEscape(r.creditSgmnt) + '</CreditSgmnt>' +
+                '<CrLimit>' + this._xmlEscape(r.crLimit) + '</CrLimit>' +
+                '<NextReDate>' + r.nextReDate + '</NextReDate>' +
+                '</item>';
+        }
+
+        var body =
+            '<?xml version="1.0" encoding="UTF-8"?>' +
+            '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:sap-com:document:sap:soap:functions:mc-style">' +
+            '<soapenv:Header/><soapenv:Body><urn:ZfsdCustCrLimitAutomation>' +
+            '<ItInput>' + items + '</ItInput>' +
+            '<ItOutput><item><Kunnr></Kunnr><Message></Message></item></ItOutput>' +
+            '</urn:ZfsdCustCrLimitAutomation></soapenv:Body></soapenv:Envelope>';
+
+        var responseBody = '';
+        var transportError = '';
+        var httpStatus = 0;
+        var t0 = new Date().getTime();
+
+        try {
+            var req = new sn_ws.RESTMessageV2();
+            req.setEndpoint(this.ENDPOINT);
+            req.setMIDServer(this.MID_SERVER);
+            req.setHttpMethod('POST');
+            req.setRequestHeader('Content-Type', 'text/xml; charset=utf-8');
+            req.setRequestHeader('Accept', 'text/xml');
+            req.setRequestHeader('SOAPAction', this.SOAP_ACTION);
+            req.setAuthenticationProfile('basic', this.AUTH_PROFILE);
+            req.setRequestBody(body);
+            req.setHttpTimeout(120000);
+
+            gs.info('==== REVIEW DATE SAP BATCH PAYLOAD (' + batch.length + ' items) ====\n' + body);
+
+            var response = req.execute();
+            response.waitForResponse(180);   // MID calls return immediately; wait for the real reply
+
+            httpStatus = response.getStatusCode();
+            responseBody = response.getBody() || '';
+            var errMsg = response.getErrorMessage();
+
+            if (errMsg) transportError = 'Transport error: ' + errMsg;
+            else if (httpStatus != 200) transportError = 'Non-200 response (HTTP ' + httpStatus + ')';
+
+            gs.info('==== REVIEW DATE SAP BATCH RESPONSE (' + ((new Date().getTime() - t0) / 1000) + 's) ====\n' + responseBody);
+        } catch (ex) {
+            transportError = 'Script exception: ' + ex.message;
+        }
+
+        // SOAP Fault (usually HTTP 500): SAP got the request but rejected/crashed on it.
+        // One bad item can fault the whole batch, so split and resend one by one.
+        var fault = this._parseFault(responseBody);
+        if (fault) {
+            gs.info('CLM Review Date SOAP fault (' + batch.length + ' items, HTTP ' + httpStatus + '): ' + fault);
+            if (batch.length > 1) {
+                for (var s = 0; s < batch.length; s++) this._sendBatch([batch[s]]);
+                return;
+            }
+            var fgr = new GlideRecord(this.QUEUE);
+            if (fgr.get(batch[0].sysId)) {
+                fgr.sap_response = String(responseBody).substring(0, 4000);
+                this._markResult(fgr, 'Failed', 'SAP fault: ' + fault);
+            }
+            return;
+        }
+
+        var msgMap = transportError ? {} : this._parseSapOutput(responseBody);
+
+        // fan the result back out to each queue row
+        for (var j = 0; j < batch.length; j++) {
+            var row = batch[j];
+            var gr = new GlideRecord(this.QUEUE);
+            if (!gr.get(row.sysId)) continue;
+
+            if (transportError) {
+                this._markConnectionFailure(gr, 'Batch ' + transportError);
+                continue;
+            }
+
+            var msgs = msgMap[row.kunnr] || [];
+            var successRe = this.SUCCESS_RE;
+            var errors = msgs.filter(function(m) { return !successRe.test(m); });
+
+            gr.sap_response = 'Messages: ' + (msgs.length ? msgs.join(' | ') : '(none returned for this Kunnr)');
+
+            if (msgs.length && errors.length === msgs.length) {
+                // every line is a rejection -> final business failure, no retry
+                this._markResult(gr, 'Failed', 'SAP rejected: ' + this._unique(errors).join(' | '));
+                continue;
+            }
+
+            // every line is a success message -> trust SAP (unless read-back is forced)
+            if (msgs.length && errors.length === 0 && !this.VERIFY_AFTER_SUCCESS) {
+                this._markResult(gr, 'Success', '');
+                this._updateCustomerCache(gr, row.nextReDate);
+                continue;
+            }
+
+            // forced verify, mixed, or no message -> SAP read-back decides
+            this._verifyAndMark(gr, row.kunnr, row.salesOrg, row.nextReDate);
+        }
+    },
+
+    // { kunnr: [message, message, ...] } — SAP can return several lines per customer.
+    // The empty placeholder item (<Kunnr/><Message/>) echoed back from the request is skipped.
+    // Tolerates namespace prefixes and self-closing tags.
+    _parseSapOutput: function(body) {
+        var map = {};
+        var outBlock = String(body || '').match(/<(?:\w+:)?ItOutput[^>]*>([\s\S]*?)<\/(?:\w+:)?ItOutput>/);
+        if (!outBlock) return map;
+
+        var items = outBlock[1].match(/<(?:\w+:)?item[^>]*>[\s\S]*?<\/(?:\w+:)?item>/g) || [];
+        for (var i = 0; i < items.length; i++) {
+            var k = this._tagValue(items[i], 'Kunnr');
+            var m = this._tagValue(items[i], 'Message');
+            if (!k || !m) continue;
+            (map[k] = map[k] || []).push(m);
+        }
+        return map;
+    },
+
+    // Value of <Tag>value</Tag>; self-closing <Tag/> does not match, so returns ''
+    _tagValue: function(xml, tag) {
+        var re = new RegExp('<(?:\\w+:)?' + tag + '(?:\\s[^>]*)?>([^<]*)</(?:\\w+:)?' + tag + '>');
+        var m = re.exec(xml);
+        return m ? m[1].trim() : '';
+    },
+
+    // Returns the SOAP faultstring, or '' if the body is not a fault
+    _parseFault: function(body) {
+        body = String(body || '');
+        if (!/Fault>/.test(body)) return '';
+        var m = body.match(/<(?:\w+:)?faultstring[^>]*>([\s\S]*?)<\/(?:\w+:)?faultstring>/) ||
+                body.match(/<(?:\w+:)?Text[^>]*>([\s\S]*?)<\/(?:\w+:)?Text>/);   // SOAP 1.2
+        return m ? m[1].trim() : 'SOAP fault (no faultstring)';
+    },
+
+    _xmlEscape: function(s) {
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    },
+
+    _unique: function(arr) {
+        var seen = {}, out = [];
+        for (var i = 0; i < arr.length; i++) {
+            if (!seen[arr[i]]) { seen[arr[i]] = true; out.push(arr[i]); }
+        }
+        return out;
+    },
+
+    /* ================= Read back from SAP ================= */
+    _verifyAndMark: function(gr, kunnr, salesOrg, expectedDate) {
+        try {
+            var wsdl = new CLM_NEW_WSDL1();
+            var rawResult = wsdl.getCreditDetails(kunnr, salesOrg);
+
+            if (!rawResult) {
+                this._markConnectionFailure(gr, 'Verification call returned no data for ' + kunnr);
+                return;
+            }
+
+            var creditDetails = JSON.parse(rawResult);
+            var sapDate = String(creditDetails.followUpDate || '').trim();
+
+            gs.info('CLM Review Date Verify: ' + kunnr + ' | expected=' + expectedDate + ' | sapReturned=' + sapDate);
+
+            gr.sap_response = (gr.getValue('sap_response') || '') +
+                '\n[Verify] expected=' + expectedDate + ' sapReturned=' + sapDate;
+
+            if (sapDate === expectedDate) {
+                this._markResult(gr, 'Success', '');
+                this._updateCustomerCache(gr, expectedDate);
+            } else {
+                this._retryOrFail(gr, 'Verification mismatch - SAP shows ' + sapDate + ', expected ' + expectedDate);
+            }
+        } catch (ex) {
+            this._markConnectionFailure(gr, 'Verification exception: ' + ex.message);
+        }
+    },
+
+    /* ================= Status helpers ================= */
+    _markConnectionFailure: function(gr, errorText) {
+        var connAttempts = parseInt(gr.getValue('connection_retry_count') || 0, 10) + 1;
+        gr.last_error = errorText;
+        gr.connection_retry_count = connAttempts;
+        gr.processed_on = new GlideDateTime();
+        if (connAttempts >= this.MAX_CONN_RETRIES) {
+            gr.status = 'Failed';
+            gr.last_error = errorText + ' (connection retries exhausted)';
+        } else {
+            gr.status = 'Pending';
+        }
+        gr.update();
+    },
+
+    _retryOrFail: function(gr, errorText) {
+        var attemptsSoFar = parseInt(gr.getValue('u_attempt_count') || 0, 10) + 1;
+        if (attemptsSoFar >= this.MAX_ATTEMPTS) {
+            this._markResult(gr, 'Failed', errorText + ' (max attempts reached)');
+        } else {
+            gr.status = 'Pending';
+            gr.last_error = errorText;
+            gr.u_attempt_count = attemptsSoFar;
+            gr.processed_on = new GlideDateTime();
+            gr.update();
+        }
+    },
+
+    _markResult: function(gr, status, errorText) {
+        gr.status = status;
+        gr.last_error = errorText || '';
+        gr.u_attempt_count = parseInt(gr.getValue('u_attempt_count') || 0, 10) + 1;
+        gr.processed_on = new GlideDateTime();
+        gr.update();
+    },
+
+    type: 'CLMReviewDateWriteback'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-03 11:22:17</sys_created_on>
+        <sys_id>ff08ae402b7bc7104572f3745e91bfba</sys_id>
+        <sys_mod_count>11</sys_mod_count>
+        <sys_name>CLMReviewDateWriteback</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_ff08ae402b7bc7104572f3745e91bfba</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-17 12:36:49</sys_updated_on>
+    </sys_script_include>
+</record_update>

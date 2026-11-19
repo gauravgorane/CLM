@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_key_swap_approver_details</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function runMailScript(current, template, email, email_action, event) {
+
+    var swap = new GlideRecord(current.getValue('source_table'));
+    if (!swap.get(current.getValue('document_id'))) return;
+
+    function esc(s) { return GlideStringUtil.escapeHTML((s || '') + '').replace(/\n/g, '<br>'); }
+    function num(gr, f) {
+        var v = gr.getValue(f);
+        if (v === null || v === undefined || v === '') return 0;
+        v = String(v);
+        if (v.indexOf(';') > -1) v = v.split(';')[1];
+        var n = parseFloat(v);
+        return isNaN(n) ? 0 : n;
+    }
+    function has(gr, f) { var v = gr.getValue(f); return v !== null && v !== undefined && v !== ''; }
+    function inr(v) {
+        var n = Math.round(parseFloat(v) || 0);
+        var s = Math.abs(n).toString();
+        var last = s.slice(-3), rest = s.slice(0, -3);
+        if (rest) { last = ',' + last; rest = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ','); }
+        return (n < 0 ? '-' : '') + '&#8377;' + rest + last;
+    }
+    function journal(gr, element) {
+        try {
+            var jf = new GlideRecord('sys_journal_field');
+            jf.addQuery('element_id', gr.getUniqueValue());
+            jf.addQuery('element', element);
+            jf.orderByDesc('sys_created_on');
+            jf.setLimit(1);
+            jf.query();
+            if (jf.next()) return jf.getValue('value') || '';
+        } catch (e) {}
+        return '';
+    }
+    function site(id) {
+        var o = { code: '', name: '', segment: '', group: '', zone: '' };
+        var g = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        if (id && g.get(id)) {
+            o.code = g.getDisplayValue('customer_code_sap') || '';
+            o.name = g.getDisplayValue('customer_name') || '';
+            o.segment = g.getDisplayValue('segment') || '';
+            o.group = g.getDisplayValue('groupcode') || '';
+            o.zone = g.getDisplayValue('zonalparentcode') || '';
+        }
+        return o;
+    }
+
+    var TD = 'style="padding:9px 12px;font-size:13px;color:#1a1a1a;border:1px solid #e0e6ed;"';
+    var TL = 'style="padding:9px 12px;font-size:13px;color:#3a4451;background-color:#fffcf0;border:1px solid #e0e6ed;width:38%;"';
+    var TH = 'style="padding:8px 12px;font-size:12px;color:#2b3440;background-color:#eef1f5;border:1px solid #e0e6ed;text-align:left;"';
+    var OPEN = '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">';
+    function head(t) { template.print('<p style="margin:22px 0 8px 0;font-size:12px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#3a4451;">' + t + '</p>'); }
+    function row(l, v) { template.print('<tr><td ' + TL + '>' + l + '</td><td ' + TD + '>' + v + '</td></tr>'); }
+
+    var donor = site(swap.getValue('donor'));
+    var donee = site(swap.getValue('donee'));
+    var number = swap.getValue('number') || '';
+    var initiator = swap.isValidField('opened_by') ? swap.getDisplayValue('opened_by') : (swap.getValue('sys_created_by') || '');
+    var amount = num(swap, 'requested_amount');
+
+    try { email.setSubject('Action Required: CLM Key Limit Swap | ' + number + ' | ' + donor.code + ' to ' + donee.code); } catch (e) {}
+
+    // this approver's role in the donor chain
+    var ROLE = {
+        cement: { ls_donor_crm: 'Donor CRM', ls_donor_zh_key: 'Donor ZH Key', ls_donor_head_ka: 'Head KA' },
+        bpd:    { ls_donor_crm: 'Donor CRM', ls_donor_zk_hbpd: 'ZK HBPD', ls_donor_hsbpd: 'HS BPD', ls_donor_hbpd: 'HBPD' },
+        rmc:    { ls_donor_tsm: 'Donor TSM', ls_donor_rh_rmc: 'Donor RH/CH', ls_donor_zh_rmc: 'Donor ZH RMC', ls_donor_head_rmc: 'Head RMC' }
+    };
+    var map = ROLE[(swap.getValue('donor_segment') || '').toLowerCase()] || {};
+    var myRole = '';
+    for (var f in map) {
+        if (swap.isValidField(f) && swap.getValue(f) === current.getValue('approver')) { myRole = map[f]; break; }
+    }
+
+    // donor / donee headroom
+    var dLimit = num(swap, 'donor_current_limit') || num(swap, 'donor_limit_before');
+    var eLimit = num(swap, 'donee_current_limit') || num(swap, 'donee_limit_before');
+    var dOs = has(swap, 'donor_outstanding') ? num(swap, 'donor_outstanding') : null;
+    var dAvail = (dOs !== null) ? (dLimit - dOs) : (num(swap, 'donor_available_limit') || null);
+
+    template.print('<p style="margin:0 0 14px 0;font-size:14px;line-height:1.6;">A Key customer credit limit swap is waiting for your approval.</p>');
+
+    head('Swap summary');
+    template.print(OPEN);
+    row('Swap', '<b>' + esc(number) + '</b>');
+    row('Swap type', esc(swap.getDisplayValue('swap_type')));
+    row('Swap amount', '<b>' + inr(amount) + '</b>');
+    row('Raised by', esc(initiator));
+    if (myRole) row('Your approval level', esc(myRole));
+    template.print('</table>');
+
+    head('Sites');
+    template.print(OPEN);
+    template.print('<tr><th ' + TH + '></th><th ' + TH + '>Site Code</th><th ' + TH + '>Customer</th><th ' + TH + '>Segment</th><th ' + TH + '>Group / Zone</th><th ' + TH + ' align="right">Current Limit</th></tr>');
+    template.print('<tr><td ' + TD + '><b>Donor</b> (gives limit)</td><td ' + TD + '>' + esc(donor.code) + '</td><td ' + TD + '>' + esc(donor.name) + '</td><td ' + TD + '>' + esc(donor.segment) + '</td><td ' + TD + '>' + esc(donor.group) + ' / ' + esc(donor.zone) + '</td><td ' + TD + ' align="right">' + inr(dLimit) + '</td></tr>');
+    template.print('<tr><td ' + TD + '><b>Donee</b> (receives limit)</td><td ' + TD + '>' + esc(donee.code) + '</td><td ' + TD + '>' + esc(donee.name) + '</td><td ' + TD + '>' + esc(donee.segment) + '</td><td ' + TD + '>' + esc(donee.group) + ' / ' + esc(donee.zone) + '</td><td ' + TD + ' align="right">' + inr(eLimit) + '</td></tr>');
+    template.print('</table>');
+
+    head('Donor headroom');
+    template.print(OPEN);
+    row('Donor outstanding', dOs !== null ? inr(dOs) : '-');
+    row('Donor unutilized limit', dAvail !== null ? inr(dAvail) : '-');
+    template.print('</table>');
+
+    // earlier approvals on this swap
+    var done = [];
+    var ap = new GlideRecord('sysapproval_approver');
+    var q = ap.addQuery('document_id', swap.getUniqueValue());
+    q.addOrCondition('sysapproval', swap.getUniqueValue());
+    ap.orderBy('sys_created_on');
+    ap.query();
+    while (ap.next()) {
+        if (ap.getUniqueValue() === current.getUniqueValue()) continue;
+        var st = ap.getValue('state');
+        if (st === 'approved' || st === 'rejected') {
+            done.push({ approver: ap.getDisplayValue('approver'), state: st, comments: journal(ap, 'comments'), when: ap.getDisplayValue('sys_updated_on') });
+        }
+    }
+    if (done.length) {
+        head('Approval history');
+        template.print(OPEN);
+        template.print('<tr><th ' + TH + '>Approver</th><th ' + TH + '>Decision</th><th ' + TH + '>Comments</th><th ' + TH + '>Date</th></tr>');
+        done.forEach(function(x) {
+            var d = x.state.charAt(0).toUpperCase() + x.state.slice(1);
+            template.print('<tr><td ' + TD + '>' + esc(x.approver) + '</td><td ' + TD + '>' + d + '</td><td ' + TD + '>' + (esc(x.comments) || '-') + '</td><td ' + TD + '>' + (esc(x.when) || '-') + '</td></tr>');
+        });
+        template.print('</table>');
+    }
+
+    template.print('<p style="margin:22px 0 10px 0;font-size:14px;">Please review and take a decision:</p>');
+
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-03 20:16:51</sys_created_on>
+        <sys_id>4d3b48da2b545b10335bf9fe4e91bf68</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_key_swap_approver_details</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_4d3b48da2b545b10335bf9fe4e91bf68</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-03 20:16:51</sys_updated_on>
+    </sys_script_email>
+</record_update>

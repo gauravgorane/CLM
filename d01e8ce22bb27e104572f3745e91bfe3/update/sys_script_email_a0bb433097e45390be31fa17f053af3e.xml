@@ -1,0 +1,505 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_nt_pending_at_approver_script</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm_nt_pending_at_approver_script
+// Notification table: sysapproval_approver
+// Notifies Initiator when Non-Trade PAN Credit Limit or Limit Swap is pending with an approver (CredX UI + Approval History)
+(function runMailScript(current, template, email, email_action, event) {
+    try {
+        // ── 1. Helpers & Parsers (Aligned with Trade CredX UI) ─────────────
+        function s(v) { return (v === null || v === undefined) ? '' : String(v).trim(); }
+
+        function parseNum(v) {
+            if (!v && v !== 0) return 0;
+            var strVal = String(v);
+            if (strVal.indexOf(';') > -1) strVal = strVal.split(';')[1];
+            var num = parseFloat(strVal);
+            return isNaN(num) ? 0 : num;
+        }
+
+        function inr(n) {
+            var str = Math.round(Math.abs(parseNum(n))).toString();
+            var last = str.slice(-3), rest = str.slice(0, -3);
+            if (rest) last = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last;
+            return last;
+        }
+
+        function rupee(n) {
+            var num = parseNum(n);
+            return (num < 0 ? '- &#8377; ' : '&#8377; ') + inr(num);
+        }
+
+        function esc(str) {
+            return GlideStringUtil.escapeHTML(s(str));
+        }
+
+        // ── PAN-Level Calculation & Approver Recommended CL Helpers ──────────
+        function segKey(t) {
+            t = (t || '').toString().toLowerCase();
+            if (t.indexOf('cement') !== -1) return 'Cement';
+            if (t.indexOf('rmc') !== -1) return 'RMC';
+            if (t.indexOf('bpd') !== -1) return 'BPD';
+            return '';
+        }
+
+        function getSiteCode(sGr) {
+            var code = s(sGr.getValue('customer_code'));
+            if (!code && sGr.isValidField('customer_site_code') && sGr.customer_site_code) {
+                code = sGr.customer_site_code.customer_code_sap ? s(sGr.customer_site_code.customer_code_sap) : '';
+            }
+            return code;
+        }
+
+        // Computes PAN-level Requested Limit (requested sites + unrequested sites' current limits)
+        // and PAN-level Total Outstanding across all N01 sites under the PAN
+        function getPanListFigures(panSysId, panVal) {
+            var reqMap = {};
+            var sGr = new GlideRecord('x_birl3_clm_nt_site_request');
+            sGr.addQuery('pan_request', panSysId);
+            sGr.query();
+            while (sGr.next()) {
+                var code = getSiteCode(sGr);
+                var seg = sGr.isValidField('segment') ? segKey(sGr.getDisplayValue('segment')) : '';
+                reqMap[code + '|' + seg] = {
+                    requested: parseNum(sGr.getValue('requested_limit') || sGr.getValue('site_desired_limit')),
+                    os: parseNum(sGr.getValue('existing_outstanding'))
+                };
+            }
+
+            var snapOs = {};
+            var snGr = new GlideRecord('x_birl3_clm_nt_pan_request_outstanding');
+            snGr.addQuery('pan_request', panSysId);
+            snGr.orderByDesc('snapshot_month');
+            snGr.orderByDesc('sys_created_on');
+            snGr.query();
+            while (snGr.next()) {
+                var sk = s(snGr.getValue('customer_site_code') || snGr.getValue('customer'));
+                var ck = s(snGr.getValue('customer_code'));
+                if ((sk && snapOs[sk] === undefined) || (ck && snapOs[ck] === undefined)) {
+                    var isLeg = snGr.isValidField('bucket_0_21_days') && snGr.getValue('bucket_0_21_days') !== null;
+                    var b03   = parseNum(isLeg ? snGr.getValue('bucket_0_21_days')  : snGr.getValue('bucket_0_30_days'));
+                    var b47   = parseNum(isLeg ? snGr.getValue('bucket_22_30_days') : snGr.getValue('bucket_31_45_days'));
+                    var b821  = parseNum(isLeg ? snGr.getValue('bucket_31_45_days') : snGr.getValue('bucket_46_60_days'));
+                    var b22   = parseNum(isLeg ? snGr.getValue('bucket_46_60_days') : snGr.getValue('bucket_61_75_days'));
+                    var b31   = parseNum(isLeg ? snGr.getValue('bucket_61_75_days') : snGr.getValue('bucket_76_90_days'));
+                    var bgt   = parseNum(snGr.getValue('bucket_gt120_days')) + parseNum(snGr.getValue('bucket_91_120_days'));
+                    var tot   = parseNum(snGr.getValue('total_outstanding')) || (b03 + b47 + b821 + b22 + b31 + bgt);
+                    if (sk && snapOs[sk] === undefined) snapOs[sk] = tot;
+                    if (ck && snapOs[ck] === undefined) snapOs[ck] = tot;
+                }
+            }
+
+            var requestedPan = 0, outstanding = 0;
+            var seen = {}, claimed = {};
+            var cGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+            cGr.addQuery('pan', panVal);
+            cGr.addQuery('cg1', 'N01');
+            cGr.query();
+            while (cGr.next()) {
+                var cId = cGr.getUniqueValue();
+                var cCode = s(cGr.getValue('customer_code_sap'));
+                var cSeg = segKey(cGr.getDisplayValue('segment'));
+                var dedupe = cCode ? (cCode + '|' + cSeg) : cId;
+                if (seen[dedupe]) continue;
+                seen[dedupe] = true;
+
+                var key = cCode + '|' + cSeg;
+                if (reqMap[key] === undefined && reqMap[cCode + '|'] !== undefined) key = cCode + '|';
+                var line = (reqMap[key] !== undefined && !claimed[key]) ? reqMap[key] : null;
+                if (line) claimed[key] = true;
+
+                var curCl = parseNum(cGr.getValue('cr_limit') || cGr.getValue('credit_limit'));
+                requestedPan += line ? line.requested : curCl;
+
+                if (snapOs[cId] !== undefined) outstanding += snapOs[cId];
+                else if (cCode && snapOs[cCode] !== undefined) outstanding += snapOs[cCode];
+                else outstanding += line ? line.os : parseNum(cGr.getValue('outstanding'));
+            }
+
+            return { requestedPan: requestedPan, outstanding: outstanding };
+        }
+
+        // Reads each approver's PAN-level Recommended CL from approval_journal_column
+        function getRecommendedCl(appGr) {
+            if (!appGr || !appGr.isValidField('approval_journal_column')) return 0;
+            var raw = '';
+            try {
+                var el = appGr.getElement('approval_journal_column');
+                if (el) raw = el.getJournalEntry(1) || '';
+            } catch (e) { raw = ''; }
+            if (!raw) raw = appGr.getValue('approval_journal_column') || '';
+            if (!raw) return 0;
+
+            var lines = String(raw).split('\n');
+            if (lines.length > 1 && /^\d{4}-\d{2}-\d{2}|^[^:]+:\s*\d{4}-\d{2}-\d{2}/.test(lines[0])) lines.shift();
+            var txt = lines.join(' ').replace(/[,₹\s]/g, '');
+            var m = txt.match(/\d+(\.\d+)?/);
+            return m ? (parseFloat(m[0]) || 0) : 0;
+        }
+
+        // ── Shared CredX UI Component Builders ─────────────────────────────
+        var TD_K   = 'padding:8px 0; color:#5a6a7a; border-bottom:1px solid #eef1f5;';
+        var TD_V   = 'padding:8px 0; color:#1a1a1a; border-bottom:1px solid #eef1f5;';
+        var TILE   = 'border:1px solid #e0e6ed; border-radius:6px; padding:12px 14px; background-color:#fafbfc;';
+        var TILE_K = 'font-size:10px; text-transform:uppercase; letter-spacing:.8px; color:#5a6a7a; font-weight:700;';
+
+        function sec(title, top) {
+            return '<h3 style="margin:' + (top || 24) + 'px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">' + title + '</h3>';
+        }
+
+        function kv(label, value, last, bold) {
+            return '<tr><td width="38%" style="' + (last ? 'padding:8px 0; color:#5a6a7a;' : TD_K) + '">' + label + '</td>' +
+                   '<td style="' + (last ? 'padding:8px 0; color:#1a1a1a;' : TD_V) + (bold ? ' font-weight:700;' : '') + '">' + value + '</td></tr>';
+        }
+
+        // ── Shared Approval History Builder (Matches CredX Approval UI) ────
+        function renderApprovalHistory(parentGr, amountVal, amountHeader) {
+            var pId = parentGr.getUniqueValue();
+            var ap  = new GlideRecord('sysapproval_approver');
+            var apq = ap.addQuery('document_id', pId);
+            apq.addOrCondition('sysapproval', pId);
+            ap.addQuery('state', 'IN', 'approved,rejected');
+            if (parentGr.isValidField('u_last_submitted_on') && s(parentGr.getValue('u_last_submitted_on'))) {
+                ap.addQuery('sys_created_on', '>=', s(parentGr.getValue('u_last_submitted_on')));
+            }
+            ap.orderBy('sys_updated_on');
+            ap.query();
+
+            var H_TH = 'padding:9px 12px; background-color:#eef1f5; color:#2b3440; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; text-align:left; border-bottom:1px solid #dde3ea;';
+            var H_TD = 'padding:10px 12px; font-size:13px; color:#1a1a1a; border-bottom:1px solid #eef1f5; vertical-align:top;';
+            var histRows = '', histCount = 0;
+
+            while (ap.next()) {
+                histCount++;
+                var apState   = s(ap.getValue('state'));
+                var roleBadge = s(ap.getValue('approval_reason')) || (apState === 'approved' ? 'Approved' : 'Rejected');
+                var comment   = '';
+
+                // 1. Read clean comment value from sys_journal_field
+                var jf = new GlideRecord('sys_journal_field');
+                jf.addQuery('element_id', ap.getUniqueValue());
+                jf.addQuery('element', 'comments');
+                jf.orderByDesc('sys_created_on');
+                jf.setLimit(1);
+                jf.query();
+                if (jf.next()) {
+                    comment = s(jf.getValue('value'));
+                }
+
+                // 2. Fallback to approval journal entry (stripping timestamp header)
+                if (!comment && ap.comments) {
+                    var jEntry = s(ap.comments.getJournalEntry(1));
+                    if (jEntry) {
+                        var lines = jEntry.split('\n');
+                        if (lines.length > 1) {
+                            lines.shift();
+                            comment = lines.join('\n').trim();
+                        } else {
+                            comment = jEntry.trim();
+                        }
+                    }
+                }
+
+                // 3. Fallback to direct comments field
+                if (!comment) {
+                    comment = s(ap.getValue('comments'));
+                }
+
+                var recCl     = getRecommendedCl(ap);
+                var dispAmt   = recCl > 0 ? recCl : amountVal;
+                var stateIcon = apState === 'approved'
+                    ? '<span style="color:#27ae60; font-weight:700;">&#10004;</span>'
+                    : '<span style="color:#E23D28; font-weight:700;">&#10006;</span>';
+
+                histRows += '<tr>';
+                histRows += '<td style="' + H_TD + '"><div style="font-weight:700;">' + stateIcon + ' ' + esc(ap.approver.getDisplayValue()) + '</div>' +
+                            '<div style="padding-top:4px;"><span style="display:inline-block; background-color:#eef1f5; border:1px solid #dde3ea; border-radius:4px; padding:2px 8px; font-size:11px; font-weight:700; color:#2b3440;">' + esc(roleBadge) + '</span></div></td>';
+                histRows += '<td style="' + H_TD + ' white-space:nowrap; font-weight:700;">' + (apState === 'approved' ? rupee(dispAmt) : '&mdash;') + '</td>';
+                histRows += '<td style="' + H_TD + ' white-space:pre-wrap; word-break:break-word;">' + (comment ? esc(comment) : '<span style="color:#8a96a3;">&mdash;</span>') +
+                            '<div style="font-size:11px; color:#8a96a3; padding-top:4px;">' + esc(ap.getDisplayValue('sys_updated_on')) + '</div></td>';
+                histRows += '</tr>';
+            }
+
+            var out = sec('Approval History' + (histCount ? ' <span style="display:inline-block; background-color:#eef1f5; border:1px solid #dde3ea; border-radius:10px; padding:0 8px; font-size:11px; letter-spacing:0; color:#2b3440;">' + histCount + '</span>' : ''));
+            if (histCount) {
+                out += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #dde3ea; border-radius:6px;"><thead><tr>' +
+                       '<th style="' + H_TH + '">Approver</th><th style="' + H_TH + '">' + esc(amountHeader || 'Recommended Limit') + '</th><th style="' + H_TH + '">Comments</th></tr></thead><tbody>' + histRows + '</tbody></table>';
+            } else {
+                out += '<p style="margin:0; font-size:13px; color:#5a6a7a;">No earlier approvals recorded yet &mdash; currently awaiting the first approver.</p>';
+            }
+            return out;
+        }
+
+        // Resolve Initiator display name (and fallback TO address if opened_by was empty)
+        function resolveInitiatorName(taskGr) {
+            if (taskGr.opened_by && taskGr.opened_by.getDisplayValue()) {
+                return s(taskGr.opened_by.getDisplayValue());
+            }
+            var createdBy = s(taskGr.getValue('sys_created_by'));
+            if (createdBy) {
+                var uGr = new GlideRecord('sys_user');
+                uGr.addQuery('user_name', createdBy);
+                uGr.setLimit(1);
+                uGr.query();
+                if (uGr.next()) {
+                    var em = s(uGr.getValue('email'));
+                    var nm = s(uGr.getDisplayValue('name'));
+                    if (em) email.addAddress('to', em, nm);
+                    return nm || createdBy;
+                }
+            }
+            return 'Initiator';
+        }
+
+        // ── 2. Resolve Task Class & Record via sysapproval ─────────────────
+        var targetSysId = s(current.getValue('sysapproval')) || s(current.getValue('document_id'));
+        var targetTable = '';
+
+        if (current.sysapproval) {
+            targetTable = s(current.sysapproval.sys_class_name);
+        }
+        if (!targetTable && targetSysId) {
+            var taskCheck = new GlideRecord('task');
+            if (taskCheck.get(targetSysId)) {
+                targetTable = taskCheck.getRecordClassName();
+            }
+        }
+        if (!targetTable) {
+            targetTable = s(current.getValue('source_table'));
+        }
+
+        var instanceUrl = gs.getProperty('glide.servlet.uri');
+        if (!instanceUrl.endsWith('/')) instanceUrl += '/';
+
+        var currentApproverName = current.approver ? s(current.approver.getDisplayValue()) : 'Assigned Approver';
+        var currentApproverRole = s(current.getValue('approval_reason'));
+        var approverDisplay     = currentApproverRole
+            ? currentApproverName + ' (' + currentApproverRole + ')'
+            : currentApproverName;
+
+        var h = '';
+
+        // ── 3. Branch A: Non-Trade Credit Limit Request ────────────────────
+        if (targetTable === 'x_birl3_clm_nt_pan_request') {
+            var panGr = new GlideRecord('x_birl3_clm_nt_pan_request');
+            if (!panGr.get(targetSysId)) {
+                template.print('<div style="font-family: Arial, sans-serif; color: #d9534f;">Unable to retrieve Non-Trade CL request details.</div>');
+                return;
+            }
+
+            var panSysId       = panGr.getUniqueValue();
+            var initiatorName  = resolveInitiatorName(panGr);
+            var reqNumber      = s(panGr.getValue('number'));
+            var panStr         = s(panGr.getValue('pan'));
+            var segment        = panGr.getDisplayValue('segment') || s(panGr.getValue('segment')) || 'Non-Trade';
+            var panFigs        = panStr ? getPanListFigures(panSysId, panStr) : { requestedPan: 0, outstanding: 0 };
+            var requestedLimit = panFigs.requestedPan || parseNum(panGr.getValue('total_requested_limit') || panGr.getValue('total_desired_limit'));
+            var safeLimit      = parseNum(panGr.getValue('total_safe_allowable_limit'));
+            var submittedOn    = s(panGr.getDisplayValue('sys_created_on'));
+
+            var custName = 'Corporate Group';
+            if (panStr) {
+                var custGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+                custGr.addQuery('pan', panStr);
+                custGr.setLimit(1);
+                custGr.query();
+                if (custGr.next()) {
+                    custName = custGr.getValue('group_customer_name') || custGr.getValue('customer_name') || custGr.getValue('name') || custName;
+                }
+            }
+
+            email.setSubject('[CredX] Request Pending Approval (' + currentApproverName + ') - ' + reqNumber + ' (' + (custName !== 'Corporate Group' ? custName : panStr) + ')');
+
+            var portalUrl = instanceUrl + 'uclm?id=uclm_non_trade_view_request&number=' + encodeURIComponent(reqNumber);
+
+            // Greeting
+            h += '<p style="margin:0 0 10px 0; font-size:14px; color:#5a6a7a;">Dear <strong style="color:#1a1a1a;">' + esc(initiatorName) + '</strong>,</p>';
+
+            // Blue Informational Progress Banner (Matches clm_request_step_approved)
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f4f9fb; border:1px solid #aed6f1; border-left:5px solid #3498db; border-radius:6px; margin-top:4px;"><tbody><tr>';
+            h += '<td width="52" align="center" valign="middle" style="padding:16px 0 16px 14px;"><div style="width:36px; height:36px; line-height:36px; border-radius:18px; background-color:#3498db; color:#ffffff; font-size:20px; font-weight:700; text-align:center;">&#8594;</div></td>';
+            h += '<td style="padding:16px 16px 16px 12px;"><div style="font-size:20px; font-weight:700; color:#1a5276;">Request pending at approver</div>';
+            h += '<div style="font-size:13px; color:#3a4451; padding-top:2px;">Now awaiting approval from <strong>' + esc(approverDisplay) + '</strong></div></td>';
+            h += '</tr></tbody></table>';
+
+            // Yellow Request Number Card
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:16px; background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px;"><tbody><tr>';
+            h += '<td style="padding:12px 16px;">';
+            h += '<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#5a6a7a; font-weight:700;">Request Number</div>';
+            h += '<div style="font-size:18px; font-weight:700; color:#1a1a1a;">' + esc(reqNumber) + '</div>';
+            if (submittedOn) {
+                h += '<div style="font-size:12px; color:#5a6a7a; padding-top:2px;">Submitted on ' + esc(submittedOn) + '</div>';
+            }
+            h += '</td>';
+            h += '<td align="right" valign="middle" style="padding:12px 16px;"><span style="display:inline-block; background-color:#eaf4fb; color:#1a5276; border:1px solid #aed6f1; border-radius:4px; padding:5px 12px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">In Progress</span></td>';
+            h += '</tr></tbody></table>';
+
+            // Approval Progress Card
+            h += sec('Approval Progress', 24);
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#fafbfc; border:1px solid #e0e6ed; border-radius:6px;"><tbody>';
+            h += '<tr><td style="padding:14px 18px;">';
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+            h += '<tr><td width="38%" style="padding:6px 0; color:#5a6a7a; font-weight:600;">Current Status</td>';
+            h += '<td style="padding:6px 0; color:#1a1a1a; font-weight:700;">Pending Approval</td></tr>';
+            h += '<tr><td width="38%" style="padding:6px 0; color:#5a6a7a; font-weight:600;">Now With</td>';
+            h += '<td style="padding:6px 0; color:#1a5276; font-weight:700;">' + esc(currentApproverName);
+            if (currentApproverRole) {
+                h += ' <span style="color:#8a96a3; font-weight:400;">(' + esc(currentApproverRole) + ')</span>';
+            }
+            h += '</td></tr>';
+            h += '</tbody></table>';
+            h += '</td></tr></tbody></table>';
+
+            // Credit Limit Tiles
+            h += sec('Credit Limit (PAN Level)', 24);
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+            h += '<td width="50%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Safe Allowable Limit</div><div style="font-size:17px; font-weight:700; color:#1e8449; padding-top:3px;">' + rupee(safeLimit) + '</div></div></td>';
+            h += '<td width="50%" valign="top" style="padding-left:6px;"><div style="background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + '">Requested PAN Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(requestedLimit) + '</div></div></td>';
+            h += '</tr></tbody></table>';
+
+            // Request Summary
+            h += sec('Request Summary');
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+            h += kv('Customer Group', esc(custName), false, true);
+            h += kv('Corporate PAN', '<span style="font-family:monospace; font-weight:700;">' + esc(panStr || '&mdash;') + '</span>');
+            h += kv('Customer Type', 'Non-Trade');
+            h += kv('Segment', esc(segment), true);
+            h += '</tbody></table>';
+
+            // Approval History Table
+            h += renderApprovalHistory(panGr, requestedLimit, 'Recommended Limit');
+
+            // What Happens Next Callout
+            h += sec('What Happens Next');
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f4f9fb; border-left:4px solid #3498db;"><tbody><tr><td style="padding:12px 16px; font-size:13px; line-height:1.6; color:#1a1a1a;">';
+            h += 'Your Non-Trade Credit Limit request <strong>' + esc(reqNumber) + '</strong> is currently pending review with <strong>' + esc(approverDisplay) + '</strong>. No action is required from you right now &mdash; you&rsquo;ll be notified as soon as a decision is taken or if additional information is requested.';
+            h += '</td></tr></tbody></table>';
+
+            // CTA Button
+            h += '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:28px;"><tbody><tr>';
+            h += '<td align="center" style="background-color:#1a1a1a; border-radius:6px; border-bottom:3px solid #F3D54E;">';
+            h += '<a href="' + portalUrl + '" target="_blank" style="display:inline-block; padding:12px 28px; font-size:13px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; color:#ffffff; text-decoration:none;">View Request in CredX</a>';
+            h += '</td></tr></tbody></table>';
+            h += '<p style="margin:14px 0 0 0; font-size:12px; color:#8a96a3;">Open the request in CredX to see the complete approval trail.</p>';
+
+            template.print(h);
+            return;
+        }
+
+        // ── 4. Branch B: Non-Trade Limit Swap Request ──────────────────────
+        if (targetTable === 'x_birl3_clm_nt_limit_swap_request') {
+            var swapGr = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+            if (!swapGr.get(targetSysId)) {
+                template.print('<div style="font-family: Arial, sans-serif; color: #d9534f;">Unable to retrieve Limit Swap request details.</div>');
+                return;
+            }
+
+            var swapInitiatorName = resolveInitiatorName(swapGr);
+            var swapNumber        = s(swapGr.getValue('number'));
+            var swapAmount        = parseNum(swapGr.getValue('requested_amount'));
+            var swapSubmittedOn   = s(swapGr.getDisplayValue('sys_created_on'));
+
+            var donorCode = swapGr.donor ? s(swapGr.donor.customer_code_sap) : '';
+            var donorName = swapGr.donor ? s(swapGr.donor.customer_name) : s(swapGr.getDisplayValue('donor'));
+
+            var doneeCode = swapGr.donee ? s(swapGr.donee.customer_code_sap) : '';
+            var doneeName = swapGr.donee ? s(swapGr.donee.customer_name) : s(swapGr.getDisplayValue('donee'));
+
+            email.setSubject('[CredX] Limit Swap Pending Approval (' + currentApproverName + ') - ' + swapNumber + ' (' + donorCode + ' → ' + doneeCode + ')');
+
+            var swapPortalUrl = instanceUrl + 'uclm?id=uclm_limit_swap_view_request&number=' + encodeURIComponent(swapNumber);
+
+            // Greeting
+            h += '<p style="margin:0 0 10px 0; font-size:14px; color:#5a6a7a;">Dear <strong style="color:#1a1a1a;">' + esc(swapInitiatorName) + '</strong>,</p>';
+
+            // Blue Informational Progress Banner
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f4f9fb; border:1px solid #aed6f1; border-left:5px solid #3498db; border-radius:6px; margin-top:4px;"><tbody><tr>';
+            h += '<td width="52" align="center" valign="middle" style="padding:16px 0 16px 14px;"><div style="width:36px; height:36px; line-height:36px; border-radius:18px; background-color:#3498db; color:#ffffff; font-size:20px; font-weight:700; text-align:center;">&#8594;</div></td>';
+            h += '<td style="padding:16px 16px 16px 12px;"><div style="font-size:20px; font-weight:700; color:#1a5276;">Limit swap pending at approver</div>';
+            h += '<div style="font-size:13px; color:#3a4451; padding-top:2px;">Now awaiting approval from <strong>' + esc(approverDisplay) + '</strong></div></td>';
+            h += '</tr></tbody></table>';
+
+            // Yellow Request Number Card
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:16px; background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px;"><tbody><tr>';
+            h += '<td style="padding:12px 16px;">';
+            h += '<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#5a6a7a; font-weight:700;">Swap Request Number</div>';
+            h += '<div style="font-size:18px; font-weight:700; color:#1a1a1a;">' + esc(swapNumber) + '</div>';
+            if (swapSubmittedOn) {
+                h += '<div style="font-size:12px; color:#5a6a7a; padding-top:2px;">Submitted on ' + esc(swapSubmittedOn) + '</div>';
+            }
+            h += '</td>';
+            h += '<td align="right" valign="middle" style="padding:12px 16px;"><span style="display:inline-block; background-color:#eaf4fb; color:#1a5276; border:1px solid #aed6f1; border-radius:4px; padding:5px 12px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">In Progress</span></td>';
+            h += '</tr></tbody></table>';
+
+            // Approval Progress Card
+            h += sec('Approval Progress', 24);
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#fafbfc; border:1px solid #e0e6ed; border-radius:6px;"><tbody>';
+            h += '<tr><td style="padding:14px 18px;">';
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+            h += '<tr><td width="38%" style="padding:6px 0; color:#5a6a7a; font-weight:600;">Current Status</td>';
+            h += '<td style="padding:6px 0; color:#1a1a1a; font-weight:700;">Pending Approval</td></tr>';
+            h += '<tr><td width="38%" style="padding:6px 0; color:#5a6a7a; font-weight:600;">Now With</td>';
+            h += '<td style="padding:6px 0; color:#1a5276; font-weight:700;">' + esc(currentApproverName);
+            if (currentApproverRole) {
+                h += ' <span style="color:#8a96a3; font-weight:400;">(' + esc(currentApproverRole) + ')</span>';
+            }
+            h += '</td></tr>';
+            h += '</tbody></table>';
+            h += '</td></tr></tbody></table>';
+
+            // 3-Tile Reallocation Summary Strip
+            h += sec('Reallocation Summary', 24);
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+            h += '<td width="33%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Donor Site (&minus;)</div><div style="font-size:16px; font-family:monospace; font-weight:700; color:#E23D28; padding-top:4px;">' + esc(donorCode || '&mdash;') + '</div></div></td>';
+            h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Donee Site (+)</div><div style="font-size:16px; font-family:monospace; font-weight:700; color:#1e8449; padding-top:4px;">' + esc(doneeCode || '&mdash;') + '</div></div></td>';
+            h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + '">Swapped Amount</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(swapAmount) + '</div></div></td>';
+            h += '</tr></tbody></table>';
+
+            // Swap Details Summary
+            h += sec('Swap Details');
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+            h += kv('Donor Site (Deducting)', (donorCode ? '<span style="font-family:monospace; font-weight:700;">' + esc(donorCode) + '</span> &mdash; ' : '') + esc(donorName || '&mdash;'));
+            h += kv('Donee Site (Receiving)', (doneeCode ? '<span style="font-family:monospace; font-weight:700;">' + esc(doneeCode) + '</span> &mdash; ' : '') + esc(doneeName || '&mdash;'));
+            h += kv('Swapped Limit Amount', rupee(swapAmount), true, true);
+            h += '</tbody></table>';
+
+            // Approval History Table
+            h += renderApprovalHistory(swapGr, swapAmount, 'Swap Amount');
+
+            // What Happens Next Callout
+            h += sec('What Happens Next');
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f4f9fb; border-left:4px solid #3498db;"><tbody><tr><td style="padding:12px 16px; font-size:13px; line-height:1.6; color:#1a1a1a;">';
+            h += 'Your Limit Swap request <strong>' + esc(swapNumber) + '</strong> is currently pending review with <strong>' + esc(approverDisplay) + '</strong>. No action is required from you right now &mdash; you&rsquo;ll be notified once approved and synced with SAP.';
+            h += '</td></tr></tbody></table>';
+
+            // CTA Button
+            h += '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:28px;"><tbody><tr>';
+            h += '<td align="center" style="background-color:#1a1a1a; border-radius:6px; border-bottom:3px solid #F3D54E;">';
+            h += '<a href="' + swapPortalUrl + '" target="_blank" style="display:inline-block; padding:12px 28px; font-size:13px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; color:#ffffff; text-decoration:none;">Track Swap in CredX</a>';
+            h += '</td></tr></tbody></table>';
+            h += '<p style="margin:14px 0 0 0; font-size:12px; color:#8a96a3;">Open the swap request in CredX to view full approval status.</p>';
+
+            template.print(h);
+            return;
+        }
+
+    } catch (ex) {
+        gs.error('CLM MailScript clm_nt_pending_at_approver_script error: ' + ex.message);
+        template.print('<div style="font-family: Arial, sans-serif; color: #d9534f;">Error rendering pending approver status update.</div>');
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-12 04:40:32</sys_created_on>
+        <sys_id>a0bb433097e45390be31fa17f053af3e</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_name>clm_nt_pending_at_approver_script</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_a0bb433097e45390be31fa17f053af3e</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-17 07:31:06</sys_updated_on>
+    </sys_script_email>
+</record_update>

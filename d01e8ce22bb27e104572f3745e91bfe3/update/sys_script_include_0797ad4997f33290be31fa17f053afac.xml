@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLMTradeFormulas</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLMTradeFormulas</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var CLMTradeFormulas = Class.create();
+CLMTradeFormulas.prototype = {
+
+    initialize: function() {},
+getCalendarMonths: function(firstOrderDateStr) {
+        if (!firstOrderDateStr || firstOrderDateStr === '' || firstOrderDateStr === 'null') return 0;
+        var fParts = (firstOrderDateStr + '').split('-');
+        var fYear  = parseInt(fParts[0]) || 0;
+        var fMonth = parseInt(fParts[1]) || 0;
+        var fDay   = parseInt(fParts[2]) || 0;
+        var tNow   = new GlideDateTime();
+        var tStr   = tNow.getValue();
+        var tYear  = parseInt(tStr.substring(0, 4));
+        var tMonth = parseInt(tStr.substring(5, 7));
+        var tDay   = parseInt(tStr.substring(8, 10));
+        var months = (tYear - fYear) * 12 + (tMonth - fMonth);
+        if (tDay < fDay) months -= 1;
+        return months < 0 ? 0 : months;
+    },
+
+    getVintageDays: function(customerSysId) {
+        var gr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        if (!gr.get(customerSysId)) return 0;
+        var fos = gr.first_order_date + '';
+        if (!fos || fos === '' || fos === 'null') return 0;
+        var fd = new GlideDate();
+        fd.setValue(fos);
+        var td = new GlideDate();
+        var diff = Math.floor((td.getNumericValue() - fd.getNumericValue()) / (1000 * 60 * 60 * 24));
+        return diff > 0 ? diff : 0;
+    },
+
+    getAging6Month: function(customerSysId) {
+        var result = {
+            total: 0,
+            safe: 0,
+            warning: 0,
+            critical: 0,
+            toxic: 0
+        };
+        var count = 0;
+        var gr = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+        gr.addQuery('customer', customerSysId);
+        gr.orderByDesc('snapshot_month');
+        gr.setLimit(6);
+        gr.query();
+        while (gr.next()) {
+            count++;
+            result.total += parseFloat(gr.total_outstanding) || 0;
+            result.safe += (parseFloat(gr.bucket_0_30_days) || 0) +
+                (parseFloat(gr.bucket_31_45_days) || 0) +
+                (parseFloat(gr.bucket_46_60_days) || 0);
+            result.warning += parseFloat(gr.bucket_61_75_days) || 0;
+            result.critical += parseFloat(gr.bucket_76_90_days) || 0;
+            result.toxic += (parseFloat(gr.bucket_91_120_days) || 0) +
+                (parseFloat(gr.bucket_gt120_days) || 0);
+        }
+        if (count === 0) return result;
+        return {
+            total: result.total / count,
+            safe: result.safe / count,
+            warning: result.warning / count,
+            critical: result.critical / count,
+            toxic: result.toxic / count,
+            months_found: count
+        };
+    },
+
+    calcAgingRating: function(aging) {
+        var total = parseFloat(aging.total) || 0;
+        if (total === 0) return 'A';
+        var safePct = aging.safe / total;
+        var toxicPct = (aging.critical + aging.toxic) / total;
+        if (safePct >= 0.80 && toxicPct <= 0.10) return 'A';
+        if (safePct >= 0.60 && toxicPct <= 0.20) return 'B';
+        return 'C';
+    },
+
+    // calcNOD: function(vintageDays, outstanding, totalSales, daysActive, avgSales2M) {
+    //     outstanding = parseFloat(outstanding) || 0;
+    //     totalSales = parseFloat(totalSales) || 0;
+    //     avgSales2M = parseFloat(avgSales2M) || 0;
+    //     daysActive = parseInt(daysActive) || 0;
+    //     vintageDays = parseInt(vintageDays) || 0;
+    //     if (vintageDays <= 60) {
+    //         if (totalSales === 0) return 0;
+    //         return Math.ceil((outstanding / totalSales) * daysActive);
+    //     }
+    //     if (avgSales2M === 0) return 0;
+    //     return Math.round((outstanding / avgSales2M) * 30);
+    // },
+
+
+	calcNOD: function(vintageDays, outstanding, totalSalesValue, daysActive, avgSales2M) {
+        // totalSalesValue must be cumulative sales in ₹ (NOT metric tonnes)
+        outstanding     = parseFloat(outstanding)     || 0;
+        totalSalesValue = parseFloat(totalSalesValue) || 0;
+        avgSales2M      = parseFloat(avgSales2M)      || 0;
+        daysActive      = parseInt(daysActive)         || 0;
+        vintageDays     = parseInt(vintageDays)        || 0;
+        if (vintageDays <= 60) {
+            if (totalSalesValue === 0) return 0;
+            return Math.ceil((outstanding / totalSalesValue) * daysActive);
+        }
+        if (avgSales2M === 0) return 0;
+        return Math.round((outstanding / avgSales2M) * 30);
+    },
+
+    // getSystemMultiplier: function(vintageDays, cg2Code, avgMonthlySales, nod) { changes open-close
+    // getSystemMultiplier: function(vintageDays, cg2Code, avgMonthlySales, nod, segment) {
+    //     if (vintageDays < 90) return 1;
+    //     if (vintageDays < 180) {
+    //         return (nod < 15 && avgMonthlySales > 1000) ? 2 : 1;
+    //     }
+    //     // >6 months: look up multiplier config
+    //     var gr = new GlideRecord('x_birl3_clm_clm_multiplier');
+    //     gr.addQuery('cg2_code', cg2Code);
+    //     gr.addQuery('segment', segment);
+    //     gr.addQuery('is_active', true);
+    //     gr.setLimit(1);
+    //     gr.query();
+    //     if (gr.next()) return parseInt(gr.multiplier) || 1;
+    //     // fallback
+    //     if (cg2Code === 'CG2_A' || cg2Code === 'PMNT_GOOD') return 4;
+    //     if (cg2Code === 'CG2_B') return 2;
+    //     return 1;
+    // },
+
+	getSystemMultiplier: function(firstOrderDateStr, cg2Code, avgMonthlySales, nod, segment) {
+        var vintageMonths = this.getCalendarMonths(firstOrderDateStr);
+        if (vintageMonths < 3) return 1;
+        if (vintageMonths < 6) {
+            return (nod < 15 && avgMonthlySales > 1000) ? 2 : 1;
+        }
+        var gr = new GlideRecord('x_birl3_clm_clm_multiplier');
+        gr.addQuery('cg2_code', cg2Code);
+        gr.addQuery('segment',  segment);
+        gr.addQuery('is_active', true);
+        gr.setLimit(1);
+        gr.query();
+        if (gr.next()) return parseInt(gr.multiplier) || 1;
+        return 1;
+    },
+    //old working code 
+    // calcNetExposure:     function(reqLimit, sd) { return Math.max(0, parseFloat(reqLimit) - parseFloat(sd)); },
+
+    //updated below based on jayant-open 
+    calcNetExposure: function(totalRequested, sd) {
+        return Math.max(0, parseFloat(totalRequested) - parseFloat(sd));
+    },
+    // updated close
+
+    calcMaxAllowable: function(sd, mult) {
+        return parseFloat(sd) * parseInt(mult);
+    },
+    calcImpliedMultiplier: function(reqLimit, sd) {
+        sd = parseFloat(sd);
+        return sd > 0 ? parseFloat(reqLimit) / sd : 0;
+    },
+isDeviation: function(impliedMult, systemMultiplier) {
+    return parseFloat(impliedMult) > parseFloat(systemMultiplier);
+},
+
+
+
+    // isDeviation: function(reqLimit, maxAllowable) {
+    //     return parseFloat(reqLimit) > parseFloat(maxAllowable);
+    // },
+    //new added for cg2 code
+   
+    //added above code
+
+    runTradeCalc: function(current) {
+        var custSysId = current.customer + '';
+        var segment = current.segment + '';
+        var reqLimit = parseFloat(current.requested_limit) || 0;
+        var activeSD = parseFloat(current.active_sd) || 0;
+        var outstanding = parseFloat(current.outstanding_amount) || 0;
+        var avgSales = parseFloat(current.avg_monthly_sales) || 0;
+
+        var custGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        var cg2Code = '';
+
+        //changes open
+        //if (custGr.get(custSysId)) cg2Code = custGr.cg2_code + ''; changes open
+
+        var rawCG = '';
+        if (custGr.get(custSysId)) rawCG = custGr.cg1 + '';
+
+cg2Code = rawCG; // direct T00, T04        //changes close
+
+        var vintageDays = this.getVintageDays(custSysId);
+        var aging = this.getAging6Month(custSysId);
+
+        var salesLast = parseFloat(current.sales_last_month) || 0;
+        var salesPrev = parseFloat(current.sales_prev_month) || 0;
+        var avgSales2M = (salesLast + salesPrev) / 2;
+
+        var nod = this.calcNOD(vintageDays, outstanding, avgSales * 6, Math.min(vintageDays, 60), avgSales2M);
+        // var multiplier = this.getSystemMultiplier(vintageDays, cg2Code, avgSales, nod); changes open-close commented
+        var multiplier = this.getSystemMultiplier(vintageDays, cg2Code, avgSales, nod, segment);
+        var netExposure = this.calcNetExposure(reqLimit, activeSD);
+        var maxAllowable = this.calcMaxAllowable(activeSD, multiplier);
+        var impliedMult = this.calcImpliedMultiplier(reqLimit, activeSD);
+       // var isDeviation = this.isDeviation(reqLimit, maxAllowable);
+
+	 //  var isDeviation = this.isDeviation(impliedMult, multiplier);
+	 var isDeviation = this.isDeviation(impliedMult, multiplier, activeSD, reqLimit);
+        var agingRating = this.calcAgingRating(aging);
+
+        return {
+            vintage_days: vintageDays,
+            nod: nod,
+            multiplier: multiplier,
+            net_exposure: netExposure,
+            max_allowable: maxAllowable,
+            implied_mult: impliedMult,
+            is_deviation: isDeviation,
+            aging_rating: agingRating,
+            cg2_code: cg2Code
+        };
+    },
+
+
+    type: 'CLMTradeFormulas'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-03-21 13:03:43</sys_created_on>
+        <sys_id>0797ad4997f33290be31fa17f053afac</sys_id>
+        <sys_mod_count>11</sys_mod_count>
+        <sys_name>CLMTradeFormulas</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_0797ad4997f33290be31fa17f053afac</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-08 08:54:05</sys_updated_on>
+    </sys_script_include>
+</record_update>

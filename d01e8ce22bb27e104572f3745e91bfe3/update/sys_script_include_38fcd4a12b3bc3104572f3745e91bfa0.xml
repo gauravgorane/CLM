@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLMApprovalLimit</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLMApprovalLimit</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var CLMApprovalLimit = Class.create();
+CLMApprovalLimit.prototype = {
+    initialize: function() {},
+
+    FIELD: 'u_approval_limits',
+
+    save: function(requestSysId, approvalSysId, limit) {
+        var n = parseFloat(limit);
+        if (!requestSysId || !approvalSysId || isNaN(n)) return;
+
+        var rq = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+        if (!rq.get(requestSysId)) return;
+
+        var map = {};
+        try { map = JSON.parse(rq.getValue(this.FIELD) || '{}'); } catch (e) { map = {}; }
+        map[approvalSysId] = n;
+
+        rq.setValue(this.FIELD, JSON.stringify(map));
+        rq.setWorkflow(false);
+        rq.autoSysFields(false);
+        rq.update();
+    },
+
+    type: 'CLMApprovalLimit'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-07 17:05:18</sys_created_on>
+        <sys_id>38fcd4a12b3bc3104572f3745e91bfa0</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>CLMApprovalLimit</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_38fcd4a12b3bc3104572f3745e91bfa0</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-16 04:22:05</sys_updated_on>
+    </sys_script_include>
+</record_update>

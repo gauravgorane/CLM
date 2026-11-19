@@ -1,0 +1,883 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $window, $sce) {
+	var c = this;
+
+	var LIB = {
+		new:       { bg: 'yellow', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F57C00" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>'},
+		view:      { bg: 'blue',   icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1565C0" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h8"/></svg>'},
+		approval:  { bg: 'orange', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F57C00" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg>'},
+		docs:      { bg: 'yellow', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F57C00" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h4"/></svg>'},
+		swap:      { bg: 'blue',   icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1565C0" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7H3M21 7l-5-5M21 7l-5 5M3 17h18M3 17l5-5M3 17l5 5"/></svg>'},
+		calendar:  { bg: 'green',  icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2E7D32" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>'},
+		bank:      { bg: 'yellow', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F57C00" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 8 9-5 9 5M4 9h16M5 9v9M9.5 9v9M14.5 9v9M19 9v9M3 21h18M3 18h18"/></svg>'},
+		dashboard: { bg: 'blue',   icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1565C0" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>'}
+	};
+
+	var hour    = new Date().getHours();
+	c.greeting  = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+	c.firstName = c.data.firstName || 'there';
+
+	var p = c.data.p || {};
+	var totalPending = parseInt(c.data.pendingTotal, 10) || 0;
+
+	// Resolves unified uclm_<role>_dashboard across Trade, Non-Trade, or Key
+	var resolvedDashboard = '';
+	if (c.data.dashboards) {
+		resolvedDashboard = c.data.dashboards.trade || c.data.dashboards.nontrade || c.data.dashboards.key || '';
+	}
+
+	// ── 1. Common Section Definition ──
+	var COMMON_CONFIG = [
+		{
+			id: 'dashboard',
+			label: 'Dashboard',
+			desc: 'Role-based operational dashboard',
+			page: resolvedDashboard,
+			pendingCount: 0,
+			iconHtml: $sce.trustAsHtml(LIB.dashboard.icon),
+			iconBg: LIB.dashboard.bg,
+			show: p.dev || p.admin || p.trade.initiator || p.trade.approver || p.nontrade.initiator || p.nontrade.approver || p.key.initiator || p.key.approver
+		},
+		{
+			id: 'approval',
+			label: 'Pending Approvals',
+			desc: 'Review and action requests awaiting your approval',
+			page: 'uclm_credit_limit_approval',
+			pendingCount: totalPending,
+			iconHtml: $sce.trustAsHtml(LIB.approval.icon),
+			iconBg: LIB.approval.bg,
+			show: p.dev || p.admin || p.trade.initiator || p.trade.approver || p.nontrade.initiator || p.nontrade.approver || p.key.approver
+		},
+		{
+			id: 'swap',
+			label: 'Limit Swap',
+			desc: 'Reallocate credit limits',
+			page: 'uclm_limit_swap',
+			pendingCount: parseInt(c.data.swapPending, 10) || 0,
+			iconHtml: $sce.trustAsHtml(LIB.swap.icon),
+			iconBg: LIB.swap.bg,
+			show: p.dev || p.admin || p.nontrade.initiator || p.nontrade.approver || p.key.initiator || p.key.approver
+		},
+		{
+			id: 'calendar',
+			label: 'Next Review Update',
+			desc: 'Update Next Review date in bulk',
+			page: 'uclm_next_review_date',
+			pendingCount: 0,
+			iconHtml: $sce.trustAsHtml(LIB.calendar.icon),
+			iconBg: LIB.calendar.bg,
+			show: p.dev || p.admin || p.zchInitiator
+		},
+		{
+			id: 'bank',
+			label: 'Bank Guarantee Monitor',
+			desc: 'Update Credit Limit on Bank Guarantee Expiry',
+			page: 'uclm_bank_guarantee_monitor',
+			pendingCount: 0,
+			iconHtml: $sce.trustAsHtml(LIB.bank.icon),
+			iconBg: LIB.bank.bg,
+			show: p.dev || p.admin || p.zchInitiator
+		}
+	];
+
+	c.common = COMMON_CONFIG.filter(function(tile) {
+		return tile.show;
+	});
+
+	// ── 2. Segment Sections Definition ──
+	var SEGMENT_CONFIG = [
+		{
+			key: 'trade',
+			badge: 'TRADE',
+			show: p.dev || p.admin || p.trade.initiator || p.trade.approver,
+			cards: [
+				{ id: 'new',  label: 'New Credit Limit Request', desc: 'Initiate a credit limit request for a customer', page: 'clm_livecl', roles: ['initiator', 'admin', 'developer'] },
+				{ id: 'view', label: 'View My Requests',         desc: 'Monitor the status of your submitted requests',   page: 'view_my_credit_request', roles: ['initiator', 'admin', 'developer'] },
+				{ id: 'docs', label: 'Document Submission',      desc: 'Share secure links for customer document upload', page: 'uclm_trade_document_submission_dashboard', roles: ['initiator', 'admin', 'developer'] }
+			]
+		},
+		{
+			key: 'nontrade',
+			badge: 'NON-TRADE',
+			show: p.dev || p.admin || p.nontrade.initiator || p.nontrade.approver,
+			cards: [
+				{ id: 'new',  label: 'New Credit Limit Request', desc: 'Initiate a credit limit request for a customer', page: 'uclm_non_trade_request', roles: ['initiator', 'admin', 'developer'] },
+				{ id: 'view', label: 'View My Requests',         desc: 'Monitor the status of your submitted requests',   page: 'uclm_non_trade_view_request', roles: ['initiator', 'admin', 'developer'] },
+				{ id: 'docs', label: 'Document Submission',      desc: 'Share secure links for customer document upload', page: 'uclm_nt_document_submission', roles: ['initiator', 'admin', 'developer'] }
+			]
+		},
+		{
+			key: 'key',
+			badge: 'KEY',
+			show: p.dev || p.admin || p.key.initiator || p.key.approver,
+			cards: [
+				{ id: 'new',  label: 'New Credit Limit Request', desc: 'Initiate a credit limit request for a customer', page: '', roles: ['initiator', 'admin', 'developer'] },
+				{ id: 'view', label: 'View My Requests',         desc: 'Monitor the status of your submitted requests',   page: '', roles: ['initiator', 'admin', 'developer'] },
+				{ id: 'docs', label: 'Document Submission',      desc: 'Share secure links for customer document upload', page: '', roles: ['initiator', 'admin', 'developer'] }
+			]
+		}
+	];
+
+	c.segments = [];
+
+	SEGMENT_CONFIG.forEach(function(seg) {
+		if (!seg.show) return;
+
+		var segPerms = p[seg.key] || {};
+		var segCards = [];
+
+		seg.cards.forEach(function(card) {
+			var canSee = false;
+			if (p.dev) {
+				canSee = true;
+			} else {
+				if (p.admin && card.roles.indexOf('admin') !== -1) canSee = true;
+				if (segPerms.initiator && card.roles.indexOf('initiator') !== -1) canSee = true;
+				if (segPerms.approver && card.roles.indexOf('approver') !== -1) canSee = true;
+			}
+			if (!canSee) return;
+
+			segCards.push({
+				id: card.id,
+				label: card.label,
+				desc: card.desc,
+				page: card.page || '',
+				pendingCount: 0,
+				iconHtml: $sce.trustAsHtml(LIB[card.id].icon),
+				iconBg: LIB[card.id].bg
+			});
+		});
+
+		if (segCards.length > 0) {
+			c.segments.push({
+				key: seg.key,
+				badge: seg.badge,
+				cards: segCards
+			});
+		}
+	});
+
+	// Safe Navigation fallback
+	c.navigate = function(pageId) {
+		if (pageId && pageId.trim() !== '') {
+			$window.location.href = '/uclm?id=' + pageId;
+		} else {
+			$window.location.href = '/uclm';
+		}
+	};
+
+	// Real-time Clock
+	var DAYS   = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+	var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+	function updateClock() {
+		var pad    = function(n) { return n.toString().padStart(2, '0'); };
+		var now    = new Date();
+		var timeEl = document.getElementById('clm-time');
+		var dateEl = document.getElementById('clm-date');
+		if (timeEl) timeEl.textContent = pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+		if (dateEl) dateEl.textContent = DAYS[now.getDay()] + ', ' + now.getDate() + ' ' + MONTHS[now.getMonth()] + ' ' + now.getFullYear();
+	}
+
+	updateClock();
+	setInterval(updateClock, 1000);
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Wrapper ── */
+.db-wrap {
+  width: 100%;
+  min-height: 90vh;
+  background: #F9FAFB;
+  font-family: 'Oxygen', "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  padding: clamp(16px, 3vw, 48px);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ── Content Container ── */
+.db-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* ── Banner (Red/Orange) ── */
+.db-banner {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, #9b1111 0%, #b81e1e 45%, #e0301e 100%);
+  border-radius: 10px;
+  padding: 34px 40px;
+  margin-bottom: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border-top: 5px solid #FFE100;
+  box-shadow: 0 10px 28px rgba(120, 20, 15, 0.28);
+  flex-shrink: 0;
+}
+
+.db-banner::before,
+.db-banner::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+/* orange sweep */
+.db-banner::before {
+  width: 760px; height: 760px;
+  left: 58%; top: -40px;
+  background: linear-gradient(150deg, rgba(244, 123, 48, 0.6) 0%, rgba(244, 123, 48, 0.3) 35%, rgba(244, 123, 48, 0) 60%);
+}
+/* deep red arc */
+.db-banner::after {
+  width: 760px; height: 760px;
+  left: 68%; top: -20px;
+  background: linear-gradient(150deg, rgba(120, 15, 15, 0.55) 0%, rgba(120, 15, 15, 0.25) 40%, rgba(120, 15, 15, 0) 65%);
+}
+
+.db-banner-left, .db-banner-right { position: relative; z-index: 1; }
+.db-banner-title       { font-size: 30px; font-weight: 700; color: #ffffff; letter-spacing: 0.2px; line-height: 1.25; }
+.db-banner-title span  { color: #FFE100; }
+.db-banner-sub          { font-size: 16px; color: rgba(255, 234, 228, 0.9); margin-top: 8px; }
+.db-banner-right        { text-align: center; flex-shrink: 0; padding-left: 32px; border-left: 1px solid rgba(255, 255, 255, 0.3); }
+.db-banner-time         { font-size: 32px; font-weight: 700; color: #FFE100; letter-spacing: 1px; line-height: 1.15; }
+.db-banner-date         { font-size: 12px; color: rgba(255, 217, 207, 0.95); margin-top: 6px; white-space: nowrap; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; }
+/* ── Section Structure ── */
+.clm-hb-section       { margin-bottom: 32px; flex-shrink: 0; }
+.clm-hb-section-head  { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
+.clm-hb-badge {
+  display: inline-flex; align-items: center; height: 30px; padding: 0 16px; border-radius: 15px;
+  background: #8f1d16; color: #FFE100; font-size: 12px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 1px; white-space: nowrap;
+}
+.clm-hb-line          { flex: 1; height: 1px; background: #dde3ea; }
+
+/* ── Standard Tile Grid ── */
+.clm-hb-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.clm-hb-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 196px;
+  padding: 18px 18px 16px;
+  background: #ffffff;
+  border: 1px solid #dde3ea;
+  border-top: 3px solid #FFE100;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.04);
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+}
+.clm-hb-tile:hover {
+  transform: translateY(-3px);
+  border-color: #F3D54E;
+  box-shadow: 0 0 0 2px rgba(243, 213, 78, .25), 0 10px 24px rgba(0,0,0,.08);
+  text-decoration: none;
+}
+.clm-hb-tile:focus {
+  outline: none;
+  border-color: #AF272F;
+  box-shadow: 0 0 0 3px rgba(175, 39, 47, .15);
+}
+
+/* Tile Icons */
+.clm-hb-icon {
+  width: 52px; height: 52px; border-radius: 50%; flex-shrink: 0; margin-bottom: 14px;
+  display: flex; align-items: center; justify-content: center;
+  transition: transform .2s ease;
+}
+.clm-hb-icon span { display: flex; }
+.clm-hb-icon svg  { width: 24px; height: 24px; }
+.clm-hb-tile:hover .clm-hb-icon { transform: scale(1.06); }
+
+.clm-hb-icon.yellow   { background: #fff6d6; color: #E87722; }
+.clm-hb-icon.blue     { background: #e3eefa; color: #0b5394; }
+.clm-hb-icon.green    { background: #e6f4ea; color: #2e7d32; }
+.clm-hb-icon.orange   { background: #fde8dc; color: #E87722; }
+
+/* Tile Typography */
+.clm-hb-label { font-size: 15px; font-weight: 700; color: #1a1a1a; line-height: 1.35; }
+.clm-hb-desc  { margin-top: 6px; font-size: 13px; color: #5a6a7a; line-height: 1.5; }
+
+/* Tile Bottom Arrow */
+.clm-hb-foot  { margin-top: auto; padding-top: 14px; display: flex; justify-content: flex-end; }
+.clm-hb-arrow {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: #8f1d16; color: #ffffff;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: transform .2s ease, background .2s ease;
+}
+.clm-hb-tile:hover .clm-hb-arrow { transform: translateX(3px); }
+
+/* Tile Top-Right Pending Notification Pill */
+.clm-hb-pending {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 11px;
+  background: #E23D28;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 5px rgba(226, 61, 40, .3);
+  z-index: 2;
+}
+
+/* ── Full-Width Rectangle Footer (Resources &amp; Support) ── */
+.clm-resources-footer {
+  margin-top: auto;
+  padding-top: 24px;
+  width: 100%;
+}
+.clm-resources-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  width: 100%;
+}
+.clm-resource-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  background: #ffffff;
+  border: 1px solid #dde3ea;
+  border-left: 4px solid #FFE100;
+  border-radius: 8px;
+  text-decoration: none;
+  color: inherit;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04), 0 2px 8px rgba(0,0,0,.03);
+  transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+}
+.clm-resource-card:hover {
+  transform: translateY(-2px);
+  border-color: #F3D54E;
+  box-shadow: 0 6px 18px rgba(0,0,0,.07);
+  text-decoration: none;
+}
+.clm-resource-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.clm-resource-icon.res-red  { background: #fdecea; color: #E23D28; }
+.clm-resource-icon.res-blue { background: #e3eefa; color: #0b5394; }
+.clm-resource-icon.res-gray { background: #eef1f5; color: #3a4451; }
+
+.clm-resource-info {
+  flex: 1;
+  min-width: 0;
+}
+.clm-resource-title {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: #1a1a1a;
+  line-height: 1.3;
+}
+.clm-resource-desc {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: #5a6a7a;
+  line-height: 1.4;
+}
+.clm-resource-arrow {
+  color: #8f1d16;
+  display: flex;
+  align-items: center;
+  transition: transform .2s ease;
+  flex-shrink: 0;
+}
+.clm-resource-card:hover .clm-resource-arrow {
+  transform: translateX(3px);
+}
+
+/* ── Responsive ── */
+@media (max-width: 992px) {
+  .clm-resources-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .db-banner            { flex-direction: column; align-items: flex-start; gap: 16px; padding: 24px; }
+  .db-banner-right      { text-align: left; padding-left: 0; border-left: 0; }
+  .db-banner-title      { font-size: 22px; }
+  .db-banner-sub        { font-size: 14px; }
+  .db-banner-time       { font-size: 22px; }
+  .clm-hb-tiles         { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+}
+
+@media (max-width: 480px) {
+  .db-banner            { padding: 20px; border-radius: 8px; }
+  .db-banner-title      { font-size: 19px; }
+  .clm-hb-tiles         { grid-template-columns: 1fr; }
+  .clm-hb-tile          { min-height: 0; padding: 14px 14px 12px; }
+  .clm-hb-icon          { width: 44px; height: 44px; margin-bottom: 10px; }
+  .clm-hb-label         { font-size: 14px; }
+  .clm-hb-desc          { font-size: 12px; }
+  .clm-hb-badge         { font-size: 11px; padding: 0 12px; height: 26px; }
+}
+
+/* Font Enforcement */
+.clm-widget, .clm-widget *, .clm-widget input, .clm-widget select,
+.clm-widget textarea, .clm-widget button, .clm-widget table {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>home</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Landing Page</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+	var user = gs.getUser();
+	var userId = gs.getUserID();
+	data.firstName = user.getDisplayName() || gs.getUserName();
+
+	// ── Permissions Setup ──────────────────────────────────────────────
+	var p = {
+		admin: false,
+		dev: false,
+		zchInitiator: false,
+		trade:    { initiator: false, approver: false },
+		nontrade: { initiator: false, approver: false },
+		key:      { initiator: false, approver: false }
+	};
+
+	var groupMap = {
+		'CLM: ADMIN':                function() { p.admin = true; },
+		'CLM: DEVELOPER':            function() { p.dev = true; },
+		'CLM: ZCH INITIATOR':        function() { p.zchInitiator = true; },
+		'CLM: TRADE INITIATOR':      function() { p.trade.initiator = true; },
+		'CLM: TRADE APPROVER':       function() { p.trade.approver = true; },
+		'CLM: NON-TRADE INITIATOR':  function() { p.nontrade.initiator = true; },
+		'CLM: NON-TRADE APPROVER':   function() { p.nontrade.approver = true; },
+		'CLM: KEY INITIATOR':        function() { p.key.initiator = true; },
+		'CLM: KEY APPROVER':         function() { p.key.approver = true; }
+	};
+
+	var gmGr = new GlideRecord('sys_user_grmember');
+	gmGr.addQuery('user', userId);
+	gmGr.query();
+	while (gmGr.next()) {
+		var gName = (gmGr.getDisplayValue('group') || '').toUpperCase().trim();
+		if (groupMap[gName]) {
+			groupMap[gName]();
+		}
+	}
+	data.p = p;
+
+	// ── Category Configuration ─────────────────────────────────────────
+	var isAdminRole = gs.hasRole('admin');
+	var COUNT_CONFIG = {
+		trade: {
+			request_table:  'x_birl3_clm_clm_new_credit_request',
+			request_filter: 'customer_type=Trade^ORcustomer_type=trade',
+			approver_group: 'CLM: Trade Approver',
+			rfi_table:      'x_birl3_clm_clm_rfi',
+			rfi_filter:     'customer_type=trade^ORcustomer_type=Trade^ORcustomer_typeISEMPTY'
+		},
+		nt: {
+			request_table:  'x_birl3_clm_nt_pan_request',
+			request_filter: '',
+			approver_group: 'CLM: NON-TRADE APPROVER',
+			rfi_table:      'x_birl3_clm_clm_rfi',
+			rfi_filter:     'customer_type=non_trade'
+		},
+		key: {
+			request_table:  '',
+			request_filter: '',
+			approver_group: 'CLM: KEY APPROVER',
+			rfi_table:      'x_birl3_clm_clm_rfi',
+			rfi_filter:     'customer_type=key'
+		}
+	};
+
+	var _grpCache = {};
+	function canApproveCat(cfg) {
+		if (!cfg.request_table) return false;
+		if (isAdminRole) return true;
+		if (!cfg.approver_group) return false;
+		if (!_grpCache.hasOwnProperty(cfg.approver_group)) {
+			_grpCache[cfg.approver_group] = user.isMemberOf(cfg.approver_group);
+		}
+		return _grpCache[cfg.approver_group];
+	}
+
+	// ── Approval Calculations (Task vs Non-Task) ──────────────────────
+	function pendingCountFor(cfg, catId) {
+		if (!canApproveCat(cfg)) return 0;
+
+		// 1. Non-Trade (Extended from task table -> direct aggregate via sysapproval)
+		if (catId === 'nt') {
+			var gaNt = new GlideAggregate('sysapproval_approver');
+			gaNt.addQuery('approver', userId);
+			gaNt.addQuery('state', 'requested');
+			var qcNt = gaNt.addQuery('sysapproval.sys_class_name', cfg.request_table);
+			qcNt.addOrCondition('source_table', cfg.request_table);
+			gaNt.addAggregate('COUNT');
+			gaNt.query();
+			return gaNt.next() ? (parseInt(gaNt.getAggregate('COUNT'), 10) || 0) : 0;
+		}
+
+		// 2. Trade (Not extended from task table -> document_id lookup with state='Submitted')
+		if (catId === 'trade') {
+			var ids = [], seen = {};
+			var sa = new GlideRecord('sysapproval_approver');
+			sa.addQuery('source_table', cfg.request_table);
+			sa.addQuery('approver', userId);
+			sa.addQuery('state', 'requested');
+			sa.query();
+			while (sa.next()) {
+				var d = sa.getValue('document_id') + '';
+				if (d && !seen[d]) {
+					seen[d] = true;
+					ids.push(d);
+				}
+			}
+			if (!ids.length) return 0;
+
+			var gaTrade = new GlideAggregate(cfg.request_table);
+			gaTrade.addQuery('sys_id', 'IN', ids.join(','));
+			gaTrade.addQuery('state', 'Submitted');
+			if (cfg.request_filter) gaTrade.addEncodedQuery(cfg.request_filter);
+			gaTrade.addAggregate('COUNT');
+			gaTrade.query();
+			return gaTrade.next() ? (parseInt(gaTrade.getAggregate('COUNT'), 10) || 0) : 0;
+		}
+
+		return 0;
+	}
+
+	function rfiCountFor(cfg) {
+		if (!cfg.rfi_table) return 0;
+		var ga = new GlideAggregate(cfg.rfi_table);
+		ga.addQuery('u_target_user', userId);
+		ga.addQuery('u_status', 'open');
+		if (cfg.rfi_filter) ga.addEncodedQuery(cfg.rfi_filter);
+		ga.addAggregate('COUNT');
+		ga.query();
+		return ga.next() ? (parseInt(ga.getAggregate('COUNT'), 10) || 0) : 0;
+	}
+
+	data.pendingBreakdown = {};
+	data.pendingTotal = 0;
+	['trade', 'nt', 'key'].forEach(function(id) {
+		var cfg = COUNT_CONFIG[id];
+		var pend = 0, rfi = 0;
+		try {
+			pend = pendingCountFor(cfg, id);
+			rfi  = rfiCountFor(cfg);
+		} catch (e) {
+			gs.error('CLM Landing: count error for ' + id + ': ' + e.message);
+		}
+		data.pendingBreakdown[id] = { pending: pend, rfi: rfi };
+		data.pendingTotal += pend + rfi;
+	});
+
+	// ── Limit Swap Pending Approvals Count ─────────────────────────────
+	// Strictly counts records assigned to the logged-in approver (no global admin view)
+	var swapApp = new GlideAggregate('sysapproval_approver');
+	var qcSwap = swapApp.addQuery('source_table', 'x_birl3_clm_nt_limit_swap_request');
+	qcSwap.addOrCondition('sysapproval.sys_class_name', 'x_birl3_clm_nt_limit_swap_request');
+	swapApp.addQuery('approver', userId);
+	swapApp.addQuery('state', 'requested');
+	swapApp.addAggregate('COUNT');
+	swapApp.query();
+	data.swapPending = swapApp.next() ? (parseInt(swapApp.getAggregate('COUNT'), 10) || 0) : 0;
+
+	data.tradePending    = data.pendingBreakdown.trade.pending;
+	data.nonTradePending = data.pendingBreakdown.nt.pending;
+
+	// ── Role Pattern Normalizer ────────────────────────────────────────
+	function normalizeRoleToSlug(rawRole) {
+		if (!rawRole) return '';
+		var r = rawRole.toUpperCase().trim();
+
+		var rules = [
+			[/TS[HM]/,                     'tsh'],          // TSH, TSH_BPD, TSM
+			[/ZH[M_]|\bZH\b/,              'zhm'],          // ZHM, ZH_BPD, ZH_RMC
+			[/RH[M_]|\bRH\b/,              'rhm'],          // RHM, RH_CH_RMC
+			[/ZCH/,                        'zch'],          // ZCH
+			[/CCH/,                        'cch'],          // CCH, CCH_HBPD, HEAD_KEY_CCH, NSH_CCH
+			[/HEAD.*RMC|CH_RMC/,           'head_rmc'],     // HEAD_RMC, HEAD_KEY_RMC, HEAD_KEY_CH_RMC, CH_RMC
+			[/H(S)?BPD/,                   'hbpd'],         // HBPD, HSBPD
+			[/\bNSH\b/,                    'nsh'],          // NSH
+			[/\bHO\b/,                     'ho'],           // HO
+			[/CFO/,                        'cfo'],          // CFO, BH_CFO, CMO_CFO
+			[/\b(BH|CMO)\b/,               'bh'],           // BH, CMO
+			[/\bMD\b/,                     'md']            // MD
+		];
+
+		for (var i = 0; i < rules.length; i++) {
+			if (rules[i][0].test(r)) return rules[i][1];
+		}
+		return r.toLowerCase().replace(/[\s-]+/g, '_');
+	}
+
+	// ── Matrix Route Resolver (Unified: uclm_<role>_dashboard) ────────
+	data.dashboards = {};
+
+	function getDashboardRoute(cfg) {
+		if (!cfg || !cfg.table) return '';
+		var gr = new GlideRecord(cfg.table);
+		gr.addQuery(cfg.userField, userId);
+
+		if (cfg.extraQuery) {
+			for (var field in cfg.extraQuery) {
+				gr.addQuery(field, cfg.extraQuery[field]);
+			}
+		}
+		if (cfg.orderBy) gr.orderBy(cfg.orderBy);
+		gr.query();
+
+		if (gr.next()) {
+			var slug = normalizeRoleToSlug(gr.getValue(cfg.roleField) || '');
+			if (slug) return (cfg.prefix || 'uclm_') + slug + (cfg.suffix || '_dashboard');
+		}
+		return '';
+	}
+
+	var DASHBOARD_CONFIG = {
+		trade: {
+			table: 'x_birl3_clm_role_user_mapping',
+			userField: 'u_user',
+			roleField: 'u_role',
+			prefix: 'uclm_',
+			suffix: '_dashboard'
+		},
+		nontrade: {
+			table: 'x_birl3_clm_approval_matrix',
+			userField: 'approver_user',
+			roleField: 'role_name',
+			prefix: 'uclm_',
+			suffix: '_dashboard',
+			extraQuery: { customer_type: 'non_trade' },
+			orderBy: 'sequence_order'
+		},
+		key: {
+			table: 'x_birl3_clm_approval_matrix',
+			userField: 'approver_user',
+			roleField: 'role_name',
+			prefix: 'uclm_',
+			suffix: '_dashboard',
+			extraQuery: { customer_type: 'key' },
+			orderBy: 'sequence_order'
+		}
+	};
+
+	for (var segKey in DASHBOARD_CONFIG) {
+		data.dashboards[segKey] = getDashboardRoute(DASHBOARD_CONFIG[segKey]);
+	}
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-12 07:06:42</sys_created_on>
+        <sys_id>3fe380c72bb703104572f3745e91bfa4</sys_id>
+        <sys_mod_count>32</sys_mod_count>
+        <sys_name>UCLM Landing Page</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_3fe380c72bb703104572f3745e91bfa4</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-11 14:16:41</sys_updated_on>
+        <template><![CDATA[<div class="db-wrap clm-widget">
+  <div class="db-content">
+
+    <!-- ── Banner ── -->
+    <div class="db-banner">
+      <div class="db-banner-left">
+        <div class="db-banner-title">{{c.greeting}}, <span>{{c.firstName}}</span></div>
+        <div class="db-banner-sub">Credit Limit Management — What would you like to do today?</div>
+      </div>
+      <div class="db-banner-right">
+        <div class="db-banner-time" id="clm-time">--:--:--</div>
+        <div class="db-banner-date" id="clm-date"></div>
+      </div>
+    </div>
+
+    <!-- ── Common Section ── -->
+    <div class="clm-hb-section" ng-if="c.common.length > 0">
+      <div class="clm-hb-section-head">
+        <span class="clm-hb-badge">Common</span>
+        <div class="clm-hb-line"></div>
+      </div>
+
+      <div class="clm-hb-tiles">
+        <div ng-repeat="card in c.common"
+             class="clm-hb-tile"
+             ng-click="c.navigate(card.page)"
+             role="button"
+             tabindex="0">
+          
+          <!-- Top-Right Red Notification Badge -->
+          <div class="clm-hb-pending" ng-if="card.pendingCount > 0">{{card.pendingCount}}</div>
+
+          <div class="clm-hb-icon {{card.iconBg}}">
+            <span ng-bind-html="card.iconHtml"></span>
+          </div>
+          <div class="clm-hb-label">{{card.label}}</div>
+          <div class="clm-hb-desc">{{card.desc}}</div>
+          <div class="clm-hb-foot">
+            <span class="clm-hb-arrow" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 12h14M13 6l6 6-6 6"/>
+              </svg>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Segment Sections: Trade / Non-Trade / Key ── -->
+    <div class="clm-hb-section" ng-repeat="seg in c.segments">
+      <div class="clm-hb-section-head">
+        <span class="clm-hb-badge">{{seg.badge}}</span>
+        <div class="clm-hb-line"></div>
+      </div>
+
+      <div class="clm-hb-tiles">
+        <div class="clm-hb-tile"
+             ng-repeat="card in seg.cards"
+             ng-click="c.navigate(card.page)"
+             role="button"
+             tabindex="0">
+          
+          <div class="clm-hb-pending" ng-if="card.pendingCount > 0">{{card.pendingCount}}</div>
+          
+          <div class="clm-hb-icon {{card.iconBg}}">
+            <span ng-bind-html="card.iconHtml"></span>
+          </div>
+          <div class="clm-hb-label">{{card.label}}</div>
+          <div class="clm-hb-desc">{{card.desc}}</div>
+          <div class="clm-hb-foot">
+            <span class="clm-hb-arrow" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 12h14M13 6l6 6-6 6"/>
+              </svg>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Resources & Support (Footer - Full-Width Rectangles) ── -->
+    <div class="clm-resources-footer">
+      <div class="clm-hb-section-head">
+        <span class="clm-hb-badge">Resources &amp; Support</span>
+        <div class="clm-hb-line"></div>
+      </div>
+
+      <div class="clm-resources-grid">
+        <a href="javascript:void(0)" class="clm-resource-card">
+          <div class="clm-resource-icon res-red">
+            <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="16" y1="13" x2="8" y2="13"></line>
+              <line x1="16" y1="17" x2="8" y2="17"></line>
+              <polyline points="10 9 9 9 8 9"></polyline>
+            </svg>
+          </div>
+          <div class="clm-resource-info">
+            <div class="clm-resource-title">Credit Policy Guidelines</div>
+            <div class="clm-resource-desc">Read the latest ABG Standard Operating Procedures.</div>
+          </div>
+          <div class="clm-resource-arrow" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 12h14M13 6l6 6-6 6"/>
+            </svg>
+          </div>
+        </a>
+
+        <a href="javascript:void(0)" class="clm-resource-card">
+          <div class="clm-resource-icon res-blue">
+            <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polygon points="10 8 16 12 10 16 10 8"></polygon>
+            </svg>
+          </div>
+          <div class="clm-resource-info">
+            <div class="clm-resource-title">Training &amp; Tutorials</div>
+            <div class="clm-resource-desc">Step-by-step guides on using the CLM dashboard.</div>
+          </div>
+          <div class="clm-resource-arrow" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 12h14M13 6l6 6-6 6"/>
+            </svg>
+          </div>
+        </a>
+
+        <a href="javascript:void(0)" class="clm-resource-card">
+          <div class="clm-resource-icon res-gray">
+            <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72 12.84 12.84 0 00.7 2.81 2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45 12.84 12.84 0 002.81.7A2 2 0 0122 16.92z"></path>
+            </svg>
+          </div>
+          <div class="clm-resource-info">
+            <div class="clm-resource-title">IT Helpdesk</div>
+            <div class="clm-resource-desc">Facing technical issues? Raise a support ticket here.</div>
+          </div>
+          <div class="clm-resource-arrow" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 12h14M13 6l6 6-6 6"/>
+            </svg>
+          </div>
+        </a>
+      </div>
+    </div>
+
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>3fe380c72bb703104572f3745e91bfa4</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-12 07:06:43</sys_created_on>
+        <sys_id>f3e380c72bb703104572f3745e91bfab</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-12 07:06:43</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

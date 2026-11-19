@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_trade_financials</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm_trade_financials
+// Table: x_birl3_clm_clm_new_credit_request
+(function runMailScript(current, template, email, email_action, event) {
+
+    function num(f) {
+        var v = parseFloat(current.getValue(f));
+        return isNaN(v) ? 0 : v;
+    }
+    // Indian digit grouping, no decimals: 1250000 -> 12,50,000
+    function inr(n) {
+        var s = Math.round(Math.abs(n)).toString();
+        var last = s.slice(-3), rest = s.slice(0, -3);
+        if (rest) last = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last;
+        return last;
+    }
+    function rupee(n) { return '&#8377; ' + inr(n); }
+
+    var existing = num('u_code_level_current_limit');
+    var change   = num('u_requested_additional_limit');
+    var newLimit = num('u_code_level_total_requested');
+
+    var changeText = (change > 0 ? '+' : (change < 0 ? '-' : '')) + rupee(change);
+    var changeColor = change < 0 ? '#E23D28' : '#1e8449';
+
+    var isDev = (current.getValue('is_deviation') + '' === '1') || (current.getValue('is_deviation') + '' === 'true');
+    var sysMult = current.getValue('system_multiplier') || '';
+    var impMult = num('implied_multiplier');
+
+    var TD_K = 'padding:8px 0; color:#5a6a7a; border-bottom:1px solid #eef1f5;';
+    var TD_V = 'padding:8px 0; color:#1a1a1a; border-bottom:1px solid #eef1f5;';
+    var TILE = 'border:1px solid #e0e6ed; border-radius:6px; padding:12px 14px; background-color:#fafbfc;';
+    var TILE_K = 'font-size:10px; text-transform:uppercase; letter-spacing:.8px; color:#5a6a7a; font-weight:700;';
+
+    var h = '';
+    h += '<h3 style="margin:28px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">Credit Limit (Customer Code)</h3>';
+
+    // Three tiles: existing -> change -> new
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+    h += '<td width="33%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Existing Limit</div>';
+    h += '<div style="font-size:17px; font-weight:700; color:#1a1a1a; padding-top:3px;">' + rupee(existing) + '</div></div></td>';
+    h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Requested Change</div>';
+    h += '<div style="font-size:17px; font-weight:700; color:' + changeColor + '; padding-top:3px;">' + changeText + '</div></div></td>';
+    h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + '">New Limit</div>';
+    h += '<div style="font-size:17px; font-weight:700; color:#1a1a1a; padding-top:3px;">' + rupee(newLimit) + '</div></div></td>';
+    h += '</tr></tbody></table>';
+
+    h += '<h3 style="margin:24px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">Exposure &amp; Multiplier</h3>';
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+    h += '<tr><td width="38%" style="' + TD_K + '">Active Security Deposit</td><td style="' + TD_V + '">' + rupee(num('active_sd')) + '</td></tr>';
+    h += '<tr><td style="' + TD_K + '">Net Exposure</td><td style="' + TD_V + ' font-weight:700;">' + rupee(num('net_exposure')) + '</td></tr>';
+    h += '<tr><td style="' + TD_K + '">Max Allowable Limit</td><td style="' + TD_V + '">' + rupee(num('max_allowable_limit')) + '</td></tr>';
+    h += '<tr><td style="' + TD_K + '">System Multiplier</td><td style="' + TD_V + '">' + (sysMult ? sysMult + 'x' : '&mdash;') + '</td></tr>';
+    h += '<tr><td style="padding:8px 0; color:#5a6a7a;">Implied Multiplier</td><td style="padding:8px 0; font-weight:700; color:' + (isDev ? '#E23D28' : '#1e8449') + ';">' + impMult.toFixed(2) + 'x</td></tr>';
+    h += '</tbody></table>';
+
+    template.print(h);
+
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-11 11:15:36</sys_created_on>
+        <sys_id>d233bbe297374350be31fa17f053af2c</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_trade_financials</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_d233bbe297374350be31fa17f053af2c</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-11 11:15:36</sys_updated_on>
+    </sys_script_email>
+</record_update>

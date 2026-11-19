@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>false</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_clm_new_credit_request</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition table="x_birl3_clm_clm_new_credit_request">stateCHANGESTOApproved^EQ<item display_value="Approved" endquery="false" field="state" goto="false" newquery="false" operator="CHANGESTO" or="false" value="Approved"/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>CLM Credit limit send back to SAP</name>
+        <order>400</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[// (function executeRule(current, previous) {
+
+//     if (current.customer_type + '' !== 'Trade') return;
+//     if (previous.state + '' === 'Approved') return; // guard against duplicate inserts
+
+//     var segment = current.segment + '';
+//     var creditSegment = '';
+
+//     if (segment === 'Cement') creditSegment = 'UTCL';
+//     else if (segment === 'RMC') creditSegment = 'URMX';
+//     else if (segment === 'BPD') creditSegment = 'GIL';
+
+//     if (!creditSegment) {
+//         gs.error('CLM SAP Writeback Queue: Unrecognized segment "' + segment + '" for request ' + current.number);
+//         return;
+//     }
+
+//     var q = new GlideRecord('x_birl3_clm_clm_servicenow_to_sap_send_back');
+//     q.initialize();
+//     q.u_request = current.sys_id;
+//     q.u_customer_code = current.customer;
+//     q.u_approved_code_limit = current.getValue('u_approved_code_limit') || 0;
+//     q.u_next_review_date = current.next_review_date;
+//     q.u_credit_segment = creditSegment;
+//     q.u_status = 'Pending';
+//     q.u_attempt_count = 0;
+//     q.insert();
+
+//     gs.info('CLM SAP Writeback Queue: inserted row for ' + current.number +
+//              ' | segment=' + creditSegment +
+//              ' | approved_code_limit=' + q.u_approved_code_limit);
+
+// })(current, previous);
+(function executeRule(current, previous) {
+
+    // 1. Ensure this is only for 'Trade' customers
+    if (current.customer_type + '' !== 'Trade') return;
+    
+    // 2. Ensure it only runs exactly when the state changes to Approved
+    if (current.state + '' !== 'Approved' || previous.state + '' === 'Approved') return;
+
+    var segment = current.segment + '';
+    var creditSegment = '';
+
+    // 3. Map the segments
+    if (segment === 'Cement') creditSegment = 'GIL';
+    else if (segment === 'RMC') creditSegment = 'URMX';
+    else if (segment === 'BPD') creditSegment = 'GIL';
+
+    if (!creditSegment) {
+        gs.error('CLM SAP Writeback Queue: Unrecognized segment "' + segment + '" for request ' + current.number);
+        return;
+    }
+
+    // 4. Initialize the send back queue record
+    var q = new GlideRecord('x_birl3_clm_clm_servicenow_to_sap_send_back');
+    q.initialize();
+    
+    q.u_request = current.sys_id;
+    q.u_customer_code = current.customer;
+    
+    // ==========================================
+    // 5. ROBUST LIMIT FETCHING LOGIC
+    // ==========================================
+    // Try getting the value both without and with the 'u_' prefix
+    var rawLimit = current.getValue('approved_limit') || current.getValue('u_approved_limit') || 0;
+    
+    // If it's a currency field, it might return a string like "INR;210000". This extracts just the number.
+    if (typeof rawLimit === 'string' && rawLimit.indexOf(';') > -1) {
+        rawLimit = rawLimit.split(';')[1];
+    }
+    
+    // Force the value to a decimal/float to prevent String->Integer data type mismatches 
+    q.u_approved_code_limit = parseFloat(rawLimit) || 0;
+    // ==========================================
+
+    q.u_next_review_date = current.next_review_date;
+    q.u_credit_segment = creditSegment;
+    q.u_status = 'Pending';
+    q.u_attempt_count = 0;
+    
+    q.insert();
+
+    gs.info('CLM SAP Writeback Queue: inserted row for ' + current.number +
+             ' | segment=' + creditSegment +
+             ' | rawLimit Found=' + rawLimit + 
+             ' | final_approved_code_limit=' + q.u_approved_code_limit);
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-27 18:24:46</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>0b4c719a971a83d0be31fa17f053afb7</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_name>CLM Credit limit send back to SAP</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_0b4c719a971a83d0be31fa17f053afb7</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-13 09:04:20</sys_updated_on>
+        <template/>
+        <when>after</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=0b4c719a971a83d0be31fa17f053afb7"/>
+</record_update>

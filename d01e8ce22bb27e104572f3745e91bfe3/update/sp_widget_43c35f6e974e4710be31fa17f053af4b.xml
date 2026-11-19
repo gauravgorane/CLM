@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[function widgetcontroller($scope, $timeout, $rootScope, spUtil) {
+    var c = this;
+    c.activeTab = 'overview';
+
+    var WIDGETS = {
+        approval_requests: ['approvalRequestsWidget', 'clm_cch_approval_request'],
+        customer360:       ['customer360Widget',      'clm_cch_customer_360'],
+        request_detail:    ['requestDetailWidget',    'clm_cch_request_details']
+    };
+    var pending = {};
+
+    function fetchWidget(tab, done) {
+        var w = WIDGETS[tab];
+        if (!w || c.data[w[0]] || pending[tab]) { if (done) done(); return; }
+        pending[tab] = true;
+        spUtil.get(w[1]).then(function(response) {
+            c.data[w[0]] = response;
+            pending[tab] = false;
+            if (done) done();
+        }, function() { pending[tab] = false; if (done) done(); });
+    }
+
+    c.isTabReady = function() {
+        var w = WIDGETS[c.activeTab];
+        return !w || !!c.data[w[0]];
+    };
+
+    c.switchTab = function(tabName) {
+        c.activeTab = tabName;
+        fetchWidget(tabName);   // if prefetch hasn't finished, load immediately
+    };
+
+    var offSwitch = $rootScope.$on('clm.switch.tab', function(event, tabName) { c.switchTab(tabName); });
+
+    // Prefetch other tabs one by one ONLY after the portfolio has finished loading
+    var prefetched = false;
+    function prefetchOthers() {
+        if (prefetched) return;
+        prefetched = true;
+        var tabs = Object.keys(WIDGETS);
+        (function next(i) { if (i < tabs.length) fetchWidget(tabs[i], function() { next(i + 1); }); })(0);
+    }
+    var offLoaded = $rootScope.$on('clm.portfolio.loaded', function() { $timeout(prefetchOthers, 300); });
+    $timeout(prefetchOthers, 10000); // safety net
+
+    $scope.$on('$destroy', function() { offSwitch(); offLoaded(); });
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.clm-dash {
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  color: #1f2933;
+  background: #f4f5f7;
+  padding-bottom: 24px;
+}
+
+/* ---------- Breadcrumb ---------- */
+.clm-breadcrumb {
+  padding: 10px 20px;
+  font-size: 13px;
+  color: #5b6470;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- Tabs ---------- */
+.clm-tabs {
+  display: flex;
+  gap: 28px;
+  padding: 0 20px;
+  background: #fff;
+  border-bottom: 1px solid #e3e6eb;
+}
+.clm-tab {
+  padding: 12px 2px;
+  color: #6b7280;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  text-decoration: none;
+}
+.clm-tab:hover { color: #374151; text-decoration: none; }
+.clm-tab.active { color: #14141a; border-bottom-color: #f5c500; }
+
+/* ---------- Loading ---------- */
+.clm-loading { text-align: center; padding: 20px; color: #8a93a0; font-size: 13px; }</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clm_cch_dashboard</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>clm_cch_dashboard</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    data.viewLabel = 'CCH';
+    data.userName  = gs.getUserDisplayName();
+
+    // Only load the initial widget upfront!
+    data.portfolioWidget = $sp.getWidget('clm_cch_portfolio', {});
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>jatin.sharma@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-16 09:08:02</sys_created_on>
+        <sys_id>43c35f6e974e4710be31fa17f053af4b</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>clm_cch_dashboard</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_43c35f6e974e4710be31fa17f053af4b</sys_update_name>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-07 07:52:33</sys_updated_on>
+        <template><![CDATA[<div class="clm-dash" ng-cloak ng-if="c.data">
+
+  <div class="clm-breadcrumb"></div>
+
+  <div class="clm-tabs">
+    <a class="clm-tab" ng-class="{active: c.activeTab === 'overview'}" ng-click="c.switchTab('overview')">Portfolio Overview</a>
+    <a class="clm-tab" ng-class="{active: c.activeTab === 'approval_requests'}" ng-click="c.switchTab('approval_requests')">Approval Requests</a>
+    <a class="clm-tab" ng-class="{active: c.activeTab === 'customer360'}" ng-click="c.switchTab('customer360')">Customer 360</a>
+    <a class="clm-tab" ng-class="{active: c.activeTab === 'request_detail'}" ng-click="c.switchTab('request_detail')">Request Detail</a>
+  </div>
+
+  <!-- Portfolio stays alive (ng-show) so returning to it is instant -->
+  <div ng-if="c.data.portfolioWidget" ng-show="c.activeTab === 'overview'">
+    <sp-widget widget="c.data.portfolioWidget"></sp-widget>
+  </div>
+
+  <div ng-if="c.activeTab === 'approval_requests' && c.data.approvalRequestsWidget">
+    <sp-widget widget="c.data.approvalRequestsWidget"></sp-widget>
+  </div>
+
+  <div ng-if="c.activeTab === 'customer360' && c.data.customer360Widget">
+    <sp-widget widget="c.data.customer360Widget"></sp-widget>
+  </div>
+
+  <div ng-if="c.activeTab === 'request_detail' && c.data.requestDetailWidget">
+    <sp-widget widget="c.data.requestDetailWidget"></sp-widget>
+  </div>
+
+  <div class="clm-loading" ng-if="c.activeTab !== 'overview' && !c.isTabReady()">
+    Loading&hellip;
+  </div>
+</div>]]></template>
+    </sp_widget>
+</record_update>

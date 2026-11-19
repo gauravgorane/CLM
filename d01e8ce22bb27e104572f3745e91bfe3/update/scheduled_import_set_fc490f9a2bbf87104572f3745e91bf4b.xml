@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="scheduled_import_set">
+    <scheduled_import_set action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <advanced>false</advanced>
+        <business_calendar/>
+        <concurrent_import>false</concurrent_import>
+        <condition/>
+        <conditional>false</conditional>
+        <connection_override/>
+        <data_source display_value="CLM Outstanding new customers">d9f84b1a2bbf87104572f3745e91bf9b</data_source>
+        <entered_run_end/>
+        <entered_run_start/>
+        <entered_time/>
+        <map/>
+        <max_drift/>
+        <name>CLM Outstanding – New Customers</name>
+        <offset/>
+        <offset_type>0</offset_type>
+        <order/>
+        <parent/>
+        <partition_method>roundRobin</partition_method>
+        <partition_script><![CDATA[(function partitionHash(import_set_row) {
+
+	// Add your code here
+	
+	// eg:
+	// return import_set_row.u_important_category;
+	// This would ensure all rows with the same 'u_important_category' value will be in the same Import Set.
+
+	 return import_set_row.sys_import_row;
+
+})(import_set_row);]]></partition_script>
+        <partition_size/>
+        <post_script><![CDATA[(function runPostImport() {
+    var BATCH = 500;
+    var P_IDX = 'x_birl3_clm.outstanding_batch_index';
+    var idx = parseInt(gs.getProperty(P_IDX, '0'), 10) || 0;
+
+    var cnt = new GlideAggregate('x_birl3_clm_clm_customer_master1');
+    cnt.addQuery('is_active', true);
+    cnt.addNotNullQuery('customer_code_sap');
+    cnt.addAggregate('COUNT');
+    cnt.query();
+    var total = cnt.next() ? parseInt(cnt.getAggregate('COUNT'), 10) : 0;
+
+    if ((idx + 1) * BATCH < total) {
+        gs.setProperty(P_IDX, String(idx + 1));
+        var si = new GlideRecord('scheduled_import_set');
+        if (si.get('name', 'CLM Outstanding data')) {
+            SncTriggerSynchronizer.executeNow(si);   // chain the next batch
+        }
+    } else {
+        gs.setProperty(P_IDX, '0');                   // done, reset for next month
+        gs.info('CLM outstanding: all batches complete');
+    }
+})();]]></post_script>
+        <post_script_bool>false</post_script_bool>
+        <pre_script><![CDATA[// (function runPreImport() {
+//     var DS_NAME = 'CLM Outstanding last 6 months';
+//     var BATCH = 500;
+//     var P_IDX = 'x_birl3_clm.outstanding_batch_index';
+//     var P_TS  = 'x_birl3_clm.outstanding_batch_last_run';
+
+//     // If the last batch ran long ago (e.g. a failed chain), start over
+//     var last = gs.getProperty(P_TS, '');
+//     var idx = parseInt(gs.getProperty(P_IDX, '0'), 10) || 0;
+//     if (last && (new GlideDateTime().getNumericValue() - new GlideDateTime(last).getNumericValue()) > 3 * 60 * 60 * 1000) {
+//         idx = 0;
+//     }
+
+//     // Fetch this batch's window of customer codes
+//     var ga = new GlideRecord('x_birl3_clm_clm_customer_master1');
+//     ga.addQuery('is_active', true);              // confirm field name
+//     ga.addNotNullQuery('customer_code_sap');     // confirm field name
+//     ga.orderBy('customer_code_sap');
+//     ga.chooseWindow(idx * BATCH, (idx + 1) * BATCH);
+//     ga.query();
+
+//     var seen = {}, codes = [];
+//     while (ga.next()) {
+//         var c = ga.getValue('customer_code_sap').replace(/'/g, "''");
+//         if (!seen[c]) { seen[c] = true; codes.push("'" + c + "'"); }
+//     }
+//     var filter = codes.length ? 'CUSTOMER IN (' + codes.join(',') + ')' : '1=0';
+
+//     var sql =
+// "SELECT TIME_SID, CUSTOMER, ZONE, STATE_DESC_I2, DEPOT_DESC_I2, SEGMENT,\n" +
+// "  PAN_NO, PARENT_NAME, PARENT_CODE, CHILD_NAME, REL_PARTY, SECURITY_DEPOSIT,\n" +
+// "  CREDIT_LIMIT, SORG, COMP_CODE,\n" +
+// "  AGING_0_21_DAYS, AGING_22_30_DAYS, AGING_31_45_DAYS, AGING_46_60_DAYS,\n" +
+// "  AGING_61_75_DAYS, AGING_76_90_DAYS, AGING_91_120_DAYS, AGING_121_180_DAYS,\n" +
+// "  AGING_181_365_DAYS, AGING_366_730_DAYS, AGING_730_DAYS_ABOVE,\n" +
+// "  ACTUAL_ADVANCE_BEFORE_ADJUSTMENT, TOTAL_UGHAI_BEFORE_ADJUSTMENT,\n" +
+// "  UGHAI_AFTER_ADJUSTMENT, BALANCE_ADVANCE_AFTER_ADJUSTMENT, UGHAI_RECLASSIFIED, TPC_CODE,\n" +
+// "  TPC_NAME, NET_BALANCE, PAN_BASED\n" +
+// "FROM (\n" +
+// "  SELECT TIME_SID, CUSTOMER, ZONE, STATE_DESC_I2, DEPOT_DESC_I2, SEGMENT,\n" +
+// "    PAN_NO, PARENT_NAME, PARENT_CODE, CHILD_NAME, REL_PARTY, SECURITY_DEPOSIT,\n" +
+// "    CREDIT_LIMIT, SORG, COMP_CODE,\n" +
+// "    \"0-21 days\" AS AGING_0_21_DAYS, \"22-30 days\" AS AGING_22_30_DAYS,\n" +
+// "    \"31-45 days\" AS AGING_31_45_DAYS, \"46-60 days\" AS AGING_46_60_DAYS,\n" +
+// "    \"61-75 days\" AS AGING_61_75_DAYS, \"76-90 days\" AS AGING_76_90_DAYS,\n" +
+// "    \"91-120 days\" AS AGING_91_120_DAYS, \"121-180 days\" AS AGING_121_180_DAYS,\n" +
+// "    \"181-365 days\" AS AGING_181_365_DAYS, \"366-730 days\" AS AGING_366_730_DAYS,\n" +
+// "    \"730 days above\" AS AGING_730_DAYS_ABOVE,\n" +
+// "    ACTUAL_ADVANCE_BEFORE_ADJUSTMENT, TOTAL_UGHAI_BEFORE_ADJUSTMENT,\n" +
+// "    UGHAI_AFTER_ADJUSTMENT, BALANCE_ADVANCE_AFTER_ADJUSTMENT, UGHAI_RECLASSIFIED, TPC_CODE,\n" +
+// "    TPC_NAME, NET_BALANCE, PAN_BASED,\n" +
+// "    ROW_NUMBER() OVER (PARTITION BY CUSTOMER, FLOOR(TIME_SID / 100) ORDER BY TIME_SID DESC) AS rn\n" +
+// "  FROM cognos.VW_F_MKT_OUTSTANDING_DAILY_PAN\n" +
+// "  WHERE TIME_SID BETWEEN\n" +
+// "      TO_NUMBER(TO_CHAR(TRUNC(ADD_MONTHS(SYSDATE, -6), 'MM'), 'YYYYMMDD'))\n" +
+// "      AND TO_NUMBER(TO_CHAR(LAST_DAY(ADD_MONTHS(SYSDATE, -1)), 'YYYYMMDD'))\n" +
+// "    AND " + filter + "\n" +
+// ") WHERE rn = 1";
+
+//     var ds = new GlideRecord('sys_data_source');
+//     ds.addQuery('name', DS_NAME);
+//     ds.query();
+//     if (ds.next()) {
+//         var url = ds.getValue('connection_url');
+//         ds.setValue('sql_statement', sql);
+//         ds.setValue('connection_url', url);
+//         ds.setWorkflow(false);
+//         ds.update();
+//         gs.setProperty(P_IDX, String(idx));
+//         gs.setProperty(P_TS, new GlideDateTime().getValue());
+//         gs.info('CLM outstanding batch ' + idx + ': ' + codes.length + ' codes');
+//     } else {
+//         gs.error('CLM pre-import: data source not found: ' + DS_NAME);
+//     }
+// })();
+
+(function runPreImport() {
+    var DS_NAME = 'CLM Outstanding new customers';
+
+    var since = new GlideDateTime();
+    since.addDaysUTC(-2);   // 2-day overlap so one failed day doesn't lose anyone
+
+    var gr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+    gr.addQuery('is_active', true);
+    gr.addNotNullQuery('customer_code_sap');
+    gr.addQuery('sys_created_on', '>=', since);
+    gr.setLimit(900);   // stays under Oracle's 1000-item IN limit
+    gr.query();
+
+    var seen = {}, codes = [];
+    while (gr.next()) {
+        var c = gr.getValue('customer_code_sap').replace(/'/g, "''");
+        if (!seen[c]) { seen[c] = true; codes.push("'" + c + "'"); }
+    }
+    var filter = codes.length ? 'CUSTOMER IN (' + codes.join(',') + ')' : '1=0';
+
+    var sql =
+"SELECT TIME_SID, CUSTOMER, ZONE, STATE_DESC_I2, DEPOT_DESC_I2, SEGMENT,\n" +
+"  PAN_NO, PARENT_NAME, PARENT_CODE, CHILD_NAME, REL_PARTY, SECURITY_DEPOSIT,\n" +
+"  CREDIT_LIMIT, SORG, COMP_CODE,\n" +
+"  AGING_0_21_DAYS, AGING_22_30_DAYS, AGING_31_45_DAYS, AGING_46_60_DAYS,\n" +
+"  AGING_61_75_DAYS, AGING_76_90_DAYS, AGING_91_120_DAYS, AGING_121_180_DAYS,\n" +
+"  AGING_181_365_DAYS, AGING_366_730_DAYS, AGING_730_DAYS_ABOVE,\n" +
+"  ACTUAL_ADVANCE_BEFORE_ADJUSTMENT, TOTAL_UGHAI_BEFORE_ADJUSTMENT,\n" +
+"  UGHAI_AFTER_ADJUSTMENT, BALANCE_ADVANCE_AFTER_ADJUSTMENT, UGHAI_RECLASSIFIED, TPC_CODE,\n" +
+"  TPC_NAME, NET_BALANCE, PAN_BASED\n" +
+"FROM (\n" +
+"  SELECT TIME_SID, CUSTOMER, ZONE, STATE_DESC_I2, DEPOT_DESC_I2, SEGMENT,\n" +
+"    PAN_NO, PARENT_NAME, PARENT_CODE, CHILD_NAME, REL_PARTY, SECURITY_DEPOSIT,\n" +
+"    CREDIT_LIMIT, SORG, COMP_CODE,\n" +
+"    \"0-21 days\" AS AGING_0_21_DAYS, \"22-30 days\" AS AGING_22_30_DAYS,\n" +
+"    \"31-45 days\" AS AGING_31_45_DAYS, \"46-60 days\" AS AGING_46_60_DAYS,\n" +
+"    \"61-75 days\" AS AGING_61_75_DAYS, \"76-90 days\" AS AGING_76_90_DAYS,\n" +
+"    \"91-120 days\" AS AGING_91_120_DAYS, \"121-180 days\" AS AGING_121_180_DAYS,\n" +
+"    \"181-365 days\" AS AGING_181_365_DAYS, \"366-730 days\" AS AGING_366_730_DAYS,\n" +
+"    \"730 days above\" AS AGING_730_DAYS_ABOVE,\n" +
+"    ACTUAL_ADVANCE_BEFORE_ADJUSTMENT, TOTAL_UGHAI_BEFORE_ADJUSTMENT,\n" +
+"    UGHAI_AFTER_ADJUSTMENT, BALANCE_ADVANCE_AFTER_ADJUSTMENT, UGHAI_RECLASSIFIED, TPC_CODE,\n" +
+"    TPC_NAME, NET_BALANCE, PAN_BASED,\n" +
+"    ROW_NUMBER() OVER (PARTITION BY CUSTOMER, FLOOR(TIME_SID / 100) ORDER BY TIME_SID DESC) AS rn\n" +
+"  FROM cognos.VW_F_MKT_OUTSTANDING_DAILY_PAN\n" +
+"  WHERE TIME_SID BETWEEN\n" +
+"      TO_NUMBER(TO_CHAR(TRUNC(ADD_MONTHS(SYSDATE, -6), 'MM'), 'YYYYMMDD'))\n" +
+"      AND TO_NUMBER(TO_CHAR(LAST_DAY(ADD_MONTHS(SYSDATE, -1)), 'YYYYMMDD'))\n" +
+"    AND " + filter + "\n" +
+") WHERE rn = 1";
+
+    var ds = new GlideRecord('sys_data_source');
+    ds.addQuery('name', DS_NAME);
+    ds.query();
+    if (ds.next()) {
+        var url = ds.getValue('connection_url');
+        ds.setValue('sql_statement', sql);
+        ds.setValue('connection_url', url);
+        ds.setWorkflow(false);
+        ds.update();
+        gs.info('CLM new-customer backfill: ' + codes.length + ' codes');
+    } else {
+        gs.error('CLM new-customer pre-import: data source not found: ' + DS_NAME);
+    }
+})();]]></pre_script>
+        <pre_script_bool>true</pre_script_bool>
+        <record_source>regular</record_source>
+        <repeat_every/>
+        <run_as display_value="Vedant Salunke">02be14ac9707fa50be31fa17f053af06</run_as>
+        <run_as_tz/>
+        <run_dayofmonth>1</run_dayofmonth>
+        <run_dayofweek>1</run_dayofweek>
+        <run_daysofweek/>
+        <run_end/>
+        <run_month/>
+        <run_period/>
+        <run_start>2026-08-19 06:40:41</run_start>
+        <run_time>1970-01-01 02:30:00</run_time>
+        <run_type>daily</run_type>
+        <run_weekinmonth/>
+        <show_connection_override>false</show_connection_override>
+        <synchronize_inserts>true</synchronize_inserts>
+        <sys_class_name>scheduled_import_set</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-10 13:33:24</sys_created_on>
+        <sys_id>fc490f9a2bbf87104572f3745e91bf4b</sys_id>
+        <sys_mod_count>3</sys_mod_count>
+        <sys_name>CLM Outstanding – New Customers</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>scheduled_import_set_fc490f9a2bbf87104572f3745e91bf4b</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-10 13:34:17</sys_updated_on>
+        <time_zone/>
+        <upgrade_safe>false</upgrade_safe>
+        <use_child_connection>false</use_child_connection>
+    </scheduled_import_set>
+</record_update>

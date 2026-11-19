@@ -1,0 +1,2024 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[function widgetcontroller($scope, $rootScope, $timeout, $uibModal, $sce) {
+    var c = this;
+
+    // ── Init State ────
+    c.loading = false;
+    c.data.acc = { snap: true, prog: true, lim: true, assess: true, prof: true, cmt: true }; // Added 'cmt: true' so Comments are open by default
+
+    // ── Helper UI Toggle ────
+    c.isOpen    = function(k) { return !!c.data.acc[k]; };
+    c.toggleAcc = function(k) { c.data.acc[k] = !c.data.acc[k]; };
+
+    // ── Number Formatters ────
+    c.formatLakh = function(v) {
+        if (v === undefined || v === null || v === '') return '';
+        var n = parseFloat(v);
+        if (isNaN(n)) return v;
+        var abs = Math.abs(n);
+        var sign = n < 0 ? '-' : '';
+        return sign + '\u20B9' + (abs / 100000).toFixed(1) + 'L';
+    };
+
+    c.formatIndianNumber = function(value) {
+        if (!value) return '0.00';
+        return new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
+    };
+
+    c.formatIndianCurrency = function(value) {
+        if (value === null || value === undefined || value === '') return '0';
+        return parseFloat(value).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+    };
+
+    c.formatAgingCell = function(value) {
+        var v = parseFloat(value) || 0;
+        if (v === 0) return '-';
+        return '₹' + c.formatIndianCurrency(v);
+    };
+
+    c.formatSigned = function(v) {
+        var n = parseFloat(v) || 0;
+        var sign = n > 0 ? '+' : (n < 0 ? '-' : '');
+        return sign + '₹' + c.formatIndianCurrency(Math.abs(n));
+    };
+
+    c.getDisplayRole = function(role) {
+        var m = {
+            'CMO_CFO': 'CFO',
+            'NSH_CCH': 'CCH',
+            'HEAD_KEY_CH_RMC': 'HEAD_KEY & RMC',
+            'HEAD_KEY_CCH': 'CCH',
+            'BH_CFO': 'CFO',
+            'CCH_HBPD': 'CCH'
+        };
+        return m[role] || role;
+    };
+
+    // ── Logic Builders ────
+    c.buildP3Buckets = function(req) {
+        var avg = (req.aging_table || []).filter(function(r) { return r.isAverage; })[0];
+        if (!avg) { req.p3_buckets = []; req.p3_total = 0; return; }
+        var defs = [
+            { label: '0-30',   amount: (avg.b0_30 || 0) + (avg.b22_30 || 0) },
+            { label: '31-45',  amount: avg.b31_45  || 0 },
+            { label: '46-60',  amount: avg.b46_60  || 0 },
+            { label: '61-75',  amount: avg.b61_75  || 0 },
+            { label: '76-90',  amount: avg.b76_90  || 0 },
+            { label: '91-120', amount: avg.b91_120 || 0 },
+            { label: '>120',   amount: avg.b120    || 0 }
+        ];
+        var total = avg.total || 0;
+        defs.forEach(function(b) {
+            b.pct = total > 0 ? Math.round((b.amount / total) * 100) : 0;
+        });
+        req.p3_buckets = defs;
+        req.p3_total   = total;
+    };
+
+    c.stepSummary = function(r) {
+        var s = (r.approval_steps || []).filter(function(x) { return x.label !== 'Submitted' && x.label !== 'Completed'; });
+        var done = s.filter(function(x) { return x.state === 'approved'; }).length;
+        var next = s.filter(function(x) { return x.state === 'pending'; })[0];
+        return done + ' of ' + s.length + ' approved' + (next ? ' · Awaiting: ' + next.label : '');
+    };
+
+    c.buildAgingChips = function(req) {
+        var keys = [['0-21','b0_30'],['22-30','b22_30'],['31-45','b31_45'],['46-60','b46_60'],
+                    ['61-75','b61_75'],['76-90','b76_90'],['91-120','b91_120'],['>120','b120']];
+        (req.aging_table || []).forEach(function(row) {
+            row.chips = keys.filter(function(k) { return (row[k[1]] || 0) !== 0; })
+                            .map(function(k) { return { l: k[0], v: row[k[1]] }; });
+        });
+    };
+
+    // ── Fetch Record by ID ────
+    c.loadRequestDetails = function(number) {
+        if (!number) return;
+        c.loading = true;
+        c.data.selectedRequest = null;
+				c.data.error = '';
+			
+        
+        c.server.get({
+            action: 'load_request',
+            number: number
+        }).then(function(response) {
+            if (response.data.record) {
+                var req = response.data.record;
+                c.buildP3Buckets(req);
+                c.buildAgingChips(req);
+                
+                c.data.selectedRequest = req;
+                c.data.acc = { prog: true, prof: true, lim: true, assess: true, cmt: true }; 
+
+                $timeout(function() { window.scrollTo(0, 0); }, 0);
+            } else {
+                c.data.selectedRequest = null;
+                c.data.error = response.data.error;
+            }
+            c.loading = false;
+        });
+    };
+
+    $rootScope.$on('clm.request.selected', function(event, payload) {
+        if (payload && payload.number) { c.loadRequestDetails(payload.number); }
+    });
+
+    if ($rootScope.clmPendingRequestNumber) {
+        c.loadRequestDetails($rootScope.clmPendingRequestNumber);
+        delete $rootScope.clmPendingRequestNumber;
+    }
+    
+    if (c.data.selectedRequest) {
+        c.buildP3Buckets(c.data.selectedRequest);
+        c.buildAgingChips(c.data.selectedRequest);
+    }
+
+    // ── Preview Attachments ────
+    c.previewAttachment = function(att) {
+        c._previewBlobUrl = null;
+        var attachmentUrl = '/sys_attachment.do?sys_id=' + att.sys_id;
+        var ext = (att.file_name || '').split('.').pop().toLowerCase();
+        var imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'];
+        var isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
+        var modalInstance = $uibModal.open({
+            size: 'lg',
+            scope: $scope,
+            template:
+                '<div class="modal-header" style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid #e5e7eb;">' +
+                '<div style="display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px;color:#1a1a1a;">' +
+                '<i class="fa fa-file-o" style="color:#888;"></i>' +
+                '<span>' + (att.file_name || 'Document') + '</span>' +
+                '</div>' +
+                '<div style="display:flex;align-items:center;gap:8px;">' +
+                '<a href="' + attachmentUrl + '" target="_blank" class="btn btn-default btn-sm">' +
+                '<i class="fa fa-external-link"></i> Open' +
+                '</a>' +
+                '<button type="button" class="close" ng-click="$dismiss()" style="margin:0;font-size:22px;">&times;</button>' +
+                '</div>' +
+                '</div>' +
+                '<div class="modal-body" style="padding:0;height:80vh;position:relative;">' +
+                '<div ng-if="previewState.type == \'loading\'" style="display:flex;align-items:center;justify-content:center;height:100%;color:#aaa;gap:10px;font-size:14px;">' +
+                '<i class="fa fa-spinner fa-spin fa-2x"></i><span>Loading preview...</span>' +
+                '</div>' +
+                '<iframe ng-if="previewState.type == \'pdf\'" ng-src="{{previewState.trustedUrl}}" style="width:100%;height:100%;border:none;display:block;"></iframe>' +
+                '<div ng-if="previewState.type == \'image\'" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:#f5f5f5;overflow:auto;padding:16px;">' +
+                '<img ng-src="{{previewState.trustedUrl}}" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:4px;" />' +
+                '</div>' +
+                '<div ng-if="previewState.type == \'other\'" style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#888;gap:14px;">' +
+                '<i class="fa fa-file-o fa-4x" style="color:#cbd5e1;"></i>' +
+                '<p style="margin:0;font-size:14px;">Inline preview not available for this file type.</p>' +
+                '<a href="' + attachmentUrl + '" target="_blank" class="btn btn-primary btn-sm"><i class="fa fa-external-link"></i> Open in New Tab</a>' +
+                '</div>' +
+                '</div>'
+        });
+
+        $scope.previewState = { type: 'loading', trustedUrl: '' };
+
+        modalInstance.result.finally(function() {
+            if (c._previewBlobUrl) {
+                URL.revokeObjectURL(c._previewBlobUrl);
+                c._previewBlobUrl = null;
+            }
+            $scope.previewState = { type: '', trustedUrl: '' };
+        });
+
+        if (isMobile) {
+            if (imageExts.indexOf(ext) > -1) {
+                $scope.previewState.type       = 'image';
+                $scope.previewState.trustedUrl = $sce.trustAsResourceUrl(attachmentUrl);
+            } else {
+                $scope.previewState.type = 'other';
+            }
+            return;
+        }
+
+        if (imageExts.indexOf(ext) > -1) {
+            var imgXhr = new XMLHttpRequest();
+            imgXhr.open('GET', attachmentUrl, true);
+            imgXhr.responseType = 'blob';
+            imgXhr.onload = function() {
+                if (imgXhr.status === 200) {
+                    c._previewBlobUrl              = URL.createObjectURL(imgXhr.response);
+                    $scope.previewState.type       = 'image';
+                    $scope.previewState.trustedUrl = $sce.trustAsResourceUrl(c._previewBlobUrl);
+                } else {
+                    $scope.previewState.type = 'other';
+                }
+                $scope.$apply();
+            };
+            imgXhr.onerror = function() { $scope.previewState.type = 'other'; $scope.$apply(); };
+            imgXhr.send();
+        } else if (ext === 'pdf') {
+            var pdfXhr = new XMLHttpRequest();
+            pdfXhr.open('GET', attachmentUrl, true);
+            pdfXhr.responseType = 'blob';
+            pdfXhr.onload = function() {
+                if (pdfXhr.status === 200) {
+                    var pdfBlob                    = new Blob([pdfXhr.response], { type: 'application/pdf' });
+                    c._previewBlobUrl              = URL.createObjectURL(pdfBlob);
+                    $scope.previewState.type       = 'pdf';
+                    $scope.previewState.trustedUrl = $sce.trustAsResourceUrl(c._previewBlobUrl);
+                } else {
+                    $scope.previewState.type = 'other';
+                }
+                $scope.$apply();
+            };
+            pdfXhr.onerror = function() { $scope.previewState.type = 'other'; $scope.$apply(); };
+            pdfXhr.send();
+        } else {
+            $scope.previewState.type = 'other';
+        }
+    };
+
+    // ── PDF Download Logic ────
+    c.isDownloading = false;
+    function loadScript(src, testFn) {
+        return new Promise(function(resolve, reject) {
+            if (testFn()) return resolve();
+            var s = document.createElement('script');
+            s.src = src;
+            s.onload = resolve;
+            s.onerror = function() { reject(new Error('Failed to load ' + src)); };
+            document.head.appendChild(s);
+        });
+    }
+
+    c.downloadPDF = function() {
+        if (c.isDownloading) return;
+        c.isDownloading = true;
+
+        var element    = document.querySelector('.clm-ap-detail');
+        var fileName   = c.data.selectedRequest.number + '_Approval_Details.pdf';
+        var prevScroll = window.scrollY;
+
+        function wait(ms) { return new Promise(function(res) { setTimeout(res, ms); }); }
+        function cleanup() {
+            element.classList.remove('pdf-export-mode');
+            element.style.width     = '';
+            element.style.boxSizing = '';
+            window.scrollTo(0, prevScroll);
+            c.isDownloading = false;
+            $scope.$applyAsync();
+        }
+
+        loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js', function() { return typeof window.html2canvas !== 'undefined'; })
+        .then(function() {
+            return loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js', function() { return window.jspdf && window.jspdf.jsPDF; });
+        })
+        .then(function() {
+            window.scrollTo(0, 0);
+            element.classList.add('pdf-export-mode');
+            return wait(300);
+        })
+        .then(function() {
+            var tables   = element.querySelectorAll('.clm-ap-table, .clm-aging-table');
+            var wrap     = element.querySelector('.clm-ap-table-wrap');
+            var maxTable = 0;
+            for (var i = 0; i < tables.length; i++) {
+                maxTable = Math.max(maxTable, tables[i].offsetWidth);
+            }
+            var chrome = wrap ? (element.offsetWidth - wrap.offsetWidth) : 120;
+            var target = Math.max(1400, Math.ceil(maxTable + chrome + 4));
+
+            element.style.boxSizing = 'border-box';
+            element.style.width     = target + 'px';
+            return wait(300);
+        })
+        .then(function() {
+            var w = Math.ceil(element.offsetWidth);
+            var h = Math.ceil(Math.max(element.offsetHeight, element.scrollHeight));
+            var scale = Math.min(2, 15000 / h, 15000 / w);
+
+            return window.html2canvas(element, {
+                scale: scale, useCORS: true, logging: false, backgroundColor: '#ffffff',
+                width: w, height: h, scrollX: 0, scrollY: 0
+            }).then(function(canvas) { return { canvas: canvas, w: w, h: h }; });
+        })
+        .then(function(res) {
+            var jsPDF = window.jspdf.jsPDF;
+            var pdf = new jsPDF({
+                orientation: res.w > res.h ? 'l' : 'p',
+                unit: 'px',
+                format: [res.w, res.h],
+                hotfixes: ['px_scaling'],
+                compress: true
+            });
+            pdf.addImage(res.canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, res.w, res.h);
+            pdf.save(fileName);
+        })
+        .catch(function(err) {
+            console.error('PDF Generation error:', err);
+            alert('There was an error generating the PDF.');
+        })
+        .then(cleanup, cleanup);
+    };
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+/* ============================================================
+   CLM DASHBOARD — CSS (UltraTech Cement &amp; ABG Theme)
+   ============================================================ */
+.modal-dialog { width: 90%; max-width: 1400px; }
+.clm-badge-resubmitted { background: #fff3cd; color: #856404; border: 1px solid #ffe69c; }
+.modal-body { overflow: hidden; }
+
+.avg-row td { background: #FFF8D6 !important; color: #1a1a1a !important; border-top: 2px solid #F3D54E !important; font-weight: 700 !important; }
+.avg-row td:first-child { background: #FFF8D6 !important; color: #1a1a1a !important; }
+
+.clm-ap-comments-section::-webkit-scrollbar { width: 8px; }
+.clm-ap-comments-section::-webkit-scrollbar-thumb { background: #cfd8dc; border-radius: 10px; }
+.clm-ap-comments-section::-webkit-scrollbar-track { background: #f5f5f5; }
+.step-comment { margin-top: 4px; font-size: 11px; color: #666; font-style: italic; max-width: 180px; line-height: 1.3; word-wrap: break-word; text-align: center; margin-left: auto; margin-right: auto; }
+.clm-ap-comments-section { background: #fff; padding: 20px; border-bottom: 1px solid #e0e6ed; max-height: 300px; overflow-y: auto; overflow-x: hidden; }
+.clm-comment-card { border-left: 4px solid #27ae60; background: #fafafa; padding: 12px 16px; margin-bottom: 12px; border-radius: 4px; }
+.clm-comment-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.clm-comment-user { font-weight: 700; color: #222; }
+.clm-comment-date { font-size: 12px; color: #777; }
+.clm-comment-state { margin-left: 10px; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
+.clm-comment-state.approved { background: #eaf7ee; color: #27ae60; }
+.clm-comment-state.rejected { background: #fdecea; color: #e23d28; }
+.clm-comment-body { color: #444; line-height: 1.5; white-space: pre-wrap; }
+
+.clm-approver { font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif; width: 100%; max-width: none; margin: 0; padding: 0; color: #1a1a1a; background-color: transparent; box-sizing: border-box; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+
+.approval-tracker { width: 100%; padding: 20px 0 28px; margin-top: 10px; background: #ffffff; border-bottom: 3px solid #F3D54E; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); overflow: hidden; }
+.tracker-role { font-size: 12px; font-weight: 700; line-height: 1.2; color: #1a1a1a; }
+.tracker-approver { margin-top: 6px; font-size: 11px; font-weight: 400; color: #5a6a7a; line-height: 1.4; max-width: 160px; white-space: normal; word-break: break-word; text-align: center; }
+.tracker-scroll-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; padding: 0 10px; }
+.tracker-inner { display: flex; align-items: flex-start; width: 100%; }
+.tracker-step { display: flex; flex-direction: column; align-items: center; position: relative; min-width: 90px; flex: 1; }
+.tracker-step + .tracker-step::before { content: ''; position: absolute; top: 16px; left: calc(-50%); width: 100%; height: 4px; background: #e0e6ed; z-index: 0; transition: background 0.3s ease; }
+.tracker-step.done-line::before { background: #27ae60 !important; }
+.tracker-step.reject-line::before { background: #E23D28 !important; }
+.tracker-circle { width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; position: relative; z-index: 1; border: 2px solid #e0e6ed; background: #fff; color: #7f8c9a; transition: all 0.3s ease; }
+.circle-done { background: #27ae60; border-color: #27ae60; color: #fff; box-shadow: 0 2px 6px rgba(39, 174, 96, 0.3); }
+.circle-reject { background: #E23D28; border-color: #E23D28; color: #fff; box-shadow: 0 2px 6px rgba(226, 61, 40, 0.3); }
+.circle-pending { background: #fff; border-color: #bdc3c7; color: #bdc3c7; }
+.tracker-label { margin-top: 10px; font-size: 12px; font-weight: 700; text-align: center; max-width: 85px; line-height: 1.3; }
+.label-done { color: #27ae60; }
+.label-reject { color: #E23D28; }
+.label-pending { color: #7f8c9a; }
+
+.clm-ap-detail-left { flex: 1.2; border-right: 1px solid #e0e6ed; min-width: 0; overflow-x: auto; }
+.clm-aging-table { width: 100%; min-width: 800px; border-collapse: separate; border-spacing: 0; margin-top: 12px; font-size: 13px; border: 1px solid #e0e6ed; border-radius: 6px; overflow: hidden; }
+.clm-aging-table th { background: #1a1a1a; color: #F3D54E; padding: 12px; border-bottom: 1px solid #333; text-align: center; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+.clm-aging-table td { padding: 12px; border-bottom: 1px solid #e0e6ed; border-right: 1px solid #e0e6ed; text-align: right; background: #ffffff; }
+.clm-aging-table td:last-child { border-right: none; }
+.clm-aging-table tr:last-child td { border-bottom: none; }
+.clm-aging-table td:first-child { text-align: left; font-weight: 700; background: #fafbfc; }
+
+.clm-badge { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; }
+.clm-badge-segment { background: #f0f4f8; color: #1a1a1a; border: 1px solid #cdd4dc; }
+.clm-badge-dev { background: #E23D28; color: #ffffff; border: 1px solid #b82b1c; }
+.clm-badge-std { background: #eafaf1; color: #1e8449; border: 1px solid #a9dfbf; }
+
+.clm-ap-detail { background: #ffffff; border: 1px solid #e0e6ed; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.03); margin-top:10px; }
+.clm-ap-detail-header { display: flex; align-items: center; gap: 20px; padding: 20px 24px; background: #fafbfc; border-bottom: 3px solid #F3D54E; flex-wrap: wrap; justify-content: space-between; }
+.clm-back-btn { background: #ffffff; border: 1px solid #cdd4dc; padding: 8px 16px; border-radius: 6px; font-size: 13px; color: #1a1a1a; cursor: pointer; white-space: nowrap; font-weight: 700; flex-shrink: 0; transition: all 0.2s ease; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+.clm-back-btn:hover { background: #f0f4f8; border-color: #1a1a1a; }
+.clm-ap-detail-title { font-size: 18px; font-weight: 700; color: #1a1a1a; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; width: 100%; }
+
+.clm-ap-summary-row { display: flex; flex-wrap: wrap; gap: 0; border-bottom: 3px solid #F3D54E; }
+.clm-ap-summary-card { flex: 1; min-width: 140px; padding: 18px 20px; border-right: 1px solid #e0e6ed; text-align: center; background: #ffffff; }
+.clm-ap-summary-card:last-child { border-right: none; }
+.clm-summary-label { font-size: 12px; font-weight: 700; text-transform: uppercase; color: #7f8c9a; margin-bottom: 8px; letter-spacing: 0.5px; }
+.clm-summary-value { font-size: 20px; font-weight: 700; color: #1a1a1a; }
+.clm-summary-ok { background: #f4fbf6; border-bottom: 4px solid #27ae60; }
+.clm-summary-danger { background: #fef5f4; border-bottom: 4px solid #E23D28; }
+
+.clm-ap-detail-body { display: flex; gap: 0; }
+.clm-ap-detail-right { flex: 1.5; min-width: 0; background: #fafbfc; }
+.clm-ap-detail-section { padding: 24px 28px; border-bottom: 1px solid #e0e6ed; }
+.clm-ap-detail-section:last-child { border-bottom: none; }
+.clm-ap-detail-section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #1a1a1a; margin-bottom: 16px; border-bottom: 2px solid #F3D54E; padding-bottom: 10px; }
+
+.clm-ap-kv-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #e0e6ed; font-size: 14px; gap: 16px; }
+.clm-ap-kv-row:last-child { border-bottom: none; }
+.clm-ap-kv-key { color: #5a6a7a; font-weight: 600; flex: 0 0 40%; }
+.clm-ap-kv-val { font-weight: 700; color: #1a1a1a; text-align: right; flex: 1; }
+
+.clm-aging-bar-wrap { display: flex; flex-direction: column; gap: 12px; }
+.clm-aging-row { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.clm-aging-label { width: 140px; flex-shrink: 0; color: #1a1a1a; font-weight: 600; }
+.clm-aging-bar-bg { flex: 1; height: 12px; background: #e0e6ed; border-radius: 6px; overflow: hidden; }
+.clm-aging-bar { height: 100%; border-radius: 6px; transition: width 0.5s ease-out; min-width: 4px; }
+.clm-aging-safe { background: #27ae60; }
+.clm-aging-warn { background: #F3D54E; }
+.clm-aging-crit { background: #E87722; }
+.clm-aging-toxic { background: #E23D28; }
+.clm-aging-pct { width: 45px; text-align: right; font-weight: 700; color: #1a1a1a; flex-shrink: 0; }
+
+.clm-ap-justification-text { font-size: 14px; line-height: 1.7; color: #1a1a1a; background: #ffffff; border: 1px solid #cdd4dc; border-left: 4px solid #1a1a1a; border-radius: 4px; padding: 16px; white-space: pre-line; word-wrap: break-word; overflow-x: auto; }
+.clm-justification-dev { background: #fffcf0; border-left-color: #F3D54E; }
+
+/* ── BUTTONS ── */
+.clm-btn { padding: 0 12px; height: 42px; border-radius: 4px; font-size: 12px; font-weight: 700; cursor: pointer; border: none; transition: all 0.2s ease; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.clm-btn i { font-size: 14px; }
+.clm-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none !important; }
+.clm-btn-outline { background: #ffffff; color: #1a1a1a; border: 1px solid #cdd4dc; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+.clm-btn-outline:hover:not(:disabled) { border-color: #1a1a1a; background: #fafbfc; }
+
+/* ── ANSWERED RFI HISTORY CARDS ── */
+.clm-rfi-history-card { background: #f4f9fb; border-left: 4px solid #3498db; padding: 16px; border-radius: 4px; margin-bottom: 12px; }
+.clm-rfi-history-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #e1e8ed; padding-bottom: 10px; }
+.clm-rfi-history-user { font-weight: 700; color: #2c3e50; font-size: 13px; }
+.clm-rfi-history-badge { background: #d6eaf8; color: #2980b9; padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 700; margin-left: 8px; text-transform: uppercase; }
+.clm-rfi-history-date { font-size: 11px; color: #7f8c9a; }
+.clm-rfi-history-qa { font-size: 13px; line-height: 1.5; color: #1a1a1a; }
+.clm-rfi-q { margin-bottom: 8px; }
+.clm-rfi-q b { color: #5a6a7a; margin-right: 6px; }
+.clm-rfi-a b { color: #2c3e50; margin-right: 6px; }
+
+.clm-val-ok { color: #27ae60 !important; }
+.clm-val-warn { color: #E87722 !important; }
+.clm-val-danger { color: #E23D28 !important; }
+
+.clm-type-pill { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; margin-left: 6px; vertical-align: middle; }
+.clm-pill-trade { background: #f0f4f8; color: #1a1a1a; border: 1px solid #cdd4dc; }
+.clm-pill-nontrade { background: #F3D54E; color: #1a1a1a; }
+.clm-pill-key { background: #1a1a1a; color: #F3D54E; }
+.clm-pill-tool { background: #eaf4fb; color: #1a5276; border: 1px solid #aed6f1; }
+.clm-pill-nontool { background: #F3D54E; color: #1a1a1a; }
+.clm-summary-sub { font-size: 11px; color: #7f8c9a; margin-top: 4px; font-weight: 600; }
+
+.clm-ap-empty { text-align: center; padding: 80px 32px; background: #ffffff; border: 1px solid #e0e6ed; border-radius: 8px; margin-top: 20px;}
+.clm-ap-empty-icon { color: #cbd5e1; opacity: 0.8; }
+.clm-ap-empty-title { font-size: 20px; font-weight: 700; color: #1a1a1a; margin-bottom: 8px; }
+.clm-ap-empty-sub { color: #7f8c9a; font-size: 14px; }
+
+.sn-widget-content, .sn-widget-content &gt; div, .container, .container-fluid { width: 100% !important; max-width: 100% !important; padding-left: 0 !important; padding-right: 0 !important; }
+html, body { width: 100%; }
+
+.clm-doc-source-label { margin-bottom: 12px; font-size: 12px; font-weight: 600; color: #5a6a7a; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 8px; }
+.clm-doc-badge { background: #1782c5; color: #ffffff; padding: 3px 10px; border-radius: 12px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+
+/* ============================================================
+   APPROVER DETAIL REDESIGN 
+   ============================================================ */
+.clm-ap-page { padding: 24px 28px 32px; background: #F9FAFB; }
+.clm-ap-sec { margin-bottom: 28px; }
+.clm-ap-sec-title { display:flex; align-items:center; gap:12px; font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; margin-bottom:14px; }
+.clm-ap-sec-num { width:24px; height:24px; border-radius:50%; background:#F3D54E; color:#1a1a1a; font-size:12px; font-weight:700; display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; }
+
+.clm-ap-table-wrap { overflow-x:auto; border:1px solid #e0e6ed; border-radius:8px; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,0.03); }
+.clm-ap-table { width:100%; border-collapse:collapse; font-size:13px; }
+.clm-ap-table th { background:#1a1a1a; color:#F3D54E; padding:12px 14px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; text-align:left; line-height:1.3; }
+.clm-ap-table td { padding:14px; color:#1a1a1a; border-top:1px solid #f0f4f8; vertical-align:middle; }
+.clm-ap-table td.strong, .clm-ap-table .strong { font-weight:700; }
+.clm-ap-table-nowrap th, .clm-ap-table-nowrap td { white-space:nowrap; text-align:center; }
+.clm-ap-table-nowrap th:first-child, .clm-ap-table-nowrap td:first-child { text-align:left; }
+.clm-ap-table .pan-cell { background:#fcfcfc; }
+
+.clm-ap-table tr.super th { font-size:11px; letter-spacing:1px; text-align:center; border-bottom:none; color:#1a1a1a; }
+.clm-ap-table tr.super th.bg-blank { background:#f8f9fa; }
+.clm-ap-table tr.super th.bg-code { background:#e6f0fa; color:#0b5394; }
+.clm-ap-table tr.super th.bg-pan  { background:#fdf5e6; color:#b45f06; }
+.clm-ap-table tr.super th.bg-req  { background:#e8f5e9; color:#2e7d32; }
+.clm-ap-table tr.super th.bg-assess { background:#f0eafa; color:#6a3fb5; }
+
+.clm-ap-table td.implied-dev { background:#fef5f4; }
+.clm-ap-dev-flag { font-size:10px; font-weight:700; color:#E23D28; margin-top:4px; letter-spacing:0.5px; }
+.clm-ap-note { margin-top:10px; font-size:12px; color:#5a6a7a; background:#fffcf0; border:1px solid #f9e79f; border-radius:6px; padding:8px 12px; display:inline-block; }
+.clm-ap-summary-boxed { border:1px solid #e0e6ed; border-radius:8px; overflow:hidden; }
+
+.clm-ap-grid { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr); gap:24px; align-items:start; }
+.clm-ap-grid.single { grid-template-columns:minmax(0,1fr); }
+.clm-ap-col-left { background:#f5f5f3; border:1px solid #e0e6ed; border-radius:8px; padding:20px; }
+.clm-ap-col-right { min-width:0; }
+.clm-ap-rsec { margin-bottom:26px; }
+.clm-ap-rsec .clm-ap-detail-section-title { margin-bottom:12px; }
+.clm-ap-col-right .clm-aging-table { min-width:640px; font-size:12px; margin-top:0; }
+.clm-ap-col-right .clm-aging-table th { padding:8px 10px; font-size:10px; }
+.clm-ap-col-right .clm-aging-table td { padding:8px 10px; }
+.clm-ap-scroll { max-height:320px; overflow-y:auto; padding-right:4px; }
+
+.clm-ap-doc-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; background:#fff; border:1px solid #e0e6ed; border-radius:6px; margin-bottom:8px; }
+.clm-ap-doc-name { font-size:13px; color:#1a1a1a; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.clm-ap-doc-actions { display:flex; align-items:center; gap:12px; flex-shrink:0; }
+.clm-ap-doc-link { font-size:12px; font-weight:700; color:#1782c5; text-decoration:none; }
+.clm-ap-doc-link:hover { text-decoration:underline; }
+
+.clm-tw-heading { font-size:16px; font-weight:700; color:#1a1a1a; margin-bottom:16px; }
+.clm-tw-card { background:#fff; border:1px solid #e0e6ed; border-top:3px solid #F3D54E; border-radius:6px; margin-bottom:12px; overflow:hidden; }
+.clm-tw-card-title { padding:12px 16px; font-size:12px; font-weight:700; color:#1a1a1a; border-bottom:1px solid #f0f4f8; }
+.clm-tw-subnote { padding:8px 16px; font-size:11px; color:#7f8c9a; }
+.clm-tw-kv { width:100%; border-collapse:collapse; font-size:13px; }
+.clm-tw-kv th { width:45%; text-align:left; padding:11px 16px; color:#1a1a1a; font-weight:600; border-top:1px solid #f0f4f8; }
+.clm-tw-kv td { padding:11px 16px; color:#5a6a7a; border-top:1px solid #f0f4f8; }
+.clm-tw-kv td.strong { color:#1a1a1a; font-weight:700; }
+.clm-tw-matrix { width:100%; border-collapse:collapse; font-size:12px; }
+.clm-tw-matrix th { text-align:left; padding:10px 14px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:#5a6a7a; background:#f9fafb; border-bottom:1px solid #e0e6ed; }
+.clm-tw-matrix td { padding:9px 14px; border-bottom:1px solid #f0f4f8; color:#5a6a7a; }
+.clm-tw-matrix td.strong { color:#1a1a1a; font-weight:700; }
+.clm-tw-matrix .num { text-align:right; }
+.clm-tw-matrix .muted { color:#b8c2cc; }
+.clm-tw-total td { background:#fcf1de; color:#1a1a1a !important; font-weight:700; border-top:2px solid #e0e6ed; }
+.clm-tw-tag { display:inline-block; margin-left:6px; padding:1px 6px; border-radius:4px; font-size:9px; font-weight:700; text-transform:uppercase; }
+.clm-tw-tag-ai  { background:#eef6fb; color:#1782c5; border:1px solid #1782c5; }
+.clm-tw-tag-ovr { background:#fffbeb; color:#b58105; border:1px solid #ffc107; }
+.clm-tw-ratings { display:flex; gap:12px; padding:14px 16px 4px; flex-wrap:wrap; }
+.clm-tw-rating { flex:1; min-width:150px; text-align:center; padding:14px; border:1px solid #e0e6ed; border-radius:6px; background:#fff; }
+.clm-tw-rating-label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:#7f8c9a; margin-bottom:6px; }
+.clm-tw-rating-value { font-size:28px; font-weight:700; color:#1a1a1a; }
+.clm-tw-result { text-align:center; padding:14px 16px; margin-bottom:12px; background:#fffcf0; border:1px solid #F3D54E; border-radius:6px; }
+.clm-tw-result-label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.8px; color:#b58105; margin-bottom:6px; }
+.clm-tw-result-value { font-size:24px; font-weight:700; color:#1a1a1a; }
+.clm-tw-result-sub { font-size:11px; color:#7f8c9a; margin-top:4px; }
+.clm-tw-result.clm-tw-safe { background:#eafaf1; border:1px solid #27ae60; }
+.clm-tw-safe .clm-tw-result-label, .clm-tw-safe .clm-tw-result-value { color:#1e8449; }
+
+/* Accordion behavior */
+.clm-acc &gt; .clm-acc-head { cursor: pointer; user-select: none; display: flex; align-items: center; justify-content: space-between; }
+.clm-acc-chev { color: #7f8c9a; font-size: 14px; transition: transform 0.2s; }
+.clm-acc.open &gt; .clm-acc-head .clm-acc-chev { transform: rotate(180deg); }
+.clm-acc:not(.open) &gt; .clm-acc-body { display: none; }
+.clm-ap-rsec.clm-acc &gt; .clm-acc-body { padding: 20px; }
+
+@media (max-width: 1100px) {
+  .clm-ap-grid { grid-template-columns:minmax(0,1fr); }
+}
+@media (max-width: 768px) {
+  .clm-ap-page { padding:16px 12px 24px; }
+  .clm-ap-col-left { padding:12px; }
+}
+
+/* ============================================================
+   PDF EXPORT OVERRIDES
+   ============================================================ */
+.pdf-export-mode { background: #ffffff !important; min-width: 1400px !important; max-width: none !important; margin: 0 !important; border: none !important; box-shadow: none !important; overflow: visible !important; }
+.pdf-export-mode .clm-ap-table-wrap, .pdf-export-mode .tracker-scroll-wrap, .pdf-export-mode .clm-ap-scroll, .pdf-export-mode .clm-matrix-table-container, .pdf-export-mode .clm-ap-col-left, .pdf-export-mode .clm-ap-col-right, .pdf-export-mode [style*="overflow-x"] { overflow: visible !important; max-height: none !important; }
+.pdf-export-mode .clm-ap-grid { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) !important; }
+.pdf-export-mode .clm-ap-grid.single { grid-template-columns: minmax(0, 1fr) !important; }
+.pdf-export-mode .clm-ap-detail-header button, .pdf-export-mode .clm-back-btn, .pdf-export-mode .clm-ap-doc-actions { display: none !important; }
+
+/* ============================================================
+   MOBILE-FRIENDLY DETAIL VIEW
+   ============================================================ */
+.clm-ap-hd-left { display: flex; align-items: center; gap: 20px; flex: 1; min-width: 0; }
+.clm-ap-hd-pdf  { margin-left: auto; height: 36px; }
+.clm-mob-only, .clm-acc-chev { display: none; }
+
+@media (max-width: 768px) {
+  .clm-ap-detail:not(.pdf-export-mode) .clm-desk-only { display: none !important; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-mob-only  { display: block; }
+  .clm-ap-detail:not(.pdf-export-mode) .hide-m        { display: none !important; }
+
+  .clm-ap-detail:not(.pdf-export-mode) { padding-left: 0; padding-right: 0; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-page { padding: 12px 12px 30px; } 
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-sec  { margin-bottom: 10px; }
+
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-detail-header { gap: 8px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-hd-left { display: contents; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-back-btn { order: 1; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-hd-pdf { order: 2; margin-left: auto; height: 34px; padding: 0 12px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-pdf-txt { display: none; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-detail-title { order: 3; width: 100%; font-size: 14px; gap: 6px; }
+
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-sec.clm-acc,
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-rsec.clm-acc { background: #fff; border: 1px solid #e0e6ed; border-radius: 8px; overflow: hidden; margin-bottom: 0; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-acc &gt; .clm-acc-head { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 10px; min-height: 46px; margin: 0; padding: 10px 14px; border-bottom: none; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-acc.open &gt; .clm-acc-head { border-bottom: 1px solid #f0f4f8; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-acc-chev { display: inline-block; margin-left: auto; color: #7f8c9a; font-size: 14px; transition: transform .2s; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-acc.open &gt; .clm-acc-head .clm-acc-chev { transform: rotate(180deg); }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-acc:not(.open) &gt; .clm-acc-body { display: none; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-sec.clm-acc &gt; .clm-acc-body,
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-rsec.clm-acc &gt; .clm-acc-body { padding: 10px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-tw-card.clm-acc &gt; .clm-acc-body { padding: 0; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-acc-body .approval-tracker { margin-top: 0; box-shadow: none; border-bottom: none; padding: 12px 0; }
+
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-table-wrap { overflow: visible; border: none; box-shadow: none; background: transparent; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-table,
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-table tbody { display: block; width: 100%; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-table thead { display: none; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-table tr { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #e0e6ed; border: 1px solid #e0e6ed; border-radius: 8px; overflow: hidden; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-table td { display: block; background: #fff; border: 0; padding: 10px 12px; text-align: left !important; white-space: normal !important; word-break: break-word; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-table td::before { content: attr(data-label); display: block; margin-bottom: 3px; font-size: 10px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: #7f8c9a; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-table td:first-child { grid-column: 1 / -1; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-table td:last-child:nth-child(even) { grid-column: 1 / -1; }
+
+  .clm-ap-detail:not(.pdf-export-mode) .clm-kpi { background: #fff; border: 1px solid #e0e6ed; border-top: 4px solid #27ae60; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-kpi.dev { border-top-color: #E23D28; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-kpi-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-kpi-step { font-size: 12px; font-weight: 600; color: #5a6a7a; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-kpi-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-kpi-tile { background: #fafbfc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 10px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-kpi-tile:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-kpi-l { font-size: 10px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: #7f8c9a; margin-bottom: 4px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-kpi-v { font-size: 16px; font-weight: 700; color: #1a1a1a; word-break: break-word; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-kpi-s { font-size: 11px; color: #7f8c9a; margin-top: 2px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-kpi-rfi { background: #fff8e1; border: 1px solid #f3d54e; border-radius: 6px; padding: 10px 12px; font-size: 13px; margin-bottom: 10px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-kpi-rfi.ok { background: #f4fbf6; border-color: #a9dfbf; color: #1e8449; }
+
+  .clm-ap-detail:not(.pdf-export-mode) .clm-glance { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-glance-tile { background: #fffcf0; border: 1px solid #F3D54E; border-radius: 6px; padding: 10px; text-align: center; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-glance-tile.safe { background: #eafaf1; border-color: #27ae60; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-glance-tile .l { font-size: 10px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: #7f8c9a; margin-bottom: 4px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-glance-tile .v { font-size: 15px; font-weight: 700; color: #1a1a1a; word-break: break-word; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-glance-tile.safe .v { color: #1e8449; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-col-left { padding: 12px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-tw-heading { font-size: 14px; margin-bottom: 10px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-tw-card &gt; .clm-acc-head { min-height: 46px; padding: 10px 14px; }
+
+  .clm-ap-detail:not(.pdf-export-mode) .p2m,
+  .clm-ap-detail:not(.pdf-export-mode) .p2m tbody { display: block; width: 100%; }
+  .clm-ap-detail:not(.pdf-export-mode) .p2m thead { display: none; }
+  .clm-ap-detail:not(.pdf-export-mode) .p2m tr { display: grid; grid-template-columns: 1fr auto; column-gap: 10px; padding: 9px 12px; border-bottom: 1px solid #f0f4f8; }
+  .clm-ap-detail:not(.pdf-export-mode) .p2m td { display: block; border: 0; padding: 0; }
+  .clm-ap-detail:not(.pdf-export-mode) .p2m .c-name  { grid-column: 1; grid-row: 1; color: #1a1a1a; font-weight: 700; }
+  .clm-ap-detail:not(.pdf-export-mode) .p2m .c-label { grid-column: 1; grid-row: 2; font-size: 12px; margin-top: 2px; }
+  .clm-ap-detail:not(.pdf-export-mode) .p2m .c-pts   { grid-column: 2; grid-row: 1 / span 2; align-self: center; text-align: right; font-weight: 700; color: #1a1a1a; }
+  .clm-ap-detail:not(.pdf-export-mode) .p2m tr.clm-tw-total { background: #fcf1de; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-tw-sub { display: block; font-size: 11px; color: #7f8c9a; margin-top: 2px; }
+
+  .clm-ap-detail:not(.pdf-export-mode) .clm-age-row { background: #fff; border: 1px solid #e0e6ed; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-age-row.avg { background: #FFF8D6; border-color: #F3D54E; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-age-top { display: flex; justify-content: space-between; font-size: 13px; font-weight: 700; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-age-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-age-chip { background: #f0f4f8; border-radius: 10px; padding: 2px 8px; font-size: 11px; color: #5a6a7a; }
+
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-grid { display: flex; flex-direction: column; gap: 10px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-col-right { display: contents; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-rsec { margin-bottom: 0; }
+  .clm-ap-detail:not(.pdf-export-mode) .m-o1 { order: 1; } .clm-ap-detail:not(.pdf-export-mode) .m-o2 { order: 2; }
+  .clm-ap-detail:not(.pdf-export-mode) .m-o3 { order: 3; } .clm-ap-detail:not(.pdf-export-mode) .m-o4 { order: 4; }
+  .clm-ap-detail:not(.pdf-export-mode) .m-o5 { order: 5; } .clm-ap-detail:not(.pdf-export-mode) .m-o6 { order: 6; }
+  .clm-ap-detail:not(.pdf-export-mode) .m-o7 { order: 7; } .clm-ap-detail:not(.pdf-export-mode) .m-o8 { order: 8; }
+  .clm-ap-detail:not(.pdf-export-mode) .m-o9 { order: 9; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-rsec:not(.clm-acc) { background: #fff; border: 1px solid #e0e6ed; border-radius: 8px; padding: 12px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-rsec:not(.clm-acc) .clm-ap-detail-section-title { font-size: 12px; margin-bottom: 8px; padding-bottom: 8px; }
+  .clm-ap-detail:not(.pdf-export-mode) .clm-ap-justification-text { max-height: none; }
+
+  .clm-ap-detail:not(.pdf-export-mode) .tracker-step { min-width: 72px; }
+  .clm-ap-detail:not(.pdf-export-mode) .tracker-circle { width: 28px; height: 28px; font-size: 12px; }
+  .clm-ap-detail:not(.pdf-export-mode) .tracker-step + .tracker-step::before { top: 13px; }
+  .clm-ap-detail:not(.pdf-export-mode) .tracker-label { max-width: 70px; font-size: 11px; }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>copy_clm_rhm_request_details</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>copy_clm_rhm_request_details</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    data.record = null;
+    data.error = '';
+
+    if (!input || input.action !== 'load_request' || !input.number) {
+        return; 
+    }
+
+    var currentUserId = gs.getUserID();
+
+    function grNum(rec, field) { return parseFloat(rec.getValue(field)) || 0; }
+    function numOrNull(v) { var n = parseFloat(v); return isNaN(n) ? null : n; }
+
+    function getLiveCreditData(customerCode, salesOrg) {
+        var out = { creditLimit: 0, outstandingAmount: 0, availableCredit: 0, asdAmount: 0, state: '', success: false };
+        if (!customerCode) {
+            gs.error('[MD Approval Detail] No customer code available — cannot call CLM_NEW_WSDL1.');
+            return out;
+        }
+        if (!salesOrg) {
+            gs.warn('[MD Approval Detail] Customer ' + customerCode + ' has no salesorg on the master record — calling API with empty SalesOrg.');
+        }
+        try {
+            var apiCall = new x_birl3_clm.CLM_NEW_WSDL1();
+            var rawResult = apiCall.getCreditDetails(customerCode, salesOrg || '');
+
+            if (!rawResult) {
+                gs.error('[MD Approval Detail] CLM_NEW_WSDL1 returned empty for ' + customerCode + '/' + salesOrg);
+                return out;
+            }
+            var parsed = JSON.parse(rawResult);
+            out.creditLimit       = parseFloat(parsed.creditLimit) || 0;
+            out.outstandingAmount = parseFloat(parsed.outstandingAmount) || 0;
+            out.availableCredit   = parseFloat(parsed.availableCredit) || 0;
+            out.asdAmount         = Math.abs(parseFloat(parsed.ASDAmount) || 0);
+            out.state             = parsed.state || '';
+
+            var allBlank = true;
+            for (var k in parsed) { if (parsed[k]) { allBlank = false; break; } }
+            if (!allBlank) {
+                out.success = true;
+            }
+        } catch (e) {
+            gs.error('[MD Approval Detail] CLM_NEW_WSDL1 call threw: ' + e.message);
+        }
+        return out;
+    }
+
+    // =========================================================
+    // RHM ACCESS (same rules as the RHM Portfolio / Approval Requests widgets)
+    // =========================================================
+    var AUTHORIZED_ROLES = { 'RHM': 'Cement', 'RH_CH_RMC': 'RMC' };
+    var userRegions = [];
+    var isRHM = false;
+    var forcedSegmentLabel = null;
+    var forcedSegmentRaw = '';
+
+    var grRole = new GlideRecord('x_birl3_clm_role_user_mapping');
+    grRole.addQuery('u_user', currentUserId);
+    grRole.addQuery('u_role', 'IN', Object.keys(AUTHORIZED_ROLES));
+    grRole.query();
+    while (grRole.next()) {
+        var roleVal = grRole.getValue('u_role');
+        if (!forcedSegmentLabel) {
+            var segFromMapping = grRole.getValue('u_segment') || '';
+            forcedSegmentLabel = segFromMapping || AUTHORIZED_ROLES[roleVal];
+        }
+        if (roleVal === 'RHM') {
+            isRHM = true;
+            var regCode = grRole.getValue('region_name');
+            if (regCode && userRegions.indexOf(regCode) === -1) userRegions.push(regCode);
+        }
+    }
+
+    if (!forcedSegmentLabel) {
+        data.error = 'You are not authorised to view request details.';
+        return;
+    }
+
+    var gaSeg = new GlideAggregate('x_birl3_clm_clm_new_credit_request');
+    gaSeg.addAggregate('COUNT', 'segment');
+    gaSeg.groupBy('segment');
+    gaSeg.query();
+    while (gaSeg.next()) {
+        if (gaSeg.getDisplayValue('segment').toLowerCase() === forcedSegmentLabel.toLowerCase()) {
+            forcedSegmentRaw = gaSeg.getValue('segment');
+            break;
+        }
+    }
+    if (!forcedSegmentRaw) forcedSegmentRaw = forcedSegmentLabel;
+
+    var grReq = new GlideRecord('x_birl3_clm_clm_new_credit_request');
+    grReq.addQuery('number', input.number);
+
+    // RHM region scoping
+    if (isRHM) {
+        if (userRegions.length > 0) grReq.addQuery('customer.region_name', 'IN', userRegions);
+        else grReq.addQuery('customer.region_name', 'IN', ['none']);
+    }
+    // Segment forced by role
+    if (forcedSegmentRaw) grReq.addQuery('segment', forcedSegmentRaw);
+
+    grReq.setLimit(1);
+    grReq.query();
+
+    if (grReq.next()) {
+        data.record = buildRecordPayload(grReq);
+    } else {
+        data.error = 'Request not found or you do not have permission to view it.';
+    }
+	
+    function buildApprovalSteps(gr) {
+        var segmentRaw = (gr.segment + '').toLowerCase().trim();
+        var segment    = segmentRaw.split('|')[0].trim();
+        var targetApprover = (gr.getValue('required_approver_level') || '').trim();
+
+        var isCementBpd = (gr.getValue('cement_bpd') + '') === 'true';
+        if (!isCementBpd && segment === 'bpd') {
+            var hasTshBpd = (gr.getValue('u_approver_tsh_bpd') || '').trim() !== '';
+            var hasRhm    = (gr.getValue('u_approver_rhm')     || '').trim() !== '';
+            if (hasTshBpd && hasRhm) isCementBpd = true;
+        }
+
+        var cementCCHAndAbove    = ['NSH_CCH', 'CMO', 'CMO_CFO', 'MD'];
+        var rmcCCHAndAbove       = ['HEAD_KEY_CCH', 'BH', 'BH_CFO', 'MD'];
+        var bpdCCHAndAbove       = ['CCH_HBPD', 'BH', 'CFO', 'MD'];
+        var cementBpdCCHAndAbove = ['NSH_CCH', 'CMO', 'CMO_CFO', 'MD'];
+
+        var showZchHo = false;
+        if      (segment === 'rmc')                    showZchHo = rmcCCHAndAbove.indexOf(targetApprover)       !== -1;
+        else if (segment === 'bpd' && isCementBpd)     showZchHo = cementBpdCCHAndAbove.indexOf(targetApprover) !== -1;
+        else if (segment === 'bpd')                    showZchHo = bpdCCHAndAbove.indexOf(targetApprover)       !== -1;
+        else                                           showZchHo = cementCCHAndAbove.indexOf(targetApprover)    !== -1;
+
+        var CEMENT_CHAIN = [
+            { label: 'TSH', field: 'u_approver_tsh' },
+            { label: 'RHM', field: 'u_approver_rhm' }
+        ];
+        if (showZchHo) CEMENT_CHAIN.push({ label: 'ZCH', field: 'u_approver_zch' });
+        CEMENT_CHAIN.push({ label: 'ZHM', field: 'u_approver_zhm' });
+        if (showZchHo) CEMENT_CHAIN.push({ label: 'HO', field: 'u_approver_ho' });
+        CEMENT_CHAIN = CEMENT_CHAIN.concat([
+            { label: 'NSH', field: 'u_approver_nsh'     },
+            { label: 'CCH', field: 'u_approver_nsh_cch' },
+            { label: 'CMO', field: 'u_approver_cmo'     },
+            { label: 'CFO', field: 'u_approver_cmo_cfo' },
+            { label: 'MD',  field: 'u_approver_md'      }
+        ]);
+
+        var RMC_CHAIN = [
+            { label: 'TSM',            field: 'u_approver_tsm'             },
+            { label: 'RH CH RMC',      field: 'u_approver_rh_ch_rmc'       },
+            { label: 'ZH RMC',         field: 'u_approver_zh_rmc'          },
+            { label: 'HEAD RMC',       field: 'u_approver_head_rmc'        },
+            { label: 'HEAD KEY & RMC', field: 'u_approver_head_key_ch_rmc' }
+        ];
+        if (showZchHo) {
+            RMC_CHAIN.push({ label: 'ZCH', field: 'u_approver_zch' });
+            RMC_CHAIN.push({ label: 'HO',  field: 'u_approver_ho'  });
+        }
+        RMC_CHAIN = RMC_CHAIN.concat([
+            { label: 'CCH', field: 'u_approver_head_key_cch' },
+            { label: 'BH',  field: 'u_approver_bh'           },
+            { label: 'CFO', field: 'u_approver_bh_cfo'       },
+            { label: 'MD',  field: 'u_approver_md'           }
+        ]);
+
+        var BPD_CHAIN = [
+            { label: 'TSH BPD', field: 'u_approver_tsh_bpd' },
+            { label: 'ZH BPD',  field: 'u_approver_zh_bpd'  },
+            { label: 'HSBPD',   field: 'u_approver_hsbpd'   },
+            { label: 'HBPD',    field: 'u_approver_hbpd'    }
+        ];
+        if (showZchHo) {
+            BPD_CHAIN.push({ label: 'ZCH', field: 'u_approver_zch' });
+            BPD_CHAIN.push({ label: 'HO',  field: 'u_approver_ho'  });
+        }
+        BPD_CHAIN = BPD_CHAIN.concat([
+            { label: 'CCH', field: 'u_approver_cch_hbpd' },
+            { label: 'BH',  field: 'u_approver_bh'       },
+            { label: 'CFO', field: 'u_approver_cfo'      },
+            { label: 'MD',  field: 'u_approver_md'       }
+        ]);
+
+        var CEMENT_BPD_CHAIN = [
+            { label: 'TSH BPD',    field: 'u_approver_tsh_bpd' },
+            { label: 'ZH BPD',     field: 'u_approver_zh_bpd'  },
+            { label: 'RHM Cement', field: 'u_approver_rhm'      },
+            { label: 'ZHM Cement', field: 'u_approver_zhm'      }
+        ];
+        if (showZchHo) {
+            CEMENT_BPD_CHAIN.push({ label: 'ZCH', field: 'u_approver_zch' });
+            CEMENT_BPD_CHAIN.push({ label: 'HO',  field: 'u_approver_ho'  });
+        }
+        CEMENT_BPD_CHAIN = CEMENT_BPD_CHAIN.concat([
+            { label: 'NSH', field: 'u_approver_nsh'     },
+            { label: 'CCH', field: 'u_approver_nsh_cch' },
+            { label: 'CMO', field: 'u_approver_cmo'     },
+            { label: 'CFO', field: 'u_approver_cmo_cfo' },
+            { label: 'MD',  field: 'u_approver_md'      }
+        ]);
+
+        var chain = (segment === 'rmc')                ? RMC_CHAIN
+                  : (segment === 'bpd' && isCementBpd) ? CEMENT_BPD_CHAIN
+                  : (segment === 'bpd')                ? BPD_CHAIN
+                  : CEMENT_CHAIN;
+
+        var mapBySysId = {};
+        var saGR = new GlideRecord('sysapproval_approver');
+        var saQuery = saGR.addQuery('sysapproval', gr.sys_id);
+        saQuery.addOrCondition('document_id', gr.sys_id);
+        saGR.addQuery('state', '!=', 'cancelled');
+
+        var lastSubmitted = gr.getValue('u_last_submitted_on');
+        if (lastSubmitted) {
+            saGR.addQuery('sys_created_on', '>=', lastSubmitted);
+        }
+
+        saGR.orderByDesc('sys_created_on');
+        saGR.query();
+
+        var commentsByApprover = {};
+        while (saGR.next()) {
+            var approverId = saGR.getValue('approver') + '';
+            var state = (saGR.getValue('state') + '').toLowerCase();
+
+            if (state == 'approved')
+                mapBySysId[approverId] = 'approved';
+            else if (state == 'rejected')
+                mapBySysId[approverId] = 'rejected';
+            else
+                mapBySysId[approverId] = 'pending';
+
+            var jf = new GlideRecord('sys_journal_field');
+            jf.addQuery('element_id', saGR.sys_id);
+            jf.orderByDesc('sys_created_on');
+            jf.query();
+
+            if (jf.next()) {
+                commentsByApprover[approverId] = jf.value + '';
+            }
+        }
+
+        var steps = [];
+        steps.push({ label: 'Submitted', state: 'approved' });
+        for (var i = 0; i < chain.length; i++) {
+            var entry = chain[i];
+            var approverId = gr.getValue(entry.field);
+            if (!approverId) continue;
+
+            var approverName = '';
+            try { approverName = gr[entry.field].getDisplayValue() + ''; } catch(e) {}
+            var stepComment = commentsByApprover[approverId] || '';
+            steps.push({
+                label: entry.label,
+                state: mapBySysId[approverId] || 'pending',
+                approver_name: approverName,
+                approver_sys_id: approverId,
+                comment: stepComment,
+                auto_approved: stepComment.indexOf('Auto Approved by') === 0
+            });
+        }
+
+        steps.push({
+            label: 'Completed',
+            state: (gr.state + '') == 'Approved' ? 'approved' : 'pending'
+        });
+
+        return steps;
+    }
+
+    function buildRecordPayload(gr) {
+        var reqSysId = gr.getUniqueValue();
+        var requestedLimit = parseFloat(gr.getValue('requested_limit')) || 0;
+
+        var overdue90 = 0;
+        var customerName = '';
+        var customerPan = '';
+        var customerCode = '';
+        var customerSalesOrg = '';
+        var commodity = gr.getDisplayValue('segment');
+        var customerId = gr.getValue('customer'); 
+
+        var custDepot = '', custDepotName = '', custZone = '', custZoneName = '', custRegion = '', custRegionName = '';
+        var panLevelSD = 0;
+
+        if (customerId) {
+            var grOut = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+            grOut.addQuery('customer', customerId);
+            grOut.orderByDesc('sys_created_on');
+            grOut.setLimit(1);
+            grOut.query();
+            
+            if (grOut.next()) {
+                var b91_120    = parseFloat(grOut.getValue('bucket_91_120_days')) || 0;
+                var b121_180   = parseFloat(grOut.getValue('bucket_121_180_days')) || 0;
+                var b181_365   = parseFloat(grOut.getValue('bucket_181_365_days')) || 0;
+                var b366_730   = parseFloat(grOut.getValue('bucket_366_730_days')) || 0;
+                var b730_above = parseFloat(grOut.getValue('bucket_730_above')) || 0;
+                var bGt120     = parseFloat(grOut.getValue('bucket_gt120_days')) || 0;
+                
+                overdue90 = b91_120 + b121_180 + b181_365 + b366_730 + b730_above + bGt120;
+            }
+
+            var grMaster = new GlideRecord('x_birl3_clm_clm_customer_master1');
+            if (grMaster.get(customerId)) {
+                customerName     = grMaster.getValue('customer_name') || '';
+                customerPan      = grMaster.getValue('pan') || '';
+                customerCode     = grMaster.getValue('customer_code_sap') || '';
+                customerSalesOrg = grMaster.getValue('salesorg') || '';
+                custDepot        = grMaster.getValue('depot') || '';
+                custDepotName    = grMaster.getValue('depot_name') || '';
+                custZone         = grMaster.getValue('zone') || '';
+                custZoneName     = grMaster.getValue('zone_name') || '';
+                custRegion       = grMaster.getValue('region') || '';
+                custRegionName   = grMaster.getValue('region_name') || '';
+                if (!commodity) commodity = grMaster.getDisplayValue('segment');
+            }
+        }
+
+        if (customerPan) {
+            var panGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+            panGr.addQuery('pan', customerPan);
+            panGr.query();
+            while (panGr.next()) {
+                panLevelSD += parseFloat(panGr.current_sd_amount) || 0;
+            }
+        }
+
+        var currentLimit, outstanding, activeSd, liveOk;
+        if (customerCode) {
+            var live = getLiveCreditData(customerCode, customerSalesOrg);
+            currentLimit = live.creditLimit;
+            outstanding  = live.outstandingAmount;
+            activeSd     = live.asdAmount;
+            liveOk       = live.success;
+        } else {
+            currentLimit = parseFloat(gr.getValue('current_credit_limit')) || 0;
+            outstanding  = parseFloat(gr.getValue('outstanding_amount')) || 0;
+            activeSd     = parseFloat(gr.getValue('active_sd')) || 0;
+            liveOk       = false;
+        }
+
+        var increaseAmount = requestedLimit - currentLimit;
+        var increasePct = (currentLimit !== 0) ? Math.round((increaseAmount / currentLimit) * 100) : 0;
+        var utilisationPctStr = (currentLimit > 0) ? ((outstanding / currentLimit) * 100).toFixed(1) + '%' : 'N/A';
+
+        var reviewDateStr = gr.getValue('next_review_date');
+        var reviewIn = 'No date set';
+        if (reviewDateStr) {
+            var reviewDate = new GlideDateTime(reviewDateStr);
+            var today = new GlideDateTime();
+            var daysDiff = GlideDateTime.subtract(today, reviewDate).getRoundedDayPart();
+            
+            if (daysDiff > 0) reviewIn = reviewDateStr + ' / ' + daysDiff + ' days left';
+            else if (daysDiff === 0) reviewIn = reviewDateStr + ' / Due today';
+            else reviewIn = reviewDateStr + ' / ' + Math.abs(daysDiff) + ' days overdue';
+        }
+
+        var workflowTrail = [];
+        var finalDecision = '';
+
+        workflowTrail.push({
+            role: 'Initiator',
+            actor: gr.getDisplayValue('sys_created_by'),
+            action: 'Submitted',
+            date: gr.getDisplayValue('sys_created_on'),
+            duration: '',
+            comment: '',
+            dotClass: 'clm-dot-approved'
+        });
+
+        var grApp = new GlideRecord('sysapproval_approver');
+        var qc = grApp.addQuery('sysapproval', reqSysId);
+        qc.addOrCondition('document_id', reqSysId);
+        grApp.orderBy('sys_created_on'); 
+        grApp.query();
+
+        while (grApp.next()) {
+            var appState = (grApp.getValue('state') || '').toLowerCase();
+            var actionLabel = 'Pending';
+            var dotClass = '';
+            var actionDate = grApp.getDisplayValue('sys_created_on');
+
+            if (appState === 'approved') {
+                actionLabel = 'Approved';
+                dotClass = 'clm-dot-approved';
+                actionDate = grApp.getDisplayValue('sys_updated_on');
+            } else if (appState === 'rejected') {
+                actionLabel = 'Rejected';
+                dotClass = 'clm-dot-rejected';
+                actionDate = grApp.getDisplayValue('sys_updated_on');
+                finalDecision = 'Request Rejected by ' + grApp.getDisplayValue('approver');
+            } else if (appState === 'requested') {
+                actionLabel = 'Pending Approval';
+            } else if (appState === 'not_required' || appState === 'cancelled') {
+                actionLabel = 'Skipped / Cancelled';
+                actionDate = grApp.getDisplayValue('sys_updated_on');
+            }
+
+            workflowTrail.push({
+                role: 'Approver',
+                actor: grApp.getDisplayValue('approver'),
+                action: actionLabel,
+                date: actionDate,
+                duration: '',
+                comment: '', 
+                dotClass: dotClass
+            });
+        }
+
+        var reqState = (gr.getValue('state') || '').toLowerCase();
+        if (reqState.indexOf('approv') > -1) {
+            finalDecision = 'Request Fully Approved';
+        }
+
+        var initiatorName = '';
+        var iGr = new GlideRecord('sys_user');
+        if (iGr.get(gr.initiator + '')) initiatorName = iGr.name + '';
+        if (!initiatorName) initiatorName = gr.initiator.getDisplayValue() || 'Unknown';
+
+        var total = 0, safe = 0, warning = 0, critical = 0, toxic = 0;
+        var agGr = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+        agGr.addQuery('customer', customerId);
+        agGr.orderByDesc('snapshot_month');
+        agGr.setLimit(6);
+        agGr.query();
+
+        while (agGr.next()) {
+            total    += parseFloat(agGr.total_outstanding)   || 0;
+            safe     += (parseFloat(agGr.bucket_0_30_days)   || 0)
+                      + (parseFloat(agGr.bucket_22_30_days)  || 0)
+                      + (parseFloat(agGr.bucket_31_45_days)  || 0)
+                      + (parseFloat(agGr.bucket_46_60_days)  || 0);
+            warning  += parseFloat(agGr.bucket_61_75_days)   || 0;
+            critical += parseFloat(agGr.bucket_76_90_days)   || 0;
+            toxic    += (parseFloat(agGr.bucket_91_120_days) || 0)
+                      + (parseFloat(agGr.bucket_gt120_days)  || 0);
+        }
+
+        var agingTable = [];
+        var agGr2 = new GlideRecord('x_birl3_clm_clm_aging_snapshot');
+        agGr2.addQuery('customer', customerId);
+        agGr2.orderByDesc('snapshot_month');
+        agGr2.setLimit(6);
+        agGr2.query();
+
+        while (agGr2.next()) {
+            agingTable.push({
+                month:   agGr2.snapshot_month.getDisplayValue(),
+                b0_30:   parseFloat(agGr2.bucket_0_30_days)   || 0,
+                b22_30:  parseFloat(agGr2.bucket_22_30_days)  || 0,
+                b31_45:  parseFloat(agGr2.bucket_31_45_days)  || 0,
+                b46_60:  parseFloat(agGr2.bucket_46_60_days)  || 0,
+                b61_75:  parseFloat(agGr2.bucket_61_75_days)  || 0,
+                b76_90:  parseFloat(agGr2.bucket_76_90_days)  || 0,
+                b91_120: parseFloat(agGr2.bucket_91_120_days) || 0,
+                b120:    parseFloat(agGr2.bucket_gt120_days)  || 0,
+                total:   parseFloat(agGr2.total_outstanding)  || 0
+            });
+        }
+
+        var rowCount = agingTable.length;
+        if (rowCount > 0) {
+            var avg0_30 = 0, avg22_30 = 0, avg31_45 = 0, avg46_60 = 0, avg61_75 = 0, avg76_90 = 0, avg91_120 = 0, avg120 = 0, avgTotal = 0;
+            agingTable.forEach(function(r) {
+                avg0_30 += r.b0_30;
+                avg22_30 += r.b22_30;
+                avg31_45 += r.b31_45; avg46_60 += r.b46_60; avg61_75 += r.b61_75;
+                avg76_90 += r.b76_90; avg91_120 += r.b91_120; avg120 += r.b120; avgTotal += r.total;
+            });
+            agingTable.push({
+                month: 'Average',
+                b0_30: avg0_30 / rowCount,
+                b22_30: avg22_30 / rowCount,
+                b31_45: avg31_45 / rowCount, b46_60: avg46_60 / rowCount,
+                b61_75: avg61_75 / rowCount, b76_90: avg76_90 / rowCount, b91_120: avg91_120 / rowCount,
+                b120: avg120 / rowCount, total: avgTotal / rowCount, isAverage: true
+            });
+        }
+
+        var agingDetail = null;
+        if (total > 0) {
+            agingDetail = {
+                safe_pct:  Math.round((safe     / total) * 100),
+                warn_pct:  Math.round((warning  / total) * 100),
+                crit_pct:  Math.round((critical / total) * 100),
+                toxic_pct: Math.round((toxic    / total) * 100)
+            };
+        }
+
+        var sequence = [];
+        try { sequence = JSON.parse(gr.u_approver_sequence + ''); } catch(e) { sequence = []; }
+
+        var previousApproval = null;
+        var pa = new GlideRecord('sysapproval_approver');
+        pa.addQuery('document_id', gr.sys_id + '');
+        pa.addQuery('state', 'approved');
+        pa.orderByDesc('sys_updated_on');
+        pa.setLimit(1);
+        pa.query();
+
+        if (pa.next()) {
+            var prevAmount = 0;
+            if ((gr.customer_type + '') === 'Trade') {
+                prevAmount = parseFloat(gr.getValue('u_approved_code_limit')) || parseFloat(gr.approved_limit) || 0;
+            } else {
+                prevAmount = parseFloat(gr.approved_limit) || 0;
+            }
+            previousApproval = {
+                approver: pa.approver.getDisplayValue(),
+                amount:   prevAmount
+            };
+        }
+
+        var approvalComments = [];
+        var apprGR = new GlideRecord('sysapproval_approver');
+        apprGR.addQuery('document_id', gr.sys_id);
+        apprGR.addQuery('state', 'IN', 'approved,rejected,cancelled');
+        apprGR.orderByDesc('sys_created_on');
+        apprGR.query();
+
+        while (apprGR.next()) {
+            var commentText = '';
+            var jf = new GlideRecord('sys_journal_field');
+            jf.addQuery('element_id', apprGR.sys_id);
+            jf.orderByDesc('sys_created_on');
+            jf.query();
+            if (jf.next()) commentText = jf.value + '';
+            if (!commentText) continue;
+
+            approvalComments.push({
+                approver: apprGR.approver.getDisplayValue() + '',
+                state: apprGR.state + '',
+                comments: commentText,
+                updated_on: apprGR.getDisplayValue('sys_updated_on')
+            });
+        }
+
+        var attachments = [];
+        var attGR = new GlideRecord('sys_attachment');
+        attGR.addQuery('table_name', 'x_birl3_clm_clm_new_credit_request');
+        attGR.addQuery('table_sys_id', gr.getUniqueValue());
+        attGR.query();
+        while (attGR.next()) {
+            attachments.push({
+                sys_id: attGR.getUniqueValue(),
+                file_name: attGR.getValue('file_name')
+            });
+        }
+
+        var rfiSysIds = [];
+        var answeredRfisForThisRequest = [];
+        var allRfis = new GlideRecord('x_birl3_clm_clm_rfi');
+        allRfis.addQuery('u_request', gr.getUniqueValue());
+        allRfis.orderByDesc('sys_updated_on');
+        allRfis.query();
+
+        while (allRfis.next()) {
+            rfiSysIds.push(allRfis.getUniqueValue());
+
+            if (allRfis.getValue('u_status') === 'answered') {
+                answeredRfisForThisRequest.push({
+                    target_role: allRfis.getValue('u_target_role'),
+                    target_name: allRfis.getDisplayValue('u_target_user') + '',
+                    question: allRfis.getValue('u_question'),
+                    response: allRfis.getValue('u_response'),
+                    responded_on: allRfis.getDisplayValue('u_responded_on') || allRfis.getDisplayValue('sys_updated_on'),
+                    raised_by_name: allRfis.u_raised_by.getDisplayValue() + ' (' + allRfis.getValue('u_raised_by_role') + ')'
+                });
+            }
+        }
+
+        if (rfiSysIds.length > 0) {
+            var rfiAttGr = new GlideRecord('sys_attachment');
+            rfiAttGr.addQuery('table_name', 'x_birl3_clm_clm_rfi');
+            rfiAttGr.addQuery('table_sys_id', 'IN', rfiSysIds.toString());
+            rfiAttGr.query();
+            while (rfiAttGr.next()) {
+                attachments.push({
+                    sys_id: rfiAttGr.getUniqueValue(),
+                    file_name: '[RFI] ' + rfiAttGr.getValue('file_name')
+                });
+            }
+        }
+
+        var toolMatrix = {};
+        try { toolMatrix = JSON.parse(gr.getValue('u_tool_matrix_json') || '{}'); } catch(e) {}
+
+        var tradeParamDefs = [
+            { name: "Age of Company", weight: 5, options: [{label:"Best (> 15 Yrs)",score:10},{label:"Good (> 10 Yrs)",score:7},{label:"Average (> 5 Yrs)",score:5},{label:"Poor (< 5 Yrs)",score:2}] },
+            { name: "Cement/RMC Potential", weight: 10, options: [{label:"Best (> 25,000 MT)",score:10},{label:"Good (10k-25k MT)",score:7},{label:"Average (3k-10k MT)",score:5},{label:"Poor (< 3,000 MT)",score:2}] },
+            { name: "Current Share (in %)", weight: 10, options: [{label:"Best (> 70)",score:10},{label:"Good (50-70)",score:7},{label:"Average (30-50)",score:5},{label:"Poor (< 30)",score:2}] },
+            { name: "Corporate Body", weight: 5, options: [{label:"Listed",score:10},{label:"Unlisted Ltd",score:7},{label:"Partnership Firm",score:5},{label:"Proprietor",score:2}] },
+            { name: "Mgmt. Competence", weight: 5, options: [{label:"Excellent",score:10},{label:"V. Good",score:7},{label:"Good",score:5},{label:"Average",score:2}] },
+            { name: "Revenue", weight: 5, options: [{label:"Best (> 100 CR)",score:10},{label:"Good (50-100 CR)",score:7},{label:"Average (10-50 CR)",score:5},{label:"Poor (< 10 CR)",score:2}] },
+            { name: "Sales Growth% (CAGR)", weight: 10, options: [{label:"Best (> 20%)",score:10},{label:"Good (10-20%)",score:7},{label:"Average (5-10%)",score:5},{label:"Poor (< 5%)",score:2}] },
+            { name: "Gross Profit%", weight: 5, options: [{label:"Best (> 20%)",score:10},{label:"Good (10-20%)",score:7},{label:"Average (5-10%)",score:5},{label:"Poor (< 5%)",score:2}] },
+            { name: "EBITDA%", weight: 10, options: [{label:"Best (> 15%)",score:10},{label:"Good (10-15%)",score:7},{label:"Average (5-10%)",score:5},{label:"Poor (< 5%)",score:2}] },
+            { name: "Net WCC Days", weight: 5, options: [{label:"Best (< 30)",score:10},{label:"Good (30-60)",score:7},{label:"Average (60-90)",score:5},{label:"Poor (> 90)",score:2}] },
+            { name: "A/R Days", weight: 15, options: [{label:"Best (< 30)",score:10},{label:"Good (30-60)",score:7},{label:"Average (60-90)",score:5},{label:"Poor (> 90)",score:2}] },
+            { name: "Inventory Days", weight: 5, options: [{label:"Best (< 30)",score:10},{label:"Good (30-60)",score:7},{label:"Average (60-90)",score:5},{label:"Poor (> 90)",score:2}] },
+            { name: "A/P Days", weight: 10, options: [{label:"Best (75-120)",score:10},{label:"Good (45-75)",score:7},{label:"Average (15-45)",score:5},{label:"Poor (< 15 or > 120)",score:2}] }
+        ];
+
+        var toolMatrixList = [];
+        for (var pi = 0; pi < tradeParamDefs.length; pi++) {
+            var def = tradeParamDefs[pi];
+            var saved = toolMatrix[def.name] || null;
+            var matchedScore = 0;
+            var matchedLabel = '—';
+
+            if (saved && saved.label) {
+                matchedLabel = saved.label;
+                var cleanSavedLabel = (saved.label + '').toLowerCase().split('(score')[0].trim();
+                for (var oi = 0; oi < def.options.length; oi++) {
+                    var opt = def.options[oi];
+                    var cleanOptLabel = opt.label.toLowerCase().split('(score')[0].trim();
+                    if (cleanSavedLabel === cleanOptLabel) {
+                        matchedScore = opt.score;
+                        break;
+                    }
+                }
+            }
+            var weightedValue = (matchedScore * def.weight) / 10;
+            toolMatrixList.push({
+                name: def.name,
+                label: matchedLabel,
+                score: matchedScore,
+                weight: def.weight,
+                weighted_value: weightedValue.toFixed(1),
+                overridden: saved ? !!saved.overridden : false,
+                mappingType: saved ? saved.mappingType : 'Manual'
+            });
+        }
+
+        var codeLevelCurrent = parseFloat(gr.getValue('u_code_level_current_limit')) || 0;
+        var codeLevelTotal   = parseFloat(gr.getValue('u_code_level_total_requested')) || 0;
+        var codeLevelRequestedAdditional = parseFloat(gr.getValue('u_requested_additional_limit')) || 0;
+        var p1Value = gr.getValue('u_tool_p1');
+        var parsedP1 = (p1Value !== null && p1Value !== '') ? parseFloat(p1Value) : null;
+
+        var approvalStepsForThisRequest = buildApprovalSteps(gr);
+        var seenSysIds = {};
+        var rfiTargetsForThisRequest = [];
+
+        approvalStepsForThisRequest.forEach(function(s) {
+            if (s.state === 'approved' && s.approver_sys_id && !seenSysIds[s.approver_sys_id]) {
+                seenSysIds[s.approver_sys_id] = true;
+                rfiTargetsForThisRequest.push({
+                    sys_id: s.approver_sys_id,
+                    label: s.label,
+                    name: s.approver_name
+                });
+            }
+        });
+
+        var currentInitiator = gr.getValue('initiator'); 
+        if (currentInitiator && !seenSysIds[currentInitiator]) {
+            rfiTargetsForThisRequest.unshift({
+                sys_id: currentInitiator,
+                label: 'Initiator',
+                name: initiatorName
+            });
+        }
+
+        var openRfiForThisRequest = null;
+        var rfiCheckGr = new GlideRecord('x_birl3_clm_clm_rfi');
+        rfiCheckGr.addQuery('u_request', gr.sys_id);
+        rfiCheckGr.addQuery('u_status', 'open');
+        rfiCheckGr.addQuery('u_raised_by', currentUserId); 
+        rfiCheckGr.query();
+        if (rfiCheckGr.next()) {
+            openRfiForThisRequest = {
+                target_role: rfiCheckGr.getValue('u_target_role'),
+                target_name: rfiCheckGr.getDisplayValue('u_target_user') + '',
+                question:    rfiCheckGr.getValue('u_question'),
+                raised_on:   rfiCheckGr.getDisplayValue('sys_created_on')
+            };
+        }
+
+        return {
+            sys_id:                  gr.sys_id + '',
+            number:                  gr.number + '',
+            customer_name:           customerName,
+            customer_code:           customerCode,
+            customer_type:           gr.customer_type + '',
+            segment:                 gr.segment + '',
+            requested_limit:         parseFloat(gr.requested_limit)    / 100000,
+            active_sd:               parseFloat(gr.active_sd)          / 100000,
+            net_exposure:            parseFloat(gr.net_exposure)       / 100000,
+            max_allowable:           parseFloat(gr.max_allowable_limit) / 100000,
+            system_mult:             gr.system_multiplier + '',
+            implied_mult:            parseFloat(gr.implied_multiplier)  || 0,
+            is_deviation:            (gr.is_deviation == true || gr.is_deviation == 'true'),
+            nod:                     parseFloat(gr.nod_days)            || 0,
+            pan_level_sd:            panLevelSD / 100000,
+            aging_rating:            gr.aging_rating + '',
+            aging_detail:            agingDetail,
+            aging_table:             agingTable,
+            vintage_days:            parseInt(gr.customer_vintage_days) || 0,
+            cheque_bounces:          parseInt(gr.cheque_bounces_12m)    || 0,
+            market_perception:       gr.market_perception + '',
+            justification:           gr.business_justification + '',
+            deviation_justification: gr.deviation_justification + '',
+            review_date:             reviewDateStr,
+            initiator:               initiatorName,
+            panlevelcl:              gr.pan_level_cl + '',
+            current_credit_limit:    gr.current_credit_limit + '',
+            code_level_current_limit: codeLevelCurrent,
+            code_level_total_requested: codeLevelTotal,
+            tool_p3:                 numOrNull(gr.getValue('u_tool_p3')),
+            tool_safe_limit:         numOrNull(gr.getValue('u_tool_safe_limit')),
+            code_level_requested_additional: codeLevelRequestedAdditional,
+            code_level_total_requested_l: codeLevelTotal / 100000,
+            code_level_sd:           grNum(gr, 'u_code_level_sd'),
+            code_level_os:           grNum(gr, 'outstanding_amount'),
+            pan_level_os:            grNum(gr, 'u_pan_level_os'),
+            pan_sd_abs:              grNum(gr, 'pan_level_sd'),
+            pan_cl_abs:              grNum(gr, 'pan_level_cl'),
+            requested_limit_abs:     grNum(gr, 'requested_limit'),
+            current_limit_expiry:    reviewDateStr,
+            segment_breakdown: {
+                Cement: { cl: grNum(gr, 'u_cement_cl'), sd: grNum(gr, 'u_cement_sd') },
+                BPD:    { cl: grNum(gr, 'u_bpd_cl'),    sd: grNum(gr, 'u_bpd_sd')    },
+                RMC:    { cl: grNum(gr, 'u_rmc_cl'),    sd: grNum(gr, 'u_rmc_sd')    }
+            },
+            approver_role:           gr.required_approver_level + '',
+            approval_steps:          approvalStepsForThisRequest,
+            rfi_targets:             rfiTargetsForThisRequest,
+            open_rfi:                openRfiForThisRequest,
+            answered_rfis:           answeredRfisForThisRequest,
+            approval_history:        sequence,
+            previous_approval:       previousApproval,
+            pan:                     customerPan,
+            depot:                   custDepot,
+            depot_name:              custDepotName,
+            zone:                    custZone,
+            zone_name:               custZoneName,
+            region:                  custRegion,
+            region_name:             custRegionName,
+            approval_comments:       approvalComments,
+            attachments:             attachments,
+            is_resubmitted:          (gr.u_resubmission_count > 0),
+            resubmission_count:      parseInt(gr.u_resubmission_count) || 0,
+            override_limit:          previousApproval ? (previousApproval.amount / 100000) : null,
+            created:                 gr.sys_created_on.getDisplayValue(),
+            tool_p1:                 parsedP1,
+            tool_p2:                 parseFloat(gr.getValue('u_tool_p2')) || null,
+            tool_mpq:                parseFloat(gr.getValue('u_tool_mpq')) || 0,
+            tool_order_rate:         parseFloat(gr.getValue('u_tool_order_rate')) || 0,
+            tool_expected_potential: parseFloat(gr.getValue('u_tool_expected_potential')) || 0,
+            tool_current_sob:        parseFloat(gr.getValue('u_tool_current_sob')) || 0,
+            tool_expected_sob:       parseFloat(gr.getValue('u_tool_expected_sob')) || 0,
+            tool_internal_rating:    gr.getValue('u_tool_internal_rating') || '',
+            tool_external_rating:    gr.getValue('u_tool_external_rating') || '',
+            tool_document_type:      gr.getValue('u_tool_document_type') || '',
+            tool_matrix_list:        toolMatrixList,
+            workflowTrail:           workflowTrail,
+            finalDecisionLabel:      finalDecision
+        };
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-06 10:41:09</sys_created_on>
+        <sys_id>927b754597f7cf10be31fa17f053af81</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>copy_clm_rhm_request_details</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_927b754597f7cf10be31fa17f053af81</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-06 11:49:23</sys_updated_on>
+        <template><![CDATA[<div class="clm-approver">
+  
+  <!-- ══════════════════════════════════════════════════════
+       DETAIL VIEW 
+  ══════════════════════════════════════════════════════ -->
+  <div class="clm-ap-detail" ng-if="c.data.selectedRequest" ng-init="r = c.data.selectedRequest">
+
+    <div class="clm-ap-detail-header">
+      <!-- Left side: Title & Badges -->
+      <div class="clm-ap-hd-left">
+        <div class="clm-ap-detail-title">
+          {{r.number}} — {{r.customer_name}}: {{r.segment}}
+          <span class="clm-badge clm-badge-segment">{{r.segment}}</span>
+          <span class="clm-type-pill clm-pill-trade" ng-if="r.customer_type == 'Trade'">Trade</span>
+          <span class="clm-type-pill clm-pill-nontrade" ng-if="r.customer_type == 'Non-Trade'">Non-Trade</span>
+          <span class="clm-type-pill clm-pill-key" ng-if="r.customer_type == 'Key'">Key</span>
+          <span class="clm-badge clm-badge-dev" ng-if="r.is_deviation">DEVIATION</span>
+          <span class="clm-badge clm-badge-std" ng-if="!r.is_deviation">STANDARD</span>
+          <span class="clm-badge clm-badge-resubmitted" ng-if="r.is_resubmitted">RESUBMITTED</span>
+        </div>
+      </div>
+
+      <!-- Right side: Download PDF Button -->
+      <button class="clm-btn clm-btn-outline clm-ap-hd-pdf" ng-click="c.downloadPDF()" ng-disabled="c.isDownloading">
+        <i class="fa fa-download" ng-if="!c.isDownloading"></i>
+        <i class="fa fa-spinner fa-spin" ng-if="c.isDownloading"></i>
+        <span class="clm-pdf-txt" ng-if="!c.isDownloading">Download PDF</span>
+        <span class="clm-pdf-txt" ng-if="c.isDownloading">Generating...</span>
+      </button>
+    </div>
+
+    <div class="clm-ap-page">
+
+      <!-- ▼▼ MOBILE ONLY: at-a-glance card (Trade) ▼▼ -->
+      <div class="clm-mob-only clm-kpi" ng-class="{'dev': r.is_deviation}" ng-if="r.customer_type == 'Trade'">
+        <div class="clm-kpi-status">
+          <span class="clm-badge clm-badge-dev" ng-if="r.is_deviation">DEVIATION</span>
+          <span class="clm-badge clm-badge-std" ng-if="!r.is_deviation">STANDARD</span>
+          <span class="clm-kpi-step">{{c.stepSummary(r)}}</span>
+        </div>
+        <div class="clm-kpi-grid">
+          <div class="clm-kpi-tile">
+            <div class="clm-kpi-l">Request Change</div>
+            <div class="clm-kpi-v" ng-class="r.code_level_requested_additional < 0 ? 'clm-val-danger' : 'clm-val-ok'">{{c.formatSigned(r.code_level_requested_additional)}}</div>
+          </div>
+          <div class="clm-kpi-tile">
+            <div class="clm-kpi-l">New Code Limit</div>
+            <div class="clm-kpi-v">₹{{c.formatIndianCurrency(r.code_level_total_requested)}}</div>
+          </div>
+          <div class="clm-kpi-tile">
+            <div class="clm-kpi-l">Net Exposure (PAN)</div>
+            <div class="clm-kpi-v">₹{{r.net_exposure | number:2}}L</div>
+          </div>
+          <div class="clm-kpi-tile">
+            <div class="clm-kpi-l">Multiplier</div>
+            <div class="clm-kpi-v" ng-class="r.is_deviation ? 'clm-val-danger' : 'clm-val-ok'">{{r.implied_mult | number:2}}x</div>
+            <div class="clm-kpi-s">System {{r.system_mult}}x</div>
+          </div>
+          <div class="clm-kpi-tile">
+            <div class="clm-kpi-l">Max Allowable</div>
+            <div class="clm-kpi-v">₹{{r.max_allowable | number:2}}L</div>
+          </div>
+          <div class="clm-kpi-tile" ng-if="r.tool_safe_limit !== null">
+            <div class="clm-kpi-l">Safe Allowable Limit</div>
+            <div class="clm-kpi-v clm-val-ok">₹ {{c.formatIndianNumber(r.tool_safe_limit)}}</div>
+          </div>
+        </div>
+      </div>
+      <!-- ▲▲ END MOBILE CARD ▲▲ -->
+
+      <!-- 1 · APPROVAL PROGRESS -->
+      <div class="clm-ap-sec clm-acc" ng-class="{open: c.isOpen('prog')}" ng-if="r.approval_steps && r.approval_steps.length > 0">
+        <div class="clm-ap-sec-title clm-acc-head" ng-click="c.toggleAcc('prog')">
+          <span class="clm-ap-sec-num">1</span> Approval Progress <span class="clm-acc-chev">▾</span>
+        </div>
+        <div class="clm-acc-body">
+          <div class="approval-tracker">
+            <div class="tracker-scroll-wrap">
+              <div class="tracker-inner">
+                <div class="tracker-step"
+                     ng-repeat="step in r.approval_steps track by $index"
+                     ng-class="{
+                       'step-done': step.state == 'approved',
+                       'step-reject': step.state == 'rejected',
+                       'step-pending': step.state == 'pending',
+                       'done-line': !$first && r.approval_steps[$index - 1].state == 'approved',
+                       'reject-line': !$first && r.approval_steps[$index - 1].state == 'rejected'
+                     }">
+                  <div class="tracker-circle" ng-class="{'circle-done': step.state == 'approved','circle-reject': step.state == 'rejected','circle-pending': step.state == 'pending'}">
+                    <span ng-if="step.state === 'approved'">✔</span>
+                    <span ng-if="step.state === 'rejected'">✖</span>
+                    <span ng-if="step.state === 'pending'">●</span>
+                  </div>
+                  <div class="tracker-label" ng-class="{'label-done': step.state == 'approved','label-reject': step.state == 'rejected','label-pending': step.state == 'pending'}">
+                    <div class="tracker-role">{{step.label}}</div>
+                    <div class="tracker-approver" ng-if="step.approver_name">{{step.approver_name}}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2 · CUSTOMER PROFILE -->
+      <div class="clm-ap-sec clm-acc" ng-class="{open: c.isOpen('prof')}">
+        <div class="clm-ap-sec-title clm-acc-head" ng-click="c.toggleAcc('prof')">
+          <span class="clm-ap-sec-num">2</span> Customer Profile <span class="clm-acc-chev">▾</span>
+        </div>
+        <div class="clm-acc-body">
+          <div class="clm-ap-table-wrap">
+            <table class="clm-ap-table">
+              <thead>
+                <tr>
+                  <th>Customer Code</th><th>PAN Number</th><th>Type</th><th>Depot</th><th>Zone</th>
+                  <th>Region</th><th>Age</th><th>Submitted By</th><th>Required Approver</th><th>Submitted On</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="strong" data-label="Customer Code">{{r.customer_code}}</td>
+                  <td data-label="PAN">{{r.pan}}</td>
+                  <td data-label="Type">{{r.customer_type}}</td>
+                  <td data-label="Depot">{{r.depot_name}} ({{r.depot}})</td>
+                  <td data-label="Zone">{{r.zone_name}} ({{r.zone}})</td>
+                  <td data-label="Region">{{r.region_name}} ({{r.region}})</td>
+                  <td data-label="Age">{{r.vintage_days}} days</td>
+                  <td data-label="Submitted By">{{r.initiator}}</td>
+                  <td data-label="Approver">{{c.getDisplayRole(r.approver_role)}}</td>
+                  <td data-label="Submitted On">{{r.created}}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3 · CUSTOMER LIMIT DETAILS (TRADE) -->
+      <div class="clm-ap-sec clm-acc" ng-class="{open: c.isOpen('lim')}" ng-if="r.customer_type == 'Trade'">
+        <div class="clm-ap-sec-title clm-acc-head" ng-click="c.toggleAcc('lim')">
+          <span class="clm-ap-sec-num">3</span> Customer Limit Details <span class="clm-acc-chev">▾</span>
+        </div>
+        <div class="clm-acc-body">
+          <div class="clm-ap-table-wrap">
+            <table class="clm-ap-table clm-ap-table-nowrap">
+              <thead>
+                <tr class="super">
+                  <th class="bg-blank"></th>
+                  <th colspan="3" class="bg-code">Code Level</th>
+                  <th colspan="9" class="bg-pan">PAN Level</th>
+                </tr>
+                <tr>
+                  <th>Customer Code</th>
+                  <th>Code SD</th><th>Code Current Limit</th><th>Current Code OS</th>
+                  <th>PAN SD</th><th>PAN Current Limit</th><th>Current PAN OS</th>
+                  <th>Cement SD</th><th>Cement Limit</th><th>RMC SD</th><th>RMC Limit</th><th>BPD SD</th><th>BPD Limit</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="strong" data-label="Customer Code">{{r.customer_code}}</td>
+                  <td data-label="Code SD">₹{{c.formatIndianCurrency(r.code_level_sd)}}</td>
+                  <td data-label="Code Limit">₹{{c.formatIndianCurrency(r.code_level_current_limit)}}</td>
+                  <td data-label="Code OS">₹{{c.formatIndianCurrency(r.code_level_os)}}</td>
+                  <td class="pan-cell" data-label="PAN SD">₹{{c.formatIndianCurrency(r.pan_sd_abs)}}</td>
+                  <td class="pan-cell" data-label="PAN Limit">₹{{c.formatIndianCurrency(r.pan_cl_abs)}}</td>
+                  <td class="pan-cell" data-label="PAN OS">₹{{c.formatIndianCurrency(r.pan_level_os)}}</td>
+                  <td data-label="Cement SD">₹{{c.formatIndianCurrency(r.segment_breakdown.Cement.sd)}}</td>
+                  <td data-label="Cement Limit">₹{{c.formatIndianCurrency(r.segment_breakdown.Cement.cl)}}</td>
+                  <td data-label="RMC SD">₹{{c.formatIndianCurrency(r.segment_breakdown.RMC.sd)}}</td>
+                  <td data-label="RMC Limit">₹{{c.formatIndianCurrency(r.segment_breakdown.RMC.cl)}}</td>
+                  <td data-label="BPD SD">₹{{c.formatIndianCurrency(r.segment_breakdown.BPD.sd)}}</td>
+                  <td data-label="BPD Limit">₹{{c.formatIndianCurrency(r.segment_breakdown.BPD.cl)}}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4 · LIMIT ASSESSMENT (TRADE) -->
+      <div class="clm-ap-sec clm-acc" ng-class="{open: c.isOpen('assess')}" ng-if="r.customer_type == 'Trade'">
+        <div class="clm-ap-sec-title clm-acc-head" ng-click="c.toggleAcc('assess')">
+          <span class="clm-ap-sec-num">4</span> Limit Assessment <span class="clm-acc-chev">▾</span>
+        </div>
+        <div class="clm-acc-body">
+          <div class="clm-ap-table-wrap">
+            <table class="clm-ap-table clm-ap-table-nowrap">
+              <thead>
+                <tr class="super">
+                  <th class="bg-blank"></th>
+                  <th colspan="3" class="bg-req">Request &amp; Updated Limits</th>
+                  <th colspan="4" class="bg-assess">Limit Assessment</th>
+                </tr>
+                <tr>
+                  <th>Customer Code</th>
+                  <th>Request Change (+/-)</th><th>Updated Code Level Limit</th><th>Updated PAN Level Limit</th>
+                  <th>Max Allowable</th><th>Net Exposure</th><th>Sys Multiplier</th><th>Implied Multiplier</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="strong" data-label="Customer Code">{{r.customer_code}}</td>
+                  <td class="strong" data-label="Request Change" ng-class="r.code_level_requested_additional < 0 ? 'clm-val-danger' : 'clm-val-ok'">{{c.formatSigned(r.code_level_requested_additional)}}</td>
+                  <td class="strong" data-label="New Code Limit">₹{{c.formatIndianCurrency(r.code_level_total_requested)}}</td>
+                  <td class="strong" data-label="New PAN Limit">₹{{c.formatIndianCurrency(r.requested_limit_abs)}}</td>
+                  <td data-label="Max Allowable">₹{{r.max_allowable | number:2}}L</td>
+                  <td data-label="Net Exposure">₹{{r.net_exposure | number:2}}L</td>
+                  <td data-label="Sys Multiplier">{{r.system_mult || '—'}}<span ng-if="r.system_mult">x</span></td>
+                  <td data-label="Implied Multiplier" ng-class="{'implied-dev': r.is_deviation}">
+                    <span class="strong" ng-class="r.is_deviation ? 'clm-val-danger' : 'clm-val-ok'">{{r.implied_mult | number:2}}x</span>
+                    <div class="clm-ap-dev-flag" ng-if="r.is_deviation">⚠ DEVIATION</div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="clm-ap-note" ng-if="r.override_limit && r.override_limit != r.code_level_total_requested_l">
+            Override limit set by a previous approver: <b>₹{{r.override_limit | number:2}}L</b>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3 · LIMIT SUMMARY (NON-TRADE / KEY) -->
+      <div class="clm-ap-sec" ng-if="r.customer_type != 'Trade'">
+        <div class="clm-ap-sec-title"><span class="clm-ap-sec-num">3</span> Limit Summary</div>
+        <div class="clm-ap-summary-row clm-ap-summary-boxed">
+          <div class="clm-ap-summary-card clm-summary-ok" ng-if="!r.is_deviation">
+            <div class="clm-summary-label">Requested</div>
+            <div class="clm-summary-value">₹{{r.requested_limit | number:1}}L</div>
+          </div>
+          <div class="clm-ap-summary-card clm-summary-danger" ng-if="r.is_deviation">
+            <div class="clm-summary-label">Requested</div>
+            <div class="clm-summary-value">₹{{r.requested_limit | number:1}}L</div>
+          </div>
+          <div class="clm-ap-summary-card">
+            <div class="clm-summary-label">P1 — MACL</div>
+            <div class="clm-summary-value">₹{{r.p1_macl | number:1}}L</div>
+            <div class="clm-summary-sub" ng-if="r.is_listed">Net Worth based</div>
+            <div class="clm-summary-sub" ng-if="!r.is_listed">MPQ based</div>
+          </div>
+          <div class="clm-ap-summary-card">
+            <div class="clm-summary-label">P2 — Composite</div>
+            <div class="clm-summary-value">{{(r.p2_composite * 100) | number:1}}%</div>
+          </div>
+          <div class="clm-ap-summary-card">
+            <div class="clm-summary-label">P3 — Credit</div>
+            <div class="clm-summary-value clm-val-ok" ng-if="r.p3_credit >= 0.75">{{(r.p3_credit * 100) | number:0}}%</div>
+            <div class="clm-summary-value clm-val-warn" ng-if="r.p3_credit >= 0.5 && r.p3_credit < 0.75">{{(r.p3_credit * 100) | number:0}}%</div>
+            <div class="clm-summary-value clm-val-danger" ng-if="r.p3_credit < 0.5">{{(r.p3_credit * 100) | number:0}}%</div>
+          </div>
+          <div class="clm-ap-summary-card clm-summary-ok" ng-if="!r.is_deviation">
+            <div class="clm-summary-label">Safe Limit</div>
+            <div class="clm-summary-value">₹{{r.safe_limit | number:1}}L</div>
+          </div>
+          <div class="clm-ap-summary-card clm-summary-danger" ng-if="r.is_deviation">
+            <div class="clm-summary-label">Safe Limit</div>
+            <div class="clm-summary-value">₹{{r.safe_limit | number:1}}L</div>
+          </div>
+          <div class="clm-ap-summary-card">
+            <div class="clm-summary-label">Workflow</div>
+            <div class="clm-summary-value">
+              <span class="clm-type-pill clm-pill-tool" ng-if="r.workflow_path == 'Tool'">Tool</span>
+              <span class="clm-type-pill clm-pill-nontool" ng-if="r.workflow_path == 'Non-Tool'">Non-Tool</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══ TWO-COLUMN BODY (desktop) / ORDERED STACK (mobile) ══ -->
+      <div class="clm-ap-grid" ng-class="{'single': !(r.customer_type == 'Trade' && r.tool_p2 !== null)}">
+
+        <!-- LEFT: TOOL WORKING (TRADE) -->
+        <div class="clm-ap-col-left m-o3" ng-if="r.customer_type == 'Trade' && r.tool_p2 !== null">
+          <div class="clm-tw-heading">Credit Limit Tool Working</div>
+
+          <!-- Mobile: results visible without tapping -->
+          <div class="clm-mob-only clm-glance">
+            <div class="clm-glance-tile"><div class="l">Total MACL</div><div class="v">{{r.tool_p1 !== null ? '₹ ' + c.formatIndianNumber(r.tool_p1) : 'N/A'}}</div></div>
+            <div class="clm-glance-tile"><div class="l">Composite Index</div><div class="v">{{r.tool_p2}}%</div></div>
+            <div class="clm-glance-tile"><div class="l">Credit Index</div><div class="v">{{r.tool_p3}}%</div></div>
+            <div class="clm-glance-tile safe"><div class="l">Safe Allowable Limit</div><div class="v">₹ {{c.formatIndianNumber(r.tool_safe_limit)}}</div></div>
+          </div>
+
+          <!-- P1 -->
+          <div class="clm-tw-card clm-acc" ng-class="{open: c.isOpen('p1')}">
+            <div class="clm-tw-card-title clm-acc-head" ng-click="c.toggleAcc('p1')">Total MACL Derivation <span class="clm-acc-chev">▾</span></div>
+            <div class="clm-acc-body">
+              <table class="clm-tw-kv">
+                <tr><th>Company Entity Type</th><td>Unlisted Entity (Trade)</td></tr>
+                <tr><th>Total Potential</th><td>{{r.tool_expected_potential | number:2}} MT</td></tr>
+                <tr><th>Current SOB %</th><td>{{r.tool_current_sob}}%</td></tr>
+                <tr><th>Expected SOB %</th><td>{{r.tool_expected_sob}}%</td></tr>
+                <tr><th>Computed MPQ</th><td class="strong">{{r.tool_mpq | number:2}} MT</td></tr>
+                <tr><th>Order Rate / MT</th><td class="strong">₹ {{r.tool_order_rate}}</td></tr>
+                <tr><th>Credit Tenor (Days)</th><td>45</td></tr>
+              </table>
+              <div class="clm-tw-subnote clm-mob-only" ng-if="r.tool_p1 !== null">{{r.tool_mpq | number:2}} MT × ₹{{r.tool_order_rate}} × (45 ÷ 30) = ₹{{c.formatIndianNumber(r.tool_p1)}}</div>
+            </div>
+          </div>
+          <div class="clm-tw-result clm-desk-only">
+            <div class="clm-tw-result-label">Total MACL</div>
+            <div class="clm-tw-result-value" ng-if="r.tool_p1 !== null">₹ {{c.formatIndianNumber(r.tool_p1)}}</div>
+            <div class="clm-tw-result-value" ng-if="r.tool_p1 === null">N/A</div>
+            <div class="clm-tw-result-sub" ng-if="r.tool_p1 !== null">{{r.tool_mpq | number:2}} MT × ₹{{r.tool_order_rate}} × (45 ÷ 30) = ₹{{c.formatIndianNumber(r.tool_p1)}}</div>
+          </div>
+
+          <!-- P2 -->
+          <div class="clm-tw-card clm-acc" ng-class="{open: c.isOpen('p2')}">
+            <div class="clm-tw-card-title clm-acc-head" ng-click="c.toggleAcc('p2')">Composite Risk Index Scoring Matrix <span class="clm-acc-chev">▾</span></div>
+            <div class="clm-acc-body">
+              <div class="clm-doc-source-label" style="padding:10px 16px 0;">
+                <span class="clm-doc-badge">{{r.tool_document_type || 'Manual Entry'}}</span> Document Source Utilized
+              </div>
+              <div style="overflow-x:auto;">
+                <table class="clm-tw-matrix p2m">
+                  <thead>
+                    <tr>
+                      <th>Risk Parameter Category</th><th>Selected Metric / Answer</th>
+                      <th class="num">Score</th><th class="num">Weight %</th><th class="num">Final Pts</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr ng-repeat="param in r.tool_matrix_list">
+                      <td class="strong c-name">{{param.name}}</td>
+                      <td class="c-label">
+                        {{param.label}}
+                        <span class="clm-tw-tag clm-tw-tag-ai" ng-if="param.mappingType == 'AI' && !param.overridden">AI</span>
+                        <span class="clm-tw-tag clm-tw-tag-ovr" ng-if="param.overridden">Overridden</span>
+                        <span class="clm-mob-only clm-tw-sub">Score {{param.score}} · Weight {{param.weight}}%</span>
+                      </td>
+                      <td class="num hide-m">{{param.score}}</td>
+                      <td class="num hide-m">{{param.weight}}%</td>
+                      <td class="num c-pts">{{param.weighted_value}}</td>
+                    </tr>
+                    <tr class="clm-tw-total">
+                      <td colspan="3" class="c-name">Composite Index</td>
+                      <td class="num hide-m">100%</td>
+                      <td class="num c-pts">{{r.tool_p2}}%</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="clm-tw-result clm-desk-only">
+            <div class="clm-tw-result-label">Composite Index</div>
+            <div class="clm-tw-result-value">{{r.tool_p2}}%</div>
+          </div>
+
+          <!-- P3 -->
+          <div class="clm-tw-card clm-acc" ng-class="{open: c.isOpen('p3')}">
+            <div class="clm-tw-card-title clm-acc-head" ng-click="c.toggleAcc('p3')">Credit Index Breakdown <span class="clm-acc-chev">▾</span></div>
+            <div class="clm-acc-body">
+              <div class="clm-tw-subnote">Ageing Breakdown — average of last 6 months</div>
+              <table class="clm-tw-matrix">
+                <thead>
+                  <tr><th>Bucket</th><th class="num">Avg. Amount (6 Mo.)</th><th class="num">%</th></tr>
+                </thead>
+                <tbody>
+                  <tr ng-repeat="b in r.p3_buckets">
+                    <td class="strong">{{b.label}}</td>
+                    <td class="num" ng-class="{'muted': !b.amount}">₹{{c.formatIndianCurrency(b.amount)}}</td>
+                    <td class="num" ng-class="{'muted': !b.pct, 'clm-val-ok': b.pct > 0 && b.label == '0-30'}">{{b.pct}}%</td>
+                  </tr>
+                  <tr class="clm-tw-total">
+                    <td>Total Outstanding</td>
+                    <td class="num">₹{{c.formatIndianCurrency(r.p3_total)}}</td>
+                    <td class="num">100%</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="clm-tw-ratings">
+                <div class="clm-tw-rating">
+                  <div class="clm-tw-rating-label">External Rating (from P2)</div>
+                  <div class="clm-tw-rating-value">{{r.tool_external_rating || 'N/A'}}</div>
+                </div>
+                <div class="clm-tw-rating">
+                  <div class="clm-tw-rating-label">Internal Rating (from Aging)</div>
+                  <div class="clm-tw-rating-value">{{r.tool_internal_rating || 'N/A'}}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="clm-tw-result clm-desk-only">
+            <div class="clm-tw-result-label">Credit Index</div>
+            <div class="clm-tw-result-value">{{r.tool_p3}}%</div>
+          </div>
+
+          <!-- SAFE LIMIT -->
+          <div class="clm-tw-result clm-tw-safe clm-desk-only">
+            <div class="clm-tw-result-label">Safe Allowable Limit</div>
+            <div class="clm-tw-result-value">₹ {{c.formatIndianNumber(r.tool_safe_limit)}}</div>
+          </div>
+        </div>
+
+        <!-- RIGHT COLUMN -->
+        <div class="clm-ap-col-right">
+
+          <!-- Business justification -->
+          <div class="clm-ap-rsec m-o1">
+            <div class="clm-ap-detail-section-title">Business Justification</div>
+            <div class="clm-ap-justification-text">{{r.justification || 'Not provided'}}</div>
+          </div>
+
+          <!-- Deviation justification -->
+          <div class="clm-ap-rsec m-o2" ng-if="r.is_deviation">
+            <div class="clm-ap-detail-section-title" style="color:#c0392b">⚠ Deviation Justification</div>
+            <div class="clm-ap-justification-text clm-justification-dev">{{r.deviation_justification || 'Not provided'}}</div>
+          </div>
+
+          <!-- Ageing table -->
+          <div class="clm-ap-rsec clm-acc m-o4" ng-class="{open: c.isOpen('age')}" ng-if="r.aging_table && r.aging_table.length > 0">
+            <div class="clm-ap-detail-section-title clm-acc-head" ng-click="c.toggleAcc('age')">Ageing Breakdown for Customer Code <span class="clm-acc-chev">▾</span></div>
+            <div class="clm-acc-body">
+              <!-- desktop / PDF: full table -->
+              <div class="clm-desk-only" style="overflow-x:auto;">
+                <table class="clm-aging-table">
+                  <thead>
+                    <tr>
+                      <th>Month</th><th>0-21</th><th>22-30</th><th>31-45</th><th>46-60</th><th>61-75</th>
+                      <th>76-90</th><th>91-120</th><th>&gt;120</th><th>Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr ng-repeat="row in r.aging_table" ng-class="{'avg-row': row.isAverage}">
+                      <td>{{row.month}}</td>
+                      <td>{{c.formatAgingCell(row.b0_30)}}</td>
+                      <td>{{c.formatAgingCell(row.b22_30)}}</td>
+                      <td>{{c.formatAgingCell(row.b31_45)}}</td>
+                      <td>{{c.formatAgingCell(row.b46_60)}}</td>
+                      <td>{{c.formatAgingCell(row.b61_75)}}</td>
+                      <td>{{c.formatAgingCell(row.b76_90)}}</td>
+                      <td>{{c.formatAgingCell(row.b91_120)}}</td>
+                      <td>{{c.formatAgingCell(row.b120)}}</td>
+                      <td><b>{{c.formatAgingCell(row.total)}}</b></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <!-- mobile: compact rows, only non-zero buckets -->
+              <div class="clm-mob-only">
+                <div class="clm-age-row" ng-repeat="row in r.aging_table" ng-class="{'avg': row.isAverage}">
+                  <div class="clm-age-top">
+                    <span class="clm-age-month">{{row.month}}</span>
+                    <span class="clm-age-total">{{c.formatAgingCell(row.total)}}</span>
+                  </div>
+                  <div class="clm-age-chips" ng-if="row.chips && row.chips.length">
+                    <span class="clm-age-chip" ng-repeat="ch in row.chips"><b>{{ch.l}}</b> {{c.formatAgingCell(ch.v)}}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Aging risk bars -->
+          <div class="clm-ap-rsec m-o5" ng-if="r.aging_detail">
+            <div class="clm-ap-detail-section-title">Aging Risk Distribution</div>
+            <div class="clm-aging-row">
+              <span class="clm-aging-label">0–60 Days (Safe)</span>
+              <div class="clm-aging-bar-bg"><div class="clm-aging-bar clm-aging-safe" ng-style="{width: r.aging_detail.safe_pct + '%'}"></div></div>
+              <span class="clm-aging-pct">{{r.aging_detail.safe_pct}}%</span>
+            </div>
+            <div class="clm-aging-row">
+              <span class="clm-aging-label">61–75 Days</span>
+              <div class="clm-aging-bar-bg"><div class="clm-aging-bar clm-aging-warn" ng-style="{width: r.aging_detail.warn_pct + '%'}"></div></div>
+              <span class="clm-aging-pct">{{r.aging_detail.warn_pct}}%</span>
+            </div>
+            <div class="clm-aging-row">
+              <span class="clm-aging-label">76–90 Days</span>
+              <div class="clm-aging-bar-bg"><div class="clm-aging-bar clm-aging-crit" ng-style="{width: r.aging_detail.crit_pct + '%'}"></div></div>
+              <span class="clm-aging-pct">{{r.aging_detail.crit_pct}}%</span>
+            </div>
+            <div class="clm-aging-row">
+              <span class="clm-aging-label">&gt;90 Days</span>
+              <div class="clm-aging-bar-bg"><div class="clm-aging-bar clm-aging-toxic" ng-style="{width: r.aging_detail.toxic_pct + '%'}"></div></div>
+              <span class="clm-aging-pct">{{r.aging_detail.toxic_pct}}%</span>
+            </div>
+          </div>
+
+          <!-- Previous approved limit (approval_history) -->
+          <div class="clm-ap-rsec m-o6" ng-if="r.approval_history.length > 0">
+            <div class="clm-ap-detail-section-title">Previous Approved Limit</div>
+            <div class="clm-ap-kv-row" ng-repeat="step in r.approval_history" ng-if="step.status == 'approved'">
+              <span class="clm-ap-kv-key">Approved by {{step.approver_role}}</span>
+              <span class="clm-ap-kv-val">₹{{step.approved_limit | number}}</span>
+            </div>
+          </div>
+
+          <!-- Previous approval -->
+          <div class="clm-ap-rsec m-o6" ng-if="r.previous_approval">
+            <div class="clm-ap-detail-section-title">Previous Approved Limit</div>
+            <div class="clm-ap-kv-row">
+              <span class="clm-ap-kv-key">Approved by {{r.previous_approval.approver}}</span>
+              <span class="clm-ap-kv-val">₹{{c.formatIndianNumber(r.previous_approval.amount)}}</span>
+            </div>
+          </div>
+
+          <!-- Approval comments history -->
+          <div class="clm-ap-rsec clm-acc m-o7" ng-class="{open: c.isOpen('cmt')}" ng-if="r.approval_comments && r.approval_comments.length">
+            <div class="clm-ap-detail-section-title clm-acc-head" ng-click="c.toggleAcc('cmt')">Approval Comments History ({{r.approval_comments.length}}) <span class="clm-acc-chev">▾</span></div>
+            <div class="clm-acc-body">
+              <div class="clm-ap-scroll">
+                <div class="clm-comment-card" ng-repeat="comment in r.approval_comments">
+                  <div class="clm-comment-header">
+                    <div>
+                      <span class="clm-comment-user">{{comment.approver}}</span>
+                      <span class="clm-comment-state" ng-class="{'approved': comment.state == 'approved', 'rejected': comment.state == 'rejected'}">{{comment.state | uppercase}}</span>
+                    </div>
+                    <div class="clm-comment-date">{{comment.updated_on}}</div>
+                  </div>
+                  <div class="clm-comment-body">{{comment.comments}}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Answered RFIs -->
+          <div class="clm-ap-rsec clm-acc m-o8" ng-class="{open: c.isOpen('rfi')}" ng-if="r.answered_rfis && r.answered_rfis.length > 0">
+            <div class="clm-ap-detail-section-title clm-acc-head" ng-click="c.toggleAcc('rfi')">Information Received ({{r.answered_rfis.length}}) <span class="clm-acc-chev">▾</span></div>
+            <div class="clm-acc-body">
+              <div class="clm-rfi-history-card" ng-repeat="rfi in r.answered_rfis">
+                <div class="clm-rfi-history-header">
+                  <div style="line-height:1.4;">
+                    <span style="color:#7f8c9a; font-size:12px;">{{rfi.raised_by_name}} asked:</span><br>
+                    <span class="clm-rfi-history-user">{{rfi.target_name}} ({{rfi.target_role}})</span>
+                    <span class="clm-rfi-history-badge">Answered</span>
+                  </div>
+                  <div class="clm-rfi-history-date">{{rfi.responded_on}}</div>
+                </div>
+                <div class="clm-rfi-history-qa">
+                  <div class="clm-rfi-q"><b>Q:</b> {{rfi.question}}</div>
+                  <div class="clm-rfi-a"><b>A:</b> {{rfi.response}}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Documents attached -->
+          <div class="clm-ap-rsec clm-acc m-o9" ng-class="{open: c.isOpen('docs')}" ng-if="r.attachments && r.attachments.length">
+            <div class="clm-ap-detail-section-title clm-acc-head" ng-click="c.toggleAcc('docs')">Documents Attached ({{r.attachments.length}}) <span class="clm-acc-chev">▾</span></div>
+            <div class="clm-acc-body">
+              <div class="clm-ap-doc-row" ng-repeat="att in r.attachments">
+                <span class="clm-ap-doc-name">]]>📄<![CDATA[ {{att.file_name}}</span>
+                <span class="clm-ap-doc-actions">
+                  <button class="clm-btn clm-btn-outline" style="height:32px;padding:0 12px;" ng-click="c.previewAttachment(att)">Preview</button>
+                  <a class="clm-ap-doc-link" ng-href="/sys_attachment.do?sys_id={{att.sys_id}}" target="_blank">Download</a>
+                </span>
+              </div>
+            </div>
+          </div>
+
+        </div><!-- /right -->
+      </div><!-- /grid -->
+    </div><!-- /page -->
+  </div><!-- /detail -->
+
+  <!-- ── EMPTY STATE ── -->
+  <div class="clm-ap-empty" ng-if="!c.data.selectedRequest && !c.loading">
+    <div class="clm-ap-empty-icon" style="font-size: 56px; margin-bottom: 20px;">]]>📄<![CDATA[</div>
+    <div class="clm-ap-empty-title">No Request Selected</div>
+    <div class="clm-ap-empty-sub">Click a row in the Approval Requests tab to view the request details here.</div>
+    <div class="clm-ap-empty-sub" ng-if="c.data.error" style="color:#E23D28; margin-top:8px;">{{c.data.error}}</div>
+  </div>
+
+  <!-- LOADING STATE -->
+  <div class="clm-ap-empty" ng-if="c.loading">
+      <div class="clm-ap-empty-icon" style="font-size: 56px; margin-bottom: 20px;"><i class="fa fa-spinner fa-spin" style="color: #1a1a1a;"></i></div>
+      <div class="clm-ap-empty-title">Loading Details</div>
+      <div class="clm-ap-empty-sub">Fetching request financials and customer snapshot...</div>
+  </div>
+
+</div>]]></template>
+    </sp_widget>
+</record_update>

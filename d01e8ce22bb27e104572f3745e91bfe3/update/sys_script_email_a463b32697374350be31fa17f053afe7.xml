@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_trade_approval</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm_trade_approval
+// Table: x_birl3_clm_clm_new_credit_request
+(function runMailScript(current, template, email, email_action, event) {
+
+    // Same display mapping the "View My Requests" widget uses (getDisplayRole)
+    var ROLE_MAP = {
+        'CMO_CFO': 'CFO',
+        'NSH_CCH': 'CCH',
+        'HEAD_KEY_RMC': 'HEAD_KEY & RMC',
+        'CH_RMC': 'CH RMC',
+        'HEAD_KEY_CCH': 'CCH',
+        'BH_CFO': 'CFO',
+        'CCH_HBPD': 'CCH'
+    };
+    var rawLevel = (current.getValue('required_approver_level') || '').trim();
+    var level = ROLE_MAP[rawLevel] || rawLevel || '&mdash;';
+
+    var isDev = (current.getValue('is_deviation') + '' === '1') || (current.getValue('is_deviation') + '' === 'true');
+    var devPill = isDev
+        ? '<span style="display:inline-block; background-color:#E23D28; color:#ffffff; border:1px solid #b82b1c; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">Deviation</span>'
+        : '<span style="display:inline-block; background-color:#eafaf1; color:#1e8449; border:1px solid #a9dfbf; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">Standard</span>';
+
+    // Who currently holds the request (pending approval records)
+    var awaiting = [];
+    var ap = new GlideRecord('sysapproval_approver');
+    var q = ap.addQuery('sysapproval', current.getUniqueValue());
+    q.addOrCondition('document_id', current.getUniqueValue());
+    ap.addQuery('state', 'requested');
+    var lastSubmitted = current.getValue('u_last_submitted_on');
+    if (lastSubmitted) ap.addQuery('sys_created_on', '>=', lastSubmitted);
+    ap.orderBy('sys_created_on');
+    ap.query();
+    while (ap.next()) awaiting.push(GlideStringUtil.escapeHTML(ap.approver.getDisplayValue() + ''));
+
+    var TD_K = 'padding:8px 0; color:#5a6a7a; border-bottom:1px solid #eef1f5;';
+    var TD_V = 'padding:8px 0; color:#1a1a1a; border-bottom:1px solid #eef1f5;';
+
+    var h = '';
+    h += '<h3 style="margin:24px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">Approval</h3>';
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+    h += '<tr><td width="38%" style="' + TD_K + '">Request Type</td><td style="' + TD_V + '">' + devPill + '</td></tr>';
+    h += '<tr><td style="' + (awaiting.length ? TD_K : 'padding:8px 0; color:#5a6a7a;') + '">Final Approval Level</td><td style="' + (awaiting.length ? TD_V : 'padding:8px 0; color:#1a1a1a;') + ' font-weight:700;">' + level + '</td></tr>';
+    if (awaiting.length) {
+        h += '<tr><td style="padding:8px 0; color:#5a6a7a;">Currently With</td><td style="padding:8px 0; color:#1a1a1a;">' + awaiting.join(', ') + '</td></tr>';
+    }
+    h += '</tbody></table>';
+
+    template.print(h);
+
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-11 11:15:55</sys_created_on>
+        <sys_id>a463b32697374350be31fa17f053afe7</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_trade_approval</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_a463b32697374350be31fa17f053afe7</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-11 11:15:55</sys_updated_on>
+    </sys_script_email>
+</record_update>

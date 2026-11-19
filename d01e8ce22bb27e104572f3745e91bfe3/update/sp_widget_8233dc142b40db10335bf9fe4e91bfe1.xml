@@ -1,0 +1,1916 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[/*
+  CLM – Approval Requests (Zonal: ZHM / ZH_RMC / ZH_BPD / ZCH dashboard) – Client Script  v2.2-ZHM
+  Built from MD master v2.2. Persona differences:
+  - Search also matches zone / region / depot names and codes
+  - Unused custom date-range state (customFrom / customTo) removed – Period has no custom option
+  ---------------- master history ----------------
+  v2.2
+  - Total Requests tile now also scrolls down to the Approval Requests table
+    (scroll moved into c.scrollToTable(), called for every tile click except un-toggling a tile)
+  v2.1
+  - c.seriesDefs: Total, Pending, Approved, Rejected (Stage Pending / Send-Back removed)
+  - KPI: 'sendback' filter removed; c.setKpiFilter('') (Total tile) clears the tile filter
+  v2.0
+  - Chart: c.seriesDefs (legend/lines/tooltip from one list), c.buildChartScale() -> dynamic
+    "nice" Y-axis that matches the data (old ticks were hard-coded 0–8 while lines were scaled to max),
+    c.chartY / c.xPct / c.yPct / c.colWidth helpers for the 1000x200 plot, simplified hover
+  - Scale is rebuilt after every server.update()
+  - New: c.hasActiveFilters(), c.clearAllFilters(), c.kpiLabels (table "Filtered by" chip)
+  - Removed: c.yAxisTicks loop, getBoundingClientRect tooltip maths (tooltip now % positioned)
+  Filters, KPI filter, search and pagination logic unchanged.
+*/
+function widgetcontroller($scope, $rootScope, $timeout) {
+  var c = this;
+
+  c.filters = {
+    segments: [],
+    zones: [],
+    regions: [],
+    depots: [],
+    status: '',
+    period: c.data.selectedPeriod || 'latest',
+    search: ''
+  };
+
+  c.rowsPerPageOptions = [10, 15, 20, 50, 100];
+  c.pagination = { currentPage: 1, rowsPerPage: 10 };
+  c.hoverIndex = -1;
+  c.showTooltip = false;
+  c.paginatedRequests = [];
+  c.kpiFilter = '';
+
+  c.kpiLabels = {
+    pending: 'Pending',
+    approved: 'Approved',
+    rejected: 'Rejected',
+    deviated: 'Deviated'
+  };
+
+  // Chart series: key = property of data.chart.series (order = draw order, last on top;
+  // Total is dashed and drawn last so lines underneath stay visible where they overlap)
+  c.seriesDefs = [
+    { key: 'submitted', label: 'Pending' },
+    { key: 'approved',  label: 'Approved' },
+    { key: 'rejected',  label: 'Rejected' },
+    { key: 'total',     label: 'Total' }
+  ];
+
+  c.closeAllDropdowns = function() {
+      c.segmentDropdownOpen = false;
+      c.zoneDropdownOpen = false;
+      c.regionDropdownOpen = false;
+      c.depotDropdownOpen = false;
+  };
+
+  // ===================== SEGMENT multiselect =====================
+  c.segmentDropdownOpen = false;
+  c.segmentSearch = '';
+
+  c.openSegmentDropdown = function() { c.closeAllDropdowns(); c.segmentDropdownOpen = true; };
+  c.closeSegmentDropdown = function() { c.segmentDropdownOpen = false; };
+
+  c.toggleSegment = function(sg) {
+      var idx = c.filters.segments.indexOf(sg);
+      if (idx === -1) {
+          c.filters.segments.push(sg);
+      } else {
+          c.filters.segments.splice(idx, 1);
+      }
+      c.filters.zones = [];
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.segmentSearch = '';
+      c.applyFilters();
+  };
+
+  c.selectAllSegments = function() {
+      var allSegments = (c.data && c.data.filterOpts && c.data.filterOpts.segments) || [];
+      c.filters.segments = allSegments.slice();
+      c.filters.zones = [];
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.segmentSearch = '';
+      c.applyFilters();
+  };
+
+  c.clearAllSegments = function() {
+      c.filters.segments = [];
+      c.filters.zones = [];
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.segmentSearch = '';
+      c.applyFilters();
+  };
+
+  c.isSegmentSelected = function(sg) {
+      return c.filters.segments.indexOf(sg) !== -1;
+  };
+
+  c.getFilteredSegments = function() {
+      var all = (c.data && c.data.filterOpts && c.data.filterOpts.segments) || [];
+      var term = (c.segmentSearch || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(sg) { return String(sg).toLowerCase().indexOf(term) !== -1; });
+  };
+
+  c.getSegmentDisplayText = function() {
+      if (!c.filters.segments || c.filters.segments.length === 0) return 'All Segments';
+      if (c.filters.segments.length === 1) return c.filters.segments[0];
+      return c.filters.segments.length + ' segments selected';
+  };
+
+  // ===================== ZONE multiselect =====================
+  c.zoneDropdownOpen = false;
+  c.zoneSearch = '';
+
+  c.openZoneDropdown = function() { c.closeAllDropdowns(); c.zoneDropdownOpen = true; };
+  c.closeZoneDropdown = function() { c.zoneDropdownOpen = false; };
+
+  c.toggleZone = function(z) {
+      var idx = c.filters.zones.indexOf(z);
+      if (idx === -1) {
+          c.filters.zones.push(z);
+      } else {
+          c.filters.zones.splice(idx, 1);
+      }
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.zoneSearch = '';
+      c.applyFilters();
+  };
+
+  c.selectAllZones = function() {
+      var allZones = (c.data && c.data.filterOpts && c.data.filterOpts.zones) || [];
+      c.filters.zones = allZones.slice();
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.zoneSearch = '';
+      c.applyFilters();
+  };
+
+  c.clearAllZones = function() {
+      c.filters.zones = [];
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.zoneSearch = '';
+      c.applyFilters();
+  };
+
+  c.isZoneSelected = function(z) {
+      return c.filters.zones.indexOf(z) !== -1;
+  };
+
+  c.getFilteredZones = function() {
+      var all = (c.data && c.data.filterOpts && c.data.filterOpts.zones) || [];
+      var term = (c.zoneSearch || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(z) { return String(z).toLowerCase().indexOf(term) !== -1; });
+  };
+
+  c.getZoneDisplayText = function() {
+      if (!c.filters.zones || c.filters.zones.length === 0) return 'All Zones';
+      if (c.filters.zones.length === 1) return c.filters.zones[0];
+      return c.filters.zones.length + ' zones selected';
+  };
+
+  // ===================== REGION multiselect =====================
+  c.regionDropdownOpen = false;
+  c.regionSearch = '';
+
+  c.openRegionDropdown = function() { c.closeAllDropdowns(); c.regionDropdownOpen = true; };
+  c.closeRegionDropdown = function() { c.regionDropdownOpen = false; };
+
+  c.toggleRegion = function(r) {
+      var idx = c.filters.regions.indexOf(r);
+      if (idx === -1) {
+          c.filters.regions.push(r);
+      } else {
+          c.filters.regions.splice(idx, 1);
+      }
+      c.filters.depots = [];
+      c.regionSearch = '';
+      c.applyFilters();
+  };
+
+  c.selectAllRegions = function() {
+      var allRegions = (c.data && c.data.filterOpts && c.data.filterOpts.regions) || [];
+      c.filters.regions = allRegions.slice();
+      c.filters.depots = [];
+      c.regionSearch = '';
+      c.applyFilters();
+  };
+
+  c.clearAllRegions = function() {
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.regionSearch = '';
+      c.applyFilters();
+  };
+
+  c.isRegionSelected = function(r) {
+      return c.filters.regions.indexOf(r) !== -1;
+  };
+
+  c.getFilteredRegions = function() {
+      var all = (c.data && c.data.filterOpts && c.data.filterOpts.regions) || [];
+      var term = (c.regionSearch || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(r) { return String(r).toLowerCase().indexOf(term) !== -1; });
+  };
+
+  c.getRegionDisplayText = function() {
+      if (!c.filters.regions || c.filters.regions.length === 0) return 'All Regions';
+      if (c.filters.regions.length === 1) return c.filters.regions[0];
+      return c.filters.regions.length + ' regions selected';
+  };
+
+  // ===================== DEPOT multiselect =====================
+  c.depotDropdownOpen = false;
+  c.depotSearch = '';
+
+  c.openDepotDropdown = function() { c.closeAllDropdowns(); c.depotDropdownOpen = true; };
+  c.closeDepotDropdown = function() { c.depotDropdownOpen = false; };
+
+  c.toggleDepot = function(d) {
+      var idx = c.filters.depots.indexOf(d);
+      if (idx === -1) {
+          c.filters.depots.push(d);
+      } else {
+          c.filters.depots.splice(idx, 1);
+      }
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.selectAllDepots = function() {
+      var allDepots = (c.data && c.data.filterOpts && c.data.filterOpts.depots) || [];
+      c.filters.depots = allDepots.slice();
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.clearAllDepots = function() {
+      c.filters.depots = [];
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.isDepotSelected = function(d) {
+      return c.filters.depots.indexOf(d) !== -1;
+  };
+
+  c.getFilteredDepots = function() {
+      var all = (c.data && c.data.filterOpts && c.data.filterOpts.depots) || [];
+      var term = (c.depotSearch || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(d) { return String(d).toLowerCase().indexOf(term) !== -1; });
+  };
+
+  c.getDepotDisplayText = function() {
+      if (!c.filters.depots || c.filters.depots.length === 0) return 'All Depots';
+      if (c.filters.depots.length === 1) return c.filters.depots[0];
+      return c.filters.depots.length + ' depots selected';
+  };
+
+  // ===================== Filter helpers =====================
+  c.hasActiveFilters = function() {
+      var f = c.filters;
+      return !!(f.segments.length || f.zones.length || f.regions.length || f.depots.length ||
+                f.status || (f.period && f.period !== 'latest'));
+  };
+
+  c.clearAllFilters = function() {
+      c.filters.segments = [];
+      c.filters.zones = [];
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.filters.status = '';
+      c.filters.period = 'latest';
+      c.closeAllDropdowns();
+      c.applyFilters();
+  };
+
+  c.openRequestDetail = function(r) {
+      if (!r || !r.requestCode) return;
+      $rootScope.clmPendingRequestNumber = r.requestCode;
+      $rootScope.$broadcast('clm.request.selected', { number: r.requestCode });
+      $rootScope.$broadcast('clm.switch.tab', 'request_detail');
+  };
+
+  c.applyFilters = function() {
+    c.pagination.currentPage = 1;
+    c.data.filters = {
+      segments: c.filters.segments,
+      zones: c.filters.zones,
+      regions: c.filters.regions,
+      depots: c.filters.depots,
+      status: c.filters.status,
+      period: c.filters.period
+    };
+    c.server.update().then(function() {
+      c.buildChartScale();
+      c.onMouseLeaveChart();
+      c.runSearch();
+    });
+  };
+
+  c.scrollToTable = function() {
+      $timeout(function() {
+          var el = document.getElementById('clmRequestsTableContainer');
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 100);
+  };
+
+  c.setKpiFilter = function(state) {
+      state = state || '';
+      if (!state) {
+          // Total Requests tile: show everything and jump to the table
+          c.kpiFilter = '';
+          c.scrollToTable();
+      } else if (c.kpiFilter === state) {
+          // Clicking the active tile again (or the chip ✕) just clears the filter
+          c.kpiFilter = '';
+      } else {
+          c.kpiFilter = state;
+          c.scrollToTable();
+      }
+      c.pagination.currentPage = 1;
+      c.runSearch();
+  };
+
+  c.runSearch = function() {
+    var term = (c.filters.search || '').toString().toLowerCase().trim();
+
+    (c.data.requests || []).forEach(function(r) {
+      var isHidden = false;
+
+      if (term) {
+        var fields = [
+          r.requestCode, r.customerCode, r.customerName, r.pan,
+          r.zone, r.zoneName, r.zoneCode,
+          r.region, r.regionName, r.regionCode,
+          r.depot, r.depotName, r.depotCode
+        ];
+        var matched = fields.some(function(f) {
+          return (f || '').toString().toLowerCase().indexOf(term) > -1;
+        });
+        if (!matched) isHidden = true;
+      }
+
+      if (!isHidden && c.kpiFilter) {
+          if (c.kpiFilter === 'deviated') {
+              if (!r.isDeviation) isHidden = true;
+          } else {
+              var statLower = (r.status || '').toLowerCase();
+              if (c.kpiFilter === 'pending' && statLower.indexOf('submit') === -1) isHidden = true;
+              if (c.kpiFilter === 'approved' && statLower.indexOf('approv') === -1) isHidden = true;
+              if (c.kpiFilter === 'rejected' && statLower.indexOf('reject') === -1) isHidden = true;
+          }
+      }
+
+      r._hidden = isHidden;
+    });
+
+    c.pagination.currentPage = 1;
+    c.updatePaginatedRequests();
+  };
+
+  c.updatePaginatedRequests = function() {
+    var visible = (c.data.requests || []).filter(function(r) { return !r._hidden; });
+    var start = (c.pagination.currentPage - 1) * c.pagination.rowsPerPage;
+    var end = start + c.pagination.rowsPerPage;
+    c.paginatedRequests = visible.slice(start, end);
+  };
+
+  c.getVisibleRecordsCount = function() {
+    return (c.data.requests || []).filter(function(r) { return !r._hidden; }).length;
+  };
+
+  c.getTotalPages = function() {
+    var visible = (c.data.requests || []).filter(function(r) { return !r._hidden; });
+    return Math.ceil(visible.length / c.pagination.rowsPerPage) || 1;
+  };
+
+  c.getPageNumbers = function() {
+    var total = c.getTotalPages();
+    var pages = [];
+    var maxVisible = 5;
+    var start = Math.max(1, c.pagination.currentPage - Math.floor(maxVisible / 2));
+    var end = Math.min(total, start + maxVisible - 1);
+
+    if (end - start < maxVisible - 1) {
+      start = Math.max(1, end - maxVisible + 1);
+    }
+
+    for (var i = start; i <= end; i++) {
+      pages.push(i);
+    }
+    return pages;
+  };
+
+  c.previousPage = function() {
+    if (c.pagination.currentPage > 1) { c.pagination.currentPage--; c.updatePaginatedRequests(); }
+  };
+  c.nextPage = function() {
+    if (c.pagination.currentPage < c.getTotalPages()) { c.pagination.currentPage++; c.updatePaginatedRequests(); }
+  };
+  c.goToPage = function(pageNum) {
+    c.pagination.currentPage = pageNum; c.updatePaginatedRequests();
+  };
+  c.onRowsPerPageChange = function() {
+    c.pagination.currentPage = 1; c.updatePaginatedRequests();
+  };
+
+  $scope.$watch('c.filters.search', c.runSearch);
+
+  // ===================== Chart (plot area = 1000 x 200 SVG units) =====================
+  var PLOT_W = 1000, PLOT_H = 200;
+  c.chartScale = { top: 4, ticks: [0, 1, 2, 3, 4] };
+
+  // Y-axis with "nice" steps that always covers the highest value in any series
+  c.buildChartScale = function() {
+    var max = (c.data.chart && c.data.chart.max) || 0;
+    var step, top;
+    if (max <= 4) {
+      step = 1; top = 4;
+    } else {
+      var raw = max / 4;
+      var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+      var r = raw / mag;
+      step = (r <= 1 ? 1 : r <= 2 ? 2 : r <= 2.5 ? 2.5 : r <= 5 ? 5 : 10) * mag;
+      if (step < 1) step = 1;
+      top = step * Math.ceil(max / step);
+    }
+    var ticks = [];
+    for (var v = 0; v <= top + 1e-9; v += step) ticks.push(Math.round(v * 100) / 100);
+    c.chartScale = { top: top, ticks: ticks };
+  };
+
+  c.chartX = function(i) {
+    var n = (c.data.chart.months || []).length;
+    if (n <= 1) return PLOT_W / 2;
+    return i * (PLOT_W / (n - 1));
+  };
+
+  c.chartY = function(v) {
+    return PLOT_H - ((v || 0) / (c.chartScale.top || 1)) * PLOT_H;
+  };
+
+  c.xPct = function(i) { return c.chartX(i) / PLOT_W * 100; };
+  c.yPct = function(v) { return c.chartY(v) / PLOT_H * 100; };
+
+  c.colWidth = function() {
+    var n = (c.data.chart.months || []).length;
+    return n <= 1 ? PLOT_W : PLOT_W / (n - 1);
+  };
+
+  c.linePoints = function(key) {
+    var months = c.data.chart.months || [];
+    var series = (c.data.chart.series || {})[key] || [];
+    var pts = [];
+    months.forEach(function(m, i) {
+      pts.push(c.chartX(i) + ',' + c.chartY(series[i] || 0));
+    });
+    return pts.join(' ');
+  };
+
+  c.onMouseOverMonth = function(ev, index) {
+    c.hoverIndex = index;
+    c.showTooltip = true;
+  };
+
+  c.onMouseLeaveChart = function() { c.hoverIndex = -1; c.showTooltip = false; };
+
+  // ===================== Badges =====================
+  c.statusClass = function(status) {
+    var s = (status || '').toLowerCase();
+    if (s.indexOf('submit') > -1 || s.indexOf('pend') > -1) return 'st-submitted';
+    if (s.indexOf('approv') > -1) return 'st-approved';
+    if (s.indexOf('return') > -1 || s.indexOf('send') > -1) return 'st-sendback';
+    if (s.indexOf('reject') > -1) return 'st-rejected';
+    return 'st-default';
+  };
+
+  c.segClass = function(seg) {
+    var s = (seg || '').toLowerCase();
+    if (s.indexOf('cement') > -1) return 'seg-cement';
+    if (s.indexOf('rmc') > -1) return 'seg-rmc';
+    if (s.indexOf('bpd') > -1) return 'seg-bpd';
+    return 'seg-default';
+  };
+
+  c.buildChartScale();
+  c.updatePaginatedRequests();
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/*
+  CLM – Approval Requests (Zonal: ZHM / ZH_RMC / ZH_BPD / ZCH dashboard)  v2.1-ZHM
+  Same as MD master v2.1, plus a "ZHM: compact table" block so the 14 columns (incl. Zone,
+  with "Name (Code)" location values) fit at 1366px+.
+  ---------------- master history ----------------
+  v2.1
+  - Status tiles: .st-total added (charcoal), .st-sendback removed; Total tile full width on phones
+  - Chart colours: k-total (charcoal, dashed so overlapping lines stay visible), k-submitted, k-approved,
+    k-rejected; k-pending / k-sendback removed
+  - Table: no group row, no vertical dividers – horizontal row lines only; customer name not a link
+  v2.0
+  - Adopts CLM design system: Oxygen font, .clm-block cards with yellow marker, light table header
+  - Status tiles (.clm-ar-stat) replace the old left-border KPI cards
+  - New chart styles (.clm-ar-*): HTML axis labels, horizontal grid, hover guide/markers, tooltip
+  - Table: light header + tinted group row, 2px dividers per group, phone label/value cards
+  - Responsive: tiles 5 -&gt; 3 -&gt; 2 -&gt; 1, filters wrap, table cards under 768px
+*/
+@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+.clm-ar {
+  color: #1a1a1a;
+  font-size: 13px;
+  padding: 20px;
+  background: #f4f5f7;
+}
+
+/* ===================== Card (block) ===================== */
+.clm-ar .clm-block { margin: 0 0 16px; background: #fff; border: 1px solid #dde3ea; border-radius: 8px; }
+.clm-ar .clm-block-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap;
+  padding: 14px 20px; background: #fafbfc; border-bottom: 1px solid #dde3ea; border-radius: 8px 8px 0 0;
+}
+.clm-ar .clm-block-title {
+  display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 700; color: #1a1a1a;
+  text-transform: uppercase; letter-spacing: .8px;
+}
+.clm-ar .clm-block-title::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: #F3D54E; flex-shrink: 0; }
+.clm-ar .clm-block-sub { margin: 4px 0 0 14px; font-size: 12px; color: #5a6a7a; }
+.clm-ar .clm-block-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.clm-ar .clm-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: #fff;
+  border: 1px solid #dde3ea; border-radius: 12px; font-size: 12px; font-weight: 700; color: #1a1a1a; white-space: nowrap;
+}
+.clm-ar .clm-chip-k { font-weight: 400; color: #5a6a7a; }
+.clm-ar .clm-tw-body { padding: 18px 20px; }
+.clm-ar .clm-no-data { text-align: center; color: #7f8c9a; padding: 24px 0; font-style: italic; }
+
+.clm-ar .clm-ar-clear {
+  padding: 4px 12px; background: #fff; border: 1px solid #cdd4dc; border-radius: 12px;
+  font-size: 12px; font-weight: 700; color: #3a4451; cursor: pointer;
+}
+.clm-ar .clm-ar-clear:hover { background: #1a1a1a; border-color: #1a1a1a; color: #F3D54E; }
+
+/* ===================== Filters ===================== */
+.clm-ar .clm-ar-filters .clm-tw-body { padding: 16px 20px; }
+.clm-ar .clm-filter-row { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 14px; }
+.clm-ar .clm-filter-field {
+  display: flex; flex-direction: column; gap: 6px; margin: 0; min-width: 0; position: relative; font-weight: 400;
+}
+.clm-ar .clm-filter-k { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-ar .clm-filter-field select {
+  width: 100%; height: 36px; font-size: 13px; color: #1a1a1a; border-radius: 6px; border: 1px solid #cdd4dc;
+  background-color: #fff; padding: 0 10px; outline: none; cursor: pointer; box-shadow: none; box-sizing: border-box;
+}
+.clm-ar .clm-filter-field select:hover { border-color: #a0aab6; }
+.clm-ar .clm-filter-field select:focus { border-color: #1a1a1a; box-shadow: 0 0 0 2px rgba(243, 213, 78, .45); }
+
+/* ---------- Multiselect ---------- */
+.clm-ar .clm-multiselect-container { position: relative; width: 100%; }
+.clm-ar .clm-multiselect-trigger {
+  display: flex; align-items: center; justify-content: space-between; width: 100%; height: 36px; padding: 0 10px;
+  font-size: 13px; border: 1px solid #cdd4dc; border-radius: 6px; background: #fff; cursor: pointer; box-sizing: border-box;
+}
+.clm-ar .clm-multiselect-trigger:hover { border-color: #a0aab6; }
+.clm-ar .clm-multiselect-container.open .clm-multiselect-trigger {
+  border-color: #1a1a1a; border-bottom-left-radius: 0; border-bottom-right-radius: 0;
+}
+.clm-ar .clm-multiselect-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #1a1a1a; }
+.clm-ar .clm-multiselect-arrow { color: #7f8c9a; font-size: 10px; margin-left: 6px; }
+.clm-ar .clm-multiselect-dropdown {
+  position: absolute; top: 36px; left: 0; right: 0; min-width: 220px; z-index: 60; background: #fff;
+  border: 1px solid #1a1a1a; border-top: none; border-radius: 0 0 6px 6px; box-shadow: 0 8px 18px rgba(0, 0, 0, .12);
+  max-height: 300px; display: flex; flex-direction: column; overflow: hidden;
+}
+.clm-ar .clm-multiselect-actions {
+  display: flex; justify-content: space-between; padding: 7px 12px; border-bottom: 1px solid #e6eaef; background: #fafbfc;
+}
+.clm-ar .clm-multiselect-actions a { font-size: 12px; font-weight: 700; color: #3a4451; cursor: pointer; }
+.clm-ar .clm-multiselect-actions a:hover { text-decoration: underline; }
+.clm-ar .clm-multiselect-search {
+  width: 100%; height: 34px; padding: 0 12px; border: none; border-bottom: 1px solid #e6eaef;
+  font-size: 12.5px; outline: none; box-sizing: border-box;
+}
+.clm-ar .clm-multiselect-list { list-style: none; margin: 0; padding: 4px 0; overflow-y: auto; max-height: 190px; }
+.clm-ar .clm-multiselect-list li {
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-size: 13px; color: #1a1a1a; cursor: pointer;
+}
+.clm-ar .clm-multiselect-list li:hover { background: #f4f5f7; }
+.clm-ar .clm-multiselect-list li.selected { background: #fffcf0; font-weight: 700; }
+.clm-ar .clm-checkbox {
+  width: 14px; height: 14px; border: 2px solid #cdd4dc; border-radius: 3px; display: inline-block; flex-shrink: 0; position: relative;
+}
+.clm-ar .clm-checkbox.checked { background: #1a1a1a; border-color: #1a1a1a; }
+.clm-ar .clm-checkbox.checked::after {
+  content: ''; position: absolute; left: 3px; top: 0; width: 4px; height: 8px;
+  border: solid #F3D54E; border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.clm-ar .clm-dropdown-empty { color: #7f8c9a !important; cursor: default !important; font-style: italic; }
+.clm-ar .clm-dropdown-empty:hover { background: #fff !important; }
+
+/* ===================== Status tiles ===================== */
+.clm-ar .clm-ar-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin: 0 0 16px; }
+.clm-ar .clm-ar-stat {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px 16px; background: #fff;
+  border: 1px solid #dde3ea; border-top: 4px solid #cdd4dc; border-radius: 8px; cursor: pointer; text-align: left;
+  transition: box-shadow .2s, background-color .2s; outline: none;
+}
+.clm-ar .clm-ar-stat:hover { box-shadow: 0 3px 10px rgba(0, 0, 0, .06); }
+.clm-ar .clm-ar-stat-k { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-ar .clm-ar-stat-v { font-size: 26px; font-weight: 700; line-height: 1.1; }
+.clm-ar .clm-ar-stat-s { font-size: 11px; color: #7f8c9a; }
+.clm-ar .clm-ar-stat.st-total    { border-top-color: #1a1a1a; } .clm-ar .st-total    .clm-ar-stat-v { color: #1a1a1a; }
+.clm-ar .clm-ar-stat.st-pending  { border-top-color: #2e86c1; } .clm-ar .st-pending  .clm-ar-stat-v { color: #2e86c1; }
+.clm-ar .clm-ar-stat.st-approved { border-top-color: #27ae60; } .clm-ar .st-approved .clm-ar-stat-v { color: #27ae60; }
+.clm-ar .clm-ar-stat.st-rejected { border-top-color: #E23D28; } .clm-ar .st-rejected .clm-ar-stat-v { color: #E23D28; }
+.clm-ar .clm-ar-stat.st-deviated { border-top-color: #E87722; } .clm-ar .st-deviated .clm-ar-stat-v { color: #E87722; }
+.clm-ar .clm-ar-stat.is-active {
+  background: #fffcf0; border-color: #F3D54E; box-shadow: 0 0 0 2px rgba(243, 213, 78, .35);
+}
+.clm-ar .clm-ar-stat.is-active.st-total    { border-top-color: #1a1a1a; }
+.clm-ar .clm-ar-stat.is-active.st-pending  { border-top-color: #2e86c1; }
+.clm-ar .clm-ar-stat.is-active.st-approved { border-top-color: #27ae60; }
+.clm-ar .clm-ar-stat.is-active.st-rejected { border-top-color: #E23D28; }
+.clm-ar .clm-ar-stat.is-active.st-deviated { border-top-color: #E87722; }
+
+/* ===================== Chart ===================== */
+/* series colours: Total charcoal, Pending blue, Approved green, Rejected red */
+.clm-ar .k-total     { --k: #1a1a1a; }
+.clm-ar .k-submitted { --k: #2e86c1; }
+.clm-ar .k-approved  { --k: #27ae60; }
+.clm-ar .k-rejected  { --k: #E23D28; }
+
+.clm-ar .clm-ar-legend { gap: 6px 14px; }
+.clm-ar .clm-ar-leg { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #3a4451; }
+.clm-ar .clm-ar-sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; background: var(--k); flex-shrink: 0; }
+
+.clm-ar .clm-ar-chart-body { padding: 8px 28px 30px 40px; }
+.clm-ar .clm-ar-plot { position: relative; height: 240px; }
+.clm-ar .clm-ar-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; display: block; }
+.clm-ar .clm-ar-svg line, .clm-ar .clm-ar-svg polyline { vector-effect: non-scaling-stroke; }
+.clm-ar .clm-ar-grid { stroke: #eef1f5; stroke-width: 1; }
+.clm-ar .clm-ar-grid.is-base { stroke: #c9d1db; }
+.clm-ar .clm-ar-guide { stroke: #8a96a3; stroke-width: 1; stroke-dasharray: 4 4; }
+.clm-ar .clm-ar-line { fill: none; stroke: var(--k); stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+.clm-ar .clm-ar-line.k-total { stroke-width: 2; stroke-dasharray: 6 5; }
+.clm-ar .clm-ar-hit { fill: transparent; cursor: crosshair; }
+
+.clm-ar .clm-ar-ytick {
+  position: absolute; right: calc(100% + 10px); transform: translateY(-50%);
+  font-size: 11.5px; color: #7f8c9a; font-variant-numeric: tabular-nums; pointer-events: none;
+}
+.clm-ar .clm-ar-xtick {
+  position: absolute; top: calc(100% + 10px); transform: translateX(-50%); white-space: nowrap;
+  font-size: 11.5px; color: #5a6a7a; pointer-events: none;
+}
+.clm-ar .clm-ar-xtick.is-current, .clm-ar .clm-ar-xtick.is-hover { color: #1a1a1a; font-weight: 700; }
+.clm-ar .clm-ar-mtd {
+  margin-left: 4px; padding: 0 5px; border-radius: 8px; background: #fff8e1; border: 1px solid #F3D54E;
+  font-size: 9.5px; font-weight: 700; color: #7a5a00; vertical-align: 1px;
+}
+.clm-ar .clm-ar-pt {
+  position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%;
+  background: #fff; border: 2.5px solid var(--k); box-sizing: border-box; pointer-events: none;
+}
+
+.clm-ar .clm-ar-tip {
+  position: absolute; top: 0; transform: translateX(14px); z-index: 20; min-width: 170px;
+  padding: 10px 12px; background: #1a1a1a; color: #fff; border-radius: 6px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, .2); pointer-events: none; font-size: 12px;
+}
+.clm-ar .clm-ar-tip.is-flip { transform: translateX(calc(-100% - 14px)); }
+.clm-ar .clm-ar-tip .k-total { --k: #ffffff; }
+.clm-ar .clm-ar-tip-t {
+  margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid rgba(255, 255, 255, .18);
+  font-weight: 700; color: #F3D54E;
+}
+.clm-ar .clm-ar-tip-r { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.clm-ar .clm-ar-tip-k { flex: 1; color: #d6dbe1; }
+.clm-ar .clm-ar-tip-v { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* ===================== Requests table ===================== */
+.clm-ar .clm-ar-toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 14px 20px;
+}
+.clm-ar .clm-search-box { position: relative; display: flex; align-items: center; width: 420px; max-width: 100%; }
+.clm-ar .clm-search-box i { position: absolute; left: 12px; color: #7f8c9a; font-size: 13px; }
+.clm-ar .clm-search-box input {
+  width: 100%; height: 36px; border: 1px solid #cdd4dc; border-radius: 6px; padding: 0 10px 0 34px;
+  font-size: 13px; color: #1a1a1a; outline: none; box-sizing: border-box;
+}
+.clm-ar .clm-search-box input:focus { border-color: #1a1a1a; box-shadow: 0 0 0 2px rgba(243, 213, 78, .45); }
+.clm-ar .clm-search-box input::placeholder { color: #7f8c9a; }
+.clm-ar .clm-rows-label {
+  display: flex; align-items: center; gap: 8px; margin: 0; font-size: 12px; font-weight: 700;
+  color: #3a4451; text-transform: uppercase; letter-spacing: .6px;
+}
+.clm-ar .clm-rows-select {
+  height: 34px; padding: 0 8px; min-width: 64px; font-size: 13px; color: #1a1a1a; border: 1px solid #cdd4dc;
+  border-radius: 6px; background: #fff; cursor: pointer; outline: none;
+}
+.clm-ar .clm-ar-kpi-chip { cursor: pointer; background: #fffcf0; border-color: #F3D54E; }
+.clm-ar .clm-ar-kpi-chip .clm-ar-x { color: #5a6a7a; font-size: 11px; }
+.clm-ar .clm-ar-kpi-chip:hover .clm-ar-x { color: #1a1a1a; }
+
+.clm-ar .clm-table-wrap {
+  overflow: auto; max-height: 520px; border-top: 1px solid #dde3ea; border-bottom: 1px solid #dde3ea; background: #fff;
+}
+.clm-ar .clm-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; margin: 0; }
+.clm-ar .clm-table th {
+  background: #eef1f5; color: #2b3440; padding: 10px; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .6px; text-align: center; white-space: nowrap;
+  border: 0; border-bottom: 1px solid #dde3ea;
+}
+.clm-ar .clm-table thead { position: sticky; top: 0; z-index: 3; }
+.clm-ar .clm-table td {
+  padding: 10px; color: #1a1a1a; text-align: center; white-space: nowrap; border: 0; border-bottom: 1px solid #e6eaef; vertical-align: middle;
+}
+.clm-ar .clm-table tr &gt; :first-child { padding-left: 20px; }
+.clm-ar .clm-table tr &gt; :last-child  { padding-right: 20px; }
+.clm-ar .clm-table tbody tr:last-child td  { border-bottom: 0; }
+.clm-ar .clm-table tbody tr:hover td { background: #fafbfc; }
+
+.clm-ar .clm-ar-table td:nth-child(1), .clm-ar .clm-ar-table td:nth-child(2),
+.clm-ar .clm-ar-table thead tr:last-child th:nth-child(1),
+.clm-ar .clm-ar-table thead tr:last-child th:nth-child(2) { text-align: left; }
+.clm-ar .clm-ar-table td.col-customer { white-space: normal; min-width: 150px; max-width: 210px; }
+.clm-ar .clm-ar-table td.col-wrap { white-space: normal; min-width: 90px; }
+.clm-ar .clm-ar-table td.num { text-align: right; }
+.clm-ar .clm-ar-table td.num-key { font-weight: 700; }
+.clm-ar .clm-ar-table td.col-submitted-by { text-align: left; white-space: normal; min-width: 150px; }
+.clm-ar .clm-ar-mono { letter-spacing: .3px; }
+.clm-ar .clm-ar-faint { color: #b0b9c4; }
+.clm-ar .clm-ar-by { white-space: nowrap; }
+.clm-ar .clm-ar-on { margin-top: 2px; font-size: 11px; color: #7f8c9a; }
+
+.clm-ar .clm-link { color: #0b5394; font-weight: 700; text-decoration: none; }
+.clm-ar .clm-link:hover { text-decoration: underline; }
+.clm-ar .clm-cust-name { font-weight: 700; color: #1a1a1a; }
+.clm-ar .clm-cust-code { margin-top: 2px; font-size: 12px; font-weight: 600; color: #5a6a7a; }
+
+/* badges */
+.clm-ar .badge {
+  display: inline-block; padding: 3px 10px; border-radius: 12px; border: 1px solid transparent;
+  font-size: 11.5px; font-weight: 700; line-height: 1.4; white-space: nowrap;
+}
+.clm-ar .status-badge.st-submitted { background: #eaf3fa; color: #1f6c9e; border-color: #b9d8ee; }
+.clm-ar .status-badge.st-approved  { background: #eaf7ee; color: #1e8449; border-color: #b9e3c6; }
+.clm-ar .status-badge.st-pending   { background: #fff4e0; color: #a15a00; border-color: #f6d39a; }
+.clm-ar .status-badge.st-sendback  { background: #f3effd; color: #5b3fc4; border-color: #d6cbf8; }
+.clm-ar .status-badge.st-rejected  { background: #fdecea; color: #b3261e; border-color: #f5c2bc; }
+.clm-ar .status-badge.st-default   { background: #f4f5f7; color: #5a6a7a; border-color: #dde3ea; }
+.clm-ar .clm-ar-dev { display: block; width: fit-content; margin: 4px auto 0; background: #fdecea; color: #b3261e; border-color: #f5c2bc; }
+.clm-ar .stage-badge { background: #fff; color: #1a1a1a; border-color: #dde3ea; }
+.clm-ar .stage-badge i { color: #7f8c9a; margin-right: 2px; }
+.clm-ar .seg-badge { border-radius: 4px; }
+.clm-ar .seg-badge.seg-cement  { background: #f1f3f7; color: #3a4451; border-color: #dde3ea; }
+.clm-ar .seg-badge.seg-rmc     { background: #e6f4ea; color: #2e7d32; border-color: #c4e3cc; }
+.clm-ar .seg-badge.seg-bpd     { background: #fdf3e1; color: #a35400; border-color: #f3d9ad; }
+.clm-ar .seg-badge.seg-default { background: #f4f5f7; color: #5a6a7a; border-color: #dde3ea; }
+
+/* ---------- ZHM: compact table (14 columns incl. Zone) ---------- */
+.clm-ar .clm-ar-table { font-size: 12.5px; }
+.clm-ar .clm-ar-table th { padding: 10px 7px; font-size: 10.5px; letter-spacing: .4px; }
+.clm-ar .clm-ar-table td { padding: 10px 7px; }
+.clm-ar .clm-ar-table tr &gt; :first-child { padding-left: 16px; }
+.clm-ar .clm-ar-table tr &gt; :last-child  { padding-right: 16px; }
+.clm-ar .clm-ar-table td.col-customer { min-width: 120px; max-width: 180px; }
+.clm-ar .clm-ar-table td.col-wrap { min-width: 76px; max-width: 120px; }
+.clm-ar .clm-ar-table td.col-submitted-by { min-width: 120px; max-width: 180px; }
+.clm-ar .clm-ar-table .clm-ar-by { white-space: normal; overflow-wrap: anywhere; }
+.clm-ar .clm-ar-table .badge { padding: 3px 8px; font-size: 11px; }
+
+/* pagination */
+.clm-ar .clm-pagination-bottom {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 20px;
+}
+.clm-ar .clm-ar-pageinfo { font-size: 12px; color: #5a6a7a; }
+.clm-ar .clm-pagination-controls { display: flex; gap: 4px; flex-wrap: wrap; }
+.clm-ar .clm-page-btn {
+  min-width: 32px; height: 32px; padding: 0 8px; border: 1px solid #cdd4dc; border-radius: 6px; background: #fff;
+  color: #3a4451; font-size: 12.5px; font-weight: 700; display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.clm-ar .clm-page-btn:hover:not(:disabled) { background: #f4f5f7; }
+.clm-ar .clm-page-btn.active { background: #1a1a1a; border-color: #1a1a1a; color: #F3D54E; }
+.clm-ar .clm-page-btn:disabled { color: #b0b9c4; background: #fafbfc; border-color: #e6eaef; cursor: not-allowed; }
+
+/* ===================== Responsive ===================== */
+@media (max-width: 1280px) {
+  .clm-ar .clm-filter-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 1100px) {
+  .clm-ar .clm-ar-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 768px) {
+  .clm-ar { padding: 12px; }
+  .clm-ar .clm-filter-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .clm-ar .clm-ar-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .clm-ar .clm-ar-stat.st-total { grid-column: 1 / -1; }
+  .clm-ar .clm-ar-legend { width: 100%; }
+  .clm-ar .clm-ar-plot { height: 200px; }
+  .clm-ar .clm-ar-chart-body { padding-left: 30px; }
+  .clm-ar .clm-ar-xtick.is-skip { visibility: hidden; }
+  .clm-ar .clm-ar-xtick.is-current, .clm-ar .clm-ar-xtick.is-hover { visibility: visible; }
+  .clm-ar .clm-ar-mtd { display: none; }
+
+  /* table -&gt; label / value cards */
+  .clm-ar .clm-table-wrap { max-height: none; border: 0; background: #f4f5f7; padding: 12px; }
+  .clm-ar .clm-ar-table thead { display: none; }
+  .clm-ar .clm-ar-table, .clm-ar .clm-ar-table tbody, .clm-ar .clm-ar-table tr, .clm-ar .clm-ar-table td { display: block; width: 100%; }
+  .clm-ar .clm-ar-table tr { margin-bottom: 12px; background: #fff; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden; }
+  .clm-ar .clm-ar-table td {
+    display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 6px 8px; box-sizing: border-box;
+    padding: 9px 14px; border: 0 !important; border-bottom: 1px solid #eef1f5 !important;
+    text-align: right !important; white-space: normal; max-width: none !important; min-width: 0 !important;
+  }
+  .clm-ar .clm-ar-table td::before {
+    content: attr(data-label); flex-shrink: 0; font-size: 11.5px; font-weight: 700; color: #5a6a7a;
+    text-transform: uppercase; letter-spacing: .5px; text-align: left; margin-right: auto;
+  }
+  .clm-ar .clm-ar-table .clm-ar-dev { margin: 0; }
+  .clm-ar .clm-ar-by { white-space: normal; overflow-wrap: anywhere; }
+  .clm-ar .clm-ar-table td:first-child { background: #fafbfc; }
+  .clm-ar .clm-ar-table td:last-child { border-bottom: 0 !important; }
+  .clm-ar .clm-ar-table td.col-customer, .clm-ar .clm-ar-table td.col-submitted-by { display: block; }
+  .clm-ar .clm-ar-table td.col-customer::before,
+  .clm-ar .clm-ar-table td.col-submitted-by::before { display: block; margin-bottom: 4px; }
+  .clm-ar .clm-ar-table td.col-customer, .clm-ar .clm-ar-table td.col-submitted-by { text-align: left !important; }
+  .clm-ar .clm-ar-table tr.clm-ar-empty td { display: block; text-align: center !important; }
+  .clm-ar .clm-ar-table tr.clm-ar-empty td::before { content: none; }
+}
+@media (max-width: 640px) {
+  .clm-ar .clm-filter-row { grid-template-columns: 1fr; }
+  .clm-ar .clm-ar-stat-v { font-size: 22px; }
+  .clm-ar .clm-search-box { width: 100%; }
+}
+
+/* ===================== One font family (keep LAST) ===================== */
+.clm-widget, .clm-widget *, .clm-widget input, .clm-widget select,
+.clm-widget textarea, .clm-widget button, .clm-widget table {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}
+.clm-widget .fa { font-family: FontAwesome !important; }
+</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>real_clm_zhm_approval_request</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>real_clm_zhm_approval_request</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[/*
+  CLM – Approval Requests (Zonal: ZHM / ZH_RMC / ZH_BPD / ZCH dashboard) – Server Script  v2.1-ZHM
+  Built on the zonal persona script, aligned with MD master v2.1:
+  - Returned / Send-Back no longer applicable: removed from the Status filter options, and
+    KPIs, chart and table only include Pending (submitted), Approved and Rejected states
+  - data.scorecards.total = submitted + approved + rejected; scorecards.sendback removed
+  - Chart: rolling 12 months (11 previous months + current month to date), bucketed in the
+    user's time zone; series total / submitted / approved / rejected; data.chart.rangeLabel,
+    data.chart.monthKeys; month labels "Mon 'YY"
+  - Period: All Time / This Year / Last Year (same as master; unused custom / previous-month code removed)
+  - New: data.accessDenied (access-denied message is shown by the HTML)
+  - Rows expose zone / region / depot as "Name (Code)" (master column bindings) plus the separate
+    name / code fields used by search
+  Persona logic kept:
+  - Access: ZHM -> Cement, ZH_RMC -> RMC, ZH_BPD -> BPD, ZCH -> all segments; ALL mapping rows read;
+    zones from u_zone (comma-separated) – the user never sees beyond the mapped zones
+  - Zone list = mapped zones; Region / Depot lists = selected zones; Depot list narrowed by Region
+  - Customer resolution via customer map (sys_id, then name match)
+  - De-duplication: only the latest request per customer; KPIs and chart are computed from
+    this de-duplicated list (so they follow the selected Period and filters)
+  - "Pending At" only counts approvals raised since the last (re)submission (u_last_submitted_on)
+  - Outstanding taken from the request's outstanding_amount field
+  Fixes:
+  - pad() always prefixed "0" (gave "010", "011", "012") – corrected
+  - Array.prototype.fill is not available server-side (ES5) – replaced with loops
+  - "Pending At": one bulk sysapproval_approver query + one sys_user query instead of one
+    approval query per request; approval chain chosen from the CUSTOMER's segment
+*/
+(function() {
+
+    var REQUEST_TABLE  = 'x_birl3_clm_clm_new_credit_request';
+    var CUSTOMER_TABLE = 'x_birl3_clm_clm_customer_master1';
+    var ROLE_MAP_TABLE = 'x_birl3_clm_role_user_mapping';
+
+    var F_STATE          = 'state';
+    var F_REQUESTED_AMT  = 'requested_limit';
+    var F_APPROVED_AMT   = 'approved_limit';
+    var F_PREV_LIMIT     = 'current_credit_limit';
+    var F_OUTSTANDING    = 'outstanding_amount';
+    var F_SUBMITTED_BY   = 'sys_created_by';
+    var F_SUBMITTED_ON   = 'sys_created_on';
+    var F_REQ_NUMBER     = 'number';
+    var F_DEVIATION      = 'is_deviation';
+    var F_LAST_SUBMITTED = 'u_last_submitted_on';
+
+    var F_CUST_SEGMENT   = 'segment';
+    var F_CUST_REGION    = 'region_name';
+    var F_CUST_DEPOT     = 'depot_name';
+    var F_CUST_ZONE      = 'zone_name';
+
+    var ALLOWED_STATUS_KEYWORDS = ['approv', 'submit', 'reject'];   // Returned / Send-Back no longer used
+    var monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    function norm(s) { return (s || '').toString().trim().toUpperCase().replace(/\s+/g, ' '); }
+    function zeros(n) { var a = []; for (var i = 0; i < n; i++) a.push(0); return a; }
+
+    // ==================== CODE-AWARE HELPERS ====================
+    function extractCode(val) {
+        if (!val) return '';
+        var match = val.match(/\(([^)]+)\)$/);
+        return match ? match[1] : val;
+    }
+    function extractCodes(arr) {
+        if (!arr || !Array.isArray(arr)) return [];
+        return arr.map(extractCode).filter(function(c) { return c !== ''; });
+    }
+    function formatNameCode(name, code) {
+        if (name && code && name !== code) return name + ' (' + code + ')';
+        return name || code || '';
+    }
+    function getSafeCode(gr, field) {
+        var val = gr.getValue(field) || '';
+        if (val.length === 32 && /^[0-9a-f]{32}$/i.test(val)) {
+            val = gr.getDisplayValue(field) || '';
+        }
+        return val;
+    }
+
+    var currentUserId   = gs.getUserID();
+    var currentUserName = gs.getUserName();
+
+    var PERIOD_OPTS = [
+        { label: 'All Time (Latest)', value: 'latest' },
+        { label: 'This Year', value: 'current_year' },
+        { label: 'Last Year', value: 'last_year' }
+    ];
+
+    // =========================================================
+    // STEP 0: Role-based access – ZHM, ZH_RMC, ZH_BPD, ZCH (all mapping rows)
+    // =========================================================
+    var AUTHORIZED_ROLES = {
+        'ZHM':    'Cement',
+        'ZH_RMC': 'RMC',
+        'ZH_BPD': 'BPD',
+        'ZCH':    null          // ZCH = all segments
+    };
+
+    var roleFound = false, hasZch = false;
+    var allowedSegLabels = [];
+    var allowedZones = [];
+
+    var grRole = new GlideRecord(ROLE_MAP_TABLE);
+    var qcUser = grRole.addQuery('u_user', currentUserId);
+    qcUser.addOrCondition('u_user', currentUserName);
+    grRole.addQuery('u_role', 'IN', Object.keys(AUTHORIZED_ROLES));
+    grRole.query();
+
+    while (grRole.next()) {
+        var role = String(grRole.getValue('u_role') || '').toUpperCase().trim();
+        if (!AUTHORIZED_ROLES.hasOwnProperty(role)) continue;
+        roleFound = true;
+
+        if (role === 'ZCH') {
+            hasZch = true;
+        } else {
+            var segLbl = AUTHORIZED_ROLES[role];
+            if (allowedSegLabels.indexOf(segLbl) === -1) allowedSegLabels.push(segLbl);
+        }
+
+        String(grRole.getValue('u_zone') || '').split(',').forEach(function(z) {
+            z = z.trim();
+            if (z && allowedZones.indexOf(z) === -1) allowedZones.push(z);
+        });
+    }
+
+    data.accessDenied = !roleFound;
+    if (!roleFound) {
+        data.filterOpts = { zones: [], regions: [], depots: [], segments: [], periods: PERIOD_OPTS };
+        data.statusOptions = [];
+        data.scorecards = { total: 0, submitted: 0, approved: 0, rejected: 0, deviated: 0 };
+        data.chart = { year: new Date().getFullYear(), months: [], monthKeys: [], rangeLabel: '', series: {}, max: 1 };
+        data.requests = [];
+        data.periodLabel = '';
+        data.selectedPeriod = 'latest';
+        data.filters = {};
+        return;
+    }
+
+    // Segment label -> raw value map (from the customer master)
+    var segLabelToRaw = {};
+    (function() {
+        var gaS = new GlideAggregate(CUSTOMER_TABLE);
+        gaS.groupBy(F_CUST_SEGMENT);
+        gaS.query();
+        while (gaS.next()) {
+            segLabelToRaw[(gaS.getDisplayValue(F_CUST_SEGMENT) || '').toLowerCase()] = gaS.getValue(F_CUST_SEGMENT);
+        }
+    })();
+
+    // Empty array = unrestricted (ZCH)
+    var allowedSegRaw = hasZch ? [] : allowedSegLabels.map(function(l) {
+        return segLabelToRaw[l.toLowerCase()] || l;
+    });
+
+    var inputFilters = (typeof input !== 'undefined' && input && input.filters) ? input.filters : {};
+
+    function normalizeArray(val) {
+        if (typeof val === 'string') {
+            try { val = JSON.parse(val); } catch (e) { val = val ? [val] : []; }
+        }
+        if (!Array.isArray(val)) val = val ? [val] : [];
+        return val;
+    }
+    inputFilters.segments = normalizeArray(inputFilters.segments);
+    inputFilters.zones    = normalizeArray(inputFilters.zones);
+    inputFilters.regions  = normalizeArray(inputFilters.regions);
+    inputFilters.depots   = normalizeArray(inputFilters.depots);
+
+    // Segments to apply now = dropdown pick (if allowed), else all allowed
+    function activeSegRaw() {
+        var picked = inputFilters.segments.map(function(s) {
+            return segLabelToRaw[String(s).toLowerCase()] || s;
+        }).filter(function(raw) {
+            return !allowedSegRaw.length || allowedSegRaw.indexOf(raw) > -1;
+        });
+        return picked.length ? picked : allowedSegRaw;
+    }
+
+    // Zones: selection intersected with the role mapping (never wider than the mapping)
+    var selectedZoneCodes = extractCodes(inputFilters.zones).filter(function(z) {
+        return allowedZones.length === 0 || allowedZones.indexOf(z) > -1;
+    });
+    var activeZones = selectedZoneCodes.length ? selectedZoneCodes : allowedZones;
+
+    // =========================================================
+    // Filter options
+    // =========================================================
+    function getDistinct(nameField, codeField) {
+        var arr = [];
+        var ga = new GlideAggregate(CUSTOMER_TABLE);
+
+        // Zone list = all mapped zones; Region / Depot lists = selected zones only
+        var zoneScope = (nameField === F_CUST_ZONE) ? allowedZones : activeZones;
+        if (zoneScope.length) ga.addQuery('zone', 'IN', zoneScope.join(','));
+
+        // Only the Depot list is narrowed by the selected regions
+        if (nameField === F_CUST_DEPOT) {
+            var rc = extractCodes(inputFilters.regions);
+            if (rc.length) ga.addQuery('region', 'IN', rc.join(','));
+        }
+
+        // Every list respects the segment selection
+        var sr = activeSegRaw();
+        if (sr.length) ga.addQuery(F_CUST_SEGMENT, 'IN', sr.join(','));
+
+        ga.groupBy(nameField);
+        if (codeField) ga.groupBy(codeField);
+        ga.query();
+
+        var seenCodes = {};
+        while (ga.next()) {
+            var nVal = ga.getValue(nameField) || ga.getDisplayValue(nameField) || '';
+            var cVal = codeField ? getSafeCode(ga, codeField) : '';
+            var displayVal = formatNameCode(nVal, cVal);
+            var dedupKey = cVal || nVal;              // one entry per CODE
+            if (!displayVal || seenCodes[dedupKey]) continue;
+            seenCodes[dedupKey] = true;
+            arr.push(displayVal);
+        }
+        return arr.sort();
+    }
+
+    // Segment dropdown: allowed segments for the role(s); all segments in the zones for ZCH
+    var segmentOptions;
+    if (!hasZch) {
+        segmentOptions = allowedSegLabels.slice().sort();
+    } else {
+        var segSet = {};
+        var gaSegAll = new GlideAggregate(CUSTOMER_TABLE);
+        if (allowedZones.length) gaSegAll.addQuery('zone', 'IN', allowedZones.join(','));
+        gaSegAll.groupBy(F_CUST_SEGMENT);
+        gaSegAll.query();
+        while (gaSegAll.next()) {
+            var segVal = gaSegAll.getDisplayValue(F_CUST_SEGMENT) || '';
+            if (segVal && !segSet[segVal]) segSet[segVal] = true;
+        }
+        segmentOptions = Object.keys(segSet).sort();
+    }
+
+    data.filterOpts = {
+        segments: segmentOptions,
+        zones:    getDistinct(F_CUST_ZONE, 'zone'),
+        regions:  getDistinct(F_CUST_REGION, 'region'),
+        depots:   getDistinct(F_CUST_DEPOT, 'depot'),
+        periods:  PERIOD_OPTS
+    };
+
+    data.filters = inputFilters;
+
+    var statusFilter = inputFilters.status || '';
+    var period       = inputFilters.period || 'latest';
+
+    function applyAppFilters(gr) {
+        // Selected zones (always inside the mapped zones)
+        if (activeZones.length) gr.addQuery('customer.zone', 'IN', activeZones.join(','));
+
+        var regionCodes = extractCodes(inputFilters.regions);
+        if (regionCodes.length > 0) gr.addQuery('customer.region', 'IN', regionCodes.join(','));
+
+        var depotCodes = extractCodes(inputFilters.depots);
+        if (depotCodes.length > 0) gr.addQuery('customer.depot', 'IN', depotCodes.join(','));
+
+        var sr = activeSegRaw();
+        if (sr.length) gr.addQuery('customer.segment', 'IN', sr.join(','));
+    }
+
+    // ===== APPROVAL CHAIN DEFINITIONS =====
+    var CEMENT_CHAIN = [
+      { label: 'TSH',     field: 'u_approver_tsh'     },
+      { label: 'RHM',     field: 'u_approver_rhm'     },
+      { label: 'ZHM',     field: 'u_approver_zhm'     },
+      { label: 'ZCH',     field: 'u_approver_zch'     },
+      { label: 'HO',      field: 'u_approver_ho'      },
+      { label: 'NSH',     field: 'u_approver_nsh'     },
+      { label: 'NSH CCH', field: 'u_approver_nsh_cch' },
+      { label: 'CMO',     field: 'u_approver_cmo'     },
+      { label: 'CMO CFO', field: 'u_approver_cmo_cfo' },
+      { label: 'MD',      field: 'u_approver_md'      }
+    ];
+
+    var RMC_CHAIN = [
+      { label: 'TSM',          field: 'u_approver_tsm'             },
+      { label: 'RH CH RMC',    field: 'u_approver_rh_ch_rmc'       },
+      { label: 'ZH RMC',       field: 'u_approver_zh_rmc'          },
+      { label: 'ZCH',          field: 'u_approver_zch'             },
+      { label: 'HO',           field: 'u_approver_ho'              },
+      { label: 'HEAD RMC',     field: 'u_approver_head_rmc'        },
+      { label: 'HEAD KEY CH',  field: 'u_approver_head_key_ch_rmc' },
+      { label: 'HEAD KEY CCH', field: 'u_approver_head_key_cch'    },
+      { label: 'BH',           field: 'u_approver_bh'              },
+      { label: 'BH CFO',       field: 'u_approver_bh_cfo'          },
+      { label: 'MD',           field: 'u_approver_md'              }
+    ];
+
+    var BPD_CHAIN = [
+      { label: 'TSH BPD',  field: 'u_approver_tsh_bpd'  },
+      { label: 'ZH BPD',   field: 'u_approver_zh_bpd'   },
+      { label: 'HSBPD',    field: 'u_approver_hsbpd'    },
+      { label: 'ZCH',      field: 'u_approver_zch'      },
+      { label: 'HO',       field: 'u_approver_ho'       },
+      { label: 'HBPD',     field: 'u_approver_hbpd'     },
+      { label: 'CCH HBPD', field: 'u_approver_cch_hbpd' },
+      { label: 'BH',       field: 'u_approver_bh'       },
+      { label: 'CFO',      field: 'u_approver_cfo'      },
+      { label: 'MD',       field: 'u_approver_md'       }
+    ];
+
+    function chainForSegment(segText) {
+        var s = (segText || '').toLowerCase().split('|')[0].trim();
+        return (s === 'rmc') ? RMC_CHAIN : (s === 'bpd') ? BPD_CHAIN : CEMENT_CHAIN;
+    }
+
+    function getFilteredStatusOptions(table, field) {
+      var arr = [], seen = {};
+      var gr = new GlideRecord('sys_choice');
+      gr.addQuery('name', table);
+      gr.addQuery('element', field);
+      gr.addQuery('inactive', false);
+      gr.orderBy('sequence');
+      gr.query();
+      while (gr.next()) {
+        var v = gr.getValue('value');
+        var lbl = gr.getValue('label') || '';
+        if (!v || seen[v]) continue;
+        var lower = lbl.toLowerCase();
+        if (!ALLOWED_STATUS_KEYWORDS.some(function(kw) { return lower.indexOf(kw) > -1; })) continue;
+        seen[v] = true;
+        arr.push({ value: v, label: lbl });
+      }
+      return arr;
+    }
+
+    function formatAmt(v) {
+      if (v === undefined || v === null || v === '') return '';
+      var n = parseFloat(v);
+      if (isNaN(n)) return v;
+      return '\u20B9' + (n / 100000).toFixed(1) + 'L';
+    }
+
+    // =========================================================
+    // Customer map – respects mapped zones and allowed segments
+    // =========================================================
+    function buildCustomerMap() {
+      var map = {};
+      var gr = new GlideRecord(CUSTOMER_TABLE);
+      if (allowedZones.length) gr.addQuery('zone', 'IN', allowedZones.join(','));
+      if (allowedSegRaw.length) gr.addQuery(F_CUST_SEGMENT, 'IN', allowedSegRaw.join(','));
+      gr.query();
+      while (gr.next()) {
+        var sysId = gr.getUniqueValue();
+
+        var rName = gr.getValue('region_name') || gr.getDisplayValue('region_name') || '';
+        var rCode = getSafeCode(gr, 'region');
+        var dName = gr.getValue('depot_name') || gr.getDisplayValue('depot_name') || '';
+        var dCode = getSafeCode(gr, 'depot');
+        var zName = gr.getValue('zone_name') || gr.getDisplayValue('zone_name') || '';
+        var zCode = getSafeCode(gr, 'zone');
+
+        var entry = {
+          sysId: sysId,
+          code: gr.getValue('customer_code_sap'),
+          name: gr.getValue('customer_name'),
+          segment: gr.getDisplayValue('segment'),
+          pan: gr.getValue('pan'),
+          region: formatNameCode(rName, rCode),
+          depot:  formatNameCode(dName, dCode),
+          zone:   formatNameCode(zName, zCode),
+          regionName: rName, regionCode: rCode,
+          depotName:  dName, depotCode:  dCode,
+          zoneName:   zName, zoneCode:   zCode
+        };
+        map[sysId] = entry;
+        var key = norm(entry.name);
+        if (key) map[key] = entry;
+      }
+      return map;
+    }
+
+    function resolveCustomer(reqGr, custMap) {
+      var rawVal  = reqGr.getValue('customer');
+      var dispVal = reqGr.getDisplayValue('customer');
+      if (rawVal && custMap[rawVal]) return custMap[rawVal];
+      var key = norm(dispVal);
+      if (key && custMap[key]) return custMap[key];
+      if (key) {
+        for (var k in custMap) {
+          if (k.length === 32) continue;
+          if (k.indexOf(key) > -1 || key.indexOf(k) > -1) return custMap[k];
+        }
+      }
+      return null;
+    }
+
+    function buildPeriodRange(periodStr) {
+      var nowStr = new GlideDateTime().getValue();
+      var curYear  = parseInt(nowStr.substr(0, 4), 10);
+      var curMonth = parseInt(nowStr.substr(5, 2), 10);
+      var curDay   = parseInt(nowStr.substr(8, 2), 10);
+      var startGdt = new GlideDateTime();
+      var endGdt   = new GlideDateTime();
+      var label = '';
+      var value = periodStr || 'latest';
+
+      if (value === 'current_year') {
+        startGdt.setValue(curYear + '-01-01 00:00:00');
+        endGdt.setValue(nowStr);
+        label = 'Jan 1 – ' + monthNames[curMonth - 1] + ' ' + curDay + ', ' + curYear;
+      } else if (value === 'last_year') {
+        var lastYear = curYear - 1;
+        startGdt.setValue(lastYear + '-01-01 00:00:00');
+        endGdt.setValue(lastYear + '-12-31 23:59:59');
+        label = 'Jan 1 – Dec 31, ' + lastYear;
+      } else {
+        startGdt.setValue('1990-01-01 00:00:00');
+        endGdt.setValue(nowStr);
+        label = 'All Time (Latest)';
+        value = 'latest';
+      }
+      return { start: startGdt, end: endGdt, label: label, value: value };
+    }
+
+    var range = buildPeriodRange(period);
+    data.periodLabel    = range.label;
+    data.selectedPeriod = range.value;
+    data.statusOptions  = getFilteredStatusOptions(REQUEST_TABLE, F_STATE);
+
+    // Only Pending (submitted) / Approved / Rejected requests are in scope
+    var allowedStateValues = data.statusOptions.map(function(o) { return o.value; });
+    function applyStateScope(gr) {
+        if (allowedStateValues.length > 0) gr.addQuery(F_STATE, 'IN', allowedStateValues);
+    }
+
+    // ---- Customer map ----
+    var custMap = buildCustomerMap();
+
+    // ---- Fetch matching requests (newest first) ----
+    var allRows = [];   // { row, meta }
+    var reqGr = new GlideRecord(REQUEST_TABLE);
+    if (statusFilter) reqGr.addQuery(F_STATE, statusFilter);
+    reqGr.addQuery(F_SUBMITTED_ON, '>=', range.start);
+    reqGr.addQuery(F_SUBMITTED_ON, '<=', range.end);
+    applyAppFilters(reqGr);
+    applyStateScope(reqGr);
+    reqGr.orderByDesc(F_SUBMITTED_ON);
+    reqGr.setLimit(500);
+    reqGr.query();
+
+    while (reqGr.next()) {
+      var cust = resolveCustomer(reqGr, custMap) || {
+          code: '', name: reqGr.getDisplayValue('customer'), segment: '', pan: '',
+          zone: '', region: '', depot: '',
+          zoneName: '', zoneCode: '', regionName: '', regionCode: '', depotName: '', depotCode: ''
+      };
+
+      var reqSysId = reqGr.getUniqueValue();
+      var chain = chainForSegment(cust.segment);
+      var chainIds = [];
+      for (var ci = 0; ci < chain.length; ci++) {
+          chainIds.push((reqGr.getValue(chain[ci].field) || '').trim());
+      }
+
+      var statVal = reqGr.getValue(F_STATE);
+      var statLabel = reqGr.getDisplayValue(F_STATE);
+      if ((statVal || '').toLowerCase().indexOf('submit') > -1) statLabel = 'Pending';
+
+      var devVal = reqGr.getValue(F_DEVIATION);
+
+      allRows.push({
+        row: {
+          requestCode:  reqGr.getDisplayValue(F_REQ_NUMBER) || reqSysId,
+          customerCode: cust.code || '',
+          customerName: cust.name || reqGr.getDisplayValue('customer'),
+          pan:          cust.pan || '',
+          segment:      cust.segment || '',
+          zone:         cust.zone,
+          region:       cust.region,
+          depot:        cust.depot,
+          zoneName:     cust.zoneName,   zoneCode:   cust.zoneCode,
+          regionName:   cust.regionName, regionCode: cust.regionCode,
+          depotName:    cust.depotName,  depotCode:  cust.depotCode,
+          status:       statVal,
+          statusLabel:  statLabel,
+          isDeviation:  (devVal == '1' || devVal == 'true'),
+          stage:        '',
+          submittedBy:  reqGr.getDisplayValue(F_SUBMITTED_BY),
+          submittedOn:  reqGr.getDisplayValue(F_SUBMITTED_ON),
+          prevLimit:    formatAmt(parseFloat(reqGr.getValue(F_PREV_LIMIT)) || 0),
+          requested:    formatAmt(reqGr.getValue(F_REQUESTED_AMT)),
+          approved:     formatAmt(reqGr.getValue(F_APPROVED_AMT)),
+          outstanding:  formatAmt(parseFloat(reqGr.getValue(F_OUTSTANDING)) || 0)
+        },
+        meta: {
+          reqId:     reqSysId,
+          lastSub:   reqGr.getValue(F_LAST_SUBMITTED) || '',
+          subOnUtc:  reqGr.getValue(F_SUBMITTED_ON) || '',
+          chain:     chain,
+          chainIds:  chainIds
+        }
+      });
+    }
+
+    // =========================================================
+    // DE-DUPLICATION: keep only the latest request per customer
+    // =========================================================
+    var deduped = [];
+    var seenCust = {};
+    for (var i = 0; i < allRows.length; i++) {
+      var r0 = allRows[i].row;
+      var dedupKey = r0.customerCode || ('nocode_' + r0.customerName + '_' + r0.pan);
+      if (!seenCust[dedupKey]) {
+        seenCust[dedupKey] = true;
+        deduped.push(allRows[i]);
+      }
+    }
+
+    // =========================================================
+    // PENDING AT – one approval query + one user query
+    // =========================================================
+    if (deduped.length) {
+      var reqIds = [], lastSubMap = {};
+      deduped.forEach(function(x) { reqIds.push(x.meta.reqId); lastSubMap[x.meta.reqId] = x.meta.lastSub; });
+
+      var approvalMap = {};
+      var appGr = new GlideRecord('sysapproval_approver');
+      var qcApp = appGr.addQuery('sysapproval', 'IN', reqIds);
+      qcApp.addOrCondition('document_id', 'IN', reqIds);
+      appGr.orderBy('sys_updated_on');   // later updates overwrite earlier ones
+      appGr.query();
+      while (appGr.next()) {
+        var aReqId  = appGr.getValue('sysapproval') || appGr.getValue('document_id');
+        var lastSub = lastSubMap[aReqId];
+        // only count approvals raised since the last (re)submission
+        if (lastSub && (appGr.getValue('sys_created_on') || '') < lastSub) continue;
+        var aRaw = (appGr.getValue('state') || '').toLowerCase().trim();
+        var aSt  = (aRaw === 'approved') ? 'approved' : (aRaw === 'rejected') ? 'rejected'
+                 : (aRaw === 'cancelled') ? 'returned' : 'pending';
+        approvalMap[aReqId + '_' + appGr.getValue('approver')] = aSt;
+      }
+
+      var pendingNeeded = {}, pendingPerRow = [];
+      deduped.forEach(function(x) {
+        var found = null;
+        for (var k = 0; k < x.meta.chain.length; k++) {
+          var aid = x.meta.chainIds[k];
+          if (!aid || aid === 'null' || aid === 'undefined') continue;
+          if ((approvalMap[x.meta.reqId + '_' + aid] || 'pending') === 'pending') {
+            found = { id: aid, label: x.meta.chain[k].label };
+            break;
+          }
+        }
+        pendingPerRow.push(found);
+        if (found) pendingNeeded[found.id] = true;
+      });
+
+      var userNameMap = {};
+      var neededIds = Object.keys(pendingNeeded);
+      if (neededIds.length) {
+        var usrGr = new GlideRecord('sys_user');
+        usrGr.addQuery('sys_id', 'IN', neededIds);
+        usrGr.query();
+        while (usrGr.next()) userNameMap[usrGr.getUniqueValue()] = usrGr.getValue('name') || '';
+      }
+
+      deduped.forEach(function(x, idx) {
+        var p = pendingPerRow[idx];
+        x.row.stage = p ? (userNameMap[p.id] || p.label) : '';
+      });
+    }
+
+    data.requests = deduped.map(function(x) { return x.row; });
+
+    // =========================================================
+    // SCORECARDS from the de-duplicated list
+    // =========================================================
+    var scorecards = { total: 0, submitted: 0, approved: 0, rejected: 0, deviated: 0 };
+    deduped.forEach(function(x) {
+      var st = (x.row.status || '').toLowerCase();
+      if (st.indexOf('submit') > -1)      scorecards.submitted++;
+      else if (st.indexOf('approv') > -1) scorecards.approved++;
+      else if (st.indexOf('reject') > -1) scorecards.rejected++;
+      if (x.row.isDeviation) scorecards.deviated++;
+    });
+    scorecards.total = scorecards.submitted + scorecards.approved + scorecards.rejected;
+    data.scorecards = scorecards;
+
+    // ---------------------------------------------------------------------------------
+    // CHART: rolling 12 months = 11 previous months + current month to date, from the
+    // de-duplicated list. Months are computed in the user's time zone.
+    // ---------------------------------------------------------------------------------
+    var nowLocalStr   = new GlideDateTime().getDisplayValueInternal();   // 'yyyy-MM-dd HH:mm:ss' (user TZ)
+    var curChartYear  = parseInt(nowLocalStr.substr(0, 4), 10);
+    var curChartMonth = parseInt(nowLocalStr.substr(5, 2), 10);
+
+    var monthKeys = [], monthLabels = [], monthIndex = {};
+    for (var back = 11; back >= 0; back--) {
+        var cy = curChartYear;
+        var cm = curChartMonth - back;
+        while (cm < 1) { cm += 12; cy--; }
+        var mKey = cy + '-' + pad(cm);
+        monthIndex[mKey] = monthKeys.length;
+        monthKeys.push(mKey);
+        monthLabels.push(monthNames[cm - 1] + " '" + String(cy).substr(2));
+    }
+    var series = { total: zeros(12), submitted: zeros(12), approved: zeros(12), rejected: zeros(12) };
+
+    deduped.forEach(function(x) {
+        if (!x.meta.subOnUtc) return;
+        var local = new GlideDateTime(x.meta.subOnUtc).getDisplayValueInternal();
+        var mth = monthIndex[local.substr(0, 7)];
+        if (typeof mth === 'undefined') return;
+        var st = (x.row.status || '').toLowerCase();
+        var counted = true;
+        if (st.indexOf('submit') > -1)      series.submitted[mth]++;
+        else if (st.indexOf('approv') > -1) series.approved[mth]++;
+        else if (st.indexOf('reject') > -1) series.rejected[mth]++;
+        else counted = false;
+        if (counted) series.total[mth]++;
+    });
+
+    var maxVal = 1;
+    Object.keys(series).forEach(function(k) {
+        for (var m = 0; m < 12; m++) if (series[k][m] > maxVal) maxVal = series[k][m];
+    });
+
+    var firstKeyParts = monthKeys[0].split('-');
+    data.chart = {
+      year: curChartYear,
+      monthKeys: monthKeys,
+      months: monthLabels,
+      rangeLabel: monthNames[parseInt(firstKeyParts[1], 10) - 1] + ' ' + firstKeyParts[0] +
+                  ' – ' + monthNames[curChartMonth - 1] + ' ' + curChartYear + ' (month to date)',
+      series: series,
+      max: maxVal
+    };
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-16 05:25:54</sys_created_on>
+        <sys_id>8233dc142b40db10335bf9fe4e91bfe1</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>real_clm_zhm_approval_request</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_8233dc142b40db10335bf9fe4e91bfe1</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-16 05:25:54</sys_updated_on>
+        <template><![CDATA[<!--
+  CLM – Approval Requests (Zonal: ZHM / ZH_RMC / ZH_BPD / ZCH dashboard)  v2.1-ZHM
+  Built from MD master v2.1. Persona differences:
+  - Segment / Zone / Region / Depot lists are scoped server-side to the user's mapped zones and
+    role segments (ZCH = all segments)
+  - Zone column added to the table (14 columns); Zone / Region / Depot shown as "Name (Code)"
+  - Search also matches zone / region / depot names and codes
+  - Access-denied message refers to the zonal roles
+  ---------------- master history ----------------
+  v2.1
+  - KPI tiles: Send-Back removed; new first tile "Total Requests" (Pending + Approved + Rejected),
+    clicking it clears the tile filter
+  - Chart: 4 lines only – Total, Pending, Approved, Rejected (Stage Pending / Send-Back removed)
+  - Table: group header row and vertical column dividers removed; customer name/code no longer clickable
+    (link only on Request ID)
+  v2.0
+  - Filters moved into a standard card (yellow-marker head, period chip, "Clear filters")
+  - KPI scorecards -> clickable status tiles (coloured top edge, active state); redundant info icons removed
+  - Chart: rolling last 12 months (current month = MTD), dynamic Y-axis that matches the data,
+    undistorted HTML axis labels, horizontal grid, hover guide line + point markers, edge-aware tooltip
+  - Table: card with toolbar (search / records / rows), light header with tinted group row,
+    columns regrouped (Request & Customer | Location | Credit Limit | Workflow), submitted-on date
+    under submitter, label/value cards on phones
+  All existing bindings (filters, KPI filter, search, pagination, openRequestDetail) are unchanged.
+-->
+<div class="clm-dash clm-widget clm-ar" ng-cloak ng-click="c.closeAllDropdowns()">
+
+  <!-- ===================== Filters ===================== -->
+  <div class="clm-block clm-ar-filters">
+    <div class="clm-block-head">
+      <div class="clm-block-heading">
+        <div class="clm-block-title">Filters</div>
+      </div>
+      <div class="clm-block-meta">
+        <span class="clm-chip" ng-if="data.periodLabel"><span class="clm-chip-k">Period</span> {{data.periodLabel}}</span>
+        <button type="button" class="clm-ar-clear" ng-if="c.hasActiveFilters()" ng-click="c.clearAllFilters()">&#10005; Clear filters</button>
+      </div>
+    </div>
+
+    <div class="clm-tw-body">
+      <div class="clm-filter-row">
+
+        <!-- SEGMENT (MULTISELECT) -->
+        <label class="clm-filter-field clm-multiselect-field">
+          <span class="clm-filter-k">Segment</span>
+          <div class="clm-multiselect-container" ng-class="{open: c.segmentDropdownOpen}">
+            <div class="clm-multiselect-trigger"
+                 ng-click="$event.stopPropagation(); c.segmentDropdownOpen ? c.closeSegmentDropdown() : c.openSegmentDropdown()">
+              <span class="clm-multiselect-text">{{c.getSegmentDisplayText()}}</span>
+              <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+            </div>
+            <div class="clm-multiselect-dropdown" ng-show="c.segmentDropdownOpen" ng-click="$event.stopPropagation()">
+              <div class="clm-multiselect-actions">
+                <a ng-click="c.selectAllSegments()">Select All</a>
+                <a ng-click="c.clearAllSegments()">Clear</a>
+              </div>
+              <input type="text" class="clm-multiselect-search" ng-model="c.segmentSearch"
+                     ng-click="$event.stopPropagation()" placeholder="Search segments...">
+              <ul class="clm-multiselect-list">
+                <li ng-repeat="sg in c.getFilteredSegments() track by sg"
+                    ng-click="$event.stopPropagation(); c.toggleSegment(sg)"
+                    ng-class="{selected: c.isSegmentSelected(sg)}">
+                  <span class="clm-checkbox" ng-class="{checked: c.isSegmentSelected(sg)}"></span>
+                  {{sg}}
+                </li>
+                <li class="clm-dropdown-empty" ng-if="c.getFilteredSegments().length === 0">No matches</li>
+              </ul>
+            </div>
+          </div>
+        </label>
+
+        <!-- ZONE (MULTISELECT) -->
+        <label class="clm-filter-field clm-multiselect-field">
+          <span class="clm-filter-k">Zone</span>
+          <div class="clm-multiselect-container" ng-class="{open: c.zoneDropdownOpen}">
+            <div class="clm-multiselect-trigger"
+                 ng-click="$event.stopPropagation(); c.zoneDropdownOpen ? c.closeZoneDropdown() : c.openZoneDropdown()">
+              <span class="clm-multiselect-text">{{c.getZoneDisplayText()}}</span>
+              <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+            </div>
+            <div class="clm-multiselect-dropdown" ng-show="c.zoneDropdownOpen" ng-click="$event.stopPropagation()">
+              <div class="clm-multiselect-actions">
+                <a ng-click="c.selectAllZones()">Select All</a>
+                <a ng-click="c.clearAllZones()">Clear</a>
+              </div>
+              <input type="text" class="clm-multiselect-search" ng-model="c.zoneSearch"
+                     ng-click="$event.stopPropagation()" placeholder="Search zones...">
+              <ul class="clm-multiselect-list">
+                <li ng-repeat="z in c.getFilteredZones() track by z"
+                    ng-click="$event.stopPropagation(); c.toggleZone(z)"
+                    ng-class="{selected: c.isZoneSelected(z)}">
+                  <span class="clm-checkbox" ng-class="{checked: c.isZoneSelected(z)}"></span>
+                  {{z}}
+                </li>
+                <li class="clm-dropdown-empty" ng-if="c.getFilteredZones().length === 0">No matches</li>
+              </ul>
+            </div>
+          </div>
+        </label>
+
+        <!-- REGION (MULTISELECT) -->
+        <label class="clm-filter-field clm-multiselect-field">
+          <span class="clm-filter-k">Region</span>
+          <div class="clm-multiselect-container" ng-class="{open: c.regionDropdownOpen}">
+            <div class="clm-multiselect-trigger"
+                 ng-click="$event.stopPropagation(); c.regionDropdownOpen ? c.closeRegionDropdown() : c.openRegionDropdown()">
+              <span class="clm-multiselect-text">{{c.getRegionDisplayText()}}</span>
+              <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+            </div>
+            <div class="clm-multiselect-dropdown" ng-show="c.regionDropdownOpen" ng-click="$event.stopPropagation()">
+              <div class="clm-multiselect-actions">
+                <a ng-click="c.selectAllRegions()">Select All</a>
+                <a ng-click="c.clearAllRegions()">Clear</a>
+              </div>
+              <input type="text" class="clm-multiselect-search" ng-model="c.regionSearch"
+                     ng-click="$event.stopPropagation()" placeholder="Search regions...">
+              <ul class="clm-multiselect-list">
+                <li ng-repeat="r in c.getFilteredRegions() track by r"
+                    ng-click="$event.stopPropagation(); c.toggleRegion(r)"
+                    ng-class="{selected: c.isRegionSelected(r)}">
+                  <span class="clm-checkbox" ng-class="{checked: c.isRegionSelected(r)}"></span>
+                  {{r}}
+                </li>
+                <li class="clm-dropdown-empty" ng-if="c.getFilteredRegions().length === 0">No matches</li>
+              </ul>
+            </div>
+          </div>
+        </label>
+
+        <!-- DEPOT (MULTISELECT) -->
+        <label class="clm-filter-field clm-multiselect-field">
+          <span class="clm-filter-k">Depot</span>
+          <div class="clm-multiselect-container" ng-class="{open: c.depotDropdownOpen}">
+            <div class="clm-multiselect-trigger"
+                 ng-click="$event.stopPropagation(); c.depotDropdownOpen ? c.closeDepotDropdown() : c.openDepotDropdown()">
+              <span class="clm-multiselect-text">{{c.getDepotDisplayText()}}</span>
+              <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+            </div>
+            <div class="clm-multiselect-dropdown" ng-show="c.depotDropdownOpen" ng-click="$event.stopPropagation()">
+              <div class="clm-multiselect-actions">
+                <a ng-click="c.selectAllDepots()">Select All</a>
+                <a ng-click="c.clearAllDepots()">Clear</a>
+              </div>
+              <input type="text" class="clm-multiselect-search" ng-model="c.depotSearch"
+                     ng-click="$event.stopPropagation()" placeholder="Search depots...">
+              <ul class="clm-multiselect-list">
+                <li ng-repeat="d in c.getFilteredDepots() track by d"
+                    ng-click="$event.stopPropagation(); c.toggleDepot(d)"
+                    ng-class="{selected: c.isDepotSelected(d)}">
+                  <span class="clm-checkbox" ng-class="{checked: c.isDepotSelected(d)}"></span>
+                  {{d}}
+                </li>
+                <li class="clm-dropdown-empty" ng-if="c.getFilteredDepots().length === 0">No matches</li>
+              </ul>
+            </div>
+          </div>
+        </label>
+
+        <!-- STATUS -->
+        <label class="clm-filter-field">
+          <span class="clm-filter-k">Status</span>
+          <select class="form-control" ng-model="c.filters.status" ng-change="c.applyFilters()">
+            <option value="">All Statuses</option>
+            <option ng-repeat="s in data.statusOptions track by s.value" value="{{s.value}}">{{s.label === 'Submitted' ? 'Pending' : s.label}}</option>
+          </select>
+        </label>
+
+        <!-- PERIOD -->
+        <label class="clm-filter-field">
+          <span class="clm-filter-k">Period</span>
+          <select class="form-control" ng-model="c.filters.period" ng-change="c.applyFilters()">
+            <option ng-repeat="p in c.data.filterOpts.periods track by p.value" value="{{p.value}}">{{p.label}}</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== Access Denied ===================== -->
+  <div ng-if="data.accessDenied" class="clm-block">
+    <div class="clm-no-data">You are not mapped to a ZHM, ZH_RMC, ZH_BPD or ZCH role. Contact your administrator if you believe this is incorrect.</div>
+  </div>
+
+  <div ng-if="!data.accessDenied">
+
+    <!-- ===================== Status tiles ===================== -->
+    <div class="clm-ar-stats">
+      <button type="button" class="clm-ar-stat st-total" ng-class="{'is-active': !c.kpiFilter}"
+              ng-click="c.setKpiFilter('')" title="Show all requests">
+        <span class="clm-ar-stat-k">Total Requests</span>
+        <span class="clm-ar-stat-v">{{data.scorecards.total}}</span>
+        <span class="clm-ar-stat-s">Pending + Approved + Rejected</span>
+      </button>
+      <button type="button" class="clm-ar-stat st-pending" ng-class="{'is-active': c.kpiFilter === 'pending'}"
+              ng-click="c.setKpiFilter('pending')" title="Filter table by Pending">
+        <span class="clm-ar-stat-k">Pending</span>
+        <span class="clm-ar-stat-v">{{data.scorecards.submitted}}</span>
+        <span class="clm-ar-stat-s">New in {{data.periodLabel}}</span>
+      </button>
+      <button type="button" class="clm-ar-stat st-approved" ng-class="{'is-active': c.kpiFilter === 'approved'}"
+              ng-click="c.setKpiFilter('approved')" title="Filter table by Approved">
+        <span class="clm-ar-stat-k">Approved</span>
+        <span class="clm-ar-stat-v">{{data.scorecards.approved}}</span>
+        <span class="clm-ar-stat-s">Final approval received</span>
+      </button>
+      <button type="button" class="clm-ar-stat st-rejected" ng-class="{'is-active': c.kpiFilter === 'rejected'}"
+              ng-click="c.setKpiFilter('rejected')" title="Filter table by Rejected">
+        <span class="clm-ar-stat-k">Rejected</span>
+        <span class="clm-ar-stat-v">{{data.scorecards.rejected}}</span>
+        <span class="clm-ar-stat-s">Declined in {{data.periodLabel}}</span>
+      </button>
+      <button type="button" class="clm-ar-stat st-deviated" ng-class="{'is-active': c.kpiFilter === 'deviated'}"
+              ng-click="c.setKpiFilter('deviated')" title="Filter table by Deviated">
+        <span class="clm-ar-stat-k">Deviated</span>
+        <span class="clm-ar-stat-v">{{data.scorecards.deviated}}</span>
+        <span class="clm-ar-stat-s">Flagged in {{data.periodLabel}}</span>
+      </button>
+    </div>
+
+    <!-- ===================== Chart ===================== -->
+    <div class="clm-block clm-ar-chart">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Approval Pipeline — Last 12 Months</div>
+          <div class="clm-block-sub">Requests by current state, grouped by month submitted<span ng-if="data.chart.rangeLabel"> · {{data.chart.rangeLabel}}</span></div>
+        </div>
+        <div class="clm-block-meta clm-ar-legend">
+          <span class="clm-ar-leg" ng-repeat="s in c.seriesDefs track by s.key"><i class="clm-ar-sw" ng-class="'k-' + s.key"></i>{{s.label}}</span>
+        </div>
+      </div>
+
+      <div class="clm-tw-body">
+        <div class="clm-ar-chart-body" ng-if="data.chart.months.length" ng-mouseleave="c.onMouseLeaveChart()">
+          <div class="clm-ar-plot">
+            <!-- Y-axis labels (HTML so they never stretch) -->
+            <div class="clm-ar-ytick" ng-repeat="t in c.chartScale.ticks track by $index"
+                 ng-style="{top: c.yPct(t) + '%'}">{{t}}</div>
+
+            <svg viewBox="0 0 1000 200" preserveAspectRatio="none" class="clm-ar-svg">
+              <line ng-repeat="t in c.chartScale.ticks track by $index"
+                    x1="0" x2="1000" ng-attr-y1="{{c.chartY(t)}}" ng-attr-y2="{{c.chartY(t)}}"
+                    class="clm-ar-grid" ng-class="{'is-base': t === 0}"></line>
+
+              <line ng-if="c.hoverIndex > -1" class="clm-ar-guide"
+                    ng-attr-x1="{{c.chartX(c.hoverIndex)}}" y1="0"
+                    ng-attr-x2="{{c.chartX(c.hoverIndex)}}" y2="200"></line>
+
+              <polyline ng-repeat="s in c.seriesDefs track by s.key"
+                        class="clm-ar-line" ng-class="'k-' + s.key"
+                        ng-attr-points="{{c.linePoints(s.key)}}"></polyline>
+
+              <rect ng-repeat="m in data.chart.months track by $index"
+                    ng-attr-x="{{c.chartX($index) - c.colWidth() / 2}}" y="0"
+                    ng-attr-width="{{c.colWidth()}}" height="200"
+                    class="clm-ar-hit"
+                    ng-mouseenter="c.onMouseOverMonth($event, $index)"></rect>
+            </svg>
+
+            <!-- Point markers for the hovered month -->
+            <span ng-if="c.hoverIndex > -1" ng-repeat="s in c.seriesDefs track by s.key"
+                  class="clm-ar-pt" ng-class="'k-' + s.key"
+                  ng-style="{left: c.xPct(c.hoverIndex) + '%', top: c.yPct(data.chart.series[s.key][c.hoverIndex] || 0) + '%'}"></span>
+
+            <!-- X-axis labels -->
+            <div class="clm-ar-xtick" ng-repeat="m in data.chart.months track by $index"
+                 ng-class="{'is-current': $last, 'is-hover': $index === c.hoverIndex, 'is-skip': (data.chart.months.length - 1 - $index) % 2 === 1}"
+                 ng-style="{left: c.xPct($index) + '%'}">{{m}}<span ng-if="$last" class="clm-ar-mtd">MTD</span></div>
+
+            <!-- Tooltip -->
+            <div class="clm-ar-tip" ng-if="c.showTooltip && c.hoverIndex > -1"
+                 ng-class="{'is-flip': c.hoverIndex >= data.chart.months.length * 0.6}"
+                 ng-style="{left: c.xPct(c.hoverIndex) + '%'}">
+              <div class="clm-ar-tip-t">{{data.chart.months[c.hoverIndex]}}<span ng-if="c.hoverIndex === data.chart.months.length - 1"> (MTD)</span></div>
+              <div class="clm-ar-tip-r" ng-repeat="s in c.seriesDefs track by s.key">
+                <i class="clm-ar-sw" ng-class="'k-' + s.key"></i>
+                <span class="clm-ar-tip-k">{{s.label}}</span>
+                <span class="clm-ar-tip-v">{{data.chart.series[s.key][c.hoverIndex] || 0}}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div ng-if="!data.chart.months.length" class="clm-no-data">No data available.</div>
+      </div>
+    </div>
+
+    <!-- ===================== Data Table ===================== -->
+    <div class="clm-block clm-ar-requests" id="clmRequestsTableContainer">
+      <div class="clm-block-head">
+        <div class="clm-block-heading">
+          <div class="clm-block-title">Approval Requests</div>
+          <div class="clm-block-sub">Click a request ID to open the full request</div>
+        </div>
+        <div class="clm-block-meta">
+          <span class="clm-chip"><span class="clm-chip-k">Records</span> {{c.getVisibleRecordsCount()}}</span>
+          <button type="button" class="clm-chip clm-ar-kpi-chip" ng-if="c.kpiFilter"
+                  ng-click="c.setKpiFilter(c.kpiFilter)" title="Remove tile filter">
+            <span class="clm-chip-k">Filtered by</span> {{c.kpiLabels[c.kpiFilter]}} <span class="clm-ar-x">&#10005;</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="clm-ar-toolbar">
+        <div class="clm-search-box">
+          <i class="fa fa-search"></i>
+          <input type="text" ng-model="c.filters.search" ng-change="c.runSearch()" placeholder="Search by Req ID, Name, PAN, Zone, Region, Depot...">
+        </div>
+        <label class="clm-rows-label">Rows
+          <select class="clm-rows-select"
+                  ng-model="c.pagination.rowsPerPage"
+                  ng-change="c.onRowsPerPageChange()"
+                  ng-options="opt for opt in c.rowsPerPageOptions track by opt">
+          </select>
+        </label>
+      </div>
+
+      <div class="clm-table-wrap">
+        <table class="clm-table clm-ar-table">
+          <thead>
+            <tr>
+              <th>Request ID</th>
+              <th>Customer</th>
+              <th>PAN</th>
+              <th>Seg</th>
+              <th>Zone</th>
+              <th>Region</th>
+              <th>Depot</th>
+              <th>Prev Limit</th>
+              <th>Requested</th>
+              <th>Approved</th>
+              <th>Outstanding</th>
+              <th>Status</th>
+              <th>Pending At</th>
+              <th>Submitted By</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr ng-repeat="r in c.paginatedRequests">
+              <td data-label="Request ID"><a href="javascript:void(0)" class="clm-link" ng-click="c.openRequestDetail(r)">{{r.requestCode}}</a></td>
+              <td data-label="Customer" class="col-customer">
+                <div class="clm-cust-name">{{r.customerName}}</div>
+                <div class="clm-cust-code" ng-if="r.customerCode">({{r.customerCode}})</div>
+              </td>
+              <td data-label="PAN" class="clm-ar-mono">{{r.pan || '—'}}</td>
+              <td data-label="Segment"><span class="badge seg-badge" ng-class="c.segClass(r.segment)">{{r.segment}}</span></td>
+              <td data-label="Zone" class="col-wrap">{{r.zone || '—'}}</td>
+              <td data-label="Region" class="col-wrap">{{r.region || '—'}}</td>
+              <td data-label="Depot" class="col-wrap">{{r.depot || '—'}}</td>
+              <td data-label="Prev Limit" class="num">{{r.prevLimit || '—'}}</td>
+              <td data-label="Requested" class="num num-key">{{r.requested || '—'}}</td>
+              <td data-label="Approved" class="num">{{r.approved || '—'}}</td>
+              <td data-label="Outstanding" class="num">{{r.outstanding || '—'}}</td>
+              <td data-label="Status">
+                <span class="badge status-badge" ng-class="c.statusClass(r.status)">{{r.statusLabel}}</span>
+                <span class="badge clm-ar-dev" ng-if="r.isDeviation" title="Deviation request">Deviation</span>
+              </td>
+              <td data-label="Pending At">
+                <span class="badge stage-badge" ng-if="r.stage"><i class="fa fa-user-o"></i> {{r.stage}}</span>
+                <span class="clm-ar-faint" ng-if="!r.stage">—</span>
+              </td>
+              <td data-label="Submitted By" class="col-submitted-by">
+                <div class="clm-ar-by">{{r.submittedBy}}</div>
+                <div class="clm-ar-on" ng-if="r.submittedOn">{{r.submittedOn}}</div>
+              </td>
+            </tr>
+            <tr ng-if="!c.paginatedRequests.length && c.getVisibleRecordsCount()" class="clm-ar-empty">
+              <td colspan="14" class="clm-no-data">No records to display on this page.</td>
+            </tr>
+            <tr ng-if="c.getVisibleRecordsCount() === 0" class="clm-ar-empty">
+              <td colspan="14" class="clm-no-data">No approval requests found for the selected filters.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="clm-pagination-bottom" ng-if="c.getVisibleRecordsCount() > 0">
+        <span class="clm-ar-pageinfo">Page {{c.pagination.currentPage}} of {{c.getTotalPages()}}</span>
+        <div class="clm-pagination-controls">
+          <button class="clm-page-btn" ng-click="c.previousPage()" ng-disabled="c.pagination.currentPage === 1">&lsaquo;</button>
+          <button ng-repeat="page in c.getPageNumbers()"
+                  class="clm-page-btn"
+                  ng-class="{active: page === c.pagination.currentPage}"
+                  ng-click="c.goToPage(page)">{{page}}</button>
+          <button class="clm-page-btn" ng-click="c.nextPage()" ng-disabled="c.pagination.currentPage >= c.getTotalPages()">&rsaquo;</button>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /ng-if !data.accessDenied -->
+</div>
+]]></template>
+    </sp_widget>
+</record_update>

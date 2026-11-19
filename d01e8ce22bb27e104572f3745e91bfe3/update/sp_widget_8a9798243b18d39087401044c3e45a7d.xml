@@ -1,0 +1,441 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $timeout, $sce) {
+    var c = this;
+    var POLL_MS = 5000;
+    var MAX_POLLS = 48;   // 4 minutes
+    var polls = 0;
+    var pollPromise = null;
+
+    c.customer = { value: '', displayValue: '' };
+    c.running = false;
+    c.view = null;
+    c.error = '';
+
+    // ---- Customer selected ----
+    $scope.$on('field.change', function(evt, parms) {
+        if (parms.field !== c.customer) return;
+        stopPolling();
+        c.view = null;
+        c.error = '';
+        c.running = false;
+        if (!c.customer.value) return;
+
+        c.server.get({ action: 'load', customer: c.customer.value }).then(function(r) {
+            var d = r.data;
+            if (d.reusable) {
+                setResult(d.result);
+            } else if (d.inProgress) {
+                c.running = true;
+                polls = 0;
+                poll(d.recordId);
+            } else {
+                c.start();
+            }
+        });
+    });
+
+    // ---- Start / re-assess ----
+    c.start = function() {
+        if (!c.customer.value) return;
+        stopPolling();
+        c.error = '';
+        c.view = null;
+        c.running = true;
+        polls = 0;
+
+        c.server.get({
+            action: 'start',
+            customer: c.customer.value,
+            customerName: c.customer.displayValue
+        }).then(function(r) {
+            if (r.data.error || !r.data.recordId) {
+                c.running = false;
+                c.error = r.data.error || 'Could not start the assessment.';
+                return;
+            }
+            poll(r.data.recordId);
+        });
+    };
+
+    // ---- Polling ----
+    function poll(recordId) {
+        pollPromise = $timeout(function() {
+            polls++;
+            c.server.get({ action: 'poll', recordId: recordId }).then(function(r) {
+                var res = r.data.result;
+                if (res && res.status === 'completed') {
+                    c.running = false;
+                    setResult(res);
+                } else if (res && res.status === 'failed') {
+                    c.running = false;
+                    c.error = 'The assessment failed. Please click Re-assess to try again.';
+                } else if (polls >= MAX_POLLS) {
+                    c.running = false;
+                    c.error = 'The assessment is taking longer than expected. Select the customer again in a few minutes to see the result.';
+                } else {
+                    poll(recordId);
+                }
+            });
+        }, POLL_MS);
+    }
+
+    function stopPolling() {
+        if (pollPromise) $timeout.cancel(pollPromise);
+        pollPromise = null;
+    }
+
+    $scope.$on('$destroy', stopPolling);
+
+    // ---- Build the view once per result ----
+    function setResult(res) {
+        var risk = parseRisk(res.final_recommendation);
+        var news = parseNews(res.recent_news);
+        c.view = {
+            updated: res.updated,
+            company: res.company_name || res.customer,
+            price: res.current_stock_price,
+            overview: res.company_overview,
+            financials: parseBullets(res.financial_highlights),
+            developments: parseBullets(res.major_developments),
+            news: news,
+            alertCount: news.filter(function(n) { return n.alert; }).length,
+            risk: risk,
+            riskClass: (risk.split(' ')[0] || '').toLowerCase(),
+            recoHtml: toHtml(res.final_recommendation)
+        };
+    }
+
+    // "* Label: text" lines -> [{label, text}]
+    function parseBullets(text) {
+        return lines(text).map(function(l) {
+            var idx = l.indexOf(':');
+            if (idx > 0 && idx < 45) {
+                return { label: l.substring(0, idx).trim(), text: l.substring(idx + 1).trim() };
+            }
+            return { label: '', text: l };
+        });
+    }
+
+    // "* Headline (Publisher, Date) | url" lines -> [{title, meta, url, alert}]
+    function parseNews(text) {
+        return lines(text).map(function(l) {
+            var url = '';
+            var pipe = l.lastIndexOf('|');
+            if (pipe > -1) {
+                var tail = l.substring(pipe + 1).trim();
+                if (/^https?:\/\//i.test(tail)) url = tail;
+                l = l.substring(0, pipe).trim();
+            }
+            var alert = /^\[ALERT\]/i.test(l);
+            l = l.replace(/^\[ALERT\]\s*/i, '');
+
+            var meta = '';
+            var m = l.match(/\(([^()]*)\)\s*$/);
+            if (m) {
+                meta = m[1];
+                l = l.substring(0, m.index).trim();
+            }
+            return { title: l, meta: meta, url: url, alert: alert };
+        });
+    }
+
+    function lines(text) {
+        return (text || '').split(/\r?\n/)
+            .map(function(l) { return l.trim(); })
+            .filter(function(l) { return /^[\*\-•]/.test(l); })
+            .map(function(l) { return l.replace(/^[\*\-•]\s*/, ''); })
+            .filter(Boolean);
+    }
+
+    function parseRisk(txt) {
+        var m = (txt || '').match(/Risk Category:\s*(Low|Moderate|High)\s*Risk/i);
+        return m ? m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase() + ' Risk' : '';
+    }
+
+    function toHtml(text) {
+        if (!text) return '';
+        var html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/^(Risk Category:|Reason:|Strengths:|Concerns:|Recommendation:)/gm, '<strong>$1</strong>');
+        return $sce.trustAsHtml(html);
+    }
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.vra .vra-input { margin-bottom:16px; }
+.vra .vra-input label { display:block; margin-bottom:4px; font-weight:600; }
+
+.vra .vra-running { display:flex; gap:16px; align-items:center; padding:16px; background:#f4f8fb; border-radius:6px; margin-bottom:16px; }
+
+.vra .vra-toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px; }
+
+.vra .vra-head { display:flex; gap:32px; flex-wrap:wrap; padding:12px 0 16px; border-bottom:1px solid #e5e5e5; margin-bottom:12px; }
+.vra .vra-label { font-size:12px; color:#777; text-transform:uppercase; letter-spacing:.5px; }
+.vra .vra-value { font-size:18px; font-weight:600; }
+
+.vra .vra-badge { display:inline-block; padding:4px 12px; border-radius:12px; font-weight:600; color:#fff; background:#888; }
+.vra .vra-badge.low { background:#2e7d32; }
+.vra .vra-badge.moderate { background:#ef6c00; }
+.vra .vra-badge.high { background:#c62828; }
+
+.vra .vra-section { margin-top:18px; }
+.vra h4 { font-weight:600; margin-bottom:8px; }
+.vra h4 .fa { color:#1f6fb2; margin-right:4px; }
+
+.vra .vra-text { line-height:1.6; white-space:pre-wrap; word-break:break-word; }
+.vra .vra-block { background:#fafafa; padding:12px 14px; border-radius:4px; }
+
+.vra .vra-list { padding-left:20px; margin:0; }
+.vra .vra-list li { margin-bottom:6px; line-height:1.55; }
+
+.vra .vra-news-list a { font-weight:600; color:#1f6fb2; }
+.vra .vra-news-list .fa-external-link { font-size:11px; }
+.vra .vra-meta { color:#777; font-size:12px; margin-left:4px; }
+.vra .vra-news-alert { background:#fff5f5; border-left:3px solid #c62828; padding:4px 8px; border-radius:3px; list-style-position:inside; margin-left:-20px; }
+.vra .vra-alert { display:inline-block; background:#c62828; color:#fff; font-size:11px; font-weight:700; padding:1px 6px; border-radius:3px; margin-right:6px; }
+.vra .vra-alert-box { margin-bottom:8px; }</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clm_temp_agent</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>CLM Temp agent</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    var TABLE = 'x_birl3_clm_customer_performance';
+    var REUSE_HOURS = 24;     // show an existing completed assessment if newer than this; 0 = always re-run
+    var STALE_MINUTES = 10;   // a 'requested' record older than this is treated as stuck and restarted
+
+    if (!input) return;
+
+    // ---- Load existing assessment for the selected customer ----
+    if (input.action === 'load' && input.customer) {
+        var rec = new GlideRecordSecure(TABLE);
+        rec.addQuery('customer_name', input.customer);
+        rec.orderByDesc('sys_updated_on');
+        rec.setLimit(1);
+        rec.query();
+        if (rec.next()) {
+            var age = ageHours(rec);
+            data.result = pack(rec);
+            data.recordId = rec.getUniqueValue();
+            data.reusable = rec.getValue('assessment_status') === 'completed' &&
+                            REUSE_HOURS > 0 && age < REUSE_HOURS;
+            data.inProgress = rec.getValue('assessment_status') === 'requested' &&
+                              age * 60 < STALE_MINUTES;
+        }
+        return;
+    }
+
+    // ---- Start a new assessment ----
+    if (input.action === 'start' && input.customer) {
+        var gr = new GlideRecordSecure(TABLE);
+        gr.addQuery('customer_name', input.customer);
+        gr.orderByDesc('sys_updated_on');
+        gr.setLimit(1);
+        gr.query();
+        var exists = gr.next();
+
+        if (exists && gr.getValue('assessment_status') === 'requested' &&
+            ageHours(gr) * 60 < STALE_MINUTES) {
+            data.recordId = gr.getUniqueValue();
+            return;
+        }
+
+        if (!exists) {
+            gr.initialize();
+            gr.setValue('customer_name', input.customer);
+            gr.setValue('company_name', input.customerName || '');
+        }
+        gr.setValue('current_stock_price', '');
+        gr.setValue('market_stock_insight', '');
+        gr.setValue('financial_highlights', '');
+        gr.setValue('major_developments', '');
+        gr.setValue('key_news_highlights', '');
+        gr.setValue('final_recommendation', '');
+        gr.setValue('requested_by', gs.getUserID());
+        gr.setValue('assessment_status', 'requested');
+
+        data.recordId = exists ? gr.update() : gr.insert();
+        if (!data.recordId) data.error = 'Could not start the assessment: ' + gr.getLastErrorMessage();
+        return;
+    }
+
+    // ---- Poll a running assessment ----
+    if (input.action === 'poll' && input.recordId) {
+        var p = new GlideRecordSecure(TABLE);
+        if (p.get(input.recordId)) data.result = pack(p);
+        return;
+    }
+
+    // ---------- helpers ----------
+    function pack(r) {
+        return {
+            status: r.getValue('assessment_status'),
+            customer: r.getDisplayValue('customer_name'),
+            company_name: r.getValue('company_name'),
+            current_stock_price: r.getValue('current_stock_price'),
+            company_overview: r.getValue('market_stock_insight'),
+            financial_highlights: r.getValue('financial_highlights'),
+            major_developments: r.getValue('major_developments'),
+            recent_news: r.getValue('key_news_highlights'),
+            final_recommendation: r.getValue('final_recommendation'),
+            updated: r.getDisplayValue('sys_updated_on')
+        };
+    }
+
+    function ageHours(r) {
+        var updated = new GlideDateTime(r.getValue('sys_updated_on'));
+        var now = new GlideDateTime();
+        return (now.getNumericValue() - updated.getNumericValue()) / 3600000;
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-29 10:39:12</sys_created_on>
+        <sys_id>8a9798243b18d39087401044c3e45a7d</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>CLM Temp agent</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_8a9798243b18d39087401044c3e45a7d</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-30 06:38:51</sys_updated_on>
+        <template><![CDATA[<div class="vra panel panel-default">
+  <div class="panel-heading">
+    <h3 class="panel-title"><i class="fa fa-shield"></i> Customer Risk &amp; News Assessment</h3>
+  </div>
+  <div class="panel-body">
+
+    <!-- Customer dropdown -->
+    <div class="vra-input">
+      <label>Customer Name</label>
+      <sn-record-picker
+        field="c.customer"
+        table="'x_birl3_clm_clm_customer_master1'"
+        display-field="'customer_name'"
+        display-fields="'customer_code_sap'"
+        value-field="'sys_id'"
+        search-fields="'customer_name,customer_code_sap'"
+        default-query="'is_active=true'"
+        page-size="25"
+        placeholder="Select a customer">
+      </sn-record-picker>
+    </div>
+
+    <!-- Running -->
+    <div class="vra-running" ng-if="c.running">
+      <i class="fa fa-spinner fa-spin fa-2x"></i>
+      <div>
+        <strong>Assessing {{c.customer.displayValue}}...</strong>
+        <div class="text-muted">Searching newspapers, stock exchanges and financial sites. This usually takes about a minute.</div>
+      </div>
+    </div>
+
+    <div class="alert alert-danger" ng-if="c.error">{{c.error}}</div>
+
+    <!-- Result -->
+    <div ng-if="c.view && !c.running">
+
+      <div class="vra-toolbar">
+        <span class="text-muted"><i class="fa fa-clock-o"></i> Last assessed: {{c.view.updated}}</span>
+        <button class="btn btn-default btn-sm" ng-click="c.start()">
+          <i class="fa fa-refresh"></i> Re-assess
+        </button>
+      </div>
+
+      <div class="vra-head">
+        <div>
+          <div class="vra-label">Company</div>
+          <div class="vra-value">{{c.view.company}}</div>
+        </div>
+        <div>
+          <div class="vra-label">Current Stock Price</div>
+          <div class="vra-value">{{c.view.price || 'Not available'}}</div>
+        </div>
+        <div>
+          <div class="vra-label">Risk Category</div>
+          <span class="vra-badge" ng-class="c.view.riskClass">{{c.view.risk || 'Not rated'}}</span>
+        </div>
+      </div>
+
+      <div class="alert alert-danger vra-alert-box" ng-if="c.view.alertCount > 0">
+        <i class="fa fa-exclamation-triangle"></i>
+        <strong>{{c.view.alertCount}} adverse news item(s) found.</strong> See the items marked ALERT under Recent News.
+      </div>
+
+      <!-- Company Overview -->
+      <div class="vra-section">
+        <h4><i class="fa fa-building-o"></i> Company Overview</h4>
+        <p class="vra-text">{{c.view.overview || 'Not available.'}}</p>
+      </div>
+
+      <!-- Financial Highlights -->
+      <div class="vra-section">
+        <h4><i class="fa fa-line-chart"></i> Financial Highlights</h4>
+        <ul class="vra-list" ng-if="c.view.financials.length">
+          <li ng-repeat="b in c.view.financials track by $index">
+            <strong ng-if="b.label">{{b.label}}:</strong> {{b.text}}
+          </li>
+        </ul>
+        <p class="text-muted" ng-if="!c.view.financials.length">Not available.</p>
+      </div>
+
+      <!-- Recent Major Orders & Developments -->
+      <div class="vra-section">
+        <h4><i class="fa fa-briefcase"></i> Recent Major Orders &amp; Developments</h4>
+        <ul class="vra-list" ng-if="c.view.developments.length">
+          <li ng-repeat="b in c.view.developments track by $index">
+            <strong ng-if="b.label">{{b.label}}:</strong> {{b.text}}
+          </li>
+        </ul>
+        <p class="text-muted" ng-if="!c.view.developments.length">Not available.</p>
+      </div>
+
+      <!-- Recent News -->
+      <div class="vra-section">
+        <h4><i class="fa fa-newspaper-o"></i> Recent News</h4>
+        <ul class="vra-list vra-news-list" ng-if="c.view.news.length">
+          <li ng-repeat="n in c.view.news track by $index" ng-class="{'vra-news-alert': n.alert}">
+            <span class="vra-alert" ng-if="n.alert">ALERT</span>
+            <a ng-if="n.url" ng-href="{{n.url}}" target="_blank" rel="noopener noreferrer">{{n.title}} <i class="fa fa-external-link"></i></a>
+            <span ng-if="!n.url">{{n.title}}</span>
+            <span class="vra-meta" ng-if="n.meta">({{n.meta}})</span>
+          </li>
+        </ul>
+        <p class="text-muted" ng-if="!c.view.news.length">No recent news available.</p>
+      </div>
+
+      <!-- Risk Assessment -->
+      <div class="vra-section">
+        <h4><i class="fa fa-check-square-o"></i> Risk Assessment</h4>
+        <div class="vra-text vra-block" ng-bind-html="c.view.recoHtml"></div>
+      </div>
+    </div>
+
+    <div class="text-muted" ng-if="!c.customer.value && !c.running">
+      Select a customer to view or generate its latest risk and news assessment.
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>8a9798243b18d39087401044c3e45a7d</id>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-29 10:39:12</sys_created_on>
+        <sys_id>8e97d8243b18d39087401044c3e45a3c</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-29 10:39:12</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

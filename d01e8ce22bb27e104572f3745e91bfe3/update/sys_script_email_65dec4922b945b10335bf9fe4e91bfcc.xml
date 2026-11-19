@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_key_swap_outcome</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function runMailScript(current, template, email, email_action, event) {
+
+    function esc(s) { return GlideStringUtil.escapeHTML((s || '') + '').replace(/\n/g, '<br>'); }
+    function num(gr, f) {
+        var v = gr.getValue(f);
+        if (v === null || v === undefined || v === '') return 0;
+        v = String(v);
+        if (v.indexOf(';') > -1) v = v.split(';')[1];
+        var n = parseFloat(v);
+        return isNaN(n) ? 0 : n;
+    }
+    function inr(v) {
+        var n = Math.round(parseFloat(v) || 0);
+        var s = Math.abs(n).toString();
+        var last = s.slice(-3), rest = s.slice(0, -3);
+        if (rest) { last = ',' + last; rest = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ','); }
+        return (n < 0 ? '-' : '') + '&#8377;' + rest + last;
+    }
+    function journal(gr, element) {
+        try {
+            var jf = new GlideRecord('sys_journal_field');
+            jf.addQuery('element_id', gr.getUniqueValue());
+            jf.addQuery('element', element);
+            jf.orderByDesc('sys_created_on');
+            jf.setLimit(1);
+            jf.query();
+            if (jf.next()) return jf.getValue('value') || '';
+        } catch (e) {}
+        return '';
+    }
+    function site(id) {
+        var o = { code: '', name: '', segment: '' };
+        var g = new GlideRecord('x_birl3_clm_clm_customer_master1');
+        if (id && g.get(id)) {
+            o.code = g.getDisplayValue('customer_code_sap') || '';
+            o.name = g.getDisplayValue('customer_name') || '';
+            o.segment = g.getDisplayValue('segment') || '';
+        }
+        return o;
+    }
+
+    var TD = 'style="padding:9px 12px;font-size:13px;color:#1a1a1a;border:1px solid #e0e6ed;"';
+    var TL = 'style="padding:9px 12px;font-size:13px;color:#3a4451;background-color:#fffcf0;border:1px solid #e0e6ed;width:38%;"';
+    var TH = 'style="padding:8px 12px;font-size:12px;color:#2b3440;background-color:#eef1f5;border:1px solid #e0e6ed;text-align:left;"';
+    var OPEN = '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">';
+    function head(t) { template.print('<p style="margin:22px 0 8px 0;font-size:12px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#3a4451;">' + t + '</p>'); }
+    function row(l, v) { template.print('<tr><td ' + TL + '>' + l + '</td><td ' + TD + '>' + v + '</td></tr>'); }
+
+    var approved = ((current.getValue('approval') || '') + '') === 'approved';
+    var applied = ((current.getValue('applied') || '') + '') === '1' || ((current.getValue('applied') || '') + '') === 'true';
+    var number = current.getValue('number') || '';
+    var initiator = current.isValidField('opened_by') ? current.getDisplayValue('opened_by') : (current.getValue('sys_created_by') || '');
+    var donor = site(current.getValue('donor'));
+    var donee = site(current.getValue('donee'));
+    var amount = num(current, 'requested_amount');
+
+    try { email.setSubject('Key Limit Swap ' + (approved ? 'Approved' : 'Rejected') + ' | ' + number + ' | ' + donor.code + ' to ' + donee.code); } catch (e) {}
+
+    // approvals on this swap
+    var hist = [], rejectedBy = null;
+    var ap = new GlideRecord('sysapproval_approver');
+    var q = ap.addQuery('document_id', current.getUniqueValue());
+    q.addOrCondition('sysapproval', current.getUniqueValue());
+    ap.orderBy('sys_created_on');
+    ap.query();
+    while (ap.next()) {
+        var st = ap.getValue('state');
+        if (st !== 'approved' && st !== 'rejected') continue;
+        var h = { approver: ap.getDisplayValue('approver'), state: st, comments: journal(ap, 'comments'), when: ap.getDisplayValue('sys_updated_on') };
+        hist.push(h);
+        if (st === 'rejected') rejectedBy = h;
+    }
+
+    template.print('<p style="margin:0 0 14px 0;font-size:14px;color:#5a6a7a;">Dear ' + esc(initiator) + ',</p>');
+
+    if (approved) {
+        template.print('<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:0 0 6px 0;"><tr>' +
+            '<td style="background-color:#eaf7ee;border:1px solid #b9e3c6;border-radius:6px;padding:16px;">' +
+            '<div style="font-size:12px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#1e8449;">Swap approved</div>' +
+            '<div style="font-size:15px;color:#1a1a1a;margin-top:6px;line-height:1.6;">Your Key customer limit swap <b>' + esc(number) + '</b> has been approved. <b>' +
+            inr(amount) + '</b> moves from <b>' + esc(donor.code) + '</b> to <b>' + esc(donee.code) + '</b>.</div>' +
+            '</td></tr></table>');
+    } else {
+        var reason = (rejectedBy && rejectedBy.comments) ? rejectedBy.comments : journal(current, 'work_notes');
+        template.print('<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:0 0 6px 0;"><tr>' +
+            '<td style="background-color:#fef5f4;border:1px solid #f5c2bc;border-radius:6px;padding:16px;">' +
+            '<div style="font-size:12px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#b3261e;">Swap rejected</div>' +
+            '<div style="font-size:14px;color:#1a1a1a;margin-top:6px;line-height:1.6;">' + (esc(reason) || 'No reason was recorded.') + '</div>' +
+            (rejectedBy ? '<div style="font-size:12px;color:#5a6a7a;margin-top:8px;">Rejected by ' + esc(rejectedBy.approver) + (rejectedBy.when ? ' on ' + esc(rejectedBy.when) : '') + '</div>' : '') +
+            '</td></tr></table>');
+    }
+
+    head('Swap summary');
+    template.print(OPEN);
+    row('Swap', '<b>' + esc(number) + '</b>');
+    row('Swap type', esc(current.getDisplayValue('swap_type')));
+    row('Swap amount', inr(amount));
+    row('Donor site', esc(donor.code) + (donor.name ? ' - ' + esc(donor.name) : ''));
+    row('Donee site', esc(donee.code) + (donee.name ? ' - ' + esc(donee.name) : ''));
+    template.print('</table>');
+
+    if (approved) {
+        head('Limits');
+        template.print(OPEN);
+        template.print('<tr><th ' + TH + '>Site</th><th ' + TH + ' align="right">Before</th><th ' + TH + ' align="right">After</th></tr>');
+        template.print('<tr><td ' + TD + '>Donor ' + esc(donor.code) + '</td><td ' + TD + ' align="right">' + inr(num(current, 'donor_limit_before')) + '</td><td ' + TD + ' align="right">' + (applied ? inr(num(current, 'donor_limit_after')) : '-') + '</td></tr>');
+        template.print('<tr><td ' + TD + '>Donee ' + esc(donee.code) + '</td><td ' + TD + ' align="right">' + inr(num(current, 'donee_limit_before')) + '</td><td ' + TD + ' align="right">' + (applied ? inr(num(current, 'donee_limit_after')) : '-') + '</td></tr>');
+        template.print('</table>');
+    }
+
+    if (hist.length) {
+        head('Approval history');
+        template.print(OPEN);
+        template.print('<tr><th ' + TH + '>Approver</th><th ' + TH + '>Decision</th><th ' + TH + '>Comments</th><th ' + TH + '>Date</th></tr>');
+        hist.forEach(function(x) {
+            var d = x.state.charAt(0).toUpperCase() + x.state.slice(1);
+            template.print('<tr><td ' + TD + '>' + esc(x.approver) + '</td><td ' + TD + '>' + d + '</td><td ' + TD + '>' + (esc(x.comments) || '-') + '</td><td ' + TD + '>' + (esc(x.when) || '-') + '</td></tr>');
+        });
+        template.print('</table>');
+    } else if (approved) {
+        template.print('<p style="margin:18px 0 0 0;font-size:12px;color:#8a96a3;">No approval was needed for this swap (auto-approved).</p>');
+    }
+
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>chetan.s@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-03 20:30:37</sys_created_on>
+        <sys_id>65dec4922b945b10335bf9fe4e91bfcc</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_key_swap_outcome</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_65dec4922b945b10335bf9fe4e91bfcc</sys_update_name>
+        <sys_updated_by>chetan.s@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-03 20:30:37</sys_updated_on>
+    </sys_script_email>
+</record_update>

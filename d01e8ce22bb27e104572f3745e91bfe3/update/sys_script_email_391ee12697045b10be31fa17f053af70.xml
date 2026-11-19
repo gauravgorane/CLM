@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm.trade_doc.submitted.tsh</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function runMailScript(current, template, email, email_action, event) {
+    try {
+        var custMaster = current;
+        if (!custMaster || !custMaster.isValidRecord()) {
+            template.print("<div style='font-family: Arial, sans-serif; color: #d9534f;'>Customer record unavailable</div>");
+            return;
+        }
+
+        function esc(str) {
+            if (str === null || str === undefined) return '';
+            return (str + '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        // Direct details from Customer Master
+        var custName = custMaster.getValue('customer_name') || 'Trade Customer';
+        var custCode = custMaster.getValue('customer_code_sap') || '—';
+        var pan      = custMaster.getValue('pan') || '—';
+
+        // TSH recipient name
+        var recipientName = 'Team';
+        if (event && event.parm1) {
+            var uGr = new GlideRecord('sys_user');
+            if (uGr.get('email', event.parm1 + '')) {
+                recipientName = uGr.getValue('name') || recipientName;
+            }
+        }
+
+        var dashboardUrl = (event && event.parm2) ? (event.parm2 + '').trim() : '';
+
+        // Dynamic Subject Line
+        email.setSubject('Documents Submitted: ' + custName + ' (' + custCode + ')');
+
+        var submitTime = new GlideDateTime().getDisplayValue();
+
+        var h = '';
+        h += '<p style="margin: 0 0 16px 0; font-size: 15px; line-height: 1.5; color: #1a1a1a;">Dear <strong>' + esc(recipientName) + '</strong>,</p>';
+        h += '<p style="margin: 0 0 20px 0; font-size: 14px; line-height: 1.6; color: #3a4451;">';
+        h += 'The trade customer below has successfully completed their data submission and uploaded supporting documents via the secure link.';
+        h += '</p>';
+
+        // Summary Card
+        h += '<div style="margin-bottom: 24px; border: 1px solid #e0e6ed; border-radius: 6px; background-color: #fafbfc; overflow: hidden;">';
+        h += '  <div style="padding: 10px 16px; background-color: #f1f3f7; border-bottom: 1px solid #dde3ea; font-size: 12px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.8px; color: #1a1a1a;">';
+        h += '    Submission Summary';
+        h += '  </div>';
+        h += '  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size: 13.5px; border-collapse: collapse;">';
+        h += '    <tr>';
+        h += '      <td width="36%" style="padding: 10px 16px; color: #5a6a7a; border-bottom: 1px solid #edf1f5;">Customer Name</td>';
+        h += '      <td style="padding: 10px 16px; color: #1a1a1a; font-weight: 700; border-bottom: 1px solid #edf1f5;">' + esc(custName) + '</td>';
+        h += '    </tr>';
+        h += '    <tr>';
+        h += '      <td style="padding: 10px 16px; color: #5a6a7a; border-bottom: 1px solid #edf1f5;">Customer Code</td>';
+        h += '      <td style="padding: 10px 16px; color: #1a1a1a; font-weight: 700; border-bottom: 1px solid #edf1f5;">' + esc(custCode) + '</td>';
+        h += '    </tr>';
+        h += '    <tr>';
+        h += '      <td style="padding: 10px 16px; color: #5a6a7a; border-bottom: 1px solid #edf1f5;">PAN</td>';
+        h += '      <td style="padding: 10px 16px; color: #1a1a1a; font-weight: 700; font-family: monospace; border-bottom: 1px solid #edf1f5;">' + esc(pan) + '</td>';
+        h += '    </tr>';
+        h += '    <tr>';
+        h += '      <td style="padding: 10px 16px; color: #5a6a7a;">Submitted On</td>';
+        h += '      <td style="padding: 10px 16px; color: #1e8449; font-weight: 700;">' + esc(submitTime) + '</td>';
+        h += '    </tr>';
+        h += '  </table>';
+        h += '</div>';
+
+        // Direct Dashboard Button
+        if (dashboardUrl) {
+            h += '<table role="presentation" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 24px;"><tbody><tr>';
+            h += '  <td align="center" bgcolor="#E87722" style="border-radius: 6px;">';
+            h += '    <a href="' + dashboardUrl + '" target="_blank" rel="noopener" style="display: inline-block; padding: 13px 32px; font-family: \'Segoe UI\', Arial, sans-serif; font-size: 14px; font-weight: bold; color: #ffffff; text-decoration: none; border-radius: 6px; letter-spacing: 0.5px;">';
+            h += '      View Submitted Data in CredX &rarr;';
+            h += '    </a>';
+            h += '  </td>';
+            h += '</tr></tbody></table>';
+
+            h += '<div style="margin-bottom: 20px; padding: 12px 14px; background-color: #f4f5f7; border: 1px dashed #cdd4dc; border-radius: 6px; font-size: 12px; color: #5a6a7a;">';
+            h += '  <div style="margin-bottom: 4px; font-weight: bold; color: #3a4451;">Direct Link:</div>';
+            h += '  <a href="' + dashboardUrl + '" target="_blank" style="color: #AF272F; word-break: break-all; text-decoration: underline;">' + dashboardUrl + '</a>';
+            h += '</div>';
+        }
+
+        template.print(h);
+
+    } catch (err) {
+        gs.error('[clm.trade_doc.submitted.tsh] Exception: ' + err.message);
+        template.print('<div style="color:red; font-size:12px;">Error generating submission notice: ' + esc(err.message) + '</div>');
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-23 11:49:44</sys_created_on>
+        <sys_id>391ee12697045b10be31fa17f053af70</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>clm.trade_doc.submitted.tsh</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_391ee12697045b10be31fa17f053af70</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-23 12:34:49</sys_updated_on>
+    </sys_script_email>
+</record_update>

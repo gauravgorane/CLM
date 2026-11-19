@@ -1,0 +1,1770 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $window, spUtil) {
+    var c = this;
+
+    // Default State Initialization
+    c.data.currentStep    = 1;
+    c.data.isSubmitting   = false;
+    c.data.isFetching     = false;
+    c.data.panSearchText  = '';
+    c.data.panSuggestions = [];
+    c.data.allSites       = [];
+    c.showDoneeDropdown   = false; 
+
+    c.selected = {
+        pan: '',
+        doneeSite: '',
+        doneeSiteDisplayCode: '',
+        doneeSiteDisplayName: '',
+        doneeSiteName: '', // HIGHLIGHT: SET VALUE
+        doneeAmount: null,
+        donorSite: '',
+        donorSiteName: '',
+        donorAvailable: null,
+        comments: ''
+    };
+    
+    // Check access on load
+    c.server.update().then(function() {
+        c.data.isInitialized = true;
+    });
+
+    // --- Window Click Listener to Close Custom Dropdown ---
+    $window.onclick = function(event) {
+        if (!event.target.closest('.abg-custom-select')) {
+            c.showDoneeDropdown = false;
+            $scope.$applyAsync();
+        }
+    };
+
+    // --- Typeahead PAN & Name Search ---
+    c.handlePanInput = function() {
+        // HIGHLIGHT: SET VALUE - Clear out values when changing PAN
+        c.selected.pan = ''; 
+        c.data.allSites = [];
+        c.clearDonor();
+
+        var query = c.data.panSearchText ? c.data.panSearchText.toUpperCase() : '';
+        if (query.length >= 3) {
+            c.data.action = 'fetch_pan_suggestions';
+            c.data.isFetching = true;
+            c.server.update().then(function() { 
+                c.data.action = ''; 
+                c.data.isFetching = false;
+            });
+        } else {
+            c.data.panSuggestions = [];
+        }
+    };
+
+    c.selectPan = function(selectedPan) {
+        // HIGHLIGHT: SET VALUE - Assigned selected PAN
+        c.selected.pan = selectedPan;
+        c.data.panSearchText = selectedPan;
+        c.data.panSuggestions = [];
+
+        c.data.action = 'fetch_all_sites';
+        c.data.isFetching = true;
+        c.server.update().then(function() {
+            c.data.action = '';
+            c.data.isFetching = false;
+        });
+    };
+
+    // --- Custom Dropdown Selection Logic ---
+    c.toggleDoneeDropdown = function(event) {
+        if (event) event.stopPropagation();
+        c.showDoneeDropdown = !c.showDoneeDropdown;
+    };
+
+    c.selectDonee = function(site) {
+        // HIGHLIGHT: SET VALUE - Bind donee UI variables with the selected site's values
+        c.selected.doneeSite = site.sys_id;
+        c.selected.doneeSiteDisplayCode = site.customer_code;
+        c.selected.doneeSiteDisplayName = site.name;
+        c.selected.doneeSiteName = site.customer_code + ' — ' + site.name; 
+        
+        c.showDoneeDropdown = false;
+        c.onDoneeChange();
+    };
+
+    c.onDoneeChange = function() {
+        c.clearDonor();
+    };
+
+    c.clearDonor = function() {
+        // HIGHLIGHT: SET VALUE - Resetting donor variables
+        c.selected.donorSite = '';
+        c.selected.donorSiteName = '';
+        c.selected.donorAvailable = null;
+    };
+
+    c.getDonorSites = function() {
+        if (!c.data.allSites) return [];
+        return c.data.allSites.filter(function(site) {
+            return site.sys_id !== c.selected.doneeSite;
+        });
+    };
+
+    // Alert if donors are valid but locked in ongoing request
+    c.hasOnlyInsufficientSites = function() {
+        var donors = c.getDonorSites();
+        if (donors.length === 0) return false;
+        return donors.every(function(site) {
+            return site.available < c.selected.doneeAmount || site.has_ongoing_request;
+        });
+    };
+
+    c.selectDonor = function(site) {
+        if (site.available < c.selected.doneeAmount || site.has_ongoing_request) return;
+        
+        // HIGHLIGHT: SET VALUE - Mapping Donor variables for Submit Payload
+        c.selected.donorSite = site.sys_id;
+        c.selected.donorSiteName = site.customer_code + ' — ' + site.name;
+        c.selected.donorAvailable = site.available;
+    };
+
+    // --- Validation & Navigation ---
+    c.isStep1Valid = function() {
+        return c.selected.pan && 
+            c.selected.doneeSite && 
+            c.selected.doneeAmount > 0 && 
+            c.selected.donorSite;
+    };
+
+    c.goToReview = function() {
+        c.data.currentStep = 2;
+    };
+
+    c.goToDashboard = function() {
+        $window.location.href = '?id=uclm_limit_swap'; 
+    };
+
+    // --- Submit Application ---
+    c.submitSwap = function() {
+        c.data.isSubmitting = true;
+        c.data.action = 'submitSwap';
+        
+        // HIGHLIGHT: BINDING - Send complete selected object payload to the server
+        c.data.payload = c.selected; 
+
+        c.server.update().then(function() {
+            c.data.isSubmitting = false;
+            c.data.action = '';
+
+            if (c.data.serverError) {
+                spUtil.addErrorMessage(c.data.serverError);
+                c.data.currentStep = 2;
+                return;
+            }
+            c.data.currentStep = 3; 
+        });
+    };
+
+    c.resetForm = function() {
+        c.data.currentStep    = 1;
+        c.data.swapNumber     = null;
+        c.data.panSearchText  = '';
+        c.data.panSuggestions = [];
+        c.data.allSites       = [];
+        c.showDoneeDropdown   = false;
+
+        c.selected = {
+            pan: '', doneeSite: '', doneeSiteDisplayCode: '', doneeSiteDisplayName: '', doneeSiteName: '', doneeAmount: null,
+            donorSite: '', donorSiteName: '', donorAvailable: null, comments: ''
+        };
+    };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* Global Variables */
+$abg-red: #C8102E;
+$abg-red-hover: #A00D25;
+$abg-red-light: #fce8ea;
+$text-main: #333333;
+$text-muted: #666666;
+$border-color: #D1D1D1;
+$border-light: #EAEAEA;
+
+/* Container &amp; Fonts */
+.abg-widget-container { 
+  background-color: #FFFFFF; 
+  padding: 30px; 
+  border-radius: 6px; 
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05); 
+  font-family: 'Oxygen', Arial, sans-serif; 
+}
+
+.abg-header h2 { color: $text-main; font-weight: 700; margin-top: 0; margin-bottom: 8px; font-size: 24px; }
+.abg-header p { color: $text-muted; font-size: 14px; margin-bottom: 25px; }
+
+/* Form Inputs */
+.position-relative { position: relative; }
+.abg-input-group label { font-weight: 600; color: #4A4A4A; }
+.abg-input-group .form-control { 
+  border: 1px solid $border-color; 
+  border-radius: 4px; 
+  padding: 10px 15px; 
+  height: auto; 
+  font-size: 16px; 
+  transition: all 0.2s ease; 
+}
+.abg-input-group .form-control:focus { 
+  border-color: $abg-red; 
+  box-shadow: 0 0 0 2px rgba(200, 16, 46, 0.15); 
+  outline: none;
+}
+
+/* --- CUSTOM SELECT DROPDOWN (Optimized Colors) --- */
+.abg-custom-select { position: relative; width: 100%; user-select: none; }
+.abg-select-display {
+  border: 1px solid $border-color;
+  border-radius: 4px;
+  padding: 10px 15px;
+  background: #FFF;
+  cursor: pointer;
+  font-size: 15px;
+  min-height: 44px;
+  transition: all 0.2s ease;
+}
+.abg-custom-select.open .abg-select-display { 
+  border-color: $abg-red; 
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  box-shadow: 0 0 0 2px rgba(200, 16, 46, 0.15); 
+}
+.abg-select-dropdown {
+  position: absolute; top: 100%; left: 0; right: 0;
+  background: #FFF; 
+  border: 1px solid $abg-red; /* Matches focus state */
+  border-top: none;
+  border-radius: 0 0 6px 6px; 
+  box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+  z-index: 1050; max-height: 320px; overflow-y: auto; 
+}
+.abg-select-option {
+  padding: 14px 15px; 
+  border-bottom: 1px solid #F1F5F9;
+  cursor: pointer; 
+  transition: all 0.15s ease-in-out;
+}
+.abg-select-option:last-child { border-bottom: none; }
+
+/* Dynamic Dropdown States */
+.abg-select-option:hover:not(.disabled-option) { 
+  background: #FFF5F5; 
+  border-left: 3px solid $abg-red; 
+  padding-left: 12px; 
+}
+.selected-option { 
+  background: $abg-red-light; 
+  border-left: 3px solid $abg-red; 
+  padding-left: 12px; 
+}
+.selected-option .site-code { color: $abg-red; }
+.disabled-option { opacity: 0.65; cursor: not-allowed; background: #F9FAFB; }
+.site-meta { font-size: 12px; margin-top: 4px; }
+
+/* Status Badges */
+.abg-badge-ongoing { background-color: #F59E0B; font-weight: 600; padding: 4px 8px; border-radius: 4px; }
+.abg-badge-unauth { background-color: #EF4444; font-weight: 600; padding: 4px 8px; border-radius: 4px; color: #FFF; }
+.bg-dark-gray { background: #666; font-size: 10px; }
+
+/* Typeahead Dropdown */
+.abg-typeahead-dropdown { 
+  position: absolute; top: 100%; left: 0; z-index: 1000; width: 100%; 
+  background-color: #ffffff; border: 1px solid $border-color; border-top: none; 
+  border-radius: 0 0 4px 4px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); 
+  margin: 0; padding: 0; list-style: none; max-height: 250px; overflow-y: auto; 
+}
+.abg-typeahead-dropdown li a { 
+  display: block; padding: 12px 15px; color: $text-main; text-decoration: none; 
+  font-size: 14px; transition: background-color 0.1s ease; border-bottom: 1px solid #f5f5f5;
+}
+.abg-typeahead-dropdown li a:hover { background-color: #F8F9FA; color: $abg-red; }
+
+/* Tables */
+.abg-table { margin-top: 10px; border: 1px solid $border-light; font-size: 13px; }
+.abg-table thead th { 
+  background-color: #F8F9FA; color: #333; font-weight: 600; 
+  border-bottom: 2px solid $border-light; text-transform: uppercase; font-size: 11px; 
+}
+.abg-table tbody td { vertical-align: middle; border-top: 1px solid $border-light; }
+.selected-row { background-color: $abg-red-light !important; border-left: 4px solid $abg-red; }
+.disabled-row { opacity: 0.5; cursor: not-allowed; background-color: #f9f9f9; }
+.disabled-row:hover { background-color: #f9f9f9 !important; }
+
+/* UI Helpers */
+.border-top-red { border-top: 4px solid $abg-red; }
+.summary-label { font-size: 12px; }
+.amount-display { font-size: 16px; }
+
+/* Buttons */
+.abg-btn-primary { 
+  background-color: $abg-red; color: #FFFFFF; font-weight: 600; 
+  padding: 10px 24px; border-radius: 4px; border: none; transition: background-color 0.2s;
+}
+.abg-btn-primary:hover:not([disabled]) { background-color: $abg-red-hover; color: #FFFFFF; }
+.abg-btn-primary[disabled] { background-color: #E0E0E0; color: #9E9E9E; cursor: not-allowed; }
+
+.abg-btn-outline { 
+  background: transparent; border: 2px solid $abg-red; color: $abg-red; 
+  font-weight: 600; padding: 8px 20px; border-radius: 4px; transition: all 0.2s;
+}
+.abg-btn-outline:hover { background: $abg-red; color: #FFF; text-decoration: none; }
+
+.success-icon { font-size: 64px; color: #2E7D32; line-height: 1; }</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id/>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Limit Swap Request</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    // ==========================================
+    // 1. INITIALIZATION & CONSTANTS
+    // ==========================================
+    var userId = gs.getUserID();
+    var SEGMENT_MAPPING = { 'UTCL': 'Cement', 'URMX': 'RMC', 'GIL': 'BPD' };
+
+    // ==========================================
+    // 2. REUSABLE HELPER FUNCTIONS
+    // ==========================================
+
+    /**
+     * Fetches all jurisdictional permissions for the logged-in user.
+     * Groups them into an array of strict matching rules.
+     * ONLY allows users with 'TSH' or 'TSM' in their matrix role.
+     */
+    function getUserPermissions(targetUserId) {
+        var permissions = [];
+        var mxGr = new GlideRecord('x_birl3_clm_approval_matrix');
+        mxGr.addQuery('approver_user', targetUserId);
+        mxGr.addQuery('customer_type', 'non_trade');
+        mxGr.query();
+        
+        while (mxGr.next()) {
+            var roleName = (mxGr.getValue('role_name') || '').toUpperCase();
+            
+            // SECURITY CHECK: Role must contain TSH or TSM
+            if (roleName.indexOf('TSH') > -1 || roleName.indexOf('TSM') > -1) {
+                permissions.push({
+                    segment: mxGr.getValue('segment') || '',
+                    zone: mxGr.getValue('zone') || '',
+                    region: mxGr.getValue('region') || '',
+                    depot: mxGr.getValue('depot') || ''
+                });
+            }
+        }
+        return permissions;
+    }
+
+    /**
+     * Strict evaluation if a site falls under any of the user's specific Matrix combinations.
+     * 100% Case-Insensitive matching.
+     */
+    function isUserAuthorizedForSite(siteSeg, siteZone, siteReg, siteDepot, userPerms) {
+        var sSeg = (siteSeg || '').toUpperCase();
+        var sZone = (siteZone || '').toUpperCase();
+        var sReg = (siteReg || '').toUpperCase();
+        var sDepot = (siteDepot || '').toUpperCase();
+
+        for (var i = 0; i < userPerms.length; i++) {
+            var p = userPerms[i];
+            
+            var pSeg = (p.segment || '').toUpperCase();
+            var pZone = (p.zone || '').toUpperCase();
+            var pReg = (p.region || '').toUpperCase();
+            var pDepot = (p.depot || '').toUpperCase();
+
+            // 1. Segment must match
+            if (pSeg && pSeg !== sSeg) continue;
+            // 2. If Matrix specifies a Zone, the site MUST match it
+            if (pZone && pZone !== sZone) continue;
+            // 3. If Matrix specifies a Region, the site MUST match it
+            if (pReg && pReg !== sReg) continue;
+            // 4. If Matrix specifies a Depot, the site MUST match it
+            if (pDepot && pDepot !== sDepot) continue;
+            
+            // If the loop hasn't 'continued', it means the site matches this permission rule perfectly
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Evaluates if a site is currently locked in ANY pending transaction.
+     * Checks both Limit Swaps and standard CLR requests.
+     */
+    function hasOngoingRequest(siteSysId, customerCode) {
+        // Check 1: Is it involved in a Pending Limit Swap?
+        var swap = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+        var qc = swap.addQuery('donee_site_code', siteSysId);
+        qc.addOrCondition('donor_site_code', siteSysId);
+        swap.addQuery('approval', '!=', 'approved');
+        swap.addQuery('approval', '!=', 'rejected'); 
+        swap.setLimit(1);
+        swap.query();
+        if (swap.hasNext()) return true;
+
+        // Check 2: Is it involved in a Pending Standard Limit Enhancement?
+        var clr = new GlideRecord('x_birl3_clm_non_trade_clr');
+        clr.addQuery('customer_code', customerCode);
+        clr.addQuery('approval', '!=', 'Approved');
+        clr.addQuery('approval', '!=', 'Rejected');
+        clr.addQuery('approval', '!=', 'Cancelled');
+        clr.setLimit(1);
+        clr.query();
+        if (clr.hasNext()) return true;
+
+        return false;
+    }
+
+    /**
+     * Safely calculates live outstanding balance for a given customer code.
+     */
+    function getLiveOutstanding(customerCode) {
+        var outRec = new GlideRecord('x_birl3_clm_customer_outstanding');
+        outRec.addQuery('customer', customerCode); 
+        outRec.orderByDesc('created_on'); 
+        outRec.setLimit(1);
+        outRec.query();
+        if (outRec.next()) {
+            return parseFloat(outRec.getValue('outstanding') || 0);
+        }
+        return 0;
+    }
+
+    /**
+     * Determines the swap type (A, B, C, D, E) logic based on matrix rules.
+     */
+    function calculateSwapType(donee, donor) {
+        if (donee.segment !== donor.segment) return 'E'; // Diff Segment
+        if (donee.depot === donor.depot) return 'A';     // Same depot
+        if (donee.region === donor.region) return 'B';   // Same region, diff depot
+        if (donee.zone === donor.zone) return 'C';       // Same zone, diff region, diff depot
+        return 'D';                                      // Diff Zone (Segment Head required)
+    }
+    
+    /**
+     * HIGHLIGHT: GET VALUE - Reusable formatter to combine Name and Code fields
+     */
+    function getFormattedGeo(gr, nameField, codeField) {
+        var name = gr.getValue(nameField) || '';
+        var code = gr.getValue(codeField) || '';
+        
+        if (name && code) {
+            return name + ' (' + code + ')';
+        } else if (name) {
+            return name;
+        } else if (code) {
+            return code;
+        }
+        return 'N/A';
+    }
+
+    // ==========================================
+    // 3. MAIN SCRIPT EXECUTION
+    // ==========================================
+
+    var userPermissions = getUserPermissions(userId);
+
+    // --- 0. Access Validation Check on Load ---
+    if (!input) {
+        data.isTSH = userPermissions.length > 0;
+        return; 
+    }
+
+    // --- 1. Typeahead PAN / Name Search ---
+    if (input.action === 'fetch_pan_suggestions') {
+        var searchString = input.panSearchText ? input.panSearchText.toUpperCase() : '';
+        data.panSuggestions = [];
+
+        var ga = new GlideRecord('x_birl3_clm_customer');
+        ga.addEncodedQuery('panSTARTSWITH' + searchString + '^ORnameLIKE' + searchString);
+        ga.orderBy('pan');
+        ga.setLimit(15);
+        ga.query();
+
+        var addedPans = {};
+        while (ga.next()) {
+            var panVal = ga.getValue('pan');
+            var nameVal = ga.getValue('name');
+            if (panVal && !addedPans[panVal]) {
+                data.panSuggestions.push({ pan: panVal, name: nameVal });
+                addedPans[panVal] = true;
+            }
+        }
+        return;
+    }
+
+    // --- 2. Fetch All Sites for PAN (With Jurisdiction & Ongoing Checks) ---
+    if (input.action === 'fetch_all_sites') {
+        data.allSites = [];
+        var gr = new GlideRecord('x_birl3_clm_customer');
+        gr.addQuery('pan', input.panSearchText);
+        gr.orderBy('customer_code');
+        gr.query();
+
+        while (gr.next()) {
+            var siteSysId = gr.getUniqueValue();
+            var custCode  = gr.getValue('customer_code') || '';
+            var compCode  = gr.getValue('company_code') || '';
+            
+            var siteSeg  = SEGMENT_MAPPING[compCode] || compCode || 'N/A';
+            
+            // HIGHLIGHT: GET VALUE - Dynamically constructing the format Name(Code) utilizing both Name and Code fields
+            var siteZoneFormatted = getFormattedGeo(gr, 'zone_name', 'customer_group');
+            var siteRegFormatted  = getFormattedGeo(gr, 'region_name', 'cg4');
+            var siteDepFormatted  = getFormattedGeo(gr, 'depot_name', 'sales_office');
+
+            // Internal evaluation variables (keeping raw code values to check jurisdiction permissions accurately)
+            var siteZoneRaw = gr.getValue('customer_group') || '';
+            var siteRegRaw  = gr.getValue('cg4') || '';
+            var siteDepRaw  = gr.getValue('sales_office') || '';
+
+            // Utilize Helpers: Evaluate Jurisdiction & Ongoing Status
+            var isAllowed = isUserAuthorizedForSite(siteSeg, siteZoneRaw, siteRegRaw, siteDepRaw, userPermissions);
+            var isOngoing = hasOngoingRequest(siteSysId, custCode);
+
+            // Utilize Helper: Calculate limits
+            var limit = parseFloat(gr.getValue('credit_limit') || 0);
+            var outstanding = getLiveOutstanding(custCode);
+
+            data.allSites.push({
+                sys_id:              siteSysId,
+                customer_code:       custCode,
+                name:                gr.getValue('name'),
+                
+                // HIGHLIGHT: SET VALUE - Binding Geography combined Name(Code) string to front-end
+                zone:                siteZoneFormatted,
+                region:              siteRegFormatted,
+                depot:               siteDepFormatted,
+                
+                segment:             siteSeg, 
+                credit_limit:        limit,
+                outstanding:         outstanding,
+                available:           limit - outstanding,
+                is_allowed_donee:    isAllowed,
+                has_ongoing_request: isOngoing 
+            });
+        }
+        return;
+    }
+
+    // --- 3. Submit Swap Application ---
+    if (input.action === 'submitSwap') {
+        var p = input.payload;
+
+        var donorRec = new GlideRecord('x_birl3_clm_customer');
+        var doneeRec = new GlideRecord('x_birl3_clm_customer');
+
+        if (!donorRec.get(p.donorSite)) {
+            data.serverError = 'Unable to locate donor site record.';
+            return;
+        }
+        if (!doneeRec.get(p.doneeSite)) {
+            data.serverError = 'Unable to locate donee site record.';
+            return;
+        }
+
+        // --- Package Donor Object ---
+        var donorCompCode = donorRec.getValue('company_code') || '';
+        var donorObj = {
+            code:    donorRec.getValue('customer_code') || '',
+            limit:   parseFloat(donorRec.getValue('credit_limit') || 0),
+            segment: SEGMENT_MAPPING[donorCompCode] || donorCompCode,
+            zone:    donorRec.getValue('customer_group') || '',
+            region:  donorRec.getValue('cg4') || '',
+            depot:   donorRec.getValue('sales_office') || ''
+        };
+        donorObj.outstanding = getLiveOutstanding(donorObj.code);
+        donorObj.available   = donorObj.limit - donorObj.outstanding;
+
+        if (donorObj.available < parseFloat(p.doneeAmount)) {
+            data.serverError = 'Donor site no longer has sufficient available limit. Please refresh and try again.';
+            return;
+        }
+
+        // --- Package Donee Object ---
+        var doneeCompCode = doneeRec.getValue('company_code') || '';
+        var doneeObj = {
+            code:    doneeRec.getValue('customer_code') || '',
+            limit:   parseFloat(doneeRec.getValue('credit_limit') || 0),
+            segment: SEGMENT_MAPPING[doneeCompCode] || doneeCompCode,
+            zone:    doneeRec.getValue('customer_group') || '',
+            region:  doneeRec.getValue('cg4') || '',
+            depot:   doneeRec.getValue('sales_office') || ''
+        };
+        doneeObj.outstanding = getLiveOutstanding(doneeObj.code);
+        doneeObj.available   = doneeObj.limit - doneeObj.outstanding;
+
+        // --- Double Check Backend Security (Concurrency & Jurisdiction) ---
+        // HIGHLIGHT: The Backend enforces security regardless of UI visibility. Standard users cannot force a submit.
+        if (hasOngoingRequest(p.doneeSite, doneeObj.code) || hasOngoingRequest(p.donorSite, donorObj.code)) {
+            data.serverError = 'Validation Error: One of the selected sites is currently locked in an ongoing request. Please complete the pending request first.';
+            return;
+        }
+
+        var isAuthorized = isUserAuthorizedForSite(doneeObj.segment, doneeObj.zone, doneeObj.region, doneeObj.depot, userPermissions);
+        if (!isAuthorized) {
+            data.serverError = 'Security Violation: You do not have jurisdiction to raise a request for this Donee Site based on your Approval Matrix mapping.';
+            return;
+        }
+
+        // --- Utilize Helper: Calculate Swap Logic (A, B, C, D, E) ---
+        var swapType = calculateSwapType(doneeObj, donorObj);
+
+        // --- Final Insert into New Table ---
+        var swap = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+        swap.initialize();
+
+        // HIGHLIGHT: SET VALUE - 1. Binding and Setting Donee Details
+        swap.setValue('donee_site_code', p.doneeSite); 
+        swap.setValue('donee_segment', doneeObj.segment);
+        swap.setValue('donee_current_limit', doneeObj.limit);
+        swap.setValue('donee_outstanding', doneeObj.outstanding);
+        swap.setValue('donee_available_limit', doneeObj.available);
+
+        // HIGHLIGHT: SET VALUE - 2. Binding and Setting Donor Details
+        swap.setValue('donor_site_code', p.donorSite); 
+        swap.setValue('donor_segment', donorObj.segment);
+        swap.setValue('donor_current_limit', donorObj.limit);
+        swap.setValue('donor_outstanding', donorObj.outstanding);
+        swap.setValue('donor_available_limit', donorObj.available);
+
+        // HIGHLIGHT: SET VALUE - 3. Transaction Core Details Mapping
+        swap.setValue('requested_amount', p.doneeAmount);
+        swap.setValue('approval', 'requested');
+        swap.setValue('swap_type', swapType);
+        swap.justification = p.comments; // Optional Comments Set
+
+        var swapSysId = swap.insert();
+
+        if (swapSysId) {
+            var createdSwap = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+            if (createdSwap.get(swapSysId)) {
+                // HIGHLIGHT: SET VALUE - Passing Swap Number back to front-end for Step 3 Success screen
+                data.swapNumber = createdSwap.getValue('number');
+            }
+        } else {
+            data.serverError = 'Unable to create swap request. System error.';
+        }
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>shobharani.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-05-27 05:39:19</sys_created_on>
+        <sys_id>de84cdee2bc147104572f3745e91bf4b</sys_id>
+        <sys_mod_count>65</sys_mod_count>
+        <sys_name>UCLM Limit Swap Request</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_de84cdee2bc147104572f3745e91bf4b</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 06:29:04</sys_updated_on>
+        <template><![CDATA[<div class="abg-widget-container">
+
+  <div ng-if="c.data.isInitialized">
+    
+    <div ng-if="c.data.currentStep == 1">
+      <div class="abg-header">
+        <h2>Initiate Limit Swap Request</h2>
+        <p>Enter a Corporate PAN or Name to retrieve all associated Customer Sites globally.</p>
+      </div>
+
+      <div class="form-group abg-input-group position-relative">
+        <label>Customer PAN or Name <span class="text-danger">*</span></label>
+        <input type="text" class="form-control text-uppercase" 
+               ng-model="c.data.panSearchText" 
+               ng-change="c.handlePanInput()" 
+               placeholder="Type at least 3 characters of PAN or Name to search..." 
+               autocomplete="off">
+
+        <ul class="abg-typeahead-dropdown" ng-if="c.data.panSuggestions.length > 0">
+          <li ng-repeat="suggested in c.data.panSuggestions">
+            <a href="javascript:void(0)" ng-click="c.selectPan(suggested.pan)">
+              <strong>{{::suggested.pan}}</strong> <span class="text-muted">- {{::suggested.name}}</span>
+            </a>
+          </li>
+        </ul>
+        <div class="text-muted small m-t-xs" ng-if="c.data.isFetching">
+          <i class="fa fa-spinner fa-spin"></i> Fetching comprehensive site data...
+        </div>
+      </div>
+
+      <div ng-if="c.selected.pan && c.data.allSites.length > 0" class="m-t-md p-t-md" style="border-top: 2px dashed #EAEAEA;">
+        <h4 class="m-b-md" style="color: #C8102E; font-weight: 700;">1. Select Donee Site (Receiving Limit)</h4>
+        <div class="row">
+          
+          <div class="col-md-8 form-group abg-input-group">
+            <label>Donee Site (Your Jurisdiction) <span class="text-danger">*</span></label>
+            <div class="abg-custom-select" ng-class="{'open': c.showDoneeDropdown}">
+              <div class="abg-select-display" ng-click="c.toggleDoneeDropdown($event)">
+                <span class="text-muted" ng-if="!c.selected.doneeSite">-- Select Donee Site --</span>
+                <span ng-if="c.selected.doneeSite"><strong>{{c.selected.doneeSiteDisplayCode}}</strong> — {{c.selected.doneeSiteDisplayName}}</span>
+                <i class="fa fa-chevron-down pull-right m-t-xs text-muted"></i>
+              </div>
+              <div class="abg-select-dropdown" ng-show="c.showDoneeDropdown">
+                
+                <div class="abg-select-option" ng-repeat="site in c.data.allSites"
+                     ng-class="{'disabled-option': !site.is_allowed_donee || site.has_ongoing_request, 'selected-option': c.selected.doneeSite === site.sys_id}"
+                     ng-click="(site.is_allowed_donee && !site.has_ongoing_request) && c.selectDonee(site)">
+                  
+                  <div class="clearfix m-b-xs">
+                    <strong class="pull-left site-code">{{site.customer_code}}</strong>
+                    <span class="pull-left m-l-sm site-name">{{site.name}}</span>
+                    <div class="pull-right">
+                      <span class="badge badge-warning abg-badge-ongoing" ng-if="site.has_ongoing_request"><i class="fa fa-clock-o"></i> Ongoing Request</span>
+                      <span class="badge badge-danger abg-badge-unauth" ng-if="!site.is_allowed_donee && !site.has_ongoing_request">]]>🚫<![CDATA[ Unauthorized</span>
+                    </div>
+                  </div>
+                  <div class="text-muted site-meta">
+                    Seg: <strong>{{site.segment}}</strong> | Zone: {{site.zone}} | Reg: {{site.region}} | Depot: {{site.depot}} | Limit: ₹{{site.credit_limit | number:2}}
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>
+
+          <div class="col-md-4 form-group abg-input-group">
+            <label>Enhancement Amount (₹) <span class="text-danger">*</span></label>
+            <input type="number" class="form-control font-weight-bold text-danger" ng-model="c.selected.doneeAmount" ng-change="c.clearDonor()" placeholder="e.g. 500000" min="1">
+          </div>
+        </div>
+      </div>
+
+      <div ng-if="c.selected.doneeSite && c.selected.doneeAmount > 0" class="m-t-md p-t-md" style="border-top: 2px dashed #EAEAEA;">
+        <h4 class="m-b-md" style="color: #1782c5; font-weight: 700;">2. Select Donor Site (Deducting Limit)</h4>
+
+        <div class="alert alert-warning" ng-if="c.hasOnlyInsufficientSites()">
+          <span class="glyphicon glyphicon-exclamation-sign"></span> <strong>No valid Donor Sites found:</strong> Other sites under this PAN either do not have enough available credit balance or are locked in an ongoing request.
+        </div>
+
+        <div class="table-responsive">
+          <table class="table abg-table">
+            <thead>
+              <tr>
+                <th width="4%"></th>
+                <th width="10%">Site Code</th>
+                <th width="20%">Site Name</th>
+                <th width="11%">Zone</th>
+                <th width="11%">Region</th>
+                <th width="11%">Depot</th>
+                <th width="7%">Segment</th>
+                <th width="8%">Limit</th>
+                <th width="8%">Outstanding</th>
+                <th width="10%">Available</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr ng-repeat="site in c.getDonorSites()" 
+                  ng-click="(site.available >= c.selected.doneeAmount && !site.has_ongoing_request) && c.selectDonor(site)"
+                  ng-class="{'selected-row': c.selected.donorSite === site.sys_id, 'disabled-row': (site.available < c.selected.doneeAmount || site.has_ongoing_request)}">
+                <td class="text-center">
+                  <input type="radio" name="donorSelection" 
+                         ng-checked="c.selected.donorSite === site.sys_id"
+                         ng-disabled="site.available < c.selected.doneeAmount || site.has_ongoing_request"
+                         ng-click="$event.stopPropagation(); (site.available >= c.selected.doneeAmount && !site.has_ongoing_request) && c.selectDonor(site)">
+                </td>
+                <td><strong>{{::site.customer_code}}</strong></td>
+                <td>{{::site.name}}</td>
+                <td>{{::site.zone}}</td>
+                <td>{{::site.region}}</td>
+                <td>{{::site.depot}}</td>
+                <td><span class="badge bg-dark-gray">{{::site.segment}}</span></td>
+                <td>₹ {{::site.credit_limit | number:2}}</td>
+                <td>₹ {{::site.outstanding | number:2}}</td>
+                <td>
+                  <span class="badge badge-warning abg-badge-ongoing" ng-if="site.has_ongoing_request"><i class="fa fa-clock-o"></i> Ongoing Request</span>
+                  <strong ng-if="!site.has_ongoing_request" ng-class="site.available >= c.selected.doneeAmount ? 'text-success' : 'text-danger'">
+                    ₹ {{::site.available | number:2}}
+                  </strong>
+                </td>
+              </tr>
+              <tr ng-if="c.getDonorSites().length === 0">
+                <td colspan="10" class="text-center text-muted p-md">No other sites found to act as a donor.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="text-right m-t-lg border-top p-t-md" ng-if="c.selected.pan">
+        <button class="btn btn-default m-r-sm" ng-click="c.resetForm()">Reset</button>
+        <button class="btn abg-btn-primary" ng-disabled="!c.isStep1Valid()" ng-click="c.goToReview()">
+          Review Request
+        </button>
+      </div>
+    </div>
+
+    <div ng-if="c.data.currentStep == 2">
+      <div class="abg-header">
+        <button class="btn btn-link text-muted p-l-0" ng-click="c.data.currentStep = 1">&#8592; Back to Editor</button>
+        <h2 class="m-t-sm">Review & Submit Limit Swap</h2>
+        <p>Please confirm the allocation details before submitting the request.</p>
+      </div>
+
+      <div class="panel panel-default shadow-sm border-top-red">
+        <div class="panel-body">
+          <div class="row m-b-sm">
+            <div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label">Corporate PAN</div>
+            <div class="col-xs-8"><strong>{{c.selected.pan}}</strong></div>
+          </div>
+          <hr class="m-t-sm m-b-sm">
+          <div class="row m-b-sm">
+            <div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label">Donee Site (Receiving)</div>
+            <div class="col-xs-8"><strong>{{c.selected.doneeSiteName}}</strong></div>
+          </div>
+          <hr class="m-t-sm m-b-sm">
+          <div class="row m-b-sm">
+            <div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label">Amount Requested</div>
+            <div class="col-xs-8"><strong class="text-danger amount-display">₹ {{c.selected.doneeAmount | number:2}}</strong></div>
+          </div>
+          <hr class="m-t-sm m-b-sm">
+          <div class="row m-b-sm">
+            <div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label">Donor Site (Deducting)</div>
+            <div class="col-xs-8"><strong>{{c.selected.donorSiteName}}</strong></div>
+          </div>
+          <hr class="m-t-sm m-b-sm">
+          <div class="row">
+            <div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label">Donor Available Limit</div>
+            <div class="col-xs-8"><strong>₹ {{c.selected.donorAvailable | number:2}}</strong></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-group abg-input-group m-t-md">
+        <label>Business Rationale / Comments (Optional)</label>
+        <textarea class="form-control" rows="3" ng-model="c.selected.comments" placeholder="Provide reason for this limit swap..."></textarea>
+      </div>
+
+      <div class="text-right m-t-lg border-top p-t-md">
+        <button class="btn btn-default m-r-sm" ng-click="c.data.currentStep = 1" ng-disabled="c.data.isSubmitting">Back</button>
+        <button class="btn abg-btn-primary" ng-click="c.submitSwap()" ng-disabled="c.data.isSubmitting">
+          <i class="fa fa-spinner fa-spin m-r-xs" ng-if="c.data.isSubmitting"></i>
+          {{c.data.isSubmitting ? 'Submitting...' : 'Confirm & Submit Request'}}
+        </button>
+      </div>
+    </div>
+
+    <div class="text-center p-xl" ng-if="c.data.currentStep == 3">
+      <div class="success-icon m-b-md">&#10003;</div>
+      <h2>Swap Request Submitted Successfully!</h2>
+      <p class="text-muted">Your limit swap request <strong>{{c.data.swapNumber}}</strong> has been submitted and routed for approval.</p>
+
+      <div class="m-t-lg">
+        <button class="btn abg-btn-outline m-r-sm" ng-click="c.resetForm()"><i class="fa fa-refresh"></i> Raise Another Swap</button>
+        <button class="btn abg-btn-outline" ng-click="c.goToDashboard()"><i class="fa fa-list-alt"></i> Back to Dashboard</button>
+      </div>
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>de84cdee2bc147104572f3745e91bf4b</id>
+        <sys_created_by>shobharani.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-05-27 05:39:19</sys_created_on>
+        <sys_id>9684cdee2bc147104572f3745e91bf51</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>shobharani.k@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-05-27 05:39:19</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_de84cdee2bc147104572f3745e91bf4b</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function($scope, $window, spUtil) {
+    var c = this;
+
+    // Default State Initialization
+    c.data.currentStep    = 1;
+    c.data.isSubmitting   = false;
+    c.data.isFetching     = false;
+    c.data.panSearchText  = '';
+    c.data.panSuggestions = [];
+    c.data.allSites       = [];
+    c.showDoneeDropdown   = false; 
+
+    c.selected = {
+        pan: '',
+        doneeSite: '',
+        doneeSiteDisplayCode: '',
+        doneeSiteDisplayName: '',
+        doneeSiteName: '', // HIGHLIGHT: SET VALUE
+        doneeAmount: null,
+        donorSite: '',
+        donorSiteName: '',
+        donorAvailable: null,
+        comments: ''
+    };
+    
+    // Check access on load
+    c.server.update().then(function() {
+        c.data.isInitialized = true;
+    });
+
+    // --- Window Click Listener to Close Custom Dropdown ---
+    $window.onclick = function(event) {
+        if (!event.target.closest('.abg-custom-select')) {
+            c.showDoneeDropdown = false;
+            $scope.$applyAsync();
+        }
+    };
+
+    // --- Typeahead PAN &amp; Name Search ---
+    c.handlePanInput = function() {
+        // HIGHLIGHT: SET VALUE - Clear out values when changing PAN
+        c.selected.pan = ''; 
+        c.data.allSites = [];
+        c.clearDonor();
+
+        var query = c.data.panSearchText ? c.data.panSearchText.toUpperCase() : '';
+        if (query.length &gt;= 3) {
+            c.data.action = 'fetch_pan_suggestions';
+            c.data.isFetching = true;
+            c.server.update().then(function() { 
+                c.data.action = ''; 
+                c.data.isFetching = false;
+            });
+        } else {
+            c.data.panSuggestions = [];
+        }
+    };
+
+    c.selectPan = function(selectedPan) {
+        // HIGHLIGHT: SET VALUE - Assigned selected PAN
+        c.selected.pan = selectedPan;
+        c.data.panSearchText = selectedPan;
+        c.data.panSuggestions = [];
+
+        c.data.action = 'fetch_all_sites';
+        c.data.isFetching = true;
+        c.server.update().then(function() {
+            c.data.action = '';
+            c.data.isFetching = false;
+        });
+    };
+
+    // --- Custom Dropdown Selection Logic ---
+    c.toggleDoneeDropdown = function(event) {
+        if (event) event.stopPropagation();
+        c.showDoneeDropdown = !c.showDoneeDropdown;
+    };
+
+    c.selectDonee = function(site) {
+        // HIGHLIGHT: SET VALUE - Bind donee UI variables with the selected site's values
+        c.selected.doneeSite = site.sys_id;
+        c.selected.doneeSiteDisplayCode = site.customer_code;
+        c.selected.doneeSiteDisplayName = site.name;
+        c.selected.doneeSiteName = site.customer_code + ' — ' + site.name; 
+        
+        c.showDoneeDropdown = false;
+        c.onDoneeChange();
+    };
+
+    c.onDoneeChange = function() {
+        c.clearDonor();
+    };
+
+    c.clearDonor = function() {
+        // HIGHLIGHT: SET VALUE - Resetting donor variables
+        c.selected.donorSite = '';
+        c.selected.donorSiteName = '';
+        c.selected.donorAvailable = null;
+    };
+
+    c.getDonorSites = function() {
+        if (!c.data.allSites) return [];
+        return c.data.allSites.filter(function(site) {
+            return site.sys_id !== c.selected.doneeSite;
+        });
+    };
+
+    // Alert if donors are valid but locked in ongoing request
+    c.hasOnlyInsufficientSites = function() {
+        var donors = c.getDonorSites();
+        if (donors.length === 0) return false;
+        return donors.every(function(site) {
+            return site.available &lt; c.selected.doneeAmount || site.has_ongoing_request;
+        });
+    };
+
+    c.selectDonor = function(site) {
+        if (site.available &lt; c.selected.doneeAmount || site.has_ongoing_request) return;
+        
+        // HIGHLIGHT: SET VALUE - Mapping Donor variables for Submit Payload
+        c.selected.donorSite = site.sys_id;
+        c.selected.donorSiteName = site.customer_code + ' — ' + site.name;
+        c.selected.donorAvailable = site.available;
+    };
+
+    // --- Validation &amp; Navigation ---
+    c.isStep1Valid = function() {
+        return c.selected.pan &amp;&amp; 
+            c.selected.doneeSite &amp;&amp; 
+            c.selected.doneeAmount &gt; 0 &amp;&amp; 
+            c.selected.donorSite;
+    };
+
+    c.goToReview = function() {
+        c.data.currentStep = 2;
+    };
+
+    c.goToDashboard = function() {
+        $window.location.href = '?id=uclm_limit_swap'; 
+    };
+
+    // --- Submit Application ---
+    c.submitSwap = function() {
+        c.data.isSubmitting = true;
+        c.data.action = 'submitSwap';
+        
+        // HIGHLIGHT: BINDING - Send complete selected object payload to the server
+        c.data.payload = c.selected; 
+
+        c.server.update().then(function() {
+            c.data.isSubmitting = false;
+            c.data.action = '';
+
+            if (c.data.serverError) {
+                spUtil.addErrorMessage(c.data.serverError);
+                c.data.currentStep = 2;
+                return;
+            }
+            c.data.currentStep = 3; 
+        });
+    };
+
+    c.resetForm = function() {
+        c.data.currentStep    = 1;
+        c.data.swapNumber     = null;
+        c.data.panSearchText  = '';
+        c.data.panSuggestions = [];
+        c.data.allSites       = [];
+        c.showDoneeDropdown   = false;
+
+        c.selected = {
+            pan: '', doneeSite: '', doneeSiteDisplayCode: '', doneeSiteDisplayName: '', doneeSiteName: '', doneeAmount: null,
+            donorSite: '', donorSiteName: '', donorAvailable: null, comments: ''
+        };
+    };
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;/* Global Variables */
+$abg-red: #C8102E;
+$abg-red-hover: #A00D25;
+$abg-red-light: #fce8ea;
+$text-main: #333333;
+$text-muted: #666666;
+$border-color: #D1D1D1;
+$border-light: #EAEAEA;
+
+/* Container &amp;amp; Fonts */
+.abg-widget-container { 
+  background-color: #FFFFFF; 
+  padding: 30px; 
+  border-radius: 6px; 
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05); 
+  font-family: 'Oxygen', Arial, sans-serif; 
+}
+
+.abg-header h2 { color: $text-main; font-weight: 700; margin-top: 0; margin-bottom: 8px; font-size: 24px; }
+.abg-header p { color: $text-muted; font-size: 14px; margin-bottom: 25px; }
+
+/* Form Inputs */
+.position-relative { position: relative; }
+.abg-input-group label { font-weight: 600; color: #4A4A4A; }
+.abg-input-group .form-control { 
+  border: 1px solid $border-color; 
+  border-radius: 4px; 
+  padding: 10px 15px; 
+  height: auto; 
+  font-size: 16px; 
+  transition: all 0.2s ease; 
+}
+.abg-input-group .form-control:focus { 
+  border-color: $abg-red; 
+  box-shadow: 0 0 0 2px rgba(200, 16, 46, 0.15); 
+  outline: none;
+}
+
+/* --- CUSTOM SELECT DROPDOWN (Optimized Colors) --- */
+.abg-custom-select { position: relative; width: 100%; user-select: none; }
+.abg-select-display {
+  border: 1px solid $border-color;
+  border-radius: 4px;
+  padding: 10px 15px;
+  background: #FFF;
+  cursor: pointer;
+  font-size: 15px;
+  min-height: 44px;
+  transition: all 0.2s ease;
+}
+.abg-custom-select.open .abg-select-display { 
+  border-color: $abg-red; 
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  box-shadow: 0 0 0 2px rgba(200, 16, 46, 0.15); 
+}
+.abg-select-dropdown {
+  position: absolute; top: 100%; left: 0; right: 0;
+  background: #FFF; 
+  border: 1px solid $abg-red; /* Matches focus state */
+  border-top: none;
+  border-radius: 0 0 6px 6px; 
+  box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+  z-index: 1050; max-height: 320px; overflow-y: auto; 
+}
+.abg-select-option {
+  padding: 14px 15px; 
+  border-bottom: 1px solid #F1F5F9;
+  cursor: pointer; 
+  transition: all 0.15s ease-in-out;
+}
+.abg-select-option:last-child { border-bottom: none; }
+
+/* Dynamic Dropdown States */
+.abg-select-option:hover:not(.disabled-option) { 
+  background: #FFF5F5; 
+  border-left: 3px solid $abg-red; 
+  padding-left: 12px; 
+}
+.selected-option { 
+  background: $abg-red-light; 
+  border-left: 3px solid $abg-red; 
+  padding-left: 12px; 
+}
+.selected-option .site-code { color: $abg-red; }
+.disabled-option { opacity: 0.65; cursor: not-allowed; background: #F9FAFB; }
+.site-meta { font-size: 12px; margin-top: 4px; }
+
+/* Status Badges */
+.abg-badge-ongoing { background-color: #F59E0B; font-weight: 600; padding: 4px 8px; border-radius: 4px; }
+.abg-badge-unauth { background-color: #EF4444; font-weight: 600; padding: 4px 8px; border-radius: 4px; color: #FFF; }
+.bg-dark-gray { background: #666; font-size: 10px; }
+
+/* Typeahead Dropdown */
+.abg-typeahead-dropdown { 
+  position: absolute; top: 100%; left: 0; z-index: 1000; width: 100%; 
+  background-color: #ffffff; border: 1px solid $border-color; border-top: none; 
+  border-radius: 0 0 4px 4px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); 
+  margin: 0; padding: 0; list-style: none; max-height: 250px; overflow-y: auto; 
+}
+.abg-typeahead-dropdown li a { 
+  display: block; padding: 12px 15px; color: $text-main; text-decoration: none; 
+  font-size: 14px; transition: background-color 0.1s ease; border-bottom: 1px solid #f5f5f5;
+}
+.abg-typeahead-dropdown li a:hover { background-color: #F8F9FA; color: $abg-red; }
+
+/* Tables */
+.abg-table { margin-top: 10px; border: 1px solid $border-light; font-size: 13px; }
+.abg-table thead th { 
+  background-color: #F8F9FA; color: #333; font-weight: 600; 
+  border-bottom: 2px solid $border-light; text-transform: uppercase; font-size: 11px; 
+}
+.abg-table tbody td { vertical-align: middle; border-top: 1px solid $border-light; }
+.selected-row { background-color: $abg-red-light !important; border-left: 4px solid $abg-red; }
+.disabled-row { opacity: 0.5; cursor: not-allowed; background-color: #f9f9f9; }
+.disabled-row:hover { background-color: #f9f9f9 !important; }
+
+/* UI Helpers */
+.border-top-red { border-top: 4px solid $abg-red; }
+.summary-label { font-size: 12px; }
+.amount-display { font-size: 16px; }
+
+/* Buttons */
+.abg-btn-primary { 
+  background-color: $abg-red; color: #FFFFFF; font-weight: 600; 
+  padding: 10px 24px; border-radius: 4px; border: none; transition: background-color 0.2s;
+}
+.abg-btn-primary:hover:not([disabled]) { background-color: $abg-red-hover; color: #FFFFFF; }
+.abg-btn-primary[disabled] { background-color: #E0E0E0; color: #9E9E9E; cursor: not-allowed; }
+
+.abg-btn-outline { 
+  background: transparent; border: 2px solid $abg-red; color: $abg-red; 
+  font-weight: 600; padding: 8px 20px; border-radius: 4px; transition: all 0.2s;
+}
+.abg-btn-outline:hover { background: $abg-red; color: #FFF; text-decoration: none; }
+
+.success-icon { font-size: 64px; color: #2E7D32; line-height: 1; }&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id/&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;UCLM Limit Swap Request&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+    // ==========================================
+    // 1. INITIALIZATION &amp; CONSTANTS
+    // ==========================================
+    var userId = gs.getUserID();
+    var SEGMENT_MAPPING = { 'UTCL': 'Cement', 'URMX': 'RMC', 'GIL': 'BPD' };
+
+    // ==========================================
+    // 2. REUSABLE HELPER FUNCTIONS
+    // ==========================================
+
+    /**
+     * Fetches all jurisdictional permissions for the logged-in user.
+     * Groups them into an array of strict matching rules.
+     * ONLY allows users with 'TSH' or 'TSM' in their matrix role.
+     */
+    function getUserPermissions(targetUserId) {
+        var permissions = [];
+        var mxGr = new GlideRecord('x_birl3_clm_approval_matrix');
+        mxGr.addQuery('approver_user', targetUserId);
+        mxGr.addQuery('customer_type', 'non_trade');
+        mxGr.query();
+        
+        while (mxGr.next()) {
+            var roleName = (mxGr.getValue('role_name') || '').toUpperCase();
+            
+            // SECURITY CHECK: Role must contain TSH or TSM
+            if (roleName.indexOf('TSH') &gt; -1 || roleName.indexOf('TSM') &gt; -1) {
+                permissions.push({
+                    segment: mxGr.getValue('segment') || '',
+                    zone: mxGr.getValue('zone') || '',
+                    region: mxGr.getValue('region') || '',
+                    depot: mxGr.getValue('depot') || ''
+                });
+            }
+        }
+        return permissions;
+    }
+
+    /**
+     * Strict evaluation if a site falls under any of the user's specific Matrix combinations.
+     * 100% Case-Insensitive matching.
+     */
+    function isUserAuthorizedForSite(siteSeg, siteZone, siteReg, siteDepot, userPerms) {
+        var sSeg = (siteSeg || '').toUpperCase();
+        var sZone = (siteZone || '').toUpperCase();
+        var sReg = (siteReg || '').toUpperCase();
+        var sDepot = (siteDepot || '').toUpperCase();
+
+        for (var i = 0; i &lt; userPerms.length; i++) {
+            var p = userPerms[i];
+            
+            var pSeg = (p.segment || '').toUpperCase();
+            var pZone = (p.zone || '').toUpperCase();
+            var pReg = (p.region || '').toUpperCase();
+            var pDepot = (p.depot || '').toUpperCase();
+
+            // 1. Segment must match
+            if (pSeg &amp;&amp; pSeg !== sSeg) continue;
+            // 2. If Matrix specifies a Zone, the site MUST match it
+            if (pZone &amp;&amp; pZone !== sZone) continue;
+            // 3. If Matrix specifies a Region, the site MUST match it
+            if (pReg &amp;&amp; pReg !== sReg) continue;
+            // 4. If Matrix specifies a Depot, the site MUST match it
+            if (pDepot &amp;&amp; pDepot !== sDepot) continue;
+            
+            // If the loop hasn't 'continued', it means the site matches this permission rule perfectly
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Evaluates if a site is currently locked in ANY pending transaction.
+     * Checks both Limit Swaps and standard CLR requests.
+     */
+    function hasOngoingRequest(siteSysId, customerCode) {
+        // Check 1: Is it involved in a Pending Limit Swap?
+        var swap = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+        var qc = swap.addQuery('donee_site_code', siteSysId);
+        qc.addOrCondition('donor_site_code', siteSysId);
+        swap.addQuery('approval', '!=', 'approved');
+        swap.addQuery('approval', '!=', 'rejected'); 
+        swap.setLimit(1);
+        swap.query();
+        if (swap.hasNext()) return true;
+
+        // Check 2: Is it involved in a Pending Standard Limit Enhancement?
+        var clr = new GlideRecord('x_birl3_clm_non_trade_clr');
+        clr.addQuery('customer_code', customerCode);
+        clr.addQuery('approval', '!=', 'Approved');
+        clr.addQuery('approval', '!=', 'Rejected');
+        clr.addQuery('approval', '!=', 'Cancelled');
+        clr.setLimit(1);
+        clr.query();
+        if (clr.hasNext()) return true;
+
+        return false;
+    }
+
+    /**
+     * Safely calculates live outstanding balance for a given customer code.
+     */
+    function getLiveOutstanding(customerCode) {
+        var outRec = new GlideRecord('x_birl3_clm_customer_outstanding');
+        outRec.addQuery('customer', customerCode); 
+        outRec.orderByDesc('created_on'); 
+        outRec.setLimit(1);
+        outRec.query();
+        if (outRec.next()) {
+            return parseFloat(outRec.getValue('outstanding') || 0);
+        }
+        return 0;
+    }
+
+    /**
+     * Determines the swap type (A, B, C, D, E) logic based on matrix rules.
+     */
+    function calculateSwapType(donee, donor) {
+        if (donee.segment !== donor.segment) return 'E'; // Diff Segment
+        if (donee.depot === donor.depot) return 'A';     // Same depot
+        if (donee.region === donor.region) return 'B';   // Same region, diff depot
+        if (donee.zone === donor.zone) return 'C';       // Same zone, diff region, diff depot
+        return 'D';                                      // Diff Zone (Segment Head required)
+    }
+    
+    /**
+     * HIGHLIGHT: GET VALUE - Reusable formatter to combine Name and Code fields
+     */
+    function getFormattedGeo(gr, nameField, codeField) {
+        var name = gr.getValue(nameField) || '';
+        var code = gr.getValue(codeField) || '';
+        
+        if (name &amp;&amp; code) {
+            return name + ' (' + code + ')';
+        } else if (name) {
+            return name;
+        } else if (code) {
+            return code;
+        }
+        return 'N/A';
+    }
+
+    // ==========================================
+    // 3. MAIN SCRIPT EXECUTION
+    // ==========================================
+
+    var userPermissions = getUserPermissions(userId);
+
+    // --- 0. Access Validation Check on Load ---
+    if (!input) {
+        data.isTSH = userPermissions.length &gt; 0;
+        return; 
+    }
+
+    // --- 1. Typeahead PAN / Name Search ---
+    if (input.action === 'fetch_pan_suggestions') {
+        var searchString = input.panSearchText ? input.panSearchText.toUpperCase() : '';
+        data.panSuggestions = [];
+
+        var ga = new GlideRecord('x_birl3_clm_customer');
+        ga.addEncodedQuery('panSTARTSWITH' + searchString + '^ORnameLIKE' + searchString);
+        ga.orderBy('pan');
+        ga.setLimit(15);
+        ga.query();
+
+        var addedPans = {};
+        while (ga.next()) {
+            var panVal = ga.getValue('pan');
+            var nameVal = ga.getValue('name');
+            if (panVal &amp;&amp; !addedPans[panVal]) {
+                data.panSuggestions.push({ pan: panVal, name: nameVal });
+                addedPans[panVal] = true;
+            }
+        }
+        return;
+    }
+
+    // --- 2. Fetch All Sites for PAN (With Jurisdiction &amp; Ongoing Checks) ---
+    if (input.action === 'fetch_all_sites') {
+        data.allSites = [];
+        var gr = new GlideRecord('x_birl3_clm_customer');
+        gr.addQuery('pan', input.panSearchText);
+        gr.orderBy('customer_code');
+        gr.query();
+
+        while (gr.next()) {
+            var siteSysId = gr.getUniqueValue();
+            var custCode  = gr.getValue('customer_code') || '';
+            var compCode  = gr.getValue('company_code') || '';
+            
+            var siteSeg  = SEGMENT_MAPPING[compCode] || compCode || 'N/A';
+            
+            // HIGHLIGHT: GET VALUE - Dynamically constructing the format Name(Code) utilizing both Name and Code fields
+            var siteZoneFormatted = getFormattedGeo(gr, 'zone_name', 'customer_group');
+            var siteRegFormatted  = getFormattedGeo(gr, 'region_name', 'cg4');
+            var siteDepFormatted  = getFormattedGeo(gr, 'depot_name', 'sales_office');
+
+            // Internal evaluation variables (keeping raw code values to check jurisdiction permissions accurately)
+            var siteZoneRaw = gr.getValue('customer_group') || '';
+            var siteRegRaw  = gr.getValue('cg4') || '';
+            var siteDepRaw  = gr.getValue('sales_office') || '';
+
+            // Utilize Helpers: Evaluate Jurisdiction &amp; Ongoing Status
+            var isAllowed = isUserAuthorizedForSite(siteSeg, siteZoneRaw, siteRegRaw, siteDepRaw, userPermissions);
+            var isOngoing = hasOngoingRequest(siteSysId, custCode);
+
+            // Utilize Helper: Calculate limits
+            var limit = parseFloat(gr.getValue('credit_limit') || 0);
+            var outstanding = getLiveOutstanding(custCode);
+
+            data.allSites.push({
+                sys_id:              siteSysId,
+                customer_code:       custCode,
+                name:                gr.getValue('name'),
+                
+                // HIGHLIGHT: SET VALUE - Binding Geography combined Name(Code) string to front-end
+                zone:                siteZoneFormatted,
+                region:              siteRegFormatted,
+                depot:               siteDepFormatted,
+                
+                segment:             siteSeg, 
+                credit_limit:        limit,
+                outstanding:         outstanding,
+                available:           limit - outstanding,
+                is_allowed_donee:    isAllowed,
+                has_ongoing_request: isOngoing 
+            });
+        }
+        return;
+    }
+
+    // --- 3. Submit Swap Application ---
+    if (input.action === 'submitSwap') {
+        var p = input.payload;
+
+        var donorRec = new GlideRecord('x_birl3_clm_customer');
+        var doneeRec = new GlideRecord('x_birl3_clm_customer');
+
+        if (!donorRec.get(p.donorSite)) {
+            data.serverError = 'Unable to locate donor site record.';
+            return;
+        }
+        if (!doneeRec.get(p.doneeSite)) {
+            data.serverError = 'Unable to locate donee site record.';
+            return;
+        }
+
+        // --- Package Donor Object ---
+        var donorCompCode = donorRec.getValue('company_code') || '';
+        var donorObj = {
+            code:    donorRec.getValue('customer_code') || '',
+            limit:   parseFloat(donorRec.getValue('credit_limit') || 0),
+            segment: SEGMENT_MAPPING[donorCompCode] || donorCompCode,
+            zone:    donorRec.getValue('customer_group') || '',
+            region:  donorRec.getValue('cg4') || '',
+            depot:   donorRec.getValue('sales_office') || ''
+        };
+        donorObj.outstanding = getLiveOutstanding(donorObj.code);
+        donorObj.available   = donorObj.limit - donorObj.outstanding;
+
+        if (donorObj.available &lt; parseFloat(p.doneeAmount)) {
+            data.serverError = 'Donor site no longer has sufficient available limit. Please refresh and try again.';
+            return;
+        }
+
+        // --- Package Donee Object ---
+        var doneeCompCode = doneeRec.getValue('company_code') || '';
+        var doneeObj = {
+            code:    doneeRec.getValue('customer_code') || '',
+            limit:   parseFloat(doneeRec.getValue('credit_limit') || 0),
+            segment: SEGMENT_MAPPING[doneeCompCode] || doneeCompCode,
+            zone:    doneeRec.getValue('customer_group') || '',
+            region:  doneeRec.getValue('cg4') || '',
+            depot:   doneeRec.getValue('sales_office') || ''
+        };
+        doneeObj.outstanding = getLiveOutstanding(doneeObj.code);
+        doneeObj.available   = doneeObj.limit - doneeObj.outstanding;
+
+        // --- Double Check Backend Security (Concurrency &amp; Jurisdiction) ---
+        // HIGHLIGHT: The Backend enforces security regardless of UI visibility. Standard users cannot force a submit.
+        if (hasOngoingRequest(p.doneeSite, doneeObj.code) || hasOngoingRequest(p.donorSite, donorObj.code)) {
+            data.serverError = 'Validation Error: One of the selected sites is currently locked in an ongoing request. Please complete the pending request first.';
+            return;
+        }
+
+        var isAuthorized = isUserAuthorizedForSite(doneeObj.segment, doneeObj.zone, doneeObj.region, doneeObj.depot, userPermissions);
+        if (!isAuthorized) {
+            data.serverError = 'Security Violation: You do not have jurisdiction to raise a request for this Donee Site based on your Approval Matrix mapping.';
+            return;
+        }
+
+        // --- Utilize Helper: Calculate Swap Logic (A, B, C, D, E) ---
+        var swapType = calculateSwapType(doneeObj, donorObj);
+
+        // --- Final Insert into New Table ---
+        var swap = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+        swap.initialize();
+
+        // HIGHLIGHT: SET VALUE - 1. Binding and Setting Donee Details
+        swap.setValue('donee_site_code', p.doneeSite); 
+        swap.setValue('donee_segment', doneeObj.segment);
+        swap.setValue('donee_current_limit', doneeObj.limit);
+        swap.setValue('donee_outstanding', doneeObj.outstanding);
+        swap.setValue('donee_available_limit', doneeObj.available);
+
+        // HIGHLIGHT: SET VALUE - 2. Binding and Setting Donor Details
+        swap.setValue('donor_site_code', p.donorSite); 
+        swap.setValue('donor_segment', donorObj.segment);
+        swap.setValue('donor_current_limit', donorObj.limit);
+        swap.setValue('donor_outstanding', donorObj.outstanding);
+        swap.setValue('donor_available_limit', donorObj.available);
+
+        // HIGHLIGHT: SET VALUE - 3. Transaction Core Details Mapping
+        swap.setValue('requested_amount', p.doneeAmount);
+        swap.setValue('approval', 'requested');
+        swap.setValue('swap_type', swapType);
+        swap.justification = p.comments; // Optional Comments Set
+
+        var swapSysId = swap.insert();
+
+        if (swapSysId) {
+            var createdSwap = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+            if (createdSwap.get(swapSysId)) {
+                // HIGHLIGHT: SET VALUE - Passing Swap Number back to front-end for Step 3 Success screen
+                data.swapNumber = createdSwap.getValue('number');
+            }
+        } else {
+            data.serverError = 'Unable to create swap request. System error.';
+        }
+    }
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;shobharani.k@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-05-27 05:39:19&lt;/sys_created_on&gt;&lt;sys_id&gt;de84cdee2bc147104572f3745e91bf4b&lt;/sys_id&gt;&lt;sys_mod_count&gt;65&lt;/sys_mod_count&gt;&lt;sys_name&gt;UCLM Limit Swap Request&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_de84cdee2bc147104572f3745e91bf4b&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-09-08 06:29:04&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="abg-widget-container"&gt;
+
+  &lt;div ng-if="c.data.isInitialized"&gt;
+    
+    &lt;div ng-if="c.data.currentStep == 1"&gt;
+      &lt;div class="abg-header"&gt;
+        &lt;h2&gt;Initiate Limit Swap Request&lt;/h2&gt;
+        &lt;p&gt;Enter a Corporate PAN or Name to retrieve all associated Customer Sites globally.&lt;/p&gt;
+      &lt;/div&gt;
+
+      &lt;div class="form-group abg-input-group position-relative"&gt;
+        &lt;label&gt;Customer PAN or Name &lt;span class="text-danger"&gt;*&lt;/span&gt;&lt;/label&gt;
+        &lt;input type="text" class="form-control text-uppercase" 
+               ng-model="c.data.panSearchText" 
+               ng-change="c.handlePanInput()" 
+               placeholder="Type at least 3 characters of PAN or Name to search..." 
+               autocomplete="off"&gt;
+
+        &lt;ul class="abg-typeahead-dropdown" ng-if="c.data.panSuggestions.length &gt; 0"&gt;
+          &lt;li ng-repeat="suggested in c.data.panSuggestions"&gt;
+            &lt;a href="javascript:void(0)" ng-click="c.selectPan(suggested.pan)"&gt;
+              &lt;strong&gt;{{::suggested.pan}}&lt;/strong&gt; &lt;span class="text-muted"&gt;- {{::suggested.name}}&lt;/span&gt;
+            &lt;/a&gt;
+          &lt;/li&gt;
+        &lt;/ul&gt;
+        &lt;div class="text-muted small m-t-xs" ng-if="c.data.isFetching"&gt;
+          &lt;i class="fa fa-spinner fa-spin"&gt;&lt;/i&gt; Fetching comprehensive site data...
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div ng-if="c.selected.pan &amp;&amp; c.data.allSites.length &gt; 0" class="m-t-md p-t-md" style="border-top: 2px dashed #EAEAEA;"&gt;
+        &lt;h4 class="m-b-md" style="color: #C8102E; font-weight: 700;"&gt;1. Select Donee Site (Receiving Limit)&lt;/h4&gt;
+        &lt;div class="row"&gt;
+          
+          &lt;div class="col-md-8 form-group abg-input-group"&gt;
+            &lt;label&gt;Donee Site (Your Jurisdiction) &lt;span class="text-danger"&gt;*&lt;/span&gt;&lt;/label&gt;
+            &lt;div class="abg-custom-select" ng-class="{'open': c.showDoneeDropdown}"&gt;
+              &lt;div class="abg-select-display" ng-click="c.toggleDoneeDropdown($event)"&gt;
+                &lt;span class="text-muted" ng-if="!c.selected.doneeSite"&gt;-- Select Donee Site --&lt;/span&gt;
+                &lt;span ng-if="c.selected.doneeSite"&gt;&lt;strong&gt;{{c.selected.doneeSiteDisplayCode}}&lt;/strong&gt; — {{c.selected.doneeSiteDisplayName}}&lt;/span&gt;
+                &lt;i class="fa fa-chevron-down pull-right m-t-xs text-muted"&gt;&lt;/i&gt;
+              &lt;/div&gt;
+              &lt;div class="abg-select-dropdown" ng-show="c.showDoneeDropdown"&gt;
+                
+                &lt;div class="abg-select-option" ng-repeat="site in c.data.allSites"
+                     ng-class="{'disabled-option': !site.is_allowed_donee || site.has_ongoing_request, 'selected-option': c.selected.doneeSite === site.sys_id}"
+                     ng-click="(site.is_allowed_donee &amp;&amp; !site.has_ongoing_request) &amp;&amp; c.selectDonee(site)"&gt;
+                  
+                  &lt;div class="clearfix m-b-xs"&gt;
+                    &lt;strong class="pull-left site-code"&gt;{{site.customer_code}}&lt;/strong&gt;
+                    &lt;span class="pull-left m-l-sm site-name"&gt;{{site.name}}&lt;/span&gt;
+                    &lt;div class="pull-right"&gt;
+                      &lt;span class="badge badge-warning abg-badge-ongoing" ng-if="site.has_ongoing_request"&gt;&lt;i class="fa fa-clock-o"&gt;&lt;/i&gt; Ongoing Request&lt;/span&gt;
+                      &lt;span class="badge badge-danger abg-badge-unauth" ng-if="!site.is_allowed_donee &amp;&amp; !site.has_ongoing_request"&gt;]]&gt;🚫&lt;![CDATA[ Unauthorized&lt;/span&gt;
+                    &lt;/div&gt;
+                  &lt;/div&gt;
+                  &lt;div class="text-muted site-meta"&gt;
+                    Seg: &lt;strong&gt;{{site.segment}}&lt;/strong&gt; | Zone: {{site.zone}} | Reg: {{site.region}} | Depot: {{site.depot}} | Limit: ₹{{site.credit_limit | number:2}}
+                  &lt;/div&gt;
+                &lt;/div&gt;
+
+              &lt;/div&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+
+          &lt;div class="col-md-4 form-group abg-input-group"&gt;
+            &lt;label&gt;Enhancement Amount (₹) &lt;span class="text-danger"&gt;*&lt;/span&gt;&lt;/label&gt;
+            &lt;input type="number" class="form-control font-weight-bold text-danger" ng-model="c.selected.doneeAmount" ng-change="c.clearDonor()" placeholder="e.g. 500000" min="1"&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div ng-if="c.selected.doneeSite &amp;&amp; c.selected.doneeAmount &gt; 0" class="m-t-md p-t-md" style="border-top: 2px dashed #EAEAEA;"&gt;
+        &lt;h4 class="m-b-md" style="color: #1782c5; font-weight: 700;"&gt;2. Select Donor Site (Deducting Limit)&lt;/h4&gt;
+
+        &lt;div class="alert alert-warning" ng-if="c.hasOnlyInsufficientSites()"&gt;
+          &lt;span class="glyphicon glyphicon-exclamation-sign"&gt;&lt;/span&gt; &lt;strong&gt;No valid Donor Sites found:&lt;/strong&gt; Other sites under this PAN either do not have enough available credit balance or are locked in an ongoing request.
+        &lt;/div&gt;
+
+        &lt;div class="table-responsive"&gt;
+          &lt;table class="table abg-table"&gt;
+            &lt;thead&gt;
+              &lt;tr&gt;
+                &lt;th width="4%"&gt;&lt;/th&gt;
+                &lt;th width="10%"&gt;Site Code&lt;/th&gt;
+                &lt;th width="20%"&gt;Site Name&lt;/th&gt;
+                &lt;th width="11%"&gt;Zone&lt;/th&gt;
+                &lt;th width="11%"&gt;Region&lt;/th&gt;
+                &lt;th width="11%"&gt;Depot&lt;/th&gt;
+                &lt;th width="7%"&gt;Segment&lt;/th&gt;
+                &lt;th width="8%"&gt;Limit&lt;/th&gt;
+                &lt;th width="8%"&gt;Outstanding&lt;/th&gt;
+                &lt;th width="10%"&gt;Available&lt;/th&gt;
+              &lt;/tr&gt;
+            &lt;/thead&gt;
+            &lt;tbody&gt;
+              &lt;tr ng-repeat="site in c.getDonorSites()" 
+                  ng-click="(site.available &gt;= c.selected.doneeAmount &amp;&amp; !site.has_ongoing_request) &amp;&amp; c.selectDonor(site)"
+                  ng-class="{'selected-row': c.selected.donorSite === site.sys_id, 'disabled-row': (site.available &lt; c.selected.doneeAmount || site.has_ongoing_request)}"&gt;
+                &lt;td class="text-center"&gt;
+                  &lt;input type="radio" name="donorSelection" 
+                         ng-checked="c.selected.donorSite === site.sys_id"
+                         ng-disabled="site.available &lt; c.selected.doneeAmount || site.has_ongoing_request"
+                         ng-click="$event.stopPropagation(); (site.available &gt;= c.selected.doneeAmount &amp;&amp; !site.has_ongoing_request) &amp;&amp; c.selectDonor(site)"&gt;
+                &lt;/td&gt;
+                &lt;td&gt;&lt;strong&gt;{{::site.customer_code}}&lt;/strong&gt;&lt;/td&gt;
+                &lt;td&gt;{{::site.name}}&lt;/td&gt;
+                &lt;td&gt;{{::site.zone}}&lt;/td&gt;
+                &lt;td&gt;{{::site.region}}&lt;/td&gt;
+                &lt;td&gt;{{::site.depot}}&lt;/td&gt;
+                &lt;td&gt;&lt;span class="badge bg-dark-gray"&gt;{{::site.segment}}&lt;/span&gt;&lt;/td&gt;
+                &lt;td&gt;₹ {{::site.credit_limit | number:2}}&lt;/td&gt;
+                &lt;td&gt;₹ {{::site.outstanding | number:2}}&lt;/td&gt;
+                &lt;td&gt;
+                  &lt;span class="badge badge-warning abg-badge-ongoing" ng-if="site.has_ongoing_request"&gt;&lt;i class="fa fa-clock-o"&gt;&lt;/i&gt; Ongoing Request&lt;/span&gt;
+                  &lt;strong ng-if="!site.has_ongoing_request" ng-class="site.available &gt;= c.selected.doneeAmount ? 'text-success' : 'text-danger'"&gt;
+                    ₹ {{::site.available | number:2}}
+                  &lt;/strong&gt;
+                &lt;/td&gt;
+              &lt;/tr&gt;
+              &lt;tr ng-if="c.getDonorSites().length === 0"&gt;
+                &lt;td colspan="10" class="text-center text-muted p-md"&gt;No other sites found to act as a donor.&lt;/td&gt;
+              &lt;/tr&gt;
+            &lt;/tbody&gt;
+          &lt;/table&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div class="text-right m-t-lg border-top p-t-md" ng-if="c.selected.pan"&gt;
+        &lt;button class="btn btn-default m-r-sm" ng-click="c.resetForm()"&gt;Reset&lt;/button&gt;
+        &lt;button class="btn abg-btn-primary" ng-disabled="!c.isStep1Valid()" ng-click="c.goToReview()"&gt;
+          Review Request
+        &lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div ng-if="c.data.currentStep == 2"&gt;
+      &lt;div class="abg-header"&gt;
+        &lt;button class="btn btn-link text-muted p-l-0" ng-click="c.data.currentStep = 1"&gt;&amp;#8592; Back to Editor&lt;/button&gt;
+        &lt;h2 class="m-t-sm"&gt;Review &amp; Submit Limit Swap&lt;/h2&gt;
+        &lt;p&gt;Please confirm the allocation details before submitting the request.&lt;/p&gt;
+      &lt;/div&gt;
+
+      &lt;div class="panel panel-default shadow-sm border-top-red"&gt;
+        &lt;div class="panel-body"&gt;
+          &lt;div class="row m-b-sm"&gt;
+            &lt;div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label"&gt;Corporate PAN&lt;/div&gt;
+            &lt;div class="col-xs-8"&gt;&lt;strong&gt;{{c.selected.pan}}&lt;/strong&gt;&lt;/div&gt;
+          &lt;/div&gt;
+          &lt;hr class="m-t-sm m-b-sm"&gt;
+          &lt;div class="row m-b-sm"&gt;
+            &lt;div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label"&gt;Donee Site (Receiving)&lt;/div&gt;
+            &lt;div class="col-xs-8"&gt;&lt;strong&gt;{{c.selected.doneeSiteName}}&lt;/strong&gt;&lt;/div&gt;
+          &lt;/div&gt;
+          &lt;hr class="m-t-sm m-b-sm"&gt;
+          &lt;div class="row m-b-sm"&gt;
+            &lt;div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label"&gt;Amount Requested&lt;/div&gt;
+            &lt;div class="col-xs-8"&gt;&lt;strong class="text-danger amount-display"&gt;₹ {{c.selected.doneeAmount | number:2}}&lt;/strong&gt;&lt;/div&gt;
+          &lt;/div&gt;
+          &lt;hr class="m-t-sm m-b-sm"&gt;
+          &lt;div class="row m-b-sm"&gt;
+            &lt;div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label"&gt;Donor Site (Deducting)&lt;/div&gt;
+            &lt;div class="col-xs-8"&gt;&lt;strong&gt;{{c.selected.donorSiteName}}&lt;/strong&gt;&lt;/div&gt;
+          &lt;/div&gt;
+          &lt;hr class="m-t-sm m-b-sm"&gt;
+          &lt;div class="row"&gt;
+            &lt;div class="col-xs-4 text-muted font-weight-bold text-uppercase summary-label"&gt;Donor Available Limit&lt;/div&gt;
+            &lt;div class="col-xs-8"&gt;&lt;strong&gt;₹ {{c.selected.donorAvailable | number:2}}&lt;/strong&gt;&lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div class="form-group abg-input-group m-t-md"&gt;
+        &lt;label&gt;Business Rationale / Comments (Optional)&lt;/label&gt;
+        &lt;textarea class="form-control" rows="3" ng-model="c.selected.comments" placeholder="Provide reason for this limit swap..."&gt;&lt;/textarea&gt;
+      &lt;/div&gt;
+
+      &lt;div class="text-right m-t-lg border-top p-t-md"&gt;
+        &lt;button class="btn btn-default m-r-sm" ng-click="c.data.currentStep = 1" ng-disabled="c.data.isSubmitting"&gt;Back&lt;/button&gt;
+        &lt;button class="btn abg-btn-primary" ng-click="c.submitSwap()" ng-disabled="c.data.isSubmitting"&gt;
+          &lt;i class="fa fa-spinner fa-spin m-r-xs" ng-if="c.data.isSubmitting"&gt;&lt;/i&gt;
+          {{c.data.isSubmitting ? 'Submitting...' : 'Confirm &amp; Submit Request'}}
+        &lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="text-center p-xl" ng-if="c.data.currentStep == 3"&gt;
+      &lt;div class="success-icon m-b-md"&gt;&amp;#10003;&lt;/div&gt;
+      &lt;h2&gt;Swap Request Submitted Successfully!&lt;/h2&gt;
+      &lt;p class="text-muted"&gt;Your limit swap request &lt;strong&gt;{{c.data.swapNumber}}&lt;/strong&gt; has been submitted and routed for approval.&lt;/p&gt;
+
+      &lt;div class="m-t-lg"&gt;
+        &lt;button class="btn abg-btn-outline m-r-sm" ng-click="c.resetForm()"&gt;&lt;i class="fa fa-refresh"&gt;&lt;/i&gt; Raise Another Swap&lt;/button&gt;
+        &lt;button class="btn abg-btn-outline" ng-click="c.goToDashboard()"&gt;&lt;i class="fa fa-list-alt"&gt;&lt;/i&gt; Back to Dashboard&lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;de84cdee2bc147104572f3745e91bf4b&lt;/id&gt;&lt;sys_created_by&gt;shobharani.k@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-05-27 05:39:19&lt;/sys_created_on&gt;&lt;sys_id&gt;9684cdee2bc147104572f3745e91bf51&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;shobharani.k@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-05-27 05:39:19&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>1542682422</payload_hash>
+        <record_name>UCLM Limit Swap Request</record_name>
+        <reverted_from/>
+        <source>0d1e00262bb27e104572f3745e91bf51</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-08 06:29:04</sys_created_on>
+        <sys_id>b04578cc97d74b10be31fa17f053af9e</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a07fb4b5b20000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 06:29:04</sys_updated_on>
+        <type>Widget</type>
+        <update_guid>bc4578ccb9d74b104f9426c150c3b220</update_guid>
+        <update_guid_history>bc4578ccb9d74b104f9426c150c3b220:1542682422,b0f5e40a8b0e4710b4f2e2b0c4bb35a9:-980720896,3194a406f60e4710cf8003a9ee489a9a:1555494487,0c7937e9ceca031079a40f3bef0ff057:998578727,885733a53aca0310bba88820e2cb1180:381955728,1ea8c878d782875031ddc4595ff1fd61:383624754,12d088b005428750c54f4cf1fcf7d475:343881170,3945abec038a47501a1b4c50cccaca25:383624754,8812a0a4b4ca87102d0f692bf35496e8:1670712091,49b1206414ca8710ca3e406e1c141c79:843946594,e851642496ca8710ad45c3f81cedd708:937602436,7430ac20c1ca871085dfe0d6003ace50:-269092911,f1dd5ca8b78a87109a31aa0de458aacf:-1185934704,a2db54646b8a8710503d1f29fa36dbc8:-733471723,b8abd0e0ad8a8710ddaf18fc81dec800:-2030707275,217a54ec8d4a8710c9662d1c5f7c0390:589648198,d4a894a43e4a871034019251a9030694:-209645983,a338d860fc4a87109f613c8e51f63499:-1253752389,23d6d420ae4a87107f5f8b20c69877a3:-2022901933,fd55a5e742ed8710b6a60182894bf5ed:588086646,2c54d9933da507108808c03415f34469:1423158253,3efd3be1f069439086d219821411fc53:-1662230914,978d73a10e694390343ea9c53144c2dd:-1082043810,252d7f6de4294390dfae267e94d8768f:-1857434513,083bb72df6294390ef77f604faf8b0fa:-1049313593,e7583725a4294390ecf98e1237fdca10:-127855375,23877ba1a12943905b0b264a3cdc9a3a:-2082465335,827777a16c29439035fa51324d14e9e9:236742943,c128a3691a654390a8ffcecf0e1ab5ab:770836336,99186369d2654390443c412dc151b059:-2133562923,5b0823699165439075b605394476ae16:1393977220,84a627a199654390136d1a2eb51a0a12:956665163,21c527ad38254390dee0ed6dc4c5f51c:80778649,1fb32fa1072543904cc18c2423aefda9:1162593408,d671ab11ce994790671b4d133a17059f:2095000598,d2206b19a35947907ee8a4c2f78c825b:1821369156,2b425a09a2558390983f6c6cdda76f7a:-1138182680,f123e46ce4d5cb50b8966b8135759270:787618208,b0bbb7d4c2dd8b504806b2bace004b99:527764320,c1157754d59d8b50a3570a608bd8bb8e:582877713,bb647314bb9d8b50e522d2b0e05ecf3e:1921715706,ff297554719d475024e337c821d3b45a:-1926793275,31c83514089d47503e83d7c0328ddca1:-1926793275,ca98f9d08b9d475039118dc08cc655a3:1963030450,09567d9c135d4750e235b339b47127fd:2084727266,8cc4f9d8d85d475010b11aaea44089ff:-169808547,9e13f918605d475042d998dd5c6c7b71:1951792253,abc231184a5d475001afacf22b4e9ba3:2086083505,756ba5d4c11d4750b8142735b44a98d3:-1386958721,3726695ce3d94750e301f20ab75a766e:1963030450,c3200c58611d0750815f9f0f97116a0d:-1926793275,ee108858951d0750ab763981820a661c:466544820,69ef7348fd1d07502578e9891a01b4d1:-1926793275,6c6fbfc4ee1d075076559a17acfd80e8:1093179929,f0e8b7484bd9075005b35ac7430da7a0:-1497972206,22f7374403d9075081137561b65fd850:810205454,14f67f802ad90750d40d92eb6d451161:-1618876130,42e63340c9d9075095559af2e5b98260:630099037,d9e63f801dd907501efb5e23bdad1f57:1463835047,4fd67780a6d90750f5928a6c27dd7e9b:394781743,1b863340c9d90750df5a16ebd96deb6b:-103136595,428633808dd90750e9f3f74c0323acc9:-1060928840,6a767b40d0d90750fa032843172ba302:-103136595,b7a537004dd907502c388899bf49768a:1139086296,b575bfcc889907507e177182056e3b42:-1170968265,53d4bb8c98990750e0f33d0edb89b13d:-939743611,d094f74cb89907507a424bf04017a9f3:-1170968265,de84b38c759907504786d0a3ccaeb849:-49994322,d8447b4c2c990750a36fe2039512a261:-1170968265,9a14f34cc6990750a691bc9beb453904:-115803194,29ba6566848d4710923273a15b4ee95b:1970165984,bd56696a804d471091b8d05bc615524a:1422597093,c8122d6eb20d471078040ef0938d2847:1222474108,07b401629f0547108fad712644341469:-1058189858,1a84cdee65c14710bb6f89b1ea7d1c4f:-1065638481</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="">7055f8cc97d74b10be31fa17f053afc6</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-08 06:29:21</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>08ab81c2607d4c21864c7f7972027571</sys_id>
+        <sys_metadata>de84cdee2bc147104572f3745e91bf4b</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>UCLM Limit Swap Request</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_de84cdee2bc147104572f3745e91bf4b</sys_update_name>
+        <sys_update_version display_value="sp_widget_de84cdee2bc147104572f3745e91bf4b">b04578cc97d74b10be31fa17f053af9e</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 06:29:21</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_rfi_request</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm_rfi_request
+// Notification table: x_birl3_clm_clm_new_credit_request
+(function runMailScript(current, template, email, email_action, event) {
+
+    function esc(s) { return GlideStringUtil.escapeHTML(s || ''); }
+    function inr(n) {
+        var s = Math.round(Math.abs(n)).toString();
+        var last = s.slice(-3), rest = s.slice(0, -3);
+        if (rest) last = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last;
+        return last;
+    }
+    function rupee(n) { return '&#8377; ' + inr(n); }
+    function initials(n) {
+        if (!n) return '?';
+        var p = (n + '').trim().split(/\s+/);
+        return ((p[0][0] || '') + (p.length > 1 ? p[p.length - 1][0] : '')).toUpperCase();
+    }
+
+    // ── Event inputs ─────────────────────────────────────────────────
+    var recipientName = (event && event.parm1) ? event.parm1 + '' : '';
+    var token         = (event && event.parm2) ? event.parm2 + '' : '';
+    var rfiSysId      = (event && event.parm3) ? event.parm3 + '' : '';
+
+    // ── Load the RFI (by sys_id, or newest open for this request) ────
+    var question = '', askedBy = '', askedRole = '', askedOn = '';
+    var rfi = new GlideRecord('x_birl3_clm_clm_rfi');
+    var found = false;
+    if (rfiSysId && rfi.get(rfiSysId)) {
+        found = true;
+    } else {
+        rfi.addQuery('u_request', current.getUniqueValue());
+        rfi.addQuery('u_status', 'open');
+        rfi.orderByDesc('sys_created_on');
+        rfi.setLimit(1);
+        rfi.query();
+        if (rfi.next()) found = true;
+    }
+    if (found) {
+        question  = rfi.getValue('u_question') + '';
+        askedBy   = rfi.u_raised_by.getDisplayValue() + '';
+        askedRole = rfi.getValue('u_raised_by_role') + '';
+        askedOn   = rfi.getDisplayValue('sys_created_on') + '';
+        if (!token) token = rfi.getValue('u_token') + '';
+    }
+
+    // ── Links & styles ───────────────────────────────────────────────
+    var base      = (gs.getProperty('glide.servlet.uri') || '').replace(/\/?$/, '/');
+    var rfiLink   = base + 'uclm?id=clm_rfi' + (token ? '&sysparm_token=' + encodeURIComponent(token) : '');
+    var myReqLink = base + 'uclm?id=view_my_credit_request';
+
+    var TD_K = 'padding:8px 0; color:#5a6a7a; border-bottom:1px solid #eef1f5;';
+    var TD_V = 'padding:8px 0; color:#1a1a1a; border-bottom:1px solid #eef1f5;';
+
+    function sec(t, top) {
+        return '<h3 style="margin:' + (top || 24) + 'px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">' + t + '</h3>';
+    }
+    function kv(label, value, last, bold) {
+        return '<tr><td width="38%" style="' + (last ? 'padding:8px 0; color:#5a6a7a;' : TD_K) + '">' + label + '</td>' +
+               '<td style="' + (last ? 'padding:8px 0; color:#1a1a1a;' : TD_V) + (bold ? ' font-weight:700;' : '') + '">' + value + '</td></tr>';
+    }
+
+    var customerGR = current.customer.getRefRecord();
+    var custValid  = customerGR && customerGR.isValidRecord();
+    var custName   = custValid ? customerGR.getValue('customer_name') : current.getDisplayValue('customer');
+
+    var h = '';
+
+    // ── Action-required banner ───────────────────────────────────────
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#fff8e1; border:1px solid #f3d54e; border-left:5px solid #E87722; border-radius:6px; margin-top:6px;"><tbody><tr>';
+    h += '<td width="52" align="center" valign="middle" style="padding:16px 0 16px 14px;"><div style="width:36px; height:36px; line-height:36px; border-radius:18px; background-color:#E87722; color:#ffffff; font-size:20px; font-weight:700; text-align:center;">?</div></td>';
+    h += '<td style="padding:16px 16px 16px 12px;"><div style="font-size:20px; font-weight:700; color:#8a6100;">Information requested</div>';
+    h += '<div style="font-size:13px; color:#5a6a7a; padding-top:2px;">An approver is waiting on your input to continue the workflow.</div></td>';
+    h += '</tr></tbody></table>';
+
+    // ── Question card (mirrors .clm-rfi-card) ────────────────────────
+    if (question) {
+        h += sec('Information Requested', 24);
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #dde3ea; border-left:5px solid #E87722; border-radius:8px; overflow:hidden;"><tbody>';
+
+        // Card head — amber band with status pill on the right
+        h += '<tr><td colspan="2" style="padding:12px 16px; background:#fff8e1; border-bottom:1px solid #f3e3a0;">';
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+        h += '<td style="font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:.8px; color:#8a6100;">Information Requested</td>';
+        h += '<td align="right"><span style="display:inline-block; font-size:12px; font-weight:700; color:#8a6100; background:#ffffff; border:1px solid #f3d54e; border-radius:12px; padding:3px 10px;">&#8987; Awaiting your response</span></td>';
+        h += '</tr></tbody></table></td></tr>';
+
+        // Ask row — avatar + meta + question
+        h += '<tr><td width="70" valign="top" style="padding:16px 8px 12px 18px;">';
+        h += '<div style="width:38px; height:38px; line-height:38px; border-radius:19px; background:#1a1a1a; color:#F3D54E; font-size:13px; font-weight:700; text-align:center;">' + esc(initials(askedBy)) + '</div>';
+        h += '</td><td valign="top" style="padding:16px 18px 12px 0;">';
+        if (askedBy) {
+            h += '<div style="font-size:12.5px; color:#5a6a7a;">';
+            h += '<strong style="color:#1a1a1a;">' + esc(askedBy) + '</strong>';
+            if (askedRole) h += ' <span>(' + esc(askedRole) + ')</span>';
+            if (askedOn)   h += ' <span style="margin:0 6px;">&middot;</span>' + esc(askedOn);
+            h += '</div>';
+        }
+        h += '<div style="margin-top:8px; padding:12px 16px; background:#f4f6f9; border:1px solid #e6eaef; border-radius:4px 12px 12px 12px; font-size:15px; line-height:1.6; color:#1a1a1a; white-space:pre-line; word-wrap:break-word;">' + esc(question) + '</div>';
+        h += '</td></tr>';
+
+        h += '</tbody></table>';
+    }
+
+    // ── Request summary ──────────────────────────────────────────────
+    h += sec('Request Summary');
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+    h += kv('Customer Name', esc(custName), false, true);
+    if (custValid) {
+        h += kv('Customer Code', esc(customerGR.getValue('customer_code_sap')));
+        h += kv('PAN', esc(customerGR.getValue('pan')));
+    }
+    h += kv('Customer Type', esc(current.getDisplayValue('customer_type')));
+    h += kv('Segment', esc(current.getDisplayValue('segment')));
+    h += kv('Submitted On', esc(current.getDisplayValue('sys_created_on')), true);
+    h += '</tbody></table>';
+
+    // ── What happens next ────────────────────────────────────────────
+    h += sec('What Happens Next');
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f4f9fb; border-left:4px solid #3498db;"><tbody><tr><td style="padding:12px 16px; font-size:13px; line-height:1.6; color:#1a1a1a;">';
+    h += 'Click the button below to answer directly in CredX. The approver who raised the request is notified as soon as you submit, and the approval workflow continues from where it paused.';
+    h += '</td></tr></tbody></table>';
+
+    // ── CTA ──────────────────────────────────────────────────────────
+    h += '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:28px;"><tbody><tr>';
+    h += '<td align="center" style="background-color:#1a1a1a; border-radius:6px; border-bottom:3px solid #F3D54E;">';
+    h += '<a href="' + rfiLink + '" style="display:inline-block; padding:12px 28px; font-size:13px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; color:#ffffff; text-decoration:none;">Respond to Request</a>';
+    h += '</td></tr></tbody></table>';
+
+    h += '<p style="margin:14px 0 0 0; font-size:12px; color:#8a96a3;">You can also open <a href="' + myReqLink + '" style="color:#AF272F; font-weight:700; text-decoration:none;">My Requests</a> in CredX to track this credit limit request.</p>';
+
+    template.print(h);
+
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-11 11:36:50</sys_created_on>
+        <sys_id>72287f6297774350be31fa17f053af29</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>clm_rfi_request</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_72287f6297774350be31fa17f053af29</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-11 11:58:43</sys_updated_on>
+    </sys_script_email>
+</record_update>

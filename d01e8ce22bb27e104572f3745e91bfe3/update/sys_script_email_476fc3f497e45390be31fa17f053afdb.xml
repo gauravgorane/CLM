@@ -1,0 +1,514 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_nt_rfi_script</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm_nt_rfi_script
+// Notification table: x_birl3_clm_clm_rfi
+// Handles both Open (Question Raised) and Answered states for Non-Trade (nt_request)
+(function runMailScript(current, template, email, email_action, event) {
+    try {
+        // ── 1. Helpers & Formatters (Aligned with Trade CredX UI) ─────────────
+        function s(v) { return (v === null || v === undefined) ? '' : String(v).trim(); }
+
+        function parseNum(v) {
+            if (!v && v !== 0) return 0;
+            var strVal = String(v);
+            if (strVal.indexOf(';') > -1) strVal = strVal.split(';')[1];
+            var num = parseFloat(strVal);
+            return isNaN(num) ? 0 : num;
+        }
+
+        function firstNum(gr, fields) {
+            if (!gr) return 0;
+            for (var i = 0; i < fields.length; i++) {
+                if (gr.isValidField(fields[i])) {
+                    var val = gr.getValue(fields[i]);
+                    if (val !== null && val !== undefined && String(val).trim() !== '') {
+                        return parseNum(val);
+                    }
+                }
+            }
+            return 0;
+        }
+
+        function firstStr(gr, fields) {
+            if (!gr) return '';
+            for (var i = 0; i < fields.length; i++) {
+                if (gr.isValidField(fields[i])) {
+                    var val = s(gr.getValue(fields[i]));
+                    if (val) return val;
+                }
+            }
+            return '';
+        }
+
+        function inr(n) {
+            var str = Math.round(Math.abs(parseNum(n))).toString();
+            var last = str.slice(-3), rest = str.slice(0, -3);
+            if (rest) last = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last;
+            return last;
+        }
+
+        function rupee(n) {
+            var num = parseNum(n);
+            return (num < 0 ? '- &#8377; ' : '&#8377; ') + inr(num);
+        }
+
+        function esc(str) {
+            return GlideStringUtil.escapeHTML(s(str));
+        }
+
+        function isTrue(v) {
+            var val = s(v).toLowerCase();
+            return val === '1' || val === 'true';
+        }
+
+        // ── PAN-Level Calculation & Approver Recommended CL Helpers ──────────
+        function segKey(t) {
+            t = (t || '').toString().toLowerCase();
+            if (t.indexOf('cement') !== -1) return 'Cement';
+            if (t.indexOf('rmc') !== -1) return 'RMC';
+            if (t.indexOf('bpd') !== -1) return 'BPD';
+            return '';
+        }
+
+        function getSiteCode(sGr) {
+            var code = s(sGr.getValue('customer_code'));
+            if (!code && sGr.isValidField('customer_site_code') && sGr.customer_site_code) {
+                code = sGr.customer_site_code.customer_code_sap ? s(sGr.customer_site_code.customer_code_sap) : '';
+            }
+            return code;
+        }
+
+        // Computes PAN-level Requested Limit (requested sites + unrequested sites' current limits)
+        // and PAN-level Total Outstanding across all N01 sites under the PAN
+        function getPanListFigures(panSysId, panVal) {
+            var reqMap = {};
+            var sGr = new GlideRecord('x_birl3_clm_nt_site_request');
+            sGr.addQuery('pan_request', panSysId);
+            sGr.query();
+            while (sGr.next()) {
+                var code = getSiteCode(sGr);
+                var seg = sGr.isValidField('segment') ? segKey(sGr.getDisplayValue('segment')) : '';
+                reqMap[code + '|' + seg] = {
+                    requested: parseNum(sGr.getValue('requested_limit') || sGr.getValue('site_desired_limit')),
+                    os: parseNum(sGr.getValue('existing_outstanding'))
+                };
+            }
+
+            var snapOs = {};
+            var snGr = new GlideRecord('x_birl3_clm_nt_pan_request_outstanding');
+            snGr.addQuery('pan_request', panSysId);
+            snGr.orderByDesc('snapshot_month');
+            snGr.orderByDesc('sys_created_on');
+            snGr.query();
+            while (snGr.next()) {
+                var sk = s(snGr.getValue('customer_site_code') || snGr.getValue('customer'));
+                var ck = s(snGr.getValue('customer_code'));
+                if ((sk && snapOs[sk] === undefined) || (ck && snapOs[ck] === undefined)) {
+                    var isLeg = snGr.isValidField('bucket_0_21_days') && snGr.getValue('bucket_0_21_days') !== null;
+                    var b03   = parseNum(isLeg ? snGr.getValue('bucket_0_21_days')  : snGr.getValue('bucket_0_30_days'));
+                    var b47   = parseNum(isLeg ? snGr.getValue('bucket_22_30_days') : snGr.getValue('bucket_31_45_days'));
+                    var b821  = parseNum(isLeg ? snGr.getValue('bucket_31_45_days') : snGr.getValue('bucket_46_60_days'));
+                    var b22   = parseNum(isLeg ? snGr.getValue('bucket_46_60_days') : snGr.getValue('bucket_61_75_days'));
+                    var b31   = parseNum(isLeg ? snGr.getValue('bucket_61_75_days') : snGr.getValue('bucket_76_90_days'));
+                    var bgt   = parseNum(snGr.getValue('bucket_gt120_days')) + parseNum(snGr.getValue('bucket_91_120_days'));
+                    var tot   = parseNum(snGr.getValue('total_outstanding')) || (b03 + b47 + b821 + b22 + b31 + bgt);
+                    if (sk && snapOs[sk] === undefined) snapOs[sk] = tot;
+                    if (ck && snapOs[ck] === undefined) snapOs[ck] = tot;
+                }
+            }
+
+            var requestedPan = 0, outstanding = 0;
+            var seen = {}, claimed = {};
+            var cGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+            cGr.addQuery('pan', panVal);
+            cGr.addQuery('cg1', 'N01');
+            cGr.query();
+            while (cGr.next()) {
+                var cId = cGr.getUniqueValue();
+                var cCode = s(cGr.getValue('customer_code_sap'));
+                var cSeg = segKey(cGr.getDisplayValue('segment'));
+                var dedupe = cCode ? (cCode + '|' + cSeg) : cId;
+                if (seen[dedupe]) continue;
+                seen[dedupe] = true;
+
+                var key = cCode + '|' + cSeg;
+                if (reqMap[key] === undefined && reqMap[cCode + '|'] !== undefined) key = cCode + '|';
+                var line = (reqMap[key] !== undefined && !claimed[key]) ? reqMap[key] : null;
+                if (line) claimed[key] = true;
+
+                var curCl = parseNum(cGr.getValue('cr_limit') || cGr.getValue('credit_limit'));
+                requestedPan += line ? line.requested : curCl;
+
+                if (snapOs[cId] !== undefined) outstanding += snapOs[cId];
+                else if (cCode && snapOs[cCode] !== undefined) outstanding += snapOs[cCode];
+                else outstanding += line ? line.os : parseNum(cGr.getValue('outstanding'));
+            }
+
+            return { requestedPan: requestedPan, outstanding: outstanding };
+        }
+
+        // Reads each approver's PAN-level Recommended CL from approval_journal_column
+        function getRecommendedCl(appGr) {
+            if (!appGr || !appGr.isValidField('approval_journal_column')) return 0;
+            var raw = '';
+            try {
+                var el = appGr.getElement('approval_journal_column');
+                if (el) raw = el.getJournalEntry(1) || '';
+            } catch (e) { raw = ''; }
+            if (!raw) raw = appGr.getValue('approval_journal_column') || '';
+            if (!raw) return 0;
+
+            var lines = String(raw).split('\n');
+            if (lines.length > 1 && /^\d{4}-\d{2}-\d{2}|^[^:]+:\s*\d{4}-\d{2}-\d{2}/.test(lines[0])) lines.shift();
+            var txt = lines.join(' ').replace(/[,₹\s]/g, '');
+            var m = txt.match(/\d+(\.\d+)?/);
+            return m ? (parseFloat(m[0]) || 0) : 0;
+        }
+
+        // ── Shared UI Component Builders (Identical to Trade Scripts) ────────
+        var TD_K   = 'padding:8px 0; color:#5a6a7a; border-bottom:1px solid #eef1f5;';
+        var TD_V   = 'padding:8px 0; color:#1a1a1a; border-bottom:1px solid #eef1f5;';
+        var TILE   = 'border:1px solid #e0e6ed; border-radius:6px; padding:12px 14px; background-color:#fafbfc;';
+        var TILE_K = 'font-size:10px; text-transform:uppercase; letter-spacing:.8px; color:#5a6a7a; font-weight:700;';
+
+        function sec(title, top) {
+            return '<h3 style="margin:' + (top || 24) + 'px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">' + title + '</h3>';
+        }
+
+        function kv(label, value, last, bold) {
+            return '<tr><td width="38%" style="' + (last ? 'padding:8px 0; color:#5a6a7a;' : TD_K) + '">' + label + '</td>' +
+                   '<td style="' + (last ? 'padding:8px 0; color:#1a1a1a;' : TD_V) + (bold ? ' font-weight:700;' : '') + '">' + value + '</td></tr>';
+        }
+
+        function button(url, text, bgColor, topMargin) {
+            return '<table role="presentation" border="0" cellspacing="0" cellpadding="0" style="margin-top:' + (topMargin || 18) + 'px;"><tbody><tr>' +
+                   '<td align="center" bgcolor="' + bgColor + '" style="border-radius:8px;">' +
+                   '<a href="' + url + '" target="_blank" rel="noopener" style="display:inline-block; padding:12px 28px; font-family:\'Segoe UI\', Tahoma, Geneva, Verdana, sans-serif; ' +
+                   'font-size:15px; font-weight:bold; color:#ffffff; text-decoration:none; border-radius:8px; text-transform:uppercase; letter-spacing:.5px;">' + text + '</a>' +
+                   '</td></tr></tbody></table>';
+        }
+
+        // ── 2. Determine RFI State & Participants ────────────────────────────
+        var rfiId      = current.getUniqueValue();
+        var rawStatus  = s(current.getValue('u_status')).toLowerCase();
+        var isAnswered = (rawStatus === 'answered');
+
+        var rfiNumber    = s(current.getValue('number'));
+        var questionText = s(current.getValue('u_question'));
+        var responseText = s(current.getValue('u_response')) || ((event && event.parm2) ? s(event.parm2) : '');
+        var respondedOn  = s(current.getDisplayValue('u_responded_on')) || s(current.getDisplayValue('sys_updated_on'));
+        var raisedOn     = s(current.getDisplayValue('sys_created_on'));
+
+        var raisedByName    = current.u_raised_by ? s(current.u_raised_by.getDisplayValue()) : 'Approver';
+        var raisedByRole    = s(current.getValue('u_raised_by_role'));
+        var raisedByDisplay = raisedByRole ? raisedByName + ' (' + raisedByRole + ')' : raisedByName;
+
+        var targetUserName    = current.u_target_user ? s(current.u_target_user.getDisplayValue()) : 'Assignee';
+        var targetUserRole    = s(current.getValue('u_target_role'));
+        var targetUserDisplay = targetUserRole ? targetUserName + ' (' + targetUserRole + ')' : targetUserName;
+
+        // ── 3. Resolve Parent NT PAN Request & Customer Group Details ────────
+        var panSysId       = '';
+        var panReqNumber   = '';
+        var panStr         = '';
+        var custName       = 'Corporate Group';
+        var zoneRegion     = '';
+        var segment        = 'Non-Trade';
+        var existingLimit  = 0;
+        var requestedLimit = 0;
+        var safeLimit      = 0;
+        var outstanding    = 0;
+        var isDeviation    = false;
+        var approvalLevel  = '';
+        var initiator      = '';
+        var submittedOn    = '';
+        var bizJust        = '';
+        var devJust        = '';
+
+        var panGr = current.nt_request ? current.nt_request.getRefRecord() : null;
+        if (panGr && panGr.isValidRecord()) {
+            panSysId       = panGr.getUniqueValue();
+            panReqNumber   = s(panGr.getValue('number'));
+            panStr         = s(panGr.getValue('pan'));
+            segment        = s(panGr.getDisplayValue('segment')) || s(panGr.getValue('segment')) || 'Non-Trade';
+            existingLimit  = firstNum(panGr, ['total_existing_limit', 'total_current_limit', 'existing_limit']);
+            safeLimit      = firstNum(panGr, ['total_safe_allowable_limit', 'safe_allowable_limit']);
+            isDeviation    = panGr.isValidField('is_deviation') && isTrue(panGr.getValue('is_deviation'));
+            approvalLevel  = firstStr(panGr, ['required_approver_level', 'approver_level', 'current_approver_role']);
+            initiator      = panGr.opened_by ? s(panGr.opened_by.getDisplayValue()) : (s(panGr.getValue('sys_created_by')) || '');
+            submittedOn    = s(panGr.getDisplayValue('sys_created_on'));
+            bizJust        = firstStr(panGr, ['business_justification', 'justification', 'remarks', 'description']);
+            devJust        = firstStr(panGr, ['deviation_justification', 'deviation_remarks']);
+
+            var panFigs    = panStr ? getPanListFigures(panSysId, panStr) : { requestedPan: 0, outstanding: 0 };
+            requestedLimit = panFigs.requestedPan || firstNum(panGr, ['total_requested_limit', 'total_desired_limit', 'requested_limit']);
+            outstanding    = panFigs.outstanding  || firstNum(panGr, ['total_outstanding_pan', 'total_outstanding', 'outstanding_amount']);
+
+            if (panStr) {
+                var custGr = new GlideRecord('x_birl3_clm_clm_customer_master1');
+                custGr.addQuery('pan', panStr);
+                custGr.setLimit(1);
+                custGr.query();
+                if (custGr.next()) {
+                    custName = s(custGr.getValue('group_customer_name')) || s(custGr.getValue('customer_name')) || s(custGr.getValue('name')) || custName;
+                    var reg = s(custGr.getDisplayValue('region_name')) || s(custGr.getValue('region_name'));
+                    var zn  = s(custGr.getDisplayValue('zone_name')) || s(custGr.getValue('zone')) || s(custGr.getValue('zone'));
+                    if (reg || zn) zoneRegion = (reg || '-') + ' / ' + (zn || '-');
+                }
+            }
+        }
+
+        // ── 4. Dynamic Subject & Non-Trade Portal Links ──────────────────────
+        var base = s(gs.getProperty('glide.servlet.uri'));
+        if (base && !base.endsWith('/')) base += '/';
+
+        var subjectRef = (panReqNumber || rfiNumber) + (custName !== 'Corporate Group' ? ' | ' + custName : (panStr ? ' | ' + panStr : ''));
+        var portalUrl  = '';
+
+        if (isAnswered) {
+            email.setSubject('Information Received: CLM Non-Trade Request | ' + subjectRef);
+            portalUrl = panReqNumber
+                ? base + 'uclm?id=uclm_non_trade_approval&number=' + encodeURIComponent(panReqNumber)
+                : base + 'uclm?id=uclm_nt_send_back&number=' + encodeURIComponent(rfiNumber);
+        } else {
+            email.setSubject('Action Required: CLM Non-Trade Information Request | ' + subjectRef);
+            portalUrl = base + 'uclm?id=uclm_nt_send_back&number=' + encodeURIComponent(rfiNumber);
+        }
+
+        // ── 5. Render HTML Body (Trade Visual Design + Non-Trade Content) ────
+        var h = '';
+
+        // Greeting + Headline + Intro (Matches Trade Typography)
+        if (isAnswered) {
+            h += '<p style="margin:0 0 4px 0; font-size:14px; color:#5a6a7a;">Dear ' + esc(raisedByName) + ',</p>';
+            h += '<h1 style="margin:10px 0 6px 0; font-size:22px; line-height:1.3; color:#1a1a1a; font-weight:700;">Your information request has been answered</h1>';
+            h += '<p style="margin:0 0 20px 0; font-size:14px; color:#5a6a7a;">Please review the response and continue with the Non-Trade approval.</p>';
+        } else {
+            h += '<p style="margin:0 0 4px 0; font-size:14px; color:#5a6a7a;">Dear ' + esc(targetUserName) + ',</p>';
+            h += '<h1 style="margin:10px 0 6px 0; font-size:22px; line-height:1.3; color:#1a1a1a; font-weight:700;">Your input is needed on a credit limit request</h1>';
+            h += '<p style="margin:0 0 20px 0; font-size:14px; color:#5a6a7a;">The approval is on hold until you respond to the question below.</p>';
+        }
+
+        // Yellow Highlight Request Number Banner + Status Pill
+        var statusPill = isAnswered
+            ? '<span style="display:inline-block; background-color:#d6eaf8; color:#2980b9; border:1px solid #aed6f1; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">Information Received</span>'
+            : '<span style="display:inline-block; background-color:#fff3cd; color:#856404; border:1px solid #ffe69c; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">Information Requested</span>';
+
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px;"><tbody><tr>';
+        h += '<td style="padding:12px 16px;">';
+        h += '<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#5a6a7a; font-weight:700;">Non-Trade Request Number</div>';
+        h += '<div style="font-size:18px; font-weight:700; color:#1a1a1a;">' + esc(panReqNumber || rfiNumber) + (rfiNumber && panReqNumber ? ' <span style="font-size:12px; font-weight:600; color:#5a6a7a;">(' + esc(rfiNumber) + ')</span>' : '') + '</div>';
+        if (isAnswered) {
+            h += '<div style="font-size:12px; padding-top:3px;"><a href="' + portalUrl + '" style="color:#AF272F; font-weight:700; text-decoration:none;">Review in CredX &rarr;</a></div>';
+        }
+        h += '</td>';
+        h += '<td align="right" valign="middle" style="padding:12px 16px;">' + statusPill + '</td>';
+        h += '</tr></tbody></table>';
+
+        // ── Branch A: ANSWERED STATE (Mirrors clm.rfi.answered.details) ──────
+        if (isAnswered) {
+            h += sec('Response', 28);
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f4f9fb; border-left:4px solid #3498db; border-radius:4px;"><tbody><tr><td style="padding:14px 16px;">';
+            h += '<div style="font-size:12px; color:#5a6a7a; padding-bottom:8px; border-bottom:1px solid #e1e8ed;"><b style="color:#1a1a1a;">' + esc(targetUserDisplay) + '</b> responded' + (respondedOn ? ' on ' + esc(respondedOn) : '') + '</div>';
+            if (questionText) {
+                h += '<div style="font-size:13px; line-height:1.5; padding-top:10px; color:#5a6a7a; white-space:pre-wrap; word-break:break-word;"><b>Q:</b> ' + esc(questionText) + '</div>';
+            }
+            h += '<div style="font-size:15px; line-height:1.6; padding-top:8px; color:#1a1a1a; white-space:pre-wrap; word-break:break-word;"><b style="color:#2c3e50;">A:</b> ' + (responseText ? esc(responseText) : '<span style="color:#8a96a3;">&mdash;</span>') + '</div>';
+            h += '</td></tr></tbody></table>';
+
+            // Request Summary
+            h += sec('Request Summary');
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+            h += kv('Customer Group', esc(custName), false, true);
+            if (panStr) h += kv('Corporate PAN', '<span style="font-family:monospace; font-weight:700;">' + esc(panStr) + '</span>');
+            h += kv('RFI Number', esc(rfiNumber));
+            h += kv('Segment', esc(segment), true);
+            h += '</tbody></table>';
+
+            // 3-Tile Non-Trade PAN Limit Strip
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:12px;"><tbody><tr>';
+            h += '<td width="33%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">PAN Outstanding</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(outstanding) + '</div></div></td>';
+            h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Safe Allowable Limit</div><div style="font-size:17px; font-weight:700; color:#1e8449; padding-top:3px;">' + rupee(safeLimit) + '</div></div></td>';
+            h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + '">Requested PAN Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(requestedLimit) + '</div></div></td>';
+            h += '</tr></tbody></table>';
+
+            h += button(portalUrl, 'Open Request in CredX', '#27ae60', 22);
+
+            template.print(h);
+            return;
+        }
+
+        // ── Branch B: OPEN / QUESTION RAISED STATE (Mirrors clm.rfi.details) ──
+        h += sec('Information Requested', 28);
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#fff8e1; border-left:4px solid #E87722; border-radius:4px;"><tbody><tr><td style="padding:14px 16px;">';
+        h += '<div style="font-size:12px; color:#5a6a7a;"><b style="color:#1a1a1a;">' + esc(raisedByDisplay) + '</b> asked' + (raisedOn ? ' on ' + esc(raisedOn) : '') + '</div>';
+        h += '<div style="font-size:15px; line-height:1.6; color:#1a1a1a; padding-top:8px; white-space:pre-wrap; word-break:break-word;">&ldquo;' + esc(questionText || 'Please review the request and provide clarification.') + '&rdquo;</div>';
+        h += '</td></tr></tbody></table>';
+
+        h += button(portalUrl, 'Respond to Request', '#E87722', 16);
+        h += '<p style="margin:8px 0 0 0; font-size:12px; color:#8a96a3;">You can attach supporting documents while responding.</p>';
+
+        // Customer Details
+        h += sec('Customer', 28);
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+        h += kv('Customer Group', esc(custName), false, true);
+        if (panStr) h += kv('Corporate PAN', '<span style="font-family:monospace; font-weight:700;">' + esc(panStr) + '</span>');
+        h += kv('RFI Number', esc(rfiNumber));
+        h += kv('Customer Type', 'Non-Trade');
+        h += kv('Segment', esc(segment));
+        if (zoneRegion) h += kv('Region / Zone', esc(zoneRegion));
+        if (initiator)  h += kv('Submitted By', esc(initiator));
+        h += kv('Submitted On', esc(submittedOn || raisedOn), true);
+        h += '</tbody></table>';
+
+        // Credit Limit (PAN Level) Tiles
+        h += sec('Credit Limit (PAN Level)');
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+        if (existingLimit > 0) {
+            var diff = requestedLimit - existingLimit;
+            var diffText  = (diff > 0 ? '+' : (diff < 0 ? '-' : '')) + rupee(diff);
+            var diffColor = diff < 0 ? '#E23D28' : '#1e8449';
+            h += '<td width="33%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Existing PAN Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(existingLimit) + '</div></div></td>';
+            h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Requested Change</div><div style="font-size:17px; font-weight:700; color:' + diffColor + '; padding-top:3px;">' + diffText + '</div></div></td>';
+            h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + '">New PAN Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(requestedLimit) + '</div></div></td>';
+        } else {
+            h += '<td width="33%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">PAN Outstanding</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(outstanding) + '</div></div></td>';
+            h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Safe Allowable Limit</div><div style="font-size:17px; font-weight:700; color:#1e8449; padding-top:3px;">' + rupee(safeLimit) + '</div></div></td>';
+            h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + '">Requested PAN Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(requestedLimit) + '</div></div></td>';
+        }
+        h += '</tr></tbody></table>';
+
+        // Exposure & Limit Assessment
+        h += sec('Exposure &amp; Limit Assessment');
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+        h += kv('Total PAN Outstanding', rupee(outstanding));
+        h += kv('Safe Allowable Limit', rupee(safeLimit));
+        h += kv('Requested PAN Limit', rupee(requestedLimit), !isDeviation && !approvalLevel, true);
+        if (isDeviation) {
+            h += kv('Deviation Status', '<span style="font-size:11px; color:#E23D28; font-weight:700;">&#9888; ABOVE SAFE ALLOWABLE LIMIT</span>', !approvalLevel);
+        }
+        if (approvalLevel) {
+            h += kv('Final Approval Level', esc(approvalLevel), true, true);
+        }
+        h += '</tbody></table>';
+
+        // Justification (Shown if populated on PAN request)
+        if (bizJust || isDeviation) {
+            var LABEL = 'padding:4px 0; font-size:11px; color:#5a6a7a; text-transform:uppercase; letter-spacing:.5px; font-weight:700;';
+            var BOX   = 'padding:10px 14px; color:#1a1a1a; font-size:14px; line-height:1.6; white-space:pre-wrap; word-wrap:break-word; word-break:break-word;';
+            h += sec('Justification');
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody>';
+            h += '<tr><td style="' + LABEL + '">Business Justification</td></tr>';
+            h += '<tr><td style="' + BOX + ' background-color:#f9fafb; border-left:3px solid #1a1a1a;">' + (bizJust ? esc(bizJust) : 'Not provided') + '</td></tr>';
+            if (isDeviation) {
+                h += '<tr><td style="height:14px; font-size:0; line-height:14px;">&nbsp;</td></tr>';
+                h += '<tr><td style="' + LABEL + ' color:#b3261e;">&#9888; Deviation Justification</td></tr>';
+                h += '<tr><td style="' + BOX + ' background-color:#fffdf7; border-left:3px solid #E23D28;">' + (devJust ? esc(devJust) : 'Not provided') + '</td></tr>';
+            }
+            h += '</tbody></table>';
+        }
+
+        // Approval History on PAN Request
+        if (panSysId) {
+            var ap = new GlideRecord('sysapproval_approver');
+            var apq = ap.addQuery('document_id', panSysId);
+            apq.addOrCondition('sysapproval', panSysId);
+            ap.addQuery('state', 'IN', 'approved,rejected');
+            ap.orderBy('sys_updated_on');
+            ap.query();
+
+            var TH = 'padding:9px 12px; background-color:#eef1f5; color:#2b3440; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; text-align:left; border-bottom:1px solid #dde3ea;';
+            var TD = 'padding:10px 12px; font-size:13px; color:#1a1a1a; border-bottom:1px solid #eef1f5; vertical-align:top;';
+            var histRows = '', histCount = 0;
+
+            while (ap.next()) {
+                histCount++;
+                var apState = s(ap.getValue('state'));
+                var comment = '';
+                var jf = new GlideRecord('sys_journal_field');
+                jf.addQuery('element_id', ap.getUniqueValue());
+                jf.addQuery('element', 'comments');
+                jf.orderByDesc('sys_created_on');
+                jf.setLimit(1);
+                jf.query();
+                if (jf.next()) comment = s(jf.getValue('value'));
+
+                var recCl      = getRecommendedCl(ap);
+                var recClDisp  = recCl > 0 ? rupee(recCl) : rupee(requestedLimit);
+                var stateIcon  = apState === 'approved'
+                    ? '<span style="color:#27ae60; font-weight:700;">&#10004;</span>'
+                    : '<span style="color:#E23D28; font-weight:700;">&#10006;</span>';
+                var stateBadge = apState === 'approved' ? 'Approved' : 'Rejected';
+
+                histRows += '<tr>';
+                histRows += '<td style="' + TD + '"><div style="font-weight:700;">' + stateIcon + ' ' + esc(ap.approver.getDisplayValue()) + '</div>' +
+                            '<div style="padding-top:4px;"><span style="display:inline-block; background-color:#eef1f5; border:1px solid #dde3ea; border-radius:4px; padding:2px 8px; font-size:11px; font-weight:700; color:#2b3440;">' + stateBadge + '</span></div></td>';
+                histRows += '<td style="' + TD + ' white-space:nowrap; font-weight:700;">' + (apState === 'approved' ? recClDisp : '&mdash;') + '</td>';
+                histRows += '<td style="' + TD + ' white-space:pre-wrap; word-break:break-word;">' + (comment ? esc(comment) : '<span style="color:#8a96a3;">&mdash;</span>') +
+                            '<div style="font-size:11px; color:#8a96a3; padding-top:4px;">' + esc(ap.getDisplayValue('sys_updated_on')) + '</div></td>';
+                histRows += '</tr>';
+            }
+
+            h += sec('Approval History' + (histCount ? ' <span style="display:inline-block; background-color:#eef1f5; border:1px solid #dde3ea; border-radius:10px; padding:0 8px; font-size:11px; letter-spacing:0; color:#2b3440;">' + histCount + '</span>' : ''));
+            if (histCount) {
+                h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #dde3ea; border-radius:6px;"><thead><tr>' +
+                     '<th style="' + TH + '">Approver</th><th style="' + TH + '">Recommended Limit</th><th style="' + TH + '">Comments</th></tr></thead><tbody>' + histRows + '</tbody></table>';
+            } else {
+                h += '<p style="margin:0; font-size:13px; color:#5a6a7a;">No approvals recorded yet on this request.</p>';
+            }
+
+            // Earlier Information Received on the Same PAN Request
+            var rfiCards = '', rfiCount = 0;
+            var rf = new GlideRecord('x_birl3_clm_clm_rfi');
+            rf.addQuery('nt_request', panSysId);
+            rf.addQuery('u_status', 'answered');
+            if (rfiId) rf.addQuery('sys_id', '!=', rfiId);
+            rf.orderByDesc('sys_updated_on');
+            rf.query();
+
+            while (rf.next()) {
+                rfiCount++;
+                var aBy = rf.u_raised_by.getDisplayValue() + (rf.getValue('u_raised_by_role') ? ' (' + rf.getValue('u_raised_by_role') + ')' : '');
+                var tgt = rf.getDisplayValue('u_target_user') + (rf.getValue('u_target_role') ? ' (' + rf.getValue('u_target_role') + ')' : '');
+                rfiCards += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f4f9fb; border-left:4px solid #3498db; margin-bottom:10px;"><tbody><tr><td style="padding:12px 14px;">';
+                rfiCards += '<div style="font-size:12px; color:#5a6a7a;">' + esc(aBy) + ' asked</div>';
+                rfiCards += '<div style="font-size:13px; font-weight:700; color:#2c3e50;">' + esc(tgt) +
+                            ' <span style="display:inline-block; background-color:#d6eaf8; color:#2980b9; border-radius:10px; padding:1px 8px; font-size:10px; font-weight:700; text-transform:uppercase; margin-left:4px;">Answered</span></div>';
+                rfiCards += '<div style="font-size:11px; color:#8a96a3; padding-bottom:8px; border-bottom:1px solid #e1e8ed;">' + esc(rf.getDisplayValue('u_responded_on') || rf.getDisplayValue('sys_updated_on')) + '</div>';
+                rfiCards += '<div style="font-size:13px; line-height:1.5; padding-top:8px; white-space:pre-wrap;"><b style="color:#5a6a7a;">Q:</b> ' + esc(rf.getValue('u_question')) + '</div>';
+                rfiCards += '<div style="font-size:13px; line-height:1.5; padding-top:6px; white-space:pre-wrap;"><b style="color:#2c3e50;">A:</b> ' + esc(rf.getValue('u_response')) + '</div>';
+                rfiCards += '</td></tr></tbody></table>';
+            }
+
+            if (rfiCount) {
+                h += sec('Earlier Information Received <span style="display:inline-block; background-color:#eef1f5; border:1px solid #dde3ea; border-radius:10px; padding:0 8px; font-size:11px; letter-spacing:0; color:#2b3440;">' + rfiCount + '</span>');
+                h += rfiCards;
+            }
+        }
+
+        // Bottom CTA Button (Matches Trade clm.rfi.details)
+        h += button(portalUrl, 'Respond to Request', '#E87722', 18);
+
+        template.print(h);
+
+    } catch (ex) {
+        gs.error('CLM MailScript clm_nt_rfi_script error: ' + ex.message);
+        template.print('<div style="font-family: Arial, sans-serif; color: #d9534f;">Error rendering Non-Trade RFI notification details.</div>');
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-12 05:28:13</sys_created_on>
+        <sys_id>476fc3f497e45390be31fa17f053afdb</sys_id>
+        <sys_mod_count>2</sys_mod_count>
+        <sys_name>clm_nt_rfi_script</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_476fc3f497e45390be31fa17f053afdb</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-13 06:48:23</sys_updated_on>
+    </sys_script_email>
+</record_update>

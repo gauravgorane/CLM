@@ -1,0 +1,659 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $window, $sce) {
+  var c = this;
+
+  // ── Config: add/remove roles or segments here ──────────
+  var INITIATOR_ROLES = ['Initiator', 'TSH'];
+
+  var SEGMENTS = {
+    trade: {
+      badge: 'TRADE',
+      title: 'Trade Customers',
+      cards: {
+        new:      { label: 'New Credit Limit Request', desc: 'Raise a new CL request for a trade customer',        page: 'clm_livecl'  },
+        view:     { label: 'View My Requests',         desc: 'Track status of submitted requests',                  page: 'view_my_credit_request'     },
+        approval: { label: 'Pending Approvals',        desc: 'Review and act on pending requests',                  page: 'clmapprover'                },
+        search:   { label: 'Customer Search',          desc: 'Search and view customer credit details',             page: 'uclm_customer_search'       },
+        docs:     { label: 'Document Submission',      desc: 'Send secure upload links to trade customers',         page: 'uclm_submission'            }
+      }
+    },
+    nontrade: {
+      badge: 'NON-TRADE',
+      title: 'Non-Trade Customers',
+      cards: {
+        new:      { label: 'New Credit Limit Request', desc: 'Raise a new CL request for a non-trade customer',    page: 'uclm_non_trade'             },
+        view:     { label: 'View My Requests',         desc: 'Track status of submitted requests',                  page: 'uclm_view_my_request'           },
+        approval: { label: 'Pending Approvals',        desc: 'Review and act on pending requests',                  page: ''               },
+				 swap:     { label: 'Swap Credit',              desc: 'Reallocate credit limits across sites',               page: 'clm_limit_swap'             },
+        search:   { label: 'Customer Search',          desc: 'Search and view customer credit details',             page: 'uclm_customer_search'       }
+      }
+    },
+    key: {
+      badge: 'KEY',
+      title: 'Key Customers',
+      cards: {
+        new:      { label: 'New Credit Limit Request', desc: 'Raise a new CL request for a key customer',          page: ''            },
+        view:     { label: 'View My Requests',         desc: 'Track status of submitted requests',                  page: ''          },
+        approval: { label: 'Pending Approvals',        desc: 'Review and act on pending requests',                  page: ''              },
+        search:   { label: 'Customer Search',          desc: 'Search and view customer credit details',             page: ''       }
+      }
+    }
+  };
+
+  // Icon map — keys match card keys above
+  var ICONS = {
+    new:      '<svg width="18" height="18" fill="none" stroke="#F57C00" stroke-width="1.8" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>',
+    view:     '<svg width="18" height="18" fill="none" stroke="#1565C0" stroke-width="1.8" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+    approval: '<svg width="18" height="18" fill="none" stroke="#F57C00" stroke-width="1.8" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+    search:   '<svg width="18" height="18" fill="none" stroke="#2E7D32" stroke-width="1.8" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+		swap: '<svg width="18" height="18" fill="none" stroke="#AF272F" stroke-width="1.8" viewBox="0 0 24 24"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg>',
+    docs:     '<svg width="18" height="18" fill="none" stroke="#F57C00" stroke-width="1.8" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="12" y1="17" x2="8" y2="17"/></svg>',
+  };
+
+  // Icon background color per card key
+  var ICON_BG = {
+    new:      'yellow',
+    view:     'blue',
+    approval: 'orange',
+    search:   'green',
+		swap: 'orange',
+    docs:     'yellow'
+  };
+
+  // Cards visible to initiators vs approvers
+  var INITIATOR_CARD_KEYS = ['new', 'view', 'approval', 'search', 'docs', 'swap'];
+  var APPROVER_CARD_KEYS  = ['approval', 'search'];
+
+  // ── Derived values ──────────────────────────────────────
+  var userRole         = (c.data.clmRole         || '').trim();
+  var userCustomerType = (c.data.clmCustomerType || '').trim().toLowerCase();
+  var isAdmin          = userRole === 'Admin';
+  var canInitiate      = isAdmin || INITIATOR_ROLES.indexOf(userRole) !== -1;
+
+  var hour = new Date().getHours();
+  c.greeting  = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  c.firstName = c.data.firstName || 'there';
+
+  // ── Build sections ──────────────────────────────────────
+  var CUSTOMER_TYPE_MAP = {
+    'trade':     ['trade'],
+    'non-trade': ['nontrade'],
+    'key':       ['key']
+  };
+
+  var allowedSegments = isAdmin ? Object.keys(SEGMENTS)
+    : (CUSTOMER_TYPE_MAP[userCustomerType] || Object.keys(SEGMENTS));
+
+  var cardKeys = canInitiate ? INITIATOR_CARD_KEYS : APPROVER_CARD_KEYS;
+
+  c.sections = allowedSegments.map(function(segKey) {
+    var seg = SEGMENTS[segKey];
+    var cards = cardKeys
+      .filter(function(k) { return !!seg.cards[k]; }) // skip keys not defined for this segment
+      .map(function(k) {
+        var card = seg.cards[k];
+        return {
+          label:  card.label,
+          desc:   card.desc,
+          page:   card.page,
+          icon:   $sce.trustAsHtml(ICONS[k]),
+          iconBg: ICON_BG[k]
+        };
+      });
+    return { badge: seg.badge, title: seg.title, cards: cards };
+  });
+
+  // ── Navigate ────────────────────────────────────────────
+  c.navigate = function(pageId) {
+    $window.location.href = '/uclm?id=' + pageId;
+  };
+
+  // ── Live clock ──────────────────────────────────────────
+  var DAYS   = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  function updateClock() {
+    var now  = new Date();
+    var pad  = function(n) { return n.toString().padStart(2, '0'); };
+    var timeEl = document.getElementById('clm-time');
+    var dateEl = document.getElementById('clm-date');
+    if (timeEl) timeEl.textContent = pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+    if (dateEl) dateEl.textContent = DAYS[now.getDay()] + ', ' + now.getDate() + ' ' + MONTHS[now.getMonth()] + ' ' + now.getFullYear();
+  }
+
+  updateClock();
+  setInterval(updateClock, 1000);
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* ============================================================
+   CLM DASHBOARD WRAPPER — CSS (UltraTech &amp; ABG Theme)
+   FULLY RESPONSIVE + MOBILE OPTIMIZED (BRAND GUIDELINES APPLIED)
+   ============================================================ */
+
+/* ── TYPOGRAPHY &amp; FONTS (ABG BRAND GUIDELINES) ── */
+@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Wrapper ── */
+.db-wrap {
+  width: 100%;
+  min-height: 100vh;
+  background: #F9FAFB; /* ABG Premium Light Background */
+  font-family: 'Oxygen', "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  padding: clamp(16px, 3vw, 48px);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Banner ── */
+.db-banner {
+  background: #1a1a1a; /* ABG Charcoal */
+  border-radius: 8px;
+  padding: 28px 32px;
+  margin-bottom: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 5px solid #AF272F; /* ABG Maroon Top Border */
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+.db-banner-title        { font-size: 22px; font-weight: 700; color: #ffffff; letter-spacing: 0.5px; }
+.db-banner-title span   { color: #F3D54E; /* ABG Yellow */ }
+.db-banner-sub          { font-size: 14px; color: rgba(255, 255, 255, 0.8); margin-top: 6px; }
+.db-banner-right        { text-align: right; flex-shrink: 0; }
+.db-banner-time         { font-size: 24px; font-weight: 700; color: #F3D54E; letter-spacing: 1.5px; }
+.db-banner-date         { font-size: 12px; color: rgba(255, 255, 255, 0.6); margin-top: 4px; white-space: nowrap; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+
+/* ── Section ── */
+.db-section             { margin-bottom: 32px; }
+.db-section-header      { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.db-section-badge       { height: 26px; padding: 0 12px; border-radius: 13px; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; background: #1a1a1a; color: #F3D54E; display: flex; align-items: center; white-space: nowrap; text-transform: uppercase; }
+.db-section-title       { font-size: 15px; font-weight: 700; color: #1a1a1a; white-space: nowrap; text-transform: uppercase; letter-spacing: 0.5px; }
+.db-section-line        { flex: 1; height: 1px; background: #e0e6ed; }
+
+/* ── Card grid ── */
+.db-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+
+/* ── Card ── */
+.db-card {
+  background: #ffffff;
+  border: 1px solid #e0e6ed;
+  border-radius: 8px;
+  padding: 20px 18px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: all 0.2s ease;
+}
+.db-card:hover  { 
+  border-color: #E87722; /* ABG Orange */
+  box-shadow: 0 6px 16px rgba(0,0,0,0.04); 
+  transform: translateY(-2px); 
+}
+.db-card:focus  { 
+  outline: none;
+  border-color: #AF272F; /* ABG Maroon */
+  box-shadow: 0 0 0 3px rgba(175, 39, 47, 0.15); 
+}
+
+/* ── Card internals ── */
+.db-card-icon          { width: 40px; height: 40px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+
+/* Updated Icon Backgrounds to match premium muted tones */
+.db-card-icon.yellow   { background: #fffcf0; color: #E87722; border: 1px solid #f9e79f; } /* ABG Yellow Tint */
+.db-card-icon.blue     { background: #eaf4fb; color: #1a5276; border: 1px solid #aed6f1; }
+.db-card-icon.green    { background: #f4fbf6; color: #27ae60; border: 1px solid #a9dfbf; }
+.db-card-icon.orange   { background: #fdf2eb; color: #E87722; border: 1px solid #fadbd8; } /* ABG Orange Tint */
+
+.db-card-label         { font-size: 14px; font-weight: 700; color: #1a1a1a; line-height: 1.4; }
+.db-card-desc          { font-size: 12px; color: #7f8c9a; line-height: 1.5; }
+.db-card-arrow         { font-size: 16px; color: #cdd4dc; margin-top: auto; transition: color 0.2s ease; }
+.db-card:hover .db-card-arrow { color: #E87722; /* ABG Orange */ }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .db-banner            { flex-direction: column; align-items: flex-start; gap: 16px; padding: 24px; }
+  .db-banner-right      { text-align: left; }
+  .db-banner-title      { font-size: 20px; }
+  .db-banner-time       { font-size: 20px; }
+  .db-cards             { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+}
+
+@media (max-width: 480px) {
+  .db-banner            { padding: 20px; border-radius: 8px; }
+  .db-banner-title      { font-size: 18px; }
+  .db-cards             { gap: 12px; }
+  .db-card              { padding: 16px 14px; gap: 10px; }
+  .db-card-label        { font-size: 13px; }
+  .db-card-desc         { display: none; }
+  .db-card-icon         { width: 32px; height: 32px; }
+  .db-section-badge     { padding: 0 10px; font-size: 10px; }
+  .db-section-title     { font-size: 13px; }
+}
+
+@media (max-width: 360px) {
+  .db-cards             { grid-template-columns: 1fr; }
+}
+
+/* ── ServiceNow container override ── */
+.sn-widget-content,
+.sn-widget-content &gt; div,
+.container,
+.container-fluid { width: 100% !important; max-width: 100% !important; padding-left: 0 !important; padding-right: 0 !important; }</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>dummy_uclm_dashboard</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>dummy uclm dashboard</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+  var user = gs.getUser();
+  var firstName = user.getFirstName() || '';
+  var lastName  = user.getLastName()  || '';
+  data.firstName       = (firstName + ' ' + lastName).trim() || gs.getUserName();
+  var gr = new GlideRecord('sys_user');
+  gr.get('sys_id', gs.getUserID());
+  // Update field names here if your schema changes
+  data.clmRole         = gr.getValue('x_birl3_clm_role')          || '';
+  data.clmCustomerType = gr.getValue('x_birl3_clm_customer_type') || '';
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-05-25 12:12:10</sys_created_on>
+        <sys_id>954b488a9785cb10be31fa17f053af29</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>dummy uclm dashboard</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_954b488a9785cb10be31fa17f053af29</sys_update_name>
+        <sys_updated_by>shobharani.k@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-05-26 12:06:29</sys_updated_on>
+        <template><![CDATA[<div class="db-wrap">
+
+  <!-- BANNER -->
+  <div class="db-banner">
+    <div>
+      <div class="db-banner-title">{{c.greeting}}, <span>{{c.firstName}}</span> ]]>👋<![CDATA[</div>
+      <div class="db-banner-sub">Credit Limit Management — What would you like to do today?</div>
+    </div>
+    <div class="db-banner-right">
+      <div class="db-banner-time" id="clm-time">--:--:--</div>
+      <div class="db-banner-date" id="clm-date"></div>
+    </div>
+  </div>
+
+  <!-- SECTIONS -->
+  <div class="db-section" ng-repeat="section in c.sections">
+    <div class="db-section-header">
+      <span class="db-section-badge">{{section.badge}}</span>
+      <span class="db-section-title">{{section.title}}</span>
+      <div class="db-section-line"></div>
+    </div>
+    <div class="db-cards">
+      <div class="db-card"
+        ng-repeat="card in section.cards"
+        ng-click="c.navigate(card.page)"
+        ng-keydown="$event.key === 'Enter' && c.navigate(card.page)"
+        tabindex="0"
+        role="button"
+        aria-label="{{card.label}}">
+        <div class="db-card-icon {{card.iconBg}}">
+          <span ng-bind-html="card.icon"></span>
+        </div>
+        <div class="db-card-label">{{card.label}}</div>
+        <div class="db-card-desc">{{card.desc}}</div>
+        <div class="db-card-arrow">→</div>
+      </div>
+    </div>
+  </div>
+
+</div>]]></template>
+    </sp_widget>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_954b488a9785cb10be31fa17f053af29</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function($scope, $window, $sce) {
+  var c = this;
+
+  // ── Config: add/remove roles or segments here ──────────
+  var INITIATOR_ROLES = ['Initiator', 'TSH'];
+
+  var SEGMENTS = {
+    trade: {
+      badge: 'TRADE',
+      title: 'Trade Customers',
+      cards: {
+        new:      { label: 'New Credit Limit Request', desc: 'Raise a new CL request for a trade customer',        page: 'clm_livecl'  },
+        view:     { label: 'View My Requests',         desc: 'Track status of submitted requests',                  page: 'view_my_credit_request'     },
+        approval: { label: 'Pending Approvals',        desc: 'Review and act on pending requests',                  page: 'clmapprover'                },
+        search:   { label: 'Customer Search',          desc: 'Search and view customer credit details',             page: 'uclm_customer_search'       },
+        docs:     { label: 'Document Submission',      desc: 'Send secure upload links to trade customers',         page: 'uclm_submission'            }
+      }
+    },
+    nontrade: {
+      badge: 'NON-TRADE',
+      title: 'Non-Trade Customers',
+      cards: {
+        new:      { label: 'New Credit Limit Request', desc: 'Raise a new CL request for a non-trade customer',    page: 'uclm_non_trade'             },
+        view:     { label: 'View My Requests',         desc: 'Track status of submitted requests',                  page: 'uclm_view_my_request'           },
+        approval: { label: 'Pending Approvals',        desc: 'Review and act on pending requests',                  page: ''               },
+				 swap:     { label: 'Swap Credit',              desc: 'Reallocate credit limits across sites',               page: 'clm_limit_swap'             },
+        search:   { label: 'Customer Search',          desc: 'Search and view customer credit details',             page: 'uclm_customer_search'       }
+      }
+    },
+    key: {
+      badge: 'KEY',
+      title: 'Key Customers',
+      cards: {
+        new:      { label: 'New Credit Limit Request', desc: 'Raise a new CL request for a key customer',          page: ''            },
+        view:     { label: 'View My Requests',         desc: 'Track status of submitted requests',                  page: ''          },
+        approval: { label: 'Pending Approvals',        desc: 'Review and act on pending requests',                  page: ''              },
+        search:   { label: 'Customer Search',          desc: 'Search and view customer credit details',             page: ''       }
+      }
+    }
+  };
+
+  // Icon map — keys match card keys above
+  var ICONS = {
+    new:      '&lt;svg width="18" height="18" fill="none" stroke="#F57C00" stroke-width="1.8" viewBox="0 0 24 24"&gt;&lt;circle cx="12" cy="12" r="10"/&gt;&lt;line x1="12" y1="8" x2="12" y2="16"/&gt;&lt;line x1="8" y1="12" x2="16" y2="12"/&gt;&lt;/svg&gt;',
+    view:     '&lt;svg width="18" height="18" fill="none" stroke="#1565C0" stroke-width="1.8" viewBox="0 0 24 24"&gt;&lt;path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/&gt;&lt;polyline points="14 2 14 8 20 8"/&gt;&lt;line x1="16" y1="13" x2="8" y2="13"/&gt;&lt;line x1="16" y1="17" x2="8" y2="17"/&gt;&lt;/svg&gt;',
+    approval: '&lt;svg width="18" height="18" fill="none" stroke="#F57C00" stroke-width="1.8" viewBox="0 0 24 24"&gt;&lt;path d="M22 11.08V12a10 10 0 11-5.93-9.14"/&gt;&lt;polyline points="22 4 12 14.01 9 11.01"/&gt;&lt;/svg&gt;',
+    search:   '&lt;svg width="18" height="18" fill="none" stroke="#2E7D32" stroke-width="1.8" viewBox="0 0 24 24"&gt;&lt;circle cx="11" cy="11" r="8"/&gt;&lt;line x1="21" y1="21" x2="16.65" y2="16.65"/&gt;&lt;/svg&gt;',
+		swap: '&lt;svg width="18" height="18" fill="none" stroke="#AF272F" stroke-width="1.8" viewBox="0 0 24 24"&gt;&lt;polyline points="17 1 21 5 17 9"/&gt;&lt;path d="M3 11V9a4 4 0 014-4h14"/&gt;&lt;polyline points="7 23 3 19 7 15"/&gt;&lt;path d="M21 13v2a4 4 0 01-4 4H3"/&gt;&lt;/svg&gt;',
+    docs:     '&lt;svg width="18" height="18" fill="none" stroke="#F57C00" stroke-width="1.8" viewBox="0 0 24 24"&gt;&lt;path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/&gt;&lt;polyline points="14 2 14 8 20 8"/&gt;&lt;line x1="16" y1="13" x2="8" y2="13"/&gt;&lt;line x1="12" y1="17" x2="8" y2="17"/&gt;&lt;/svg&gt;',
+  };
+
+  // Icon background color per card key
+  var ICON_BG = {
+    new:      'yellow',
+    view:     'blue',
+    approval: 'orange',
+    search:   'green',
+		swap: 'orange',
+    docs:     'yellow'
+  };
+
+  // Cards visible to initiators vs approvers
+  var INITIATOR_CARD_KEYS = ['new', 'view', 'approval', 'search', 'docs', 'swap'];
+  var APPROVER_CARD_KEYS  = ['approval', 'search'];
+
+  // ── Derived values ──────────────────────────────────────
+  var userRole         = (c.data.clmRole         || '').trim();
+  var userCustomerType = (c.data.clmCustomerType || '').trim().toLowerCase();
+  var isAdmin          = userRole === 'Admin';
+  var canInitiate      = isAdmin || INITIATOR_ROLES.indexOf(userRole) !== -1;
+
+  var hour = new Date().getHours();
+  c.greeting  = hour &lt; 12 ? 'Good morning' : hour &lt; 17 ? 'Good afternoon' : 'Good evening';
+  c.firstName = c.data.firstName || 'there';
+
+  // ── Build sections ──────────────────────────────────────
+  var CUSTOMER_TYPE_MAP = {
+    'trade':     ['trade'],
+    'non-trade': ['nontrade'],
+    'key':       ['key']
+  };
+
+  var allowedSegments = isAdmin ? Object.keys(SEGMENTS)
+    : (CUSTOMER_TYPE_MAP[userCustomerType] || Object.keys(SEGMENTS));
+
+  var cardKeys = canInitiate ? INITIATOR_CARD_KEYS : APPROVER_CARD_KEYS;
+
+  c.sections = allowedSegments.map(function(segKey) {
+    var seg = SEGMENTS[segKey];
+    var cards = cardKeys
+      .filter(function(k) { return !!seg.cards[k]; }) // skip keys not defined for this segment
+      .map(function(k) {
+        var card = seg.cards[k];
+        return {
+          label:  card.label,
+          desc:   card.desc,
+          page:   card.page,
+          icon:   $sce.trustAsHtml(ICONS[k]),
+          iconBg: ICON_BG[k]
+        };
+      });
+    return { badge: seg.badge, title: seg.title, cards: cards };
+  });
+
+  // ── Navigate ────────────────────────────────────────────
+  c.navigate = function(pageId) {
+    $window.location.href = '/uclm?id=' + pageId;
+  };
+
+  // ── Live clock ──────────────────────────────────────────
+  var DAYS   = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  function updateClock() {
+    var now  = new Date();
+    var pad  = function(n) { return n.toString().padStart(2, '0'); };
+    var timeEl = document.getElementById('clm-time');
+    var dateEl = document.getElementById('clm-date');
+    if (timeEl) timeEl.textContent = pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+    if (dateEl) dateEl.textContent = DAYS[now.getDay()] + ', ' + now.getDate() + ' ' + MONTHS[now.getMonth()] + ' ' + now.getFullYear();
+  }
+
+  updateClock();
+  setInterval(updateClock, 1000);
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;/* ============================================================
+   CLM DASHBOARD WRAPPER — CSS (UltraTech &amp;amp; ABG Theme)
+   FULLY RESPONSIVE + MOBILE OPTIMIZED (BRAND GUIDELINES APPLIED)
+   ============================================================ */
+
+/* ── TYPOGRAPHY &amp;amp; FONTS (ABG BRAND GUIDELINES) ── */
+@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;amp;display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Wrapper ── */
+.db-wrap {
+  width: 100%;
+  min-height: 100vh;
+  background: #F9FAFB; /* ABG Premium Light Background */
+  font-family: 'Oxygen', "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  padding: clamp(16px, 3vw, 48px);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Banner ── */
+.db-banner {
+  background: #1a1a1a; /* ABG Charcoal */
+  border-radius: 8px;
+  padding: 28px 32px;
+  margin-bottom: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 5px solid #AF272F; /* ABG Maroon Top Border */
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+.db-banner-title        { font-size: 22px; font-weight: 700; color: #ffffff; letter-spacing: 0.5px; }
+.db-banner-title span   { color: #F3D54E; /* ABG Yellow */ }
+.db-banner-sub          { font-size: 14px; color: rgba(255, 255, 255, 0.8); margin-top: 6px; }
+.db-banner-right        { text-align: right; flex-shrink: 0; }
+.db-banner-time         { font-size: 24px; font-weight: 700; color: #F3D54E; letter-spacing: 1.5px; }
+.db-banner-date         { font-size: 12px; color: rgba(255, 255, 255, 0.6); margin-top: 4px; white-space: nowrap; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+
+/* ── Section ── */
+.db-section             { margin-bottom: 32px; }
+.db-section-header      { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.db-section-badge       { height: 26px; padding: 0 12px; border-radius: 13px; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; background: #1a1a1a; color: #F3D54E; display: flex; align-items: center; white-space: nowrap; text-transform: uppercase; }
+.db-section-title       { font-size: 15px; font-weight: 700; color: #1a1a1a; white-space: nowrap; text-transform: uppercase; letter-spacing: 0.5px; }
+.db-section-line        { flex: 1; height: 1px; background: #e0e6ed; }
+
+/* ── Card grid ── */
+.db-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+
+/* ── Card ── */
+.db-card {
+  background: #ffffff;
+  border: 1px solid #e0e6ed;
+  border-radius: 8px;
+  padding: 20px 18px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: all 0.2s ease;
+}
+.db-card:hover  { 
+  border-color: #E87722; /* ABG Orange */
+  box-shadow: 0 6px 16px rgba(0,0,0,0.04); 
+  transform: translateY(-2px); 
+}
+.db-card:focus  { 
+  outline: none;
+  border-color: #AF272F; /* ABG Maroon */
+  box-shadow: 0 0 0 3px rgba(175, 39, 47, 0.15); 
+}
+
+/* ── Card internals ── */
+.db-card-icon          { width: 40px; height: 40px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+
+/* Updated Icon Backgrounds to match premium muted tones */
+.db-card-icon.yellow   { background: #fffcf0; color: #E87722; border: 1px solid #f9e79f; } /* ABG Yellow Tint */
+.db-card-icon.blue     { background: #eaf4fb; color: #1a5276; border: 1px solid #aed6f1; }
+.db-card-icon.green    { background: #f4fbf6; color: #27ae60; border: 1px solid #a9dfbf; }
+.db-card-icon.orange   { background: #fdf2eb; color: #E87722; border: 1px solid #fadbd8; } /* ABG Orange Tint */
+
+.db-card-label         { font-size: 14px; font-weight: 700; color: #1a1a1a; line-height: 1.4; }
+.db-card-desc          { font-size: 12px; color: #7f8c9a; line-height: 1.5; }
+.db-card-arrow         { font-size: 16px; color: #cdd4dc; margin-top: auto; transition: color 0.2s ease; }
+.db-card:hover .db-card-arrow { color: #E87722; /* ABG Orange */ }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .db-banner            { flex-direction: column; align-items: flex-start; gap: 16px; padding: 24px; }
+  .db-banner-right      { text-align: left; }
+  .db-banner-title      { font-size: 20px; }
+  .db-banner-time       { font-size: 20px; }
+  .db-cards             { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+}
+
+@media (max-width: 480px) {
+  .db-banner            { padding: 20px; border-radius: 8px; }
+  .db-banner-title      { font-size: 18px; }
+  .db-cards             { gap: 12px; }
+  .db-card              { padding: 16px 14px; gap: 10px; }
+  .db-card-label        { font-size: 13px; }
+  .db-card-desc         { display: none; }
+  .db-card-icon         { width: 32px; height: 32px; }
+  .db-section-badge     { padding: 0 10px; font-size: 10px; }
+  .db-section-title     { font-size: 13px; }
+}
+
+@media (max-width: 360px) {
+  .db-cards             { grid-template-columns: 1fr; }
+}
+
+/* ── ServiceNow container override ── */
+.sn-widget-content,
+.sn-widget-content &amp;gt; div,
+.container,
+.container-fluid { width: 100% !important; max-width: 100% !important; padding-left: 0 !important; padding-right: 0 !important; }&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id&gt;dummy_uclm_dashboard&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;dummy uclm dashboard&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+  var user = gs.getUser();
+  var firstName = user.getFirstName() || '';
+  var lastName  = user.getLastName()  || '';
+  data.firstName       = (firstName + ' ' + lastName).trim() || gs.getUserName();
+  var gr = new GlideRecord('sys_user');
+  gr.get('sys_id', gs.getUserID());
+  // Update field names here if your schema changes
+  data.clmRole         = gr.getValue('x_birl3_clm_role')          || '';
+  data.clmCustomerType = gr.getValue('x_birl3_clm_customer_type') || '';
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;vedant.salunke@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-05-25 12:12:10&lt;/sys_created_on&gt;&lt;sys_id&gt;954b488a9785cb10be31fa17f053af29&lt;/sys_id&gt;&lt;sys_mod_count&gt;1&lt;/sys_mod_count&gt;&lt;sys_name&gt;dummy uclm dashboard&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_954b488a9785cb10be31fa17f053af29&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;shobharani.k@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-05-26 12:06:29&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="db-wrap"&gt;
+
+  &lt;!-- BANNER --&gt;
+  &lt;div class="db-banner"&gt;
+    &lt;div&gt;
+      &lt;div class="db-banner-title"&gt;{{c.greeting}}, &lt;span&gt;{{c.firstName}}&lt;/span&gt; ]]&gt;👋&lt;![CDATA[&lt;/div&gt;
+      &lt;div class="db-banner-sub"&gt;Credit Limit Management — What would you like to do today?&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="db-banner-right"&gt;
+      &lt;div class="db-banner-time" id="clm-time"&gt;--:--:--&lt;/div&gt;
+      &lt;div class="db-banner-date" id="clm-date"&gt;&lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;!-- SECTIONS --&gt;
+  &lt;div class="db-section" ng-repeat="section in c.sections"&gt;
+    &lt;div class="db-section-header"&gt;
+      &lt;span class="db-section-badge"&gt;{{section.badge}}&lt;/span&gt;
+      &lt;span class="db-section-title"&gt;{{section.title}}&lt;/span&gt;
+      &lt;div class="db-section-line"&gt;&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="db-cards"&gt;
+      &lt;div class="db-card"
+        ng-repeat="card in section.cards"
+        ng-click="c.navigate(card.page)"
+        ng-keydown="$event.key === 'Enter' &amp;&amp; c.navigate(card.page)"
+        tabindex="0"
+        role="button"
+        aria-label="{{card.label}}"&gt;
+        &lt;div class="db-card-icon {{card.iconBg}}"&gt;
+          &lt;span ng-bind-html="card.icon"&gt;&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;div class="db-card-label"&gt;{{card.label}}&lt;/div&gt;
+        &lt;div class="db-card-desc"&gt;{{card.desc}}&lt;/div&gt;
+        &lt;div class="db-card-arrow"&gt;→&lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>841749182</payload_hash>
+        <record_name>dummy uclm dashboard</record_name>
+        <reverted_from/>
+        <source>57b38f622b2303104572f3745e91bf2a</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by/>
+        <sys_created_on>2026-09-28 21:32:03</sys_created_on>
+        <sys_id>d6e3cc503b08531087401044c3e45aac</sys_id>
+        <sys_mod_count/>
+        <sys_recorded_at>1a0e9ee98380000000</sys_recorded_at>
+        <sys_updated_by/>
+        <sys_updated_on/>
+        <type>Widget</type>
+        <update_guid>96e3cc50e308531090a34b7c570f75ac</update_guid>
+        <update_guid_history>96e3cc50e308531090a34b7c570f75ac:841749182</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="dummy uclm dashboard">16e3cc503b08531087401044c3e45aad</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>shobharani.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-16 04:19:01</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>149f23d821ee4cb58c0082bc35f81bb1</sys_id>
+        <sys_metadata>954b488a9785cb10be31fa17f053af29</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>dummy uclm dashboard</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_954b488a9785cb10be31fa17f053af29</sys_update_name>
+        <sys_update_version display_value="sp_widget_954b488a9785cb10be31fa17f053af29">d6e3cc503b08531087401044c3e45aac</sys_update_version>
+        <sys_updated_by>shobharani.k@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-16 04:19:01</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

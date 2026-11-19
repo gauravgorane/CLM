@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_request_rejected</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm_request_rejected
+// Notification table: x_birl3_clm_clm_new_credit_request
+(function runMailScript(current, template, email, email_action, event) {
+
+    function esc(s) { return GlideStringUtil.escapeHTML(s || ''); }
+    function num(f) { var v = parseFloat(current.getValue(f)); return isNaN(v) ? 0 : v; }
+    function inr(n) {
+        var s = Math.round(Math.abs(n)).toString();
+        var last = s.slice(-3), rest = s.slice(0, -3);
+        if (rest) last = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last;
+        return last;
+    }
+    function rupee(n) { return '&#8377; ' + inr(n); }
+    function signed(n) { return (n > 0 ? '+' : (n < 0 ? '-' : '')) + rupee(n); }
+
+    var reqId   = current.getUniqueValue();
+    var isTrade = ((current.getValue('customer_type') || '') + '').toLowerCase() === 'trade';
+    var base    = (gs.getProperty('glide.servlet.uri') || '').replace(/\/?$/, '/');
+    var link    = base + 'uclm?id=view_my_credit_request';
+
+    // ── Limit figures ─────────────────────────────────────────────
+    var existing   = num('u_code_level_current_limit');
+    var requested  = isTrade ? num('u_code_level_total_requested') : num('requested_limit');
+    var additional = num('u_requested_additional_limit');
+
+    // ── Find the rejecting approver ───────────────────────────────
+    var rejecterName  = '';
+    var rejecterLevel = '';
+    var rejectedOn    = '';
+    var rejectComment = '';
+    try {
+        var FIELD_LABELS = [
+            ['u_approver_tsh', 'TSH'], ['u_approver_rhm', 'RHM'], ['u_approver_zch', 'ZCH'], ['u_approver_zhm', 'ZHM'],
+            ['u_approver_ho', 'HO'], ['u_approver_nsh', 'NSH'], ['u_approver_nsh_cch', 'CCH'], ['u_approver_cmo', 'CMO'],
+            ['u_approver_cmo_cfo', 'CFO'], ['u_approver_md', 'MD'], ['u_approver_tsm', 'TSM'], ['u_approver_rh_ch_rmc', 'RH CH RMC'],
+            ['u_approver_zh_rmc', 'ZH RMC'], ['u_approver_head_rmc', 'HEAD RMC'], ['u_approver_head_key_ch_rmc', 'HEAD KEY & RMC'],
+            ['u_approver_ch_rmc', 'CH RMC'], ['u_approver_head_key_cch', 'CCH'], ['u_approver_bh', 'BH'], ['u_approver_bh_cfo', 'CFO'],
+            ['u_approver_tsh_bpd', 'TSH BPD'], ['u_approver_zh_bpd', 'ZH BPD'], ['u_approver_hsbpd', 'HSBPD'],
+            ['u_approver_hbpd', 'HBPD'], ['u_approver_cch_hbpd', 'CCH'], ['u_approver_cfo', 'CFO']
+        ];
+        var levelByUser = {};
+        for (var fi = 0; fi < FIELD_LABELS.length; fi++) {
+            var uid = current.getValue(FIELD_LABELS[fi][0]);
+            if (uid && !levelByUser[uid]) levelByUser[uid] = FIELD_LABELS[fi][1];
+        }
+
+        var ap = new GlideRecord('sysapproval_approver');
+        var apq = ap.addQuery('document_id', reqId);
+        apq.addOrCondition('sysapproval', reqId);
+        ap.addQuery('state', 'rejected');
+        ap.orderByDesc('sys_updated_on');
+        ap.setLimit(1);
+        ap.query();
+        if (ap.next()) {
+            var apId = ap.getValue('approver') + '';
+            rejecterName  = ap.approver.getDisplayValue() + '';
+            rejecterLevel = levelByUser[apId] || '';
+            rejectedOn    = ap.getDisplayValue('sys_updated_on') + '';
+
+            var jf = new GlideRecord('sys_journal_field');
+            jf.addQuery('element_id', ap.getUniqueValue());
+            jf.orderByDesc('sys_created_on');
+            jf.setLimit(1);
+            jf.query();
+            if (jf.next()) rejectComment = jf.getValue('value') + '';
+        }
+    } catch (e) {}
+
+    // ── Reason text — three-tier fallback ──────────────────────────
+  var reasonText = (current.getValue('rejection_reason') || '').trim()
+              || rejectComment
+              || '';
+
+    if (!rejectedOn)   rejectedOn   = current.getDisplayValue('sys_updated_on');
+    if (!rejecterName) rejecterName = '';
+
+    // ── Shared styles ────────────────────────────────────────────
+    var TD_K = 'padding:8px 0; color:#5a6a7a; border-bottom:1px solid #eef1f5;';
+    var TD_V = 'padding:8px 0; color:#1a1a1a; border-bottom:1px solid #eef1f5;';
+    var TILE = 'border:1px solid #e0e6ed; border-radius:6px; padding:12px 14px; background-color:#fafbfc;';
+    var TILE_K = 'font-size:10px; text-transform:uppercase; letter-spacing:.8px; color:#5a6a7a; font-weight:700;';
+
+    function sec(t, top) {
+        return '<h3 style="margin:' + (top || 24) + 'px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">' + t + '</h3>';
+    }
+    function kv(label, value, last, bold) {
+        return '<tr><td width="38%" style="' + (last ? 'padding:8px 0; color:#5a6a7a;' : TD_K) + '">' + label + '</td>' +
+               '<td style="' + (last ? 'padding:8px 0; color:#1a1a1a;' : TD_V) + (bold ? ' font-weight:700;' : '') + '">' + value + '</td></tr>';
+    }
+
+    var customerGR = current.customer.getRefRecord();
+    var custValid  = customerGR && customerGR.isValidRecord();
+    var custName   = custValid ? customerGR.getValue('customer_name') : current.getDisplayValue('customer');
+
+    var h = '';
+
+    // ── Rejection banner ─────────────────────────────────────────
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#fef5f4; border:1px solid #f5c2bc; border-left:5px solid #E23D28; border-radius:6px; margin-top:6px;"><tbody><tr>';
+    h += '<td width="52" align="center" valign="middle" style="padding:16px 0 16px 14px;"><div style="width:36px; height:36px; line-height:36px; border-radius:18px; background-color:#E23D28; color:#ffffff; font-size:20px; font-weight:700; text-align:center;">&#10005;</div></td>';
+    h += '<td style="padding:16px 16px 16px 12px;"><div style="font-size:20px; font-weight:700; color:#c0392b;">Your credit limit request was rejected</div>';
+    h += '<div style="font-size:13px; color:#3a4451; padding-top:2px;">' + (rejecterName ? 'Rejected by ' + esc(rejecterName) + (rejecterLevel ? ' (' + esc(rejecterLevel) + ')' : '') : 'Rejected during the approval process') + (rejectedOn ? ' &middot; ' + esc(rejectedOn) : '') + '</div></td>';
+    h += '</tr></tbody></table>';
+
+    // ── Request number + status ───────────────────────────────────
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:16px; background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px;"><tbody><tr>';
+    h += '<td style="padding:12px 16px;"><div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#5a6a7a; font-weight:700;">Request Number</div>';
+    h += '<div style="font-size:18px; font-weight:700; color:#1a1a1a;">' + esc(current.getValue('number')) + '</div>';
+    h += '<div style="font-size:12px; color:#5a6a7a; padding-top:2px;">Submitted on ' + esc(current.getDisplayValue('sys_created_on')) + '</div></td>';
+    h += '<td align="right" valign="middle" style="padding:12px 16px;"><span style="display:inline-block; background-color:#fef5f4; color:#c0392b; border:1px solid #f5c2bc; border-radius:4px; padding:5px 12px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">Rejected</span></td>';
+    h += '</tr></tbody></table>';
+
+    // ── Reason for rejection ─────────────────────────────────────
+    if (reasonText) {
+        h += sec('Reason for Rejection', 24);
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#fef5f4; border:1px solid #f5c2bc; border-left:5px solid #E23D28; border-radius:6px;"><tbody>';
+        h += '<tr><td style="padding:14px 18px;">';
+        h += '<div style="font-size:14px; line-height:1.6; color:#1a1a1a; white-space:pre-line; word-wrap:break-word;">' + esc(reasonText) + '</div>';
+        if (rejecterName) {
+            h += '<div style="margin-top:10px; font-size:12px; color:#5a6a7a;">&mdash; <strong style="color:#1a1a1a;">' + esc(rejecterName) + '</strong>' + (rejecterLevel ? ' (' + esc(rejecterLevel) + ')' : '') + (rejectedOn ? ' &middot; ' + esc(rejectedOn) : '') + '</div>';
+        }
+        h += '</td></tr></tbody></table>';
+    }
+
+    // ── Limit tiles ──────────────────────────────────────────────
+    h += sec(isTrade ? 'Credit Limit (Customer Code)' : 'Credit Limit', 24);
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+    if (isTrade) {
+        h += '<td width="50%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Previous Limit</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(existing) + '</div></div></td>';
+        h += '<td width="50%" valign="top" style="padding-left:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Requested</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(requested) + '</div></div></td>';
+    } else {
+        h += '<td width="100%" valign="top"><div style="' + TILE + '"><div style="' + TILE_K + '">Requested</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(requested) + '</div></div></td>';
+    }
+    h += '</tr></tbody></table>';
+
+    if (isTrade && additional !== 0) {
+        h += '<p style="margin:10px 0 0 0; padding:10px 14px; background-color:#fef5f4; border:1px solid #f5c2bc; border-radius:6px; font-size:13px; color:#c0392b;">Requested change: <strong>' + signed(additional) + '</strong> vs current code-level limit &mdash; not applied.</p>';
+    }
+
+    // ── Request summary ──────────────────────────────────────────
+    h += sec('Request Summary');
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:14px;"><tbody>';
+    h += kv('Customer Name', esc(custName), false, true);
+    if (custValid) {
+        h += kv('Customer Code', esc(customerGR.getValue('customer_code_sap')));
+        h += kv('PAN', esc(customerGR.getValue('pan')));
+    }
+    h += kv('Customer Type', esc(current.getDisplayValue('customer_type')));
+    h += kv('Segment', esc(current.getDisplayValue('segment')));
+    if (rejecterName) h += kv('Rejected By', esc(rejecterName) + (rejecterLevel ? ' <span style="color:#8a96a3;">(' + esc(rejecterLevel) + ')</span>' : ''));
+    h += kv('Rejected On', esc(rejectedOn), true);
+    h += '</tbody></table>';
+
+    // ── What happens next ────────────────────────────────────────
+    h += sec('What Happens Next');
+    h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f4f9fb; border-left:4px solid #3498db;"><tbody><tr><td style="padding:12px 16px; font-size:13px; line-height:1.6; color:#1a1a1a;">';
+    h += 'No changes have been made to the customer&rsquo;s credit limit. You can review the full request, the approval trail, and the rejection reason on the <strong>My Requests</strong> page in CredX. If required, you can also <strong>create a new request</strong> based on updated financials from the same page.';
+    h += '</td></tr></tbody></table>';
+
+    // ── CTA ──────────────────────────────────────────────────────
+    h += '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:28px;"><tbody><tr>';
+    h += '<td align="center" style="background-color:#1a1a1a; border-radius:6px; border-bottom:3px solid #F3D54E;">';
+    h += '<a href="' + link + '" style="display:inline-block; padding:12px 28px; font-size:13px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; color:#ffffff; text-decoration:none;">View My Requests</a>';
+    h += '</td></tr></tbody></table>';
+
+    h += '<p style="margin:14px 0 0 0; font-size:12px; color:#8a96a3;">Open the request in CredX to see the complete approval history and any comments from other approvers.</p>';
+
+    template.print(h);
+
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-05-19 06:37:19</sys_created_on>
+        <sys_id>bbf4cc002b490b104572f3745e91bfc3</sys_id>
+        <sys_mod_count>6</sys_mod_count>
+        <sys_name>clm_request_rejected</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_bbf4cc002b490b104572f3745e91bfc3</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-11 12:48:12</sys_updated_on>
+    </sys_script_email>
+</record_update>

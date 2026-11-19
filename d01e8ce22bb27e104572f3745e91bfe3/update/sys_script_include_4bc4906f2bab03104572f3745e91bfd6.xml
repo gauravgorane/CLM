@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLMStartupMultiplier</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLMStartupMultiplier</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var CLMStartupMultiplier = Class.create();
+CLMStartupMultiplier.prototype = {
+    initialize: function() {},
+
+    // Average monthly order (MT) over the last 6 COMPLETED months,
+    // read from the JAN..DEC columns. Today = Oct -> window = Apr..Sep
+    getAvgMonthlyOrderMT: function(customerCode) {
+        var MONTHS = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+        var res = { avg: 0, total: 0, found: false };
+        if (!customerCode) return res;
+
+        try {
+            var gr = new GlideRecord('x_birl3_clm_clm_sales_data');
+            gr.addQuery('u_customer.customer_code_sap', customerCode);
+            gr.addQuery('u_flag', 'CEMENT');
+            gr.query();
+
+            var curIdx = parseInt(new GlideDateTime().getValue().substring(5, 7), 10) - 1; // 0-11
+            while (gr.next()) {
+                res.found = true;
+                for (var i = 1; i <= 6; i++) {
+                    var idx = ((curIdx - i) % 12 + 12) % 12;
+                    res.total += parseFloat(gr.getValue(MONTHS[idx])) || 0;
+                }
+            }
+            res.avg = res.total / 6;
+        } catch (e) {
+            gs.error('CLMStartupMultiplier.getAvgMonthlyOrderMT error: ' + e.message);
+        }
+        return res;
+    },
+
+    // Vintage 3-6 months: 2x if Active NOD < 15 AND avg monthly order > 1000 MT, else 1x
+    evaluate: function(customerCode, activeNod) {
+        var s     = this.getAvgMonthlyOrderMT(customerCode);
+        var nod   = (activeNod === null || activeNod === undefined || isNaN(activeNod)) ? -1 : parseFloat(activeNod);
+        var nodOk = (nod >= 0 && nod < 15);     // -1 means NOD not available, so 1x
+        var avgOk = s.avg > 1000;
+        return {
+            multiplier:   (nodOk && avgOk) ? 2 : 1,
+            nodOk:        nodOk,
+            avgOk:        avgOk,
+            activeNod:    nod,
+            avgMonthlyMT: Math.round(s.avg * 100) / 100,
+            salesFound:   s.found
+        };
+    },
+
+    type: 'CLMStartupMultiplier'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-01 11:23:01</sys_created_on>
+        <sys_id>4bc4906f2bab03104572f3745e91bfd6</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>CLMStartupMultiplier</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_4bc4906f2bab03104572f3745e91bfd6</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-16 04:22:06</sys_updated_on>
+    </sys_script_include>
+</record_update>

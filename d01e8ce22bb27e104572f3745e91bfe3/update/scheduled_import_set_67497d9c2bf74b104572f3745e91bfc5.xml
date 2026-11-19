@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="scheduled_import_set">
+    <scheduled_import_set action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <advanced>false</advanced>
+        <business_calendar/>
+        <concurrent_import>false</concurrent_import>
+        <condition/>
+        <conditional>false</conditional>
+        <connection_override/>
+        <data_source display_value="CLM Sales data">a20f87062b314b104572f3745e91bfa3</data_source>
+        <entered_run_end/>
+        <entered_run_start/>
+        <entered_time/>
+        <map/>
+        <max_drift/>
+        <name>CLM Sales data</name>
+        <offset/>
+        <offset_type>0</offset_type>
+        <order/>
+        <parent/>
+        <partition_method>roundRobin</partition_method>
+        <partition_script><![CDATA[(function partitionHash(import_set_row) {
+
+	// Add your code here
+	
+	// eg:
+	// return import_set_row.u_important_category;
+	// This would ensure all rows with the same 'u_important_category' value will be in the same Import Set.
+
+	 return import_set_row.sys_import_row;
+
+})(import_set_row);]]></partition_script>
+        <partition_size/>
+        <post_script/>
+        <post_script_bool>false</post_script_bool>
+        <pre_script><![CDATA[(function runPreImport() {
+    var DS_NAME = 'CLM Sales data';
+
+    // 1. Distinct customer codes from CLM Customer Masters
+    var codes = [], seen = {};
+    var ga = new GlideAggregate('x_birl3_clm_clm_customer_master1');
+    ga.addQuery('is_active', true);              // confirm the real field name
+    ga.addNotNullQuery('customer_code_sap');
+    ga.groupBy('customer_code_sap');
+    ga.query();
+    while (ga.next()) {
+        var c = ga.getValue('customer_code_sap').replace(/'/g, "''");
+        if (!seen[c]) { seen[c] = true; codes.push("'" + c + "'"); }
+    }
+
+    // 2. Oracle IN-list limit is 1000, so chunk at 900
+    var chunks = [];
+    for (var i = 0; i < codes.length; i += 900) {
+        chunks.push('customer IN (' + codes.slice(i, i + 900).join(',') + ')');
+    }
+    var customerFilter = chunks.length ? '(' + chunks.join(' OR ') + ')' : '1=0';
+
+    var sql = "SELECT *\nFROM VW_MKT_CMNT_BPD_RMC_SALES\nWHERE " + customerFilter;
+
+    // 3. Update the data source without touching connection_url
+    var ds = new GlideRecord('sys_data_source');
+    ds.addQuery('name', DS_NAME);
+    ds.query();
+    if (ds.next()) {
+        var existingUrl = ds.getValue('connection_url');
+        ds.setValue('sql_statement', sql);
+        ds.setValue('connection_url', existingUrl); // keep it fixed
+        ds.setWorkflow(false);                      // skip the rule that rebuilds the URL
+        ds.update();
+        gs.info('CLM Sales pre-import: wrote SQL with ' + codes.length + ' customer codes');
+    } else {
+        gs.error('CLM Sales pre-import: data source not found: ' + DS_NAME);
+    }
+})();]]></pre_script>
+        <pre_script_bool>false</pre_script_bool>
+        <record_source>regular</record_source>
+        <repeat_every/>
+        <run_as display_value="Vedant Salunke">02be14ac9707fa50be31fa17f053af06</run_as>
+        <run_as_tz/>
+        <run_dayofmonth>1</run_dayofmonth>
+        <run_dayofweek>1</run_dayofweek>
+        <run_daysofweek/>
+        <run_end/>
+        <run_month/>
+        <run_period/>
+        <run_start>2026-10-04 02:36:13</run_start>
+        <run_time>1969-12-31 21:30:00</run_time>
+        <run_type>monthly</run_type>
+        <run_weekinmonth/>
+        <show_connection_override>false</show_connection_override>
+        <synchronize_inserts>true</synchronize_inserts>
+        <sys_class_name>scheduled_import_set</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-04 02:36:34</sys_created_on>
+        <sys_id>67497d9c2bf74b104572f3745e91bfc5</sys_id>
+        <sys_mod_count>7</sys_mod_count>
+        <sys_name>CLM Sales data</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>scheduled_import_set_67497d9c2bf74b104572f3745e91bfc5</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-22 10:20:34</sys_updated_on>
+        <time_zone/>
+        <upgrade_safe>false</upgrade_safe>
+        <use_child_connection>false</use_child_connection>
+    </scheduled_import_set>
+</record_update>

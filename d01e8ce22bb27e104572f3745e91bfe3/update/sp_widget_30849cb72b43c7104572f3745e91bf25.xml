@@ -1,0 +1,1633 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $q, nowAttachmentHandler) {
+    var c = this;
+
+    c.data.selectedGP = '';
+    c.data.calc = { totalP1: 0, totalRequested: 0 };
+    c.data.submitting = false;
+    c.data.submitted = false;
+    c.data.submitError = '';
+    c.data.mappedSitesList = [];
+    c.data.loadingWSDL = false;
+    c.data.overviewRows = [];
+    c.data.selectedCount = 0;
+    c.data.singleMode = false;
+	 c.data.hierarchyNodes = [];
+c.data.sapWarning = '';
+
+    // ── ATTACHMENT HANDLER ──
+    $scope.attachments = [];
+    $scope.attachmentHandler = new nowAttachmentHandler(function(attachments) {
+        $scope.attachments = attachments;
+        $scope.$evalAsync();
+    }, function(error) {
+        c.data.submitError = error.msg || 'Failed to upload attachment.';
+        $scope.$evalAsync();
+    });
+    $scope.attachmentHandler.setParams(c.data.table, c.data.sys_id, 1024 * 1024 * 20); // 20MB limit
+
+    c.formatCurrency = function(value) {
+        var num = parseFloat(value) || 0;
+        if (num === 0) return "₹0.00";
+        var isNegative = num < 0;
+        num = Math.abs(num);
+        var formattedStr = "";
+        if (num >= 10000000) {
+            formattedStr = "₹" + (num / 10000000).toFixed(2) + " Cr";
+        } else if (num >= 100000) {
+            formattedStr = "₹" + (num / 100000).toFixed(2) + " L";
+        } else if (num >= 1000) {
+            formattedStr = "₹" + (num / 1000).toFixed(2) + " K";
+        } else {
+            formattedStr = "₹" + num.toFixed(2);
+        }
+        return isNegative ? "-" + formattedStr : formattedStr;
+    };
+
+    c.fetchSitesForGP = function() {
+        c.data.mappedSitesList = [];
+        c.data.submitError = '';
+        c.data.gp_limit = 0;
+        c.data.gp_bg = 0;
+        c.data.gp_net_exposure = 0;
+        c.data.customer_name_strip = '';
+        c.data.overviewRows = [];
+        c.data.selectedCount = 0;
+        c.data.singleMode = false;
+        c.data.calc = { totalP1: 0, totalRequested: 0 };
+			  c.data.hierarchyNodes = [];
+c.data.sapWarning = '';
+
+        if (!c.data.selectedGP) return;
+
+        c.server.get({
+            action: 'fetch_sites_for_gp',
+            selectedGP: c.data.selectedGP
+        }).then(function(r) {
+            if (r.data.mappedSitesList && r.data.mappedSitesList.length > 0) {
+                c.data.mappedSitesList = r.data.mappedSitesList;
+                c.data.customer_name_strip = c.data.mappedSitesList[0].customer_name;
+							  c.data.hierarchyNodes = r.data.hierarchyNodes || [];
+                c.initSelection();
+                c.fetchLiveWSDLLimits();
+            } else {
+                c.data.submitError = "No Key Customer (N00) sites found for this Grandparent Code in your mapped region(s).";
+            }
+        });
+    };
+
+    // CHANGE 1: no locking. If only one site exists it is selected automatically.
+    c.initSelection = function() {
+        c.data.singleMode = (c.data.mappedSitesList.length === 1);
+        if (c.data.singleMode) {
+            c.data.mappedSitesList[0].selected = true;
+        }
+        c.recalculateTotals();
+    };
+
+c.fetchLiveWSDLLimits = function() {
+    c.data.loadingWSDL = true;
+    c.data.sapWarning = '';
+    var promises = [];
+    var failed = [];
+
+    // Site level: customer_code_sap + its sales org
+    c.data.mappedSitesList.forEach(function(site) {
+        promises.push(c.server.get({
+            action: 'fetch_wsdl_for_code',
+            code: site.site_code,
+            salesOrg: site.salesorg,
+            segment: site.segment
+        }).then(function(res) {
+            site.cr_limit = parseFloat(res.data.wsdl_limit) || 0;
+            site.outstanding = parseFloat(res.data.wsdl_os) || parseFloat(site.outstanding) || 0;
+            site.bank_guarantee = parseFloat(res.data.wsdl_bg) || parseFloat(site.bank_guarantee) || 0;
+            if (!res.data.wsdl_ok) failed.push('Site ' + site.site_code);
+        }));
+    });
+
+    // GP / Group / Zonal Parent level: the code itself + its own sales org
+    c.data.hierarchyNodes.forEach(function(n) {
+        promises.push(c.server.get({
+            action: 'fetch_wsdl_for_code',
+            code: n.code,
+            salesOrg: n.salesorg,
+            segment: n.segment
+        }).then(function(res) {
+            n.limit = parseFloat(res.data.wsdl_limit) || 0;
+            n.bg = parseFloat(res.data.wsdl_bg) || 0;
+            n.os = parseFloat(res.data.wsdl_os) || 0;
+            n.ok = !!res.data.wsdl_ok;
+            if (!n.ok) failed.push(n.level + ' ' + n.code + ' (' + n.salesorg + ')');
+            if (n.salesorg_source === 'fallback') {
+                failed.push(n.level + ' ' + n.code + ': sales org not found in master, site sales org used');
+            }
+        }));
+    });
+
+    $q.all(promises).then(function() {
+        c.data.loadingWSDL = false;
+        if (failed.length) c.data.sapWarning = 'SAP limit not available for: ' + failed.join('; ');
+        c.aggregateLimits();
+        $scope.$applyAsync();
+    }).catch(function() {
+        c.data.loadingWSDL = false;
+        c.data.submitError = 'Failed to fetch live credit details from SAP.';
+        $scope.$applyAsync();
+    });
+};
+
+c.aggregateLimits = function() {
+    function sumNodes(level, code) {
+        var t = { limit: 0, bg: 0 };
+        c.data.hierarchyNodes.forEach(function(n) {
+            if (n.level === level && n.code === code) {
+                t.limit += (n.limit || 0);
+                t.bg += (n.bg || 0);
+            }
+        });
+        return t;
+    }
+
+    // GP total = sum of the GP-level nodes (one per segment)
+    var gpTot = sumNodes('gp', c.data.selectedGP);
+    c.data.gp_limit = gpTot.limit;
+    c.data.gp_bg = gpTot.bg;
+    c.data.gp_net_exposure = gpTot.limit - gpTot.bg;
+
+    var rows = [{
+        level: 'gp', levelLabel: 'Grandparent',
+        gp: c.data.selectedGP, group: '', zone: '',
+        name: c.data.customer_name_strip,
+        sites: c.data.mappedSitesList.length,
+        limit: gpTot.limit, bg: gpTot.bg, net: gpTot.limit - gpTot.bg
+    }];
+
+    // group -> zones -> site counts, from the loaded sites
+    var groups = {}, groupOrder = [];
+    c.data.mappedSitesList.forEach(function(s) {
+        var g = s.group_code || '-', z = s.zonalparentcode || '-';
+        if (!groups[g]) { groups[g] = { sites: 0, zones: {}, zoneOrder: [], name: s.customer_name }; groupOrder.push(g); }
+        groups[g].sites++;
+        if (!groups[g].zones[z]) { groups[g].zones[z] = { sites: 0, name: s.customer_name }; groups[g].zoneOrder.push(z); }
+        groups[g].zones[z].sites++;
+    });
+
+    groupOrder.forEach(function(g) {
+        var gt = sumNodes('group', g);
+        rows.push({
+            level: 'group', levelLabel: 'Group',
+            gp: c.data.selectedGP, group: g, zone: '',
+            name: groups[g].name,
+            sites: groups[g].sites, limit: gt.limit, bg: gt.bg, net: gt.limit - gt.bg
+        });
+        groups[g].zoneOrder.forEach(function(z) {
+            var zt = sumNodes('zone', z);
+            rows.push({
+                level: 'zone', levelLabel: 'Zone',
+                gp: c.data.selectedGP, group: g, zone: z,
+                name: groups[g].zones[z].name,
+                sites: groups[g].zones[z].sites, limit: zt.limit, bg: zt.bg, net: zt.limit - zt.bg
+            });
+        });
+    });
+    c.data.overviewRows = rows;
+
+    // Values saved on the draft (live SAP at each level)
+    c.data.mappedSitesList.forEach(function(s) {
+        s.group_limit = sumNodes('group', s.group_code).limit;
+        s.zone_limit = sumNodes('zone', s.zonalparentcode).limit;
+    });
+};
+
+    c.toggleSiteSelection = function(site) {
+        c.recalculateTotals();
+    };
+
+    // ── helpers ──
+    function isBlank(v) { return v === null || v === undefined || v === ''; }
+    function num(v) { return parseFloat(v) || 0; }
+
+    c.rowIsEmpty = function(st) {
+        return isBlank(st.totalPotential) && isBlank(st.currentSob) && isBlank(st.expectedSob) &&
+               isBlank(st.orderRate) && isBlank(st.desiredLimit);
+    };
+
+    // Typing in a row selects it; clearing the row un-selects it
+    c.onInputChange = function(site) {
+        if (!c.data.singleMode) {
+            site.selected = !c.rowIsEmpty(site);
+        }
+        c.recalculateTotals();
+    };
+
+    // ── CHANGE 4: Monthly Expected Potential is calculated, not entered ──
+    // Example: Total 1000, Current SOB 20, Expected SOB 10  ->  1000 - 20 + 10 = 990
+    // (change only this function if the business formula is different)
+    c.calcExpectedPotential = function(st) {
+        var total = num(st.totalPotential);
+        var cur = num(st.currentSob);
+        var exp = num(st.expectedSob);
+        return Math.max(0, total - cur + exp);
+    };
+
+    // ── CHANGE 6: P1 per site = Expected SOB (MT) x Rate x Tenor / 30 ──
+    c.calcSiteP1 = function(st) {
+        var expSob = num(st.expectedSob);
+        var rate = num(st.orderRate);
+        var tenor = parseFloat(st.creditTenor);
+        if (!tenor || tenor <= 0) tenor = 45;
+        return (expSob * rate * tenor) / 30.0;
+    };
+
+    // ── CHANGE 3 + 6: validation. Fields are optional, but whatever is entered must be valid ──
+    c.rowError = function(st) {
+        if (!st.selected) return '';
+        var pot = num(st.totalPotential), cur = num(st.currentSob), exp = num(st.expectedSob);
+
+        if (num(st.totalPotential) < 0 || num(st.orderRate) < 0 || num(st.creditTenor) < 0 || num(st.desiredLimit) < 0 ||
+            num(st.currentSob) < 0 || num(st.expectedSob) < 0) {
+            return 'Values cannot be negative.';
+        }
+        if (!isBlank(st.currentSob) && cur <= 0) return 'Current SOB must be greater than 0.';
+        if (!isBlank(st.expectedSob) && exp <= 0) return 'Expected SOB must be greater than 0.';
+
+        if (!isBlank(st.currentSob) || !isBlank(st.expectedSob)) {
+            if (isBlank(st.totalPotential) || pot <= 0) {
+                return 'Enter Total Monthly Potential first (SOB cannot be greater than it).';
+            }
+            if (!isBlank(st.currentSob) && cur > pot) return 'Current SOB cannot be greater than Total Monthly Potential.';
+            if (!isBlank(st.expectedSob) && exp > pot) return 'Expected SOB cannot be greater than Total Monthly Potential.';
+        }
+        return '';
+    };
+
+    c.recalculateTotals = function() {
+        var totalP1 = 0, totalReq = 0, count = 0;
+
+        c.data.mappedSitesList.forEach(function(st) {
+            if (st.selected) {
+                count++;
+                totalP1 += c.calcSiteP1(st);
+                totalReq += num(st.desiredLimit);
+            }
+        });
+
+        c.data.calc.totalP1 = totalP1;
+        c.data.calc.totalRequested = totalReq;
+        c.data.selectedCount = count;
+    };
+
+    c.submit = function() {
+        c.data.submitError = '';
+
+        var selectedSites = c.data.mappedSitesList.filter(function(s) { return s.selected; });
+        if (selectedSites.length === 0) {
+            c.data.submitError = 'Please select at least one site.';
+            return;
+        }
+
+        var payloads = [];
+
+        for (var i = 0; i < selectedSites.length; i++) {
+            var st = selectedSites[i];
+
+            var err = c.rowError(st);
+            if (err) {
+                c.data.submitError = 'Site ' + st.site_code + ': ' + err;
+                return;
+            }
+
+            var tenor = parseInt(st.creditTenor, 10);
+            if (!tenor || tenor <= 0) tenor = 45;
+
+            var netExp = num(st.cr_limit) - num(st.bank_guarantee);
+
+            payloads.push({
+                site_code: st.site_code,
+							  customer_name: st.customer_name,
+                zonalparentcode: st.zonalparentcode || '-',
+                group_code: st.group_code,
+                segment: st.segment || 'Cement',
+                monthly_potential: num(st.totalPotential),
+                current_sob: num(st.currentSob),
+                expected_sob_qty: num(st.expectedSob),
+                expected_potential: c.calcExpectedPotential(st),
+                order_rate: num(st.orderRate),
+                credit_tenor: tenor,
+                desired_limit: num(st.desiredLimit),
+                region: st.region_code,
+                p1_total_macl: c.calcSiteP1(st),
+                
+                // --- NEW/UPDATED PAYLOAD MAPPINGS ---
+                gp_limit: c.data.gp_limit,
+                gp_bg: c.data.gp_bg,
+                gp_net_exposure: c.data.gp_net_exposure,
+                
+                group_limit: st.group_limit,
+                zone_limit: st.zone_limit,
+                
+                site_limit: st.cr_limit,
+                site_bg: st.bank_guarantee,
+                site_net_exposure: netExp,
+                total_outstanding: st.outstanding
+                // ------------------------------------
+            });
+        }
+
+        c.data.submitting = true;
+
+        c.server.get({
+            action: 'submit_multiple_drafts',
+            gpCode: c.data.selectedGP,
+            customerName: c.data.customer_name_strip,
+            justification: c.data.justification,
+            sitePayloads: payloads,
+            attachmentGUID: c.data.attachmentGUID
+        }).then(function(r) {
+            c.data.submitting = false;
+            if (r.data.success) {
+                c.data.submitted = true;
+            } else {
+                c.data.submitError = r.data.error || 'Failed to save draft details to staging table.';
+            }
+        }).catch(function() {
+            c.data.submitting = false;
+            c.data.submitError = 'Server communication error while saving draft.';
+        });
+    };
+
+    c.resetForm = function() {
+        c.data.submitted = false;
+        c.data.selectedGP = '';
+        c.data.mappedSitesList = [];
+        c.data.overviewRows = [];
+        c.data.selectedCount = 0;
+        c.data.singleMode = false;
+        c.data.calc = { totalP1: 0, totalRequested: 0 };
+        c.data.justification = '';
+        $scope.attachments = [];
+        c.server.update();
+			c.data.hierarchyNodes = [];
+c.data.sapWarning = '';
+    };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* ============================================================
+   CLM — Key Corporate Customer (CRM Entry) · CSS  v2.1
+   v2.1: CRM input grid 4 → 3 columns; Expected Potential tile styles removed
+   v2.0:
+   - ABG rising-sun page header banner replaces the black header bar
+   - Content panel with full border/radius; sections hold cards (.clm-block)
+   - Site grid replaced by per-site cards (.clm-ks-*): SAP tiles + CRM input grid
+   - Light-header ageing table with 0–60 / 61–90 / &gt;90 bucket colours
+   - Projection result row, restyled upload, alerts, actions bar
+   - Responsive: 1100 / 768 / 640px breakpoints
+   - Font rule kept LAST
+   ============================================================ */
+@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+.clm-widget { background:#f6f2ee; color:#1a1a1a; width:100%; box-sizing:border-box; }
+.clm-widget *, .clm-widget *::before, .clm-widget *::after { box-sizing:border-box; }
+
+/* ---------- Page + banner ---------- */
+.clm-page { padding:24px 32px; }
+.clm-hero { margin-bottom:20px; }
+.clm-hero {
+  --abg-maroon:#9E1715; --abg-red:#DA1D26; --abg-orange:#F3712A;
+  --abg-amber:#F9A04A; --abg-yellow:#F3CE52; --abg-deep:#7A1012;
+  --sun-x:72%;
+  position:relative; isolation:isolate; overflow:hidden;
+  display:flex; align-items:center; justify-content:space-between; gap:16px 24px; flex-wrap:wrap;
+  min-height:124px; padding:26px 32px; border-radius:12px; color:#fff;
+  background:
+    /* readable text zone on the left, fading into the rays */
+    linear-gradient(90deg, var(--abg-deep) 0%, var(--abg-maroon) 34%, rgba(158,23,21,.55) 52%, rgba(158,23,21,0) 66%),
+    /* sun rays fanning out from the bottom edge */
+    conic-gradient(from 270deg at var(--sun-x) 100%,
+      var(--abg-yellow) 0deg 16deg,  var(--abg-orange) 16deg 34deg,
+      var(--abg-maroon) 34deg 60deg, var(--abg-orange) 60deg 76deg,
+      var(--abg-red)    76deg 90deg, var(--abg-yellow) 90deg 104deg,
+      var(--abg-orange) 104deg 120deg, var(--abg-maroon) 120deg 146deg,
+      var(--abg-orange) 146deg 164deg, var(--abg-yellow) 164deg 180deg,
+      var(--abg-maroon) 180deg 360deg);
+  box-shadow:0 10px 28px rgba(122,16,18,.25);
+}
+/* mottled "painted" texture over the rays (like the logo) */
+.clm-hero::before {
+  content:""; position:absolute; inset:0; z-index:-1; pointer-events:none;
+  background:
+    radial-gradient(circle at 62% 30%, rgba(255,255,255,.10), transparent 22%),
+    radial-gradient(circle at 84% 70%, rgba(255,255,255,.08), transparent 18%),
+    radial-gradient(circle at 92% 20%, rgba(0,0,0,.08), transparent 20%),
+    radial-gradient(circle at 70% 85%, rgba(0,0,0,.06), transparent 16%);
+}
+/* half sun at the origin of the rays */
+.clm-hero::after {
+  content:""; position:absolute; z-index:-1; pointer-events:none;
+  left:var(--sun-x); bottom:0; width:96px; height:48px; transform:translateX(-50%);
+  border-radius:48px 48px 0 0;
+  background:conic-gradient(from 270deg at 50% 100%,
+    var(--abg-maroon) 0deg 34deg, var(--abg-red) 34deg 64deg, var(--abg-orange) 64deg 90deg,
+    var(--abg-maroon) 90deg 120deg, var(--abg-red) 120deg 150deg, var(--abg-maroon) 150deg 180deg,
+    transparent 180deg);
+  box-shadow:0 0 0 1px rgba(122,16,18,.25);
+}
+.clm-hero-text { position:relative; max-width:60%; }
+.clm-hero-bar { width:44px; height:6px; border-radius:3px; margin-bottom:12px;
+  background:linear-gradient(90deg, var(--abg-yellow) 0 50%, var(--abg-orange) 50% 100%); }
+.clm-hero-title { margin:0; font-size:26px; font-weight:700; line-height:1.2; color:#fff; }
+.clm-hero-title .accent { color:var(--abg-yellow); }
+.clm-hero-sub { margin-top:6px; font-size:15px; color:#fbe3cf; }
+/* actions / stat sit on a deep-maroon plate so they stay readable over the rays */
+.clm-hero-actions { position:relative; display:flex; align-items:center; gap:12px; }
+.clm-hero-btn { display:inline-flex; align-items:center; gap:8px; padding:10px 18px; border:0; border-radius:8px;
+  background:var(--abg-yellow); color:var(--abg-deep); font-size:14px; font-weight:700; cursor:pointer;
+  box-shadow:0 0 0 3px rgba(122,16,18,.55), 0 4px 10px rgba(0,0,0,.18); }
+.clm-hero-btn:hover { background:#ffdc6a; }
+.clm-hero-stat { display:flex; flex-direction:column; align-items:flex-end; padding:10px 18px;
+  border-radius:10px; background:rgba(122,16,18,.78); border-left:3px solid var(--abg-yellow); }
+.clm-hero-stat-v { font-size:34px; font-weight:700; line-height:1; letter-spacing:1px; color:var(--abg-yellow); }
+.clm-hero-stat-k { margin-top:6px; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.6px; color:#fbd9bd; }
+@media (max-width:1024px){ .clm-hero-title{font-size:22px;} .clm-hero-text{max-width:70%;} }
+@media (max-width:640px){
+  .clm-page { padding:16px; }
+  .clm-hero { --sun-x:82%; padding:22px 20px; flex-direction:column; align-items:flex-start;
+    background:
+      linear-gradient(180deg, var(--abg-deep) 0%, var(--abg-maroon) 45%, rgba(158,23,21,.35) 75%, rgba(158,23,21,.1) 100%),
+      conic-gradient(from 270deg at var(--sun-x) 100%,
+        var(--abg-yellow) 0deg 16deg, var(--abg-orange) 16deg 34deg, var(--abg-maroon) 34deg 60deg,
+        var(--abg-orange) 60deg 76deg, var(--abg-red) 76deg 90deg, var(--abg-yellow) 90deg 104deg,
+        var(--abg-orange) 104deg 120deg, var(--abg-maroon) 120deg 146deg, var(--abg-orange) 146deg 164deg,
+        var(--abg-yellow) 164deg 180deg, var(--abg-maroon) 180deg 360deg); }
+  .clm-hero-text { max-width:100%; }
+  .clm-hero-title { font-size:20px; } .clm-hero-sub { font-size:13px; }
+  .clm-hero-stat { align-items:flex-start; }
+}
+.clm-hero-stat-of { font-size:18px; color:#fbd9bd; letter-spacing:0; }
+
+/* ---------- Panel + sections ---------- */
+.clm-panel { background:#fff; border:1px solid #e0e6ed; border-radius:12px; overflow:hidden; }
+.clm-section { background:#fff; padding:28px 32px; border-bottom:1px solid #e0e6ed; }
+.clm-section:last-child { border-bottom:0; }
+.clm-section-alert { padding:16px 32px; }
+.clm-section-title {
+  display:flex; align-items:center; gap:12px; margin-bottom:20px;
+  font-size:14px; font-weight:700; color:#1a1a1a; text-transform:uppercase; letter-spacing:1px;
+}
+.clm-section-num {
+  width:26px; height:26px; border-radius:50%; background:#F3D54E; color:#1a1a1a;
+  font-size:13px; font-weight:700; display:inline-flex; align-items:center; justify-content:center; flex-shrink:0;
+}
+
+/* ---------- Card (block) ---------- */
+.clm-block { margin-top:16px; background:#fff; border:1px solid #dde3ea; border-radius:8px; overflow:hidden; }
+.clm-block-first { margin-top:0; }
+.clm-block-head { display:flex; align-items:center; justify-content:space-between; gap:12px 20px; flex-wrap:wrap;
+  padding:14px 20px; background:#fafbfc; border-bottom:1px solid #dde3ea; }
+.clm-block-title { display:flex; align-items:center; gap:10px; font-size:13px; font-weight:700; color:#1a1a1a;
+  text-transform:uppercase; letter-spacing:.8px; }
+.clm-block-title::before { content:""; width:4px; height:16px; border-radius:2px; background:#F3D54E; flex-shrink:0; }
+.clm-block-sub { margin:4px 0 0 14px; font-size:12px; color:#5a6a7a; }
+.clm-block-meta { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.clm-chip { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; background:#fff;
+  border:1px solid #dde3ea; border-radius:12px; font-size:12px; font-weight:700; color:#1a1a1a; white-space:nowrap; }
+.clm-chip-k { font-weight:400; color:#5a6a7a; }
+.clm-chip-live { background:#eaf7ee; border-color:#b9e3c6; color:#1e8449; }
+.clm-chip-req  { background:#fff8e1; border-color:#f3d54e; color:#7a5a00; }
+.clm-tw-body { padding:18px 20px; }
+.clm-spin { width:12px; height:12px; border:2px solid #b9e3c6; border-top-color:#1e8449; border-radius:50%;
+  display:inline-block; animation:clm-spin .8s linear infinite; }
+@keyframes clm-spin { to { transform:rotate(360deg); } }
+
+/* ---------- Form fields ---------- */
+.clm-field { position:relative; }
+.clm-field-gp { max-width:420px; }
+.clm-field label { display:block; margin-bottom:6px; font-size:13px; font-weight:700; color:#1a1a1a; }
+.clm-field-hint { margin-top:6px; font-size:12px; color:#7f8c9a; }
+.req { color:#E23D28; margin-left:2px; font-weight:700; }
+.clm-input, .clm-textarea { width:100%; padding:10px 12px; border:1px solid #cdd4dc; border-radius:6px;
+  font-size:14px; color:#1a1a1a; background:#fff; }
+.clm-textarea { resize:vertical; min-height:96px; }
+.clm-input:focus, .clm-textarea:focus { outline:none; border-color:#1a1a1a; box-shadow:0 0 0 3px rgba(243,213,78,.45); }
+.clm-input:disabled { background:#f0f2f5; cursor:not-allowed; }
+
+/* ---------- Factor tiles ---------- */
+.clm-tw-factors { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+.clm-sum-tiles { grid-template-columns:1.4fr 1fr 1fr 1fr; }
+.clm-tw-factor { padding:12px 14px; border:1px solid #e0e6ed; border-radius:6px; background:#fafbfc; min-width:0; }
+.clm-tw-factor-k { font-size:12px; color:#5a6a7a; margin-bottom:4px; }
+.clm-tw-factor-v { font-size:16px; font-weight:700; color:#1a1a1a; white-space:nowrap; }
+.clm-tw-factor-v.clm-wrap { white-space:normal; line-height:1.3; }
+.clm-sum-tiles .clm-tw-factor-v { font-size:18px; }
+.clm-tw-factor-s { font-size:11px; color:#7f8c9a; margin-top:4px; }
+.v-ok  { color:#1e8449 !important; }
+.v-bad { color:#c0392b !important; }
+
+/* ---------- Result row ---------- */
+.clm-tw-res { display:flex; align-items:center; justify-content:space-between; gap:12px 20px; flex-wrap:wrap;
+  padding:16px 20px; background:#fffcf0; border-top:1px solid #f1e2a0; }
+.clm-block-head + .clm-tw-res { border-top:0; }
+.clm-tw-res-k { font-size:13px; font-weight:700; color:#3a4451; text-transform:uppercase; letter-spacing:.6px; }
+.clm-tw-res-f { margin-top:3px; font-size:12px; color:#7f8c9a; }
+.clm-tw-res-v { margin-left:auto; font-size:30px; font-weight:700; line-height:1.1; color:#1a1a1a; }
+
+/* ---------- Site cards (clm-ks-) ---------- */
+.clm-ks-list { display:flex; flex-direction:column; gap:14px; padding:16px; background:#f4f5f7; }
+.clm-ks-item { position:relative; background:#fff; border:1px solid #dde3ea; border-radius:8px; overflow:hidden;
+  box-shadow:0 1px 3px rgba(0,0,0,.04); }
+.clm-ks-item::before { content:""; position:absolute; left:0; top:0; bottom:0; width:5px; background:#cdd4dc; }
+.clm-ks-item.is-selected { border-color:#F3D54E; box-shadow:0 0 0 2px rgba(243,213,78,.30); }
+.clm-ks-item.is-selected::before { background:#F3D54E; }
+.clm-ks-item.is-error::before { background:#E23D28; }
+
+.clm-ks-head { display:flex; align-items:center; gap:14px 20px; flex-wrap:wrap; padding:14px 20px 14px 24px;
+  border-bottom:1px solid #eef1f5; }
+.clm-ks-item.is-selected .clm-ks-head { background:#fffcf0; }
+.clm-ks-check { display:flex; align-items:center; margin:0; cursor:pointer; }
+.clm-ks-check input { width:18px; height:18px; margin:0; cursor:pointer; accent-color:#1a1a1a; }
+.clm-ks-id { min-width:220px; }
+.clm-ks-title { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.clm-ks-code { font-size:17px; font-weight:700; color:#1a1a1a; letter-spacing:.3px; }
+.clm-ks-seg { padding:3px 10px; border-radius:12px; background:#f1f3f7; color:#3a4451; font-size:11px; font-weight:700;
+  text-transform:uppercase; letter-spacing:.5px; }
+.clm-ks-sel { padding:3px 10px; border-radius:12px; background:#1a1a1a; color:#F3D54E; font-size:11px; font-weight:700; }
+.clm-ks-codes { display:flex; gap:16px; flex-wrap:wrap; margin-top:4px; font-size:12.5px; color:#1a1a1a; }
+.clm-ks-loc { display:flex; gap:10px 24px; flex-wrap:wrap; margin-left:auto; }
+.clm-ks-loc-k { font-size:11px; font-weight:700; color:#7f8c9a; text-transform:uppercase; letter-spacing:.5px; }
+.clm-ks-loc-v { font-size:13px; color:#1a1a1a; margin-top:2px; }
+.clm-sub-code { font-size:12px; font-weight:600; color:#5a6a7a; }
+
+.clm-ks-body { display:grid; grid-template-columns:minmax(0,5fr) minmax(0,7fr); gap:20px; padding:16px 20px 18px 24px; }
+.clm-ks-sub { margin-bottom:10px; font-size:12px; font-weight:700; color:#3a4451; text-transform:uppercase; letter-spacing:.6px; }
+.clm-ks-sap { display:flex; flex-direction:column; align-items:flex-start; }
+.clm-ks-sap-tiles { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; width:100%; margin-bottom:10px; }
+.clm-ks-inputs { padding-left:20px; border-left:1px dashed #dde3ea; }
+.clm-ks-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px 12px; }
+.clm-ks-f label { display:flex; justify-content:space-between; gap:6px; margin-bottom:5px; font-size:12px; font-weight:700; color:#3a4451; }
+.clm-unit { font-weight:400; color:#7f8c9a; }
+
+.clm-sites-input { width:100%; height:36px; padding:6px 10px; border:1px solid #cdd4dc; border-radius:6px;
+  font-size:14px; text-align:right; background:#fff; color:#1a1a1a; }
+.clm-sites-input:focus { outline:none; border-color:#1a1a1a; box-shadow:0 0 0 3px rgba(243,213,78,.45); }
+.clm-sites-input-highlight { background:#fffbe6; border-color:#F3D54E; font-weight:700; }
+.clm-sites-input.ng-invalid { border-color:#E23D28; background:#fef5f4; }
+
+.clm-btn-mini { padding:6px 12px; border:1px solid #cdd4dc; border-radius:6px; background:#fff; color:#3a4451;
+  font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; cursor:pointer; }
+.clm-btn-mini:hover { background:#1a1a1a; border-color:#1a1a1a; color:#F3D54E; }
+
+.clm-row-error { padding:8px 20px 8px 24px; background:#fef5f4; color:#b3261e; font-size:12.5px; font-weight:700;
+  border-top:1px solid #f5c2bc; }
+
+/* ---------- Ageing drawer ---------- */
+.clm-aging-drawer { padding:14px 20px 16px 24px; background:#fafbfc; border-top:1px solid #eef1f5; }
+.clm-table-wrap { overflow-x:auto; border:1px solid #dde3ea; border-radius:8px; background:#fff; }
+.clm-table { width:100%; border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums; }
+.clm-table th { background:#eef1f5; color:#2b3440; padding:10px 14px; font-size:12px; font-weight:700;
+  text-transform:uppercase; letter-spacing:.6px; text-align:center; white-space:nowrap; border:1px solid #dde3ea; }
+.clm-table td { padding:12px 14px; color:#1a1a1a; text-align:center; white-space:nowrap; border:1px solid #e6eaef; vertical-align:middle; }
+.clm-table tr &gt; :first-child { border-left:0; }
+.clm-table tr &gt; :last-child  { border-right:0; }
+.clm-table thead tr:first-child th { border-top:0; }
+.clm-table tbody tr:last-child td  { border-bottom:0; }
+.clm-table .grp { border-left:2px solid #c9d1db !important; }
+.clm-table tr.super th { letter-spacing:1px; }
+tr.ag-group th.safe { background:#d9eedd; color:#14532d; }  tr.ag-sub th.safe { background:#edf7ef; color:#14532d; }
+tr.ag-group th.warn { background:#fde4c4; color:#7a4100; }  tr.ag-sub th.warn { background:#fff4e5; color:#7a4100; }
+tr.ag-group th.risk { background:#f8d7d3; color:#8f1d16; }  tr.ag-sub th.risk { background:#fdeeec; color:#8f1d16; }
+.clm-table td.zero { color:#b0b9c4; }
+.clm-table td.warn-val { color:#a15a00; font-weight:700; background:#fffaf2; }
+.clm-table td.risk-val { color:#b3261e; font-weight:700; background:#fff6f5; }
+
+/* ---------- Upload ---------- */
+.clm-upload { display:flex; align-items:center; gap:14px; max-width:520px; padding:16px; background:#fafbfc;
+  border:1px dashed #cdd4dc; border-radius:8px; }
+.clm-upload-k { font-size:13px; font-weight:700; color:#1a1a1a; }
+.clm-upload .clm-field-hint { margin-top:2px; }
+.clm-att-list { display:flex; flex-direction:column; gap:8px; max-width:520px; margin-top:14px; }
+.clm-att-item { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 12px;
+  background:#fff; border:1px solid #dde3ea; border-radius:6px; font-size:13px; }
+.clm-att-name { color:#1782c5; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.clm-att-del { border:0; background:transparent; color:#c0392b; font-weight:700; cursor:pointer; padding:2px 6px; border-radius:4px; }
+.clm-att-del:hover { background:#fef5f4; }
+
+/* ---------- Alerts ---------- */
+.clm-alert { display:flex; align-items:flex-start; gap:12px; padding:12px 16px; border-radius:8px; font-size:13px; }
+.clm-alert-icon { font-size:16px; font-weight:700; flex-shrink:0; }
+.clm-alert-danger { background:#fef5f4; border:1px solid #f5c2bc; color:#b3261e; }
+
+/* ---------- Actions bar ---------- */
+.clm-actions { display:flex; align-items:center; justify-content:space-between; gap:12px 20px; flex-wrap:wrap;
+  padding:18px 32px; background:#fafbfc; border-top:1px solid #e0e6ed; }
+.clm-actions-note { font-size:13px; color:#5a6a7a; }
+.clm-actions-note strong { color:#1a1a1a; }
+.clm-btn { padding:11px 24px; border-radius:6px; font-size:14px; font-weight:700; cursor:pointer; border:0; }
+.clm-btn-primary { background:#1a1a1a; color:#F3D54E; }
+.clm-btn-primary:hover:not(:disabled) { background:#333; }
+.clm-btn-primary:disabled { background:#cdd4dc; color:#fff; cursor:not-allowed; }
+.clm-btn-outline { margin-top:16px; background:#fff; color:#1a1a1a; border:2px solid #1a1a1a; }
+.clm-btn-outline:hover { background:#1a1a1a; color:#F3D54E; }
+
+/* ---------- Success ---------- */
+.clm-success-panel { text-align:center; padding:48px 28px; color:#3a4451; font-size:14px; }
+.clm-success-icon { width:64px; height:64px; margin-bottom:18px; border-radius:50%; background:#eaf7ee; color:#1e8449;
+  border:2px solid #b9e3c6; display:inline-flex; align-items:center; justify-content:center; font-size:30px; font-weight:700; }
+.clm-success-title { margin:0 0 10px; font-size:20px; font-weight:700; color:#1a1a1a; }
+
+/* ---------- Hierarchy overview (template block is commented out) ---------- */
+.clm-table-flush { border:0; border-radius:0; }
+.clm-level-badge { display:inline-block; padding:2px 10px; border-radius:12px; font-size:11px; font-weight:700; text-transform:uppercase; }
+.lvl-gp { background:#1a1a1a; color:#F3D54E; } .lvl-group { background:#e3eefa; color:#0b5394; } .lvl-zone { background:#f1f3f7; color:#3a4451; }
+
+/* ---------- Responsive ---------- */
+@media (max-width:1100px) {
+  .clm-ks-body { grid-template-columns:1fr; }
+  .clm-ks-inputs { padding-left:0; padding-top:16px; border-left:0; border-top:1px dashed #dde3ea; }
+  .clm-sum-tiles { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .clm-ks-loc { margin-left:0; width:100%; }
+}
+@media (max-width:768px) {
+  .clm-page { padding:16px; }
+  .clm-section { padding:20px 16px; }
+  .clm-actions { padding:16px; }
+  .clm-ks-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .clm-ks-list { padding:12px; }
+}
+@media (max-width:640px) {
+  .clm-sum-tiles, .clm-ks-sap-tiles { grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+  .clm-sum-name { grid-column:1 / -1; }
+  .clm-sum-tiles .clm-tw-factor, .clm-ks-sap-tiles .clm-tw-factor { padding:10px; }
+  .clm-sum-tiles .clm-tw-factor-v, .clm-ks-sap-tiles .clm-tw-factor-v { font-size:14px; }
+  .clm-sum-tiles .clm-sum-name .clm-tw-factor-v { font-size:16px; }
+  .clm-tw-factor-k { font-size:11.5px; }
+  .clm-ks-head { flex-wrap:nowrap; align-items:flex-start; }
+  .clm-ks-check { padding-top:3px; }
+  .clm-ks-id { min-width:0; flex:1; }
+  .clm-ks-head { flex-wrap:wrap; }
+  .clm-ks-head .clm-ks-loc { order:3; }
+  .clm-ks-head, .clm-ks-body { padding-left:20px; padding-right:14px; }
+  .clm-tw-res-v { font-size:24px; margin-left:0; }
+  .clm-actions .clm-btn-primary { width:100%; }
+  .clm-block-sub { margin-left:14px; }
+}
+
+/* ---------- One font family (keep LAST) ---------- */
+.clm-widget, .clm-widget *, .clm-widget input, .clm-widget select,
+.clm-widget textarea, .clm-widget button, .clm-widget table {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}
+
+.clm-alert-warning { background:#fffdf5; border:1px solid #ffeeba; color:#856404; }
+</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clm_key__crm_p1_initiation</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>CLM Key CRM </name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    var action = input && input.action;
+    var currentUserId = gs.getUserID();
+
+    var TABLES = {
+        APPROVAL_MATRIX: 'x_birl3_clm_approval_matrix',
+        CUSTOMER_MASTER: 'x_birl3_clm_clm_customer_master1',
+        OUTSTANDING:     'x_birl3_clm_clm_aging_snapshot',
+        DRAFT_DEMAND:    'x_birl3_clm_p1_crm_site_draft',
+			  CRM_GP_REQ:      'x_birl3_clm_clm_key_crm_gp_request' // <-- NEW PARENT TABLE
+    };
+
+    // Roles allowed to enter site-level data (CRM for Cement/BPD, TSM for RMC)
+    var ENTRY_ROLES = ['CRM', 'TSM'];
+    var APPLY_SEGMENT_FILTER = false;
+
+    // Fixed sales orgs. Cement and BPD use the same sales org at every level.
+    // RMC differs per code and is read from the master.
+    var FIXED_SALES_ORG = { 'Cement': '6000', 'BPD': '8000' };
+
+    function setIfValid(gr, field, val) {
+        if (gr.isValidField(field)) gr.setValue(field, val);
+    }
+
+    function norm(v) { return (v || '').toString().trim().toUpperCase(); }
+
+    // Logged-in user -> approval matrix (CRM/TSM, Key) -> region(s)
+    function getUserMapping() {
+        var map = { regions: [], roles: [], segments: [] };
+
+        var mGr = new GlideRecord(TABLES.APPROVAL_MATRIX);
+        mGr.addQuery('approver_user', currentUserId);
+        mGr.addQuery('role_name', 'IN', ENTRY_ROLES.join(','));
+        mGr.addQuery('customer_type', 'Key');
+        mGr.query();
+
+        while (mGr.next()) {
+            var role = mGr.getValue('role_name');
+            var region = mGr.getValue('region');
+            var segment = mGr.getValue('segment');
+
+            if (role && map.roles.indexOf(role) === -1) map.roles.push(role);
+            if (region && map.regions.indexOf(region) === -1) map.regions.push(region);
+            if (segment && map.segments.indexOf(segment) === -1) map.segments.push(segment);
+        }
+        return map;
+    }
+
+    // Key customers (N00) in the user's region(s)
+    function buildMasterQuery(mapping) {
+        var gr = new GlideRecord(TABLES.CUSTOMER_MASTER);
+        gr.addQuery('cg1', 'N00');
+        gr.addQuery('region', 'IN', mapping.regions.join(','));
+        if (gr.isValidField('cg3')) {
+            gr.addQuery('cg3', '!=', 'N09');
+        }
+        if (APPLY_SEGMENT_FILTER && mapping.segments.length > 0) {
+            gr.addQuery('segment', 'IN', mapping.segments.join(','));
+        }
+        return gr;
+    }
+
+    // Sales org of hierarchy codes (GP / Group / Zonal Parent) from the master.
+    // These codes sit in customer_code_sap. No cg1 / region filter here on purpose.
+    // Returns { CODE: [ {salesorg, segment}, ... ] }
+    function getHierarchySalesOrgs(codes) {
+        var out = {};
+        if (!codes || codes.length === 0) return out;
+
+        var gr = new GlideRecord(TABLES.CUSTOMER_MASTER);
+        gr.addQuery('customer_code_sap', 'IN', codes.join(','));
+        gr.query();
+        while (gr.next()) {
+            var code = norm(gr.getValue('customer_code_sap'));
+            var so = (gr.getValue('salesorg') || '').trim();
+            if (!so) continue;
+            if (!out[code]) out[code] = [];
+            out[code].push({ salesorg: so, segment: (gr.getValue('segment') || '').trim() });
+        }
+        return out;
+    }
+
+    // Cement -> 6000, BPD -> 8000, RMC -> master salesorg of that code
+    function resolveNodeSalesOrg(segment, code, lookup, fallbackSalesOrg) {
+        if (FIXED_SALES_ORG[segment]) {
+            return { salesorg: FIXED_SALES_ORG[segment], source: 'fixed' };
+        }
+        var cands = lookup[norm(code)] || [];
+        for (var i = 0; i < cands.length; i++) {
+            if (cands[i].segment === segment) return { salesorg: cands[i].salesorg, source: 'master' };
+        }
+        if (cands.length > 0) return { salesorg: cands[0].salesorg, source: 'master' };
+        return { salesorg: fallbackSalesOrg || '', source: 'fallback' };
+    }
+
+    // ── INITIAL LOAD ──
+    if (!action) {
+        data.attachmentGUID = gs.generateGUID();
+        data.table = TABLES.DRAFT_DEMAND;
+        data.sys_id = data.attachmentGUID;
+
+        var userMap = getUserMapping();
+        data.hasMapping = userMap.regions.length > 0;
+        data.mappedGPList = [];
+
+        if (data.hasMapping) {
+            var gpGr = buildMasterQuery(userMap);
+            gpGr.orderBy('grand_parent');
+            gpGr.query();
+
+            var gpSeen = {};
+            while (gpGr.next()) {
+                var gp = gpGr.getValue('grand_parent');
+                if (gp && !gpSeen[gp]) {
+                    gpSeen[gp] = true;
+                    data.mappedGPList.push({
+                        grandparent_code: gp,
+                        customer_name: gpGr.getValue('customer_name')
+                    });
+                }
+            }
+        }
+    }
+
+    // ── SITES + HIERARCHY NODES ──
+    if (action === 'fetch_sites_for_gp') {
+        data.mappedSitesList = [];
+        data.hierarchyNodes = [];
+        var mapping = getUserMapping();
+
+        if (mapping.regions.length === 0) {
+            return;
+        }
+
+        var selectedGPNorm = norm(input.selectedGP);
+
+        var custGr = buildMasterQuery(mapping);
+        custGr.addQuery('grand_parent', input.selectedGP);
+        custGr.orderBy('customer_code_sap');
+        custGr.query();
+
+        // Pass 1: read the rows and collect the hierarchy codes
+        var rawRows = [];
+        var hierarchyCodes = {};
+        hierarchyCodes[selectedGPNorm] = true;
+
+        while (custGr.next()) {
+            var row = {
+                sys_id: custGr.getUniqueValue(),
+                site_code: custGr.getValue('customer_code_sap'),
+                salesorg: custGr.getValue('salesorg'),
+                customer_name: custGr.getValue('customer_name'),
+                grandparent_code: custGr.getValue('grand_parent'),
+                group_code: custGr.getValue('groupcode'),
+                zonalparentcode: custGr.getValue('zonalparentcode'),
+                segment: custGr.getValue('segment'),
+                zone_code: custGr.getValue('zone'),
+                zone_name: custGr.getValue('zone_name'),
+                region_code: custGr.getValue('region'),
+                region_name: custGr.getValue('region_name'),
+                depot_code: custGr.getValue('depot'),
+                depot_name: custGr.getValue('depot_name'),
+                bank_guarantee: parseFloat(custGr.getValue('bank_guarantee')) || 0
+            };
+            rawRows.push(row);
+            if (row.group_code) hierarchyCodes[norm(row.group_code)] = true;
+            if (row.zonalparentcode) hierarchyCodes[norm(row.zonalparentcode)] = true;
+        }
+
+        // Pass 2: drop hierarchy rows from the site list, build sites
+        var custSysIds = [];
+        var siteMap = {};
+
+        for (var ri = 0; ri < rawRows.length; ri++) {
+            var rw = rawRows[ri];
+            if (hierarchyCodes[norm(rw.site_code)]) continue;   // GP / Group / Zonal Parent row, not a site
+
+            custSysIds.push(rw.sys_id);
+
+            var siteObj = {
+                sys_id: rw.sys_id,
+                site_code: rw.site_code,
+                salesorg: rw.salesorg,
+                customer_name: rw.customer_name,
+                grandparent_code: rw.grandparent_code,
+                group_code: rw.group_code,
+                zonalparentcode: rw.zonalparentcode,
+                segment: rw.segment,
+                zone_code: rw.zone_code,
+                zone_name: rw.zone_name,
+                region_code: rw.region_code,
+                region_name: rw.region_name,
+                depot_code: rw.depot_code,
+                depot_name: rw.depot_name,
+                bank_guarantee: rw.bank_guarantee,
+                cr_limit: 0,
+                outstanding: 0,
+                b0_30: 0, b31_45: 0, b46_60: 0, b61_75: 0, b76_90: 0, b_gt90: 0,
+                selected: false,
+                totalPotential: null, currentSob: null, expectedSob: null,
+                orderRate: null, creditTenor: 45, desiredLimit: null, expanded: false
+            };
+
+            siteMap[rw.sys_id] = siteObj;
+            data.mappedSitesList.push(siteObj);
+        }
+
+        // Hierarchy nodes: one per (level, code, segment) with the right sales org
+        var codeList = [];
+        data.mappedSitesList.forEach(function(s) {
+            if (s.group_code && codeList.indexOf(s.group_code) === -1) codeList.push(s.group_code);
+            if (s.zonalparentcode && codeList.indexOf(s.zonalparentcode) === -1) codeList.push(s.zonalparentcode);
+        });
+        if (codeList.indexOf(input.selectedGP) === -1) codeList.push(input.selectedGP);
+
+        var soLookup = getHierarchySalesOrgs(codeList);
+        var nodeSeen = {};
+
+        function addNode(level, code, segment, siteSalesOrg) {
+            if (!code || code === '-') return;
+            var key = level + '|' + norm(code) + '|' + segment;
+            if (nodeSeen[key]) return;
+            nodeSeen[key] = true;
+            var res = resolveNodeSalesOrg(segment, code, soLookup, siteSalesOrg);
+            data.hierarchyNodes.push({
+                level: level,                 // 'gp' | 'group' | 'zone'
+                code: code,
+                segment: segment,
+                salesorg: res.salesorg,
+                salesorg_source: res.source   // fixed | master | fallback
+            });
+        }
+
+        data.mappedSitesList.forEach(function(s) {
+            addNode('gp', input.selectedGP, s.segment, s.salesorg);
+            addNode('group', s.group_code, s.segment, s.salesorg);
+            addNode('zone', s.zonalparentcode, s.segment, s.salesorg);
+        });
+
+        // Outstanding ageing per site
+        if (custSysIds.length > 0) {
+            var osGr = new GlideRecord(TABLES.OUTSTANDING);
+            osGr.addQuery('customer', 'IN', custSysIds.join(','));
+            osGr.orderByDesc('snapshot_month');
+            osGr.query();
+
+            var seenCustomers = {};
+            while (osGr.next()) {
+                var cId = osGr.getValue('customer');
+                if (!seenCustomers[cId]) {
+                    seenCustomers[cId] = true;
+                    var b0 = parseFloat(osGr.getValue('bucket_0_30_days')) || 0;
+                    var b31 = parseFloat(osGr.getValue('bucket_31_45_days')) || 0;
+                    var b46 = parseFloat(osGr.getValue('bucket_46_60_days')) || 0;
+                    var b61 = parseFloat(osGr.getValue('bucket_61_75_days')) || 0;
+                    var b76 = parseFloat(osGr.getValue('bucket_76_90_days')) || 0;
+                    var b90 = (parseFloat(osGr.getValue('bucket_91_120_days')) || 0) +
+                              (parseFloat(osGr.getValue('bucket_121_180_days')) || 0) +
+                              (parseFloat(osGr.getValue('bucket_181_365_days')) || 0) +
+                              (parseFloat(osGr.getValue('bucket_366_730_days')) || 0) +
+                              (parseFloat(osGr.getValue('bucket_730_above')) || 0) +
+                              (parseFloat(osGr.getValue('bucket_gt120_days')) || 0);
+
+                    if (siteMap[cId]) {
+                        siteMap[cId].b0_30 = b0;
+                        siteMap[cId].b31_45 = b31;
+                        siteMap[cId].b46_60 = b46;
+                        siteMap[cId].b61_75 = b61;
+                        siteMap[cId].b76_90 = b76;
+                        siteMap[cId].b_gt90 = b90;
+                        siteMap[cId].outstanding = b0 + b31 + b46 + b61 + b76 + b90;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── LIVE WSDL for ANY code: site, zonal parent, group or grandparent ──
+    // Client sends: code, salesOrg (already resolved for hierarchy nodes), segment
+    // (siteCode is still accepted so the old call keeps working)
+    if (action === 'fetch_wsdl_for_site' || action === 'fetch_wsdl_for_code') {
+        data.wsdl_limit = 0;
+        data.wsdl_os = 0;
+        data.wsdl_bg = 0;
+        data.wsdl_ok = false;
+
+        var wsdlCode = input.code || input.siteCode;
+
+        // Cement and BPD: fixed sales org at every level. RMC: the sales org that was passed in.
+        var targetSalesOrg = FIXED_SALES_ORG[input.segment] || input.salesOrg;
+
+        if (!wsdlCode || !targetSalesOrg) {
+            data.wsdl_error = 'Missing code or sales org';
+        } else {
+            try {
+                var obj = new x_birl3_clm.CLM_NEW_WSDL1();
+                var response = obj.getCreditDetails(wsdlCode, targetSalesOrg);
+
+                if (response) {
+                    var json = JSON.parse(response);
+                    data.wsdl_limit = parseFloat(json.creditLimit + '') || 0;
+                    data.wsdl_os = parseFloat(json.outstandingAmount + '') || 0;
+                    data.wsdl_bg = parseFloat(json.ActBg + '') || parseFloat(json.ASDAmount + '') || 0;
+                    data.wsdl_ok = true;
+                } else {
+                    data.wsdl_error = 'Empty response';
+                }
+            } catch (e) {
+                data.wsdl_error = e.message;
+                gs.error('WSDL Error for ' + wsdlCode + ' / ' + targetSalesOrg + ': ' + e.message);
+            }
+        }
+    }
+
+    if (action === 'submit_multiple_drafts') {
+        try {
+            var payloads = input.sitePayloads;
+            var sourceGuid = input.attachmentGUID;
+
+            if (!payloads || payloads.length === 0) {
+                data.success = false;
+                data.error = 'No site details were submitted.';
+                return;
+            }
+
+            var subMap = getUserMapping();
+            if (subMap.regions.length === 0) {
+                data.success = false;
+                data.error = 'You are not mapped as CRM/TSM for Key customers.';
+                return;
+            }
+            var submitSiteCodes = [];
+            for (var p = 0; p < payloads.length; p++) {
+                submitSiteCodes.push(payloads[p].site_code);
+            }
+            var allowedGr = buildMasterQuery(subMap);
+            allowedGr.addQuery('customer_code_sap', 'IN', submitSiteCodes.join(','));
+            allowedGr.query();
+            var allowed = {};
+            while (allowedGr.next()) {
+                allowed[allowedGr.getValue('customer_code_sap')] = true;
+            }
+            for (var a = 0; a < submitSiteCodes.length; a++) {
+                if (!allowed[submitSiteCodes[a]]) {
+                    data.success = false;
+                    data.error = 'Site ' + submitSiteCodes[a] + ' is not under your mapped region(s).';
+                    return;
+                }
+            }
+
+            // Server-side guard: no negative values, SOB > 0 and not above total potential
+            for (var v = 0; v < payloads.length; v++) {
+                var chk = payloads[v];
+                var nums = [chk.monthly_potential, chk.current_sob, chk.expected_sob_qty, chk.order_rate, chk.credit_tenor, chk.desired_limit];
+                for (var n = 0; n < nums.length; n++) {
+                    if ((parseFloat(nums[n]) || 0) < 0) {
+                        data.success = false;
+                        data.error = 'Site ' + chk.site_code + ': values cannot be negative.';
+                        return;
+                    }
+                }
+                var pot = parseFloat(chk.monthly_potential) || 0;
+                var cur = parseFloat(chk.current_sob) || 0;
+                var exp = parseFloat(chk.expected_sob_qty) || 0;
+                if ((cur > 0 || exp > 0) && (cur > pot || exp > pot)) {
+                    data.success = false;
+                    data.error = 'Site ' + chk.site_code + ': SOB cannot be greater than Total Monthly Potential.';
+                    return;
+                }
+            }
+
+            // 1. Create Parent Record FIRST: x_birl3_clm_clm_key_crm_gp_request
+            var parentGpGr = new GlideRecord(TABLES.CRM_GP_REQ);
+            parentGpGr.initialize();
+            parentGpGr.setValue('grandparent_code', input.gpCode || '');
+            parentGpGr.setValue('customer_name', input.customerName || '');
+            parentGpGr.setValue('state', 'Submitted');
+            parentGpGr.setValue('submitted_by', currentUserId);
+            var parentSysId = parentGpGr.insert();
+
+            // Fetch auto-generated number for display
+            var parentReqNum = '';
+            var fetchNumGr = new GlideRecord(TABLES.CRM_GP_REQ);
+            if (fetchNumGr.get(parentSysId)) {
+                parentReqNum = fetchNumGr.getDisplayValue('number') || fetchNumGr.getValue('number') || '';
+            }
+
+            // 2. Loop sites and stamp the parentSysId into crm_gp_request
+            for (var j = 0; j < payloads.length; j++) {
+                var st = payloads[j];
+                var draftGr = new GlideRecord(TABLES.DRAFT_DEMAND);
+                draftGr.initialize();
+
+                // ---> LINK TO PARENT TABLE RECORD <---
+                draftGr.setValue('crm_gp_request', parentSysId);
+
+                draftGr.setValue('grandparent_code', input.gpCode || '');
+                
+							  draftGr.setValue('customer_name', st.customer_name);
+                draftGr.setValue('group_code', st.group_code || '');
+                draftGr.setValue('zone_code', st.zonalparentcode);
+                draftGr.setValue('site_code', st.site_code);
+                draftGr.setValue('segment', st.segment);
+                draftGr.setValue('region', st.region);
+
+                draftGr.setValue('monthly_potential', st.monthly_potential);
+                setIfValid(draftGr, 'current_potential', st.current_sob);
+                draftGr.setValue('expected_potential', st.expected_sob_qty);
+                draftGr.setValue('order_rate', st.order_rate);
+                draftGr.setValue('credit_tenor', st.credit_tenor);
+                draftGr.setValue('desired_limit', st.desired_limit);
+
+                // Live SAP limits
+                draftGr.setValue('grandparent_cl', st.gp_limit);
+                draftGr.setValue('grandparent_active_bg', st.gp_bg);
+                draftGr.setValue('grandparent_net_exposure', st.gp_net_exposure);
+                
+                draftGr.setValue('groupcode_cl', st.group_limit);
+                draftGr.setValue('zonalparent_cl', st.zone_limit);
+							  draftGr.setValue('group_net_exposure', st.site_net_exposure);
+                
+                draftGr.setValue('site_cl', st.site_limit);
+                draftGr.setValue('site_active_bg', st.site_bg);
+                draftGr.setValue('site_net_exposure', st.site_net_exposure);
+                draftGr.setValue('total_outstanding', st.total_outstanding);
+
+                draftGr.setValue('p1_total_macl', st.p1_total_macl);
+                draftGr.setValue('justification', input.justification);
+                draftGr.setValue('status', 'Pending SPOC');
+                draftGr.setValue('submitted_by', currentUserId);
+
+                var draftSysId = draftGr.insert();
+
+                if (sourceGuid && draftSysId) {
+                    var attach = new GlideSysAttachment();
+                    attach.copy(TABLES.DRAFT_DEMAND, sourceGuid, TABLES.DRAFT_DEMAND, draftSysId);
+
+                    var attGr = new GlideRecord('sys_attachment');
+                    attGr.addQuery('table_sys_id', draftSysId);
+                    attGr.addQuery('table_name', TABLES.DRAFT_DEMAND);
+                    attGr.orderByDesc('sys_created_on');
+                    attGr.query();
+
+                    if (attGr.next()) {
+                        var instanceUrl = 'https://abgdev.service-now.com/';
+                        var fileUrl = instanceUrl + 'sys_attachment.do?sys_id=' + attGr.getUniqueValue();
+
+                        var updateDraft = new GlideRecord(TABLES.DRAFT_DEMAND);
+                        if (updateDraft.get(draftSysId)) {
+                            updateDraft.setValue('u_document_link', fileUrl);
+                            updateDraft.update();
+                        }
+                    }
+                }
+            }
+
+            var hoUserSysId = '';
+            var hoMatrixGr = new GlideRecord(TABLES.APPROVAL_MATRIX);
+            hoMatrixGr.addQuery('role_name', 'HO');
+            hoMatrixGr.addQuery('customer_type', 'Key');
+            hoMatrixGr.setLimit(1);
+            hoMatrixGr.query();
+
+            if (hoMatrixGr.next()) {
+                hoUserSysId = hoMatrixGr.getValue('approver_user');
+            }
+
+            if (hoUserSysId) {
+                gs.eventQueue('x_birl3_clm.crm_draft.received_ho', null, hoUserSysId, input.customerName);
+
+                var inAppGr = new GlideRecord('sys_notification_in_app_message');
+                if (inAppGr.isValid()) {
+                    inAppGr.initialize();
+                    inAppGr.setValue('recipient', hoUserSysId);
+                    inAppGr.setValue('title', 'CRM Draft Details Received');
+                    inAppGr.setValue('body', 'Draft demand details for ' + input.customerName + ' have been successfully submitted by CRM.');
+                    inAppGr.insert();
+                }
+            }
+
+            data.success = true;
+            data.requestNumber = parentReqNum;
+            data.parentSysId = parentSysId;
+        } catch (e) {
+            data.success = false;
+            data.error = 'Draft Staging Error: ' + e.message;
+        }
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-07 09:27:30</sys_created_on>
+        <sys_id>30849cb72b43c7104572f3745e91bf25</sys_id>
+        <sys_mod_count>51</sys_mod_count>
+        <sys_name>CLM Key CRM </sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_30849cb72b43c7104572f3745e91bf25</sys_update_name>
+        <sys_updated_by>gayatri.bhandge@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-25 05:52:05</sys_updated_on>
+        <template><![CDATA[<!--
+  CLM — Key Corporate Customer (CRM Entry) · HTML template  v2.1
+  v2.1:
+  - Removed the "Expected Potential (auto)" display from each site card; CRM inputs now sit in a
+    3 × 2 grid (still calculated and saved by c.calcExpectedPotential in the client script)
+  v2.0:
+  - Page header: black bar replaced by the ABG rising-sun banner (.clm-hero) with a stat block
+    (GP codes mapped → sites selected once a GP is loaded)
+  - Fixed nesting: Section 1 was never closed (its </div> sat inside the commented overview block),
+    so every later section was nested inside it
+  - Section 1: GP select in a card + "Customer Summary" tiles (name, sites, credit limit, BG, net exposure)
+  - Section 2: 18-column 1850px grid replaced by one card per site:
+      head = checkbox, site code, segment, group / zone codes, location;
+      body = SAP credit tiles (limit, BG, OS, ageing toggle) + CRM input grid;
+      ageing drawer uses the 0–60 / 61–90 / >90 bucket colours
+  - CRM Projection moved inside Section 2 as a card with a result row
+  - Sections 3 and 4 restyled as cards; justification character counter; attachment list restyled
+  - All ng-model / ng-change / ng-click / ng-if bindings unchanged
+-->
+<div class="clm-widget">
+  <div class="clm-page">
+
+    <!-- PAGE HEADER BANNER (ABG rising sun) -->
+    <div class="clm-hero">
+      <div class="clm-hero-text">
+        <div class="clm-hero-bar"></div>
+        <h1 class="clm-hero-title">Key Corporate Customer <span class="accent">CRM Entry</span></h1>
+        <div class="clm-hero-sub">Submit Draft P1 Demand Details for SPOC Review</div>
+      </div>
+      <div class="clm-hero-actions" ng-if="c.data.hasMapping && !c.data.submitted">
+        <div class="clm-hero-stat" ng-if="c.data.mappedSitesList.length > 0">
+          <div class="clm-hero-stat-v">{{c.data.selectedCount}}<span class="clm-hero-stat-of"> / {{c.data.mappedSitesList.length}}</span></div>
+          <div class="clm-hero-stat-k">Sites Selected</div>
+        </div>
+        <div class="clm-hero-stat" ng-if="c.data.mappedSitesList.length === 0">
+          <div class="clm-hero-stat-v">{{c.data.mappedGPList.length}}</div>
+          <div class="clm-hero-stat-k">GP Codes Mapped</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="clm-panel">
+
+      <!-- SUCCESS STATE -->
+      <div class="clm-success-panel" ng-if="c.data.submitted">
+        <div class="clm-success-icon">✓</div>
+        <h3 class="clm-success-title">P1 Demand Details Staged Successfully</h3>
+        <p>Draft inputs for the selected sites have been saved to the Central SPOC staging queue.</p>
+        <p>Notification receipt with site demand breakdown has been triggered to <strong>HO</strong>.</p>
+        <button type="button" class="clm-btn clm-btn-outline" ng-click="c.resetForm()">Submit Another Draft</button>
+      </div>
+
+      <!-- NO MAPPING STATE -->
+      <div class="clm-section" ng-if="!c.data.submitted && !c.data.hasMapping">
+        <div class="clm-alert clm-alert-danger">
+          <div class="clm-alert-icon">✗</div>
+          <div class="clm-alert-body">
+            You are not mapped as CRM/TSM for Key customers in the Approval Matrix (or no region is assigned to you).
+            Please contact the CLM administrator.
+          </div>
+        </div>
+      </div>
+
+      <!-- MAIN FORM WRAPPER -->
+      <div ng-form="clmKeyForm" ng-if="!c.data.submitted && c.data.hasMapping">
+
+        <!-- 1. SCOPE SELECTION -->
+        <div class="clm-section">
+          <div class="clm-section-title"><span class="clm-section-num">1</span> Scope Selection</div>
+
+          <div class="clm-block clm-block-first">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Grandparent Code</div>
+                <div class="clm-block-sub">Pick a Key customer group to load its sites and live SAP limits</div>
+              </div>
+              <div class="clm-block-meta">
+                <span class="clm-chip clm-chip-live" ng-if="c.data.loadingWSDL"><span class="clm-spin"></span> Syncing SAP limits…</span>
+                <span class="clm-chip clm-chip-live" ng-if="!c.data.loadingWSDL && c.data.mappedSitesList.length > 0">● Live SAP data</span>
+              </div>
+            </div>
+            <div class="clm-tw-body">
+              <div class="clm-field clm-field-gp">
+                <label>Select Grandparent Code <span class="req">*</span></label>
+                <select class="clm-input" ng-model="c.data.selectedGP" ng-change="c.fetchSitesForGP()" required>
+                  <option value="">-- Select GP Code --</option>
+                  <option ng-repeat="gp in c.data.mappedGPList" value="{{gp.grandparent_code}}">
+                    {{gp.grandparent_code}}
+                  </option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Customer summary (GP level roll-up from aggregateLimits) -->
+          <div class="clm-block" ng-if="c.data.mappedSitesList.length > 0 && !c.data.loadingWSDL">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Customer Summary</div>
+                <div class="clm-block-sub">All sites under this Grandparent code in your region(s)</div>
+              </div>
+              <div class="clm-block-meta">
+                <span class="clm-chip"><span class="clm-chip-k">GP</span> {{c.data.selectedGP}}</span>
+              </div>
+            </div>
+            <div class="clm-tw-body">
+              <div class="clm-tw-factors clm-sum-tiles">
+                <div class="clm-tw-factor clm-sum-name">
+                  <div class="clm-tw-factor-k">Customer</div>
+                  <div class="clm-tw-factor-v clm-wrap">{{c.data.customer_name_strip}}</div>
+                  <div class="clm-tw-factor-s">{{c.data.mappedSitesList.length}} site(s)</div>
+                </div>
+                <div class="clm-tw-factor">
+                  <div class="clm-tw-factor-k">Total Credit Limit</div>
+                  <div class="clm-tw-factor-v">{{c.formatCurrency(c.data.gp_limit)}}</div>
+                </div>
+                <div class="clm-tw-factor">
+                  <div class="clm-tw-factor-k">Active BG</div>
+                  <div class="clm-tw-factor-v">{{c.formatCurrency(c.data.gp_bg)}}</div>
+                </div>
+                <div class="clm-tw-factor">
+                  <div class="clm-tw-factor-k">Net Exposure</div>
+                  <div class="clm-tw-factor-v">{{c.formatCurrency(c.data.gp_net_exposure)}}</div>
+                  <div class="clm-tw-factor-s">Credit limit − BG</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="clm-alert clm-alert-warning" ng-if="c.data.sapWarning">
+  <div class="clm-alert-icon">⚠</div>
+  <div class="clm-alert-body">{{c.data.sapWarning}}</div>
+</div>
+
+          <!-- Hierarchy overview (kept disabled as before) -->
+          <!--
+          <div class="clm-block" ng-if="c.data.overviewRows.length > 0 && !c.data.loadingWSDL">
+            <div class="clm-block-head"><div class="clm-block-heading">
+              <div class="clm-block-title">Customer Limit Overview</div>
+              <div class="clm-block-sub">Grandparent › Group Code › Zone Code</div>
+            </div></div>
+            <div class="clm-table-wrap clm-table-flush">
+              <table class="clm-table">
+                <thead><tr>
+                  <th>Level</th><th>Grandparent</th><th>Group</th><th>Zone</th><th>Customer</th>
+                  <th>Sites</th><th>Credit Limit</th><th>Active BG</th><th>Net Exposure</th>
+                </tr></thead>
+                <tbody>
+                  <tr ng-repeat="r in c.data.overviewRows" ng-class="'ov-row-' + r.level">
+                    <td><span class="clm-level-badge" ng-class="'lvl-' + r.level">{{r.levelLabel}}</span></td>
+                    <td>{{r.gp}}</td><td>{{r.group}}</td><td>{{r.zone}}</td><td>{{r.name}}</td>
+                    <td>{{r.sites}}</td>
+                    <td>{{c.formatCurrency(r.limit)}}</td>
+                    <td>{{c.formatCurrency(r.bg)}}</td>
+                    <td><strong>{{c.formatCurrency(r.net)}}</strong></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          -->
+        </div>
+
+        <!-- 2. SITE DETAILS & LIMIT ALLOCATION -->
+        <div class="clm-section" ng-if="c.data.mappedSitesList.length > 0 && !c.data.loadingWSDL">
+          <div class="clm-section-title"><span class="clm-section-num">2</span> Site Details &amp; Limit Allocation</div>
+
+          <div class="clm-block clm-block-first">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Sites Under Consideration</div>
+                <div class="clm-block-sub">Tick a site or start typing in its inputs to include it. All inputs are optional; values cannot be negative.</div>
+              </div>
+              <div class="clm-block-meta">
+                <span class="clm-chip"><span class="clm-chip-k">Selected</span> {{c.data.selectedCount}} of {{c.data.mappedSitesList.length}}</span>
+                <span class="clm-chip clm-chip-req" ng-if="c.data.singleMode">Single site · auto-selected</span>
+              </div>
+            </div>
+
+            <div class="clm-ks-list">
+              <div class="clm-ks-item" ng-repeat="site in c.data.mappedSitesList"
+                   ng-class="{'is-selected': site.selected, 'is-error': c.rowError(site)}">
+
+                <!-- Site head -->
+                <div class="clm-ks-head">
+                  <label class="clm-ks-check">
+                    <input type="checkbox" ng-model="site.selected"
+                           ng-disabled="c.data.singleMode"
+                           ng-change="c.toggleSiteSelection(site)" />
+                  </label>
+                  <div class="clm-ks-id">
+                    <div class="clm-ks-title">
+                      <span class="clm-ks-code">{{site.site_code}}</span>
+                      <span class="clm-ks-seg">{{site.segment}}</span>
+                      <span class="clm-ks-sel" ng-if="site.selected">✓ Selected</span>
+                    </div>
+                    <div class="clm-ks-codes">
+                      <span><span class="clm-chip-k">Group</span> <strong>{{site.group_code}}</strong></span>
+                      <span><span class="clm-chip-k">Zone Code</span> <strong>{{site.zonalparentcode}}</strong></span>
+                    </div>
+                  </div>
+                  <div class="clm-ks-loc">
+                    <div class="clm-ks-loc-i">
+                      <div class="clm-ks-loc-k">Zone</div>
+                      <div class="clm-ks-loc-v">{{site.zone_name}} <span class="clm-sub-code">({{site.zone_code}})</span></div>
+                    </div>
+                    <div class="clm-ks-loc-i">
+                      <div class="clm-ks-loc-k">Region</div>
+                      <div class="clm-ks-loc-v">{{site.region_name}} <span class="clm-sub-code">({{site.region_code}})</span></div>
+                    </div>
+                    <div class="clm-ks-loc-i">
+                      <div class="clm-ks-loc-k">Depot</div>
+                      <div class="clm-ks-loc-v">{{site.depot_name}} <span class="clm-sub-code">({{site.depot_code}})</span></div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Site body: SAP credit | CRM inputs -->
+                <div class="clm-ks-body">
+                  <div class="clm-ks-sap">
+                    <div class="clm-ks-sub">SAP Credit (live)</div>
+                    <div class="clm-ks-sap-tiles">
+                      <div class="clm-tw-factor">
+                        <div class="clm-tw-factor-k">Site Credit Limit</div>
+                        <div class="clm-tw-factor-v">{{c.formatCurrency(site.cr_limit)}}</div>
+                      </div>
+                      <div class="clm-tw-factor">
+                        <div class="clm-tw-factor-k">Active BG</div>
+                        <div class="clm-tw-factor-v v-ok">{{c.formatCurrency(site.bank_guarantee)}}</div>
+                      </div>
+                      <div class="clm-tw-factor">
+                        <div class="clm-tw-factor-k">Total OS</div>
+                        <div class="clm-tw-factor-v v-bad">{{c.formatCurrency(site.outstanding)}}</div>
+                      </div>
+                    </div>
+                    <button type="button" class="clm-btn-mini" ng-click="site.expanded = !site.expanded">
+                      6M Ageing {{site.expanded ? '▲' : '▼'}}
+                    </button>
+                  </div>
+
+                  <div class="clm-ks-inputs">
+                    <div class="clm-ks-sub">CRM Inputs</div>
+                    <div class="clm-ks-grid">
+                      <!-- none mandatory, min 0 so no negative values -->
+                      <div class="clm-ks-f">
+                        <label>Monthly Potential <span class="clm-unit">MT</span></label>
+                        <input type="number" min="0" step="any" class="clm-sites-input" ng-model="site.totalPotential" ng-change="c.onInputChange(site)" />
+                      </div>
+                      <div class="clm-ks-f">
+                        <label>Current SOB <span class="clm-unit">MT</span></label>
+                        <input type="number" min="0" step="any" class="clm-sites-input" ng-model="site.currentSob" ng-change="c.onInputChange(site)" placeholder="MT" />
+                      </div>
+                      <div class="clm-ks-f">
+                        <label>Expected SOB <span class="clm-unit">MT</span></label>
+                        <input type="number" min="0" step="any" class="clm-sites-input" ng-model="site.expectedSob" ng-change="c.onInputChange(site)" placeholder="MT" />
+                      </div>
+                      <div class="clm-ks-f">
+                        <label>Order Rate <span class="clm-unit">₹</span></label>
+                        <input type="number" min="0" step="any" class="clm-sites-input" ng-model="site.orderRate" ng-change="c.onInputChange(site)" />
+                      </div>
+                      <div class="clm-ks-f">
+                        <label>Tenor <span class="clm-unit">days</span></label>
+                        <input type="number" min="0" step="any" class="clm-sites-input" ng-model="site.creditTenor" ng-change="c.onInputChange(site)" />
+                      </div>
+                      <div class="clm-ks-f">
+                        <label>Desired Credit Limit <span class="clm-unit">₹</span></label>
+                        <input type="number" min="0" step="any" class="clm-sites-input clm-sites-input-highlight" ng-model="site.desiredLimit" ng-change="c.onInputChange(site)" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Row validation message -->
+                <div class="clm-row-error" ng-if="c.rowError(site)">⚠ {{site.site_code}}: {{c.rowError(site)}}</div>
+
+                <!-- 6M ageing drawer -->
+                <div ng-if="site.expanded" class="clm-aging-drawer">
+                  <div class="clm-table-wrap">
+                    <table class="clm-table clm-ag-table">
+                      <thead>
+                        <tr class="super ag-group">
+                          <th colspan="3" class="safe">0–60 Days</th>
+                          <th colspan="2" class="warn grp">61–90 Days</th>
+                          <th class="risk grp">&gt; 90 Days</th>
+                        </tr>
+                        <tr class="ag-sub">
+                          <th class="safe">0–30</th>
+                          <th class="safe">31–45</th>
+                          <th class="safe">46–60</th>
+                          <th class="warn grp">61–75</th>
+                          <th class="warn">76–90</th>
+                          <th class="risk grp">&gt; 90</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td ng-class="{'zero': !site.b0_30}">{{c.formatCurrency(site.b0_30)}}</td>
+                          <td ng-class="{'zero': !site.b31_45}">{{c.formatCurrency(site.b31_45)}}</td>
+                          <td ng-class="{'zero': !site.b46_60}">{{c.formatCurrency(site.b46_60)}}</td>
+                          <td class="grp" ng-class="site.b61_75 ? 'warn-val' : 'zero'">{{c.formatCurrency(site.b61_75)}}</td>
+                          <td ng-class="site.b76_90 ? 'warn-val' : 'zero'">{{c.formatCurrency(site.b76_90)}}</td>
+                          <td class="grp" ng-class="site.b_gt90 ? 'risk-val' : 'zero'">{{c.formatCurrency(site.b_gt90)}}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- CRM Projection Overview -->
+          <div class="clm-block">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">CRM Projection Overview</div>
+                <div class="clm-block-sub">Totals for the selected sites</div>
+              </div>
+              <div class="clm-block-meta">
+                <span class="clm-chip"><span class="clm-chip-k">Sites</span> {{c.data.selectedCount}}</span>
+              </div>
+            </div>
+            <!--<div class="clm-tw-body">
+              <div class="clm-tw-factor">
+                <div class="clm-tw-factor-k">Total MACL (P1) for Selected</div>
+                <div class="clm-tw-factor-v">{{c.formatCurrency(c.data.calc.totalP1)}}</div>
+              </div>
+            </div>-->
+            <div class="clm-tw-res">
+              <div>
+                <div class="clm-tw-res-k">Total Requested Credit Limit</div>
+                <div class="clm-tw-res-f">Sum of Desired Credit Limit across {{c.data.selectedCount}} selected site(s)</div>
+              </div>
+              <div class="clm-tw-res-v">{{c.formatCurrency(c.data.calc.totalRequested)}}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. BUSINESS JUSTIFICATION -->
+        <div class="clm-section" ng-if="c.data.mappedSitesList.length > 0 && !c.data.loadingWSDL">
+          <div class="clm-section-title"><span class="clm-section-num">3</span> Business Justification</div>
+
+          <div class="clm-block clm-block-first">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Justification</div>
+                <div class="clm-block-sub">Why the requested limits are needed — shared with SPOC and HO</div>
+              </div>
+              <div class="clm-block-meta">
+                <span class="clm-chip clm-chip-req">Required</span>
+              </div>
+            </div>
+            <div class="clm-tw-body">
+              <div class="clm-field">
+                <label>Business Justification <span class="req">*</span></label>
+                <textarea ng-model="c.data.justification" class="clm-textarea" rows="4" placeholder="Provide strategic rationale..." required></textarea>
+                <div class="clm-field-hint">{{(c.data.justification || '').trim().length}} characters</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. SUPPORTING DOCUMENTS -->
+        <div class="clm-section" ng-if="c.data.mappedSitesList.length > 0 && !c.data.loadingWSDL">
+          <div class="clm-section-title"><span class="clm-section-num">4</span> Supporting Documents</div>
+
+          <div class="clm-block clm-block-first">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Attachments</div>
+                <div class="clm-block-sub">Files for SPOC reference (20 MB max per file)</div>
+              </div>
+              <div class="clm-block-meta">
+                <span class="clm-chip"><span class="clm-chip-k">Optional</span> {{attachments.length}} file(s)</span>
+              </div>
+            </div>
+            <div class="clm-tw-body">
+              <div class="clm-upload">
+                <sp-attachment-button></sp-attachment-button>
+                <div>
+                  <div class="clm-upload-k">Attach files for SPOC Reference</div>
+                  <div class="clm-field-hint">Click the pin to upload a document</div>
+                </div>
+              </div>
+
+              <div class="clm-att-list" ng-if="attachments.length > 0">
+                <div class="clm-att-item" ng-repeat="att in attachments">
+                  <span class="clm-att-name">]]>📎<![CDATA[ {{att.file_name}}</span>
+                  <button type="button" class="clm-att-del" ng-click="attachmentHandler.deleteAttachment(att)" title="Remove Document">✕</button>
+                </div>
+              </div>
+
+              <div style="display:none;">
+                <sp-attachment-manager table="::c.data.table" sys-id="::c.data.sys_id" omit-edit="false"></sp-attachment-manager>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="clm-section clm-section-alert" ng-if="c.data.submitError">
+          <div class="clm-alert clm-alert-danger">
+            <div class="clm-alert-icon">✗</div>
+            <div class="clm-alert-body">{{c.data.submitError}}</div>
+          </div>
+        </div>
+
+        <div class="clm-actions" ng-if="c.data.mappedSitesList.length > 0 && !c.data.loadingWSDL">
+          <div class="clm-actions-note">
+            <strong>{{c.data.selectedCount}}</strong> site(s) ·
+            <strong>{{c.formatCurrency(c.data.calc.totalRequested)}}</strong> requested
+          </div>
+          <button type="button" class="clm-btn clm-btn-primary" ng-click="c.submit()"
+                  ng-disabled="clmKeyForm.$invalid || c.data.submitting || c.data.selectedCount === 0">
+            {{c.data.submitting ? 'Staging Drafts...' : 'Submit Selected to Central SPOC'}}
+          </button>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>30849cb72b43c7104572f3745e91bf25</id>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-07 09:27:30</sys_created_on>
+        <sys_id>788494f72b43c7104572f3745e91bf9f</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-07 09:27:30</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

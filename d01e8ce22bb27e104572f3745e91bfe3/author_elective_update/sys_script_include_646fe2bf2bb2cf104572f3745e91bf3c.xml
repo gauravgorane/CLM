@@ -1,0 +1,667 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="DELETE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLMRiskScoringEngine</api_name>
+        <caller_access/>
+        <client_callable>false</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLMRiskScoringEngine</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var CLMRiskScoringEngine = Class.create();
+CLMRiskScoringEngine.prototype = {
+    initialize: function() {
+        this.TABLES = {
+            CUSTOMER:     'x_birl3_clm_clm_customer_master1',
+            OUTSTANDING:  'x_birl3_clm_clm_aging_snapshot',
+            RISK_MATRIX:  'x_birl3_clm_risk_parameter_matrix',
+            REQ_PARAMS:   'x_birl3_clm_request_parameters',
+            SITE_REQUEST: 'x_birl3_clm_nt_site_request'
+        };
+
+        this.RATING_BANDS = {
+            A: ['AAA', 'AA+', 'AA', 'AA-', 'A+', 'A', 'A-'],
+            B: ['BBB+', 'BBB', 'BBB-', 'BB+', 'BB', 'BB-'],
+            C: ['BB-', 'B+', 'B', 'B-', 'CCC', 'CC', 'C', 'D']
+        };
+
+        this.P3_GRID = {
+            'A': { 'A': 1.00, 'B': 0.75, 'C': 0.00 },
+            'B': { 'A': 0.75, 'B': 0.60, 'C': 0.00 },
+            'C': { 'A': 0.00, 'B': 0.00, 'C': 0.00 }
+        };
+    },
+
+    // =========================================================
+    // THRESHOLDS — single source of truth, driven by sys_properties
+    // =========================================================
+    getThresholds: function() {
+        return {
+            cement:       parseFloat(gs.getProperty('x_birl3_clm.threshold.cement', '5000000')),
+            defaultSeg:   parseFloat(gs.getProperty('x_birl3_clm.threshold.default', '2500000')),
+            crossSegment: parseFloat(gs.getProperty('x_birl3_clm.threshold.cross_segment', '15000000'))
+        };
+    },
+
+    getToolWorkingThreshold: function(segment) {
+        var t = this.getThresholds();
+        return (segment === 'Cement') ? t.cement : t.defaultSeg;
+    },
+
+    // =========================================================
+    // PARAMETER RELEVANCE — data-driven via segment_tag field
+    // Falls back to name substring match only if segment_tag is
+    // not populated on the record (migration safety net).
+    // =========================================================
+    isParamRelevant: function(param, segment) {
+        var tag = (param.segmentTag || '').trim();
+
+        if (tag) {
+            return tag === 'All' || tag === segment;
+        }
+
+        // Fallback for records not yet migrated to segment_tag
+        var name = (param.name || '').toLowerCase();
+        var isCem = name.indexOf('cement') !== -1;
+        var isRmc = name.indexOf('rmc') !== -1;
+        var isBpd = name.indexOf('bpd') !== -1;
+        if (!isCem && !isRmc && !isBpd) return true;
+        if (isCem && segment === 'Cement') return true;
+        if (isRmc && segment === 'RMC') return true;
+        if (isBpd && segment === 'BPD') return true;
+        return false;
+    },
+
+    // =========================================================
+    // NUMERIC BUCKET EVALUATION — structured fields first,
+    // falls back to legacy label parsing if min/max not set.
+    // =========================================================
+    evaluateNumberCondition: function(optionsArray, valueToCheck) {
+        var val = parseFloat(valueToCheck);
+        if (isNaN(val)) return '';
+
+        for (var i = 0; i < optionsArray.length; i++) {
+            var opt = optionsArray[i];
+
+            if (opt.operator) {
+                switch (opt.operator) {
+                    case 'gte':     if (val >= opt.minValue) return opt.sys_id; break;
+                    case 'lte':     if (val <= opt.maxValue) return opt.sys_id; break;
+                    case 'gt':      if (val >  opt.minValue) return opt.sys_id; break;
+                    case 'lt':      if (val <  opt.maxValue) return opt.sys_id; break;
+                    case 'between': if (val >= opt.minValue && val <= opt.maxValue) return opt.sys_id; break;
+                }
+                continue;
+            }
+
+            // Legacy fallback: parse the label text
+            var match = this._evaluateFromLabel(opt.label, val);
+            if (match) return opt.sys_id;
+        }
+        return '';
+    },
+
+    _evaluateFromLabel: function(label, val) {
+        var cleanLabel = (label || '').toLowerCase().split('(score')[0].replace(/,/g, '').trim();
+
+        if (cleanLabel.indexOf('-') !== -1 || cleanLabel.indexOf('to') !== -1 || cleanLabel.indexOf('between') !== -1) {
+            var rangeMatch = cleanLabel.match(/([\d.]+)\s*(?:-|to|and)\s*([\d.]+)/);
+            if (rangeMatch) {
+                var min = parseFloat(rangeMatch[1]);
+                var max = parseFloat(rangeMatch[2]);
+                return (val >= min && val <= max);
+            }
+        }
+
+        var singleMatch = cleanLabel.match(/([\d.]+)/);
+        if (singleMatch) {
+            var numVal = parseFloat(singleMatch[1]);
+            if (cleanLabel.indexOf('>=') !== -1) return val >= numVal;
+            if (cleanLabel.indexOf('<=') !== -1) return val <= numVal;
+            if (cleanLabel.indexOf('=') === -1 && (cleanLabel.indexOf('>') !== -1 || cleanLabel.indexOf('greater') !== -1 || cleanLabel.indexOf('above') !== -1 || cleanLabel.indexOf('more') !== -1)) return val > numVal;
+            if (cleanLabel.indexOf('=') === -1 && (cleanLabel.indexOf('<') !== -1 || cleanLabel.indexOf('less') !== -1 || cleanLabel.indexOf('below') !== -1)) return val < numVal;
+        }
+        return false;
+    },
+
+    // =========================================================
+    // RATINGS
+    // =========================================================
+    getExternalRating: function(ratingStr, p2Score) {
+        ratingStr = (ratingStr || '').toUpperCase().trim();
+        if (ratingStr) {
+            for (var grade in this.RATING_BANDS) {
+                var bands = this.RATING_BANDS[grade];
+                for (var k = 0; k < bands.length; k++) {
+                    if (ratingStr.indexOf(bands[k]) > -1) return grade;
+                }
+            }
+        }
+        var p2Pct = p2Score * 100;
+        if (p2Pct >= 61) return 'A';
+        if (p2Pct >= 31) return 'B';
+        return 'C';
+    },
+
+    getInternalRating: function(panValue) {
+        var safeL = 0, midM = 0, critN = 0, toxO = 0, recCount = 0;
+
+        var cGr = new GlideRecord(this.TABLES.CUSTOMER);
+        cGr.addQuery('pan', panValue);
+        cGr.query();
+
+        while (cGr.next()) {
+            var custSysId = cGr.getUniqueValue();
+            var oGr = new GlideRecord(this.TABLES.OUTSTANDING);
+            oGr.addQuery('customer', custSysId);
+            oGr.orderByDesc('sys_created_on');
+            oGr.setLimit(6);
+            oGr.query();
+
+            while (oGr.next()) {
+                recCount++;
+                safeL += (parseFloat(oGr.getValue('bucket_0_30_days'))  || 0)
+                       + (parseFloat(oGr.getValue('bucket_31_45_days')) || 0)
+                       + (parseFloat(oGr.getValue('bucket_46_60_days')) || 0);
+                midM  += parseFloat(oGr.getValue('bucket_61_75_days'))  || 0;
+                critN += parseFloat(oGr.getValue('bucket_76_90_days'))  || 0;
+                toxO  += (parseFloat(oGr.getValue('bucket_91_120_days'))  || 0)
+                       + (parseFloat(oGr.getValue('bucket_121_180_days')) || 0)
+                       + (parseFloat(oGr.getValue('bucket_gt120_days'))   || 0);
+            }
+        }
+
+        return this._rateFromBuckets(safeL, midM, critN, toxO, recCount);
+    },
+
+    // Same bucket math, usable directly by the widget's already-fetched
+    // in-memory bucket data (avoids re-querying the DB for the live preview).
+    getInternalRatingFromBuckets: function(customers) {
+        var safeL = 0, midM = 0, critN = 0, toxO = 0, recCount = 0;
+        (customers || []).forEach(function(cust) {
+            (cust.buckets || []).forEach(function(b) {
+                recCount++;
+                safeL += (b.b0_3 || 0) + (b.b4_7 || 0) + (b.b8_21 || 0) + (b.b22_30 || 0) + (b.b31_45 || 0) + (b.b46_60 || 0);
+                midM  += b.b61_75 || 0;
+                critN += b.b76_90 || 0;
+                toxO  += b.b_gt90 || 0;
+            });
+        });
+        return this._rateFromBuckets(safeL, midM, critN, toxO, recCount);
+    },
+
+    _rateFromBuckets: function(safeL, midM, critN, toxO, recCount) {
+        var grand = safeL + midM + critN + toxO;
+        if (grand === 0 || recCount === 0) return 'A';
+
+        var pctL  = (safeL / grand) * 100;
+        var pctCT = ((critN + toxO) / grand) * 100;
+
+        if (pctL >= 80 && pctCT <= 10) return 'A';
+        if (pctL >= 60 && pctCT <= 20) return 'B';
+        return 'C';
+    },
+
+    getP3: function(extR, intR) {
+        return (this.P3_GRID[extR] && this.P3_GRID[extR][intR] !== undefined) ? this.P3_GRID[extR][intR] : 0.00;
+    },
+
+    // =========================================================
+    // P2 (Composite Index) — DB-backed version, used post-submit
+    // once request_parameters records exist.
+    // =========================================================
+    calculateP2FromRequest: function(reqSysId) {
+        var rawScore = 0, totalMax = 0;
+        var pGr = new GlideRecord(this.TABLES.REQ_PARAMS);
+        pGr.addQuery('request', reqSysId);
+        pGr.query();
+
+        while (pGr.next()) {
+            var mGr = new GlideRecord(this.TABLES.RISK_MATRIX);
+            if (mGr.get(pGr.getValue('risk_parameter'))) {
+                var score  = parseFloat(mGr.getValue('score_value'))        || 0;
+                var weight = parseFloat(mGr.getValue('weight_percentage')) || 0;
+                rawScore += score * weight;
+                totalMax += 10 * weight;
+            }
+        }
+        return totalMax > 0 ? parseFloat((rawScore / totalMax).toFixed(4)) : 0;
+    },
+
+    // P2 from an in-memory grouped-parameters structure (pre-submit preview,
+    // shared by the client preview action so it matches post-submit exactly).
+    calculateP2FromParams: function(groupedParameters, segment) {
+        var self = this;
+        var rawScore = 0, totalMax = 0;
+
+        for (var cat in groupedParameters) {
+            var arr = groupedParameters[cat];
+            for (var i = 0; i < arr.length; i++) {
+                var p = arr[i];
+                if (!p.selectedValue || !self.isParamRelevant(p, segment)) continue;
+                var opt = null;
+                for (var j = 0; j < p.options.length; j++) {
+                    if (p.options[j].sys_id === p.selectedValue) { opt = p.options[j]; break; }
+                }
+                if (opt) {
+                    rawScore += (opt.score * opt.weight);
+                    totalMax += (10 * opt.weight);
+                }
+            }
+        }
+        return totalMax > 0 ? (rawScore / totalMax) : 0;
+    },
+
+    // =========================================================
+    // Full batch/PAN-level rollup — used both for the submit-time
+    // persistence step AND (read-only) for the live Step 4 preview,
+    // so the numbers the user sees are guaranteed to match what's saved.
+    // =========================================================
+    computeReviewSummary: function(opts) {
+        // opts: { pan, isListed, panP1IfListed, sites: [{p1, mpq, rate, siteP2}], externalRatingInput }
+        var self = this;
+        var intR = self.getInternalRating(opts.pan);
+
+        var sumP2Num = 0, sumP2Den = 0, batchSafeLimit = 0, aggregatedP1 = 0, totalP3 = 0;
+        var results = [];
+
+        opts.sites.forEach(function(site) {
+            var p1 = parseFloat(site.p1) || 0;
+            var mpq = parseFloat(site.mpq) || 0;
+            var rate = parseFloat(site.rate) || 1;
+            var siteP2 = site.siteP2;
+
+            sumP2Num += (siteP2 * mpq * rate);
+            sumP2Den += (mpq * rate);
+
+            var extR = self.getExternalRating(opts.externalRatingInput, siteP2);
+            var p3 = self.getP3(extR, intR);
+            var safe = parseFloat((p1 * siteP2 * p3).toFixed(4));
+
+            batchSafeLimit += safe;
+            aggregatedP1 += p1;
+            totalP3 += p3;
+
+            results.push({ p1: p1, p2: siteP2, p3: p3, safeLimit: safe, extR: extR, intR: intR });
+        });
+
+        var batchP2Avg = sumP2Den > 0 ? parseFloat((sumP2Num / sumP2Den).toFixed(4)) : 0;
+        var avgP3 = opts.sites.length > 0 ? parseFloat((totalP3 / opts.sites.length).toFixed(4)) : 0;
+
+        var finalSafe;
+        if (opts.isListed) {
+            finalSafe = parseFloat((opts.panP1IfListed * batchP2Avg * avgP3).toFixed(4));
+        } else {
+            finalSafe = parseFloat(batchSafeLimit.toFixed(4));
+        }
+
+        return {
+            intR: intR,
+            batchP2Avg: batchP2Avg,
+            avgP3: avgP3,
+            finalSafe: finalSafe,
+            aggregatedP1: opts.isListed ? opts.panP1IfListed : aggregatedP1,
+            perSite: results
+        };
+    },
+
+    type: 'CLMRiskScoringEngine'
+};]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-08-26 10:30:16</sys_created_on>
+        <sys_id>646fe2bf2bb2cf104572f3745e91bf3c</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>CLMRiskScoringEngine</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy>read</sys_policy>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_646fe2bf2bb2cf104572f3745e91bf3c</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-08-26 10:30:16</sys_updated_on>
+    </sys_script_include>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sys_script_include_646fe2bf2bb2cf104572f3745e91bf3c</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_script_include"&gt;&lt;sys_script_include action="INSERT_OR_UPDATE"&gt;&lt;access&gt;package_private&lt;/access&gt;&lt;active&gt;true&lt;/active&gt;&lt;api_name&gt;x_birl3_clm.CLMRiskScoringEngine&lt;/api_name&gt;&lt;caller_access/&gt;&lt;client_callable&gt;false&lt;/client_callable&gt;&lt;description/&gt;&lt;mobile_callable&gt;false&lt;/mobile_callable&gt;&lt;name&gt;CLMRiskScoringEngine&lt;/name&gt;&lt;sandbox_callable&gt;false&lt;/sandbox_callable&gt;&lt;script&gt;&lt;![CDATA[var CLMRiskScoringEngine = Class.create();
+CLMRiskScoringEngine.prototype = {
+    initialize: function() {
+        this.TABLES = {
+            CUSTOMER:     'x_birl3_clm_clm_customer_master1',
+            OUTSTANDING:  'x_birl3_clm_clm_aging_snapshot',
+            RISK_MATRIX:  'x_birl3_clm_risk_parameter_matrix',
+            REQ_PARAMS:   'x_birl3_clm_request_parameters',
+            SITE_REQUEST: 'x_birl3_clm_nt_site_request'
+        };
+
+        this.RATING_BANDS = {
+            A: ['AAA', 'AA+', 'AA', 'AA-', 'A+', 'A', 'A-'],
+            B: ['BBB+', 'BBB', 'BBB-', 'BB+', 'BB', 'BB-'],
+            C: ['BB-', 'B+', 'B', 'B-', 'CCC', 'CC', 'C', 'D']
+        };
+
+        this.P3_GRID = {
+            'A': { 'A': 1.00, 'B': 0.75, 'C': 0.00 },
+            'B': { 'A': 0.75, 'B': 0.60, 'C': 0.00 },
+            'C': { 'A': 0.00, 'B': 0.00, 'C': 0.00 }
+        };
+    },
+
+    // =========================================================
+    // THRESHOLDS — single source of truth, driven by sys_properties
+    // =========================================================
+    getThresholds: function() {
+        return {
+            cement:       parseFloat(gs.getProperty('x_birl3_clm.threshold.cement', '5000000')),
+            defaultSeg:   parseFloat(gs.getProperty('x_birl3_clm.threshold.default', '2500000')),
+            crossSegment: parseFloat(gs.getProperty('x_birl3_clm.threshold.cross_segment', '15000000'))
+        };
+    },
+
+    getToolWorkingThreshold: function(segment) {
+        var t = this.getThresholds();
+        return (segment === 'Cement') ? t.cement : t.defaultSeg;
+    },
+
+    // =========================================================
+    // PARAMETER RELEVANCE — data-driven via segment_tag field
+    // Falls back to name substring match only if segment_tag is
+    // not populated on the record (migration safety net).
+    // =========================================================
+    isParamRelevant: function(param, segment) {
+        var tag = (param.segmentTag || '').trim();
+
+        if (tag) {
+            return tag === 'All' || tag === segment;
+        }
+
+        // Fallback for records not yet migrated to segment_tag
+        var name = (param.name || '').toLowerCase();
+        var isCem = name.indexOf('cement') !== -1;
+        var isRmc = name.indexOf('rmc') !== -1;
+        var isBpd = name.indexOf('bpd') !== -1;
+        if (!isCem &amp;&amp; !isRmc &amp;&amp; !isBpd) return true;
+        if (isCem &amp;&amp; segment === 'Cement') return true;
+        if (isRmc &amp;&amp; segment === 'RMC') return true;
+        if (isBpd &amp;&amp; segment === 'BPD') return true;
+        return false;
+    },
+
+    // =========================================================
+    // NUMERIC BUCKET EVALUATION — structured fields first,
+    // falls back to legacy label parsing if min/max not set.
+    // =========================================================
+    evaluateNumberCondition: function(optionsArray, valueToCheck) {
+        var val = parseFloat(valueToCheck);
+        if (isNaN(val)) return '';
+
+        for (var i = 0; i &lt; optionsArray.length; i++) {
+            var opt = optionsArray[i];
+
+            if (opt.operator) {
+                switch (opt.operator) {
+                    case 'gte':     if (val &gt;= opt.minValue) return opt.sys_id; break;
+                    case 'lte':     if (val &lt;= opt.maxValue) return opt.sys_id; break;
+                    case 'gt':      if (val &gt;  opt.minValue) return opt.sys_id; break;
+                    case 'lt':      if (val &lt;  opt.maxValue) return opt.sys_id; break;
+                    case 'between': if (val &gt;= opt.minValue &amp;&amp; val &lt;= opt.maxValue) return opt.sys_id; break;
+                }
+                continue;
+            }
+
+            // Legacy fallback: parse the label text
+            var match = this._evaluateFromLabel(opt.label, val);
+            if (match) return opt.sys_id;
+        }
+        return '';
+    },
+
+    _evaluateFromLabel: function(label, val) {
+        var cleanLabel = (label || '').toLowerCase().split('(score')[0].replace(/,/g, '').trim();
+
+        if (cleanLabel.indexOf('-') !== -1 || cleanLabel.indexOf('to') !== -1 || cleanLabel.indexOf('between') !== -1) {
+            var rangeMatch = cleanLabel.match(/([\d.]+)\s*(?:-|to|and)\s*([\d.]+)/);
+            if (rangeMatch) {
+                var min = parseFloat(rangeMatch[1]);
+                var max = parseFloat(rangeMatch[2]);
+                return (val &gt;= min &amp;&amp; val &lt;= max);
+            }
+        }
+
+        var singleMatch = cleanLabel.match(/([\d.]+)/);
+        if (singleMatch) {
+            var numVal = parseFloat(singleMatch[1]);
+            if (cleanLabel.indexOf('&gt;=') !== -1) return val &gt;= numVal;
+            if (cleanLabel.indexOf('&lt;=') !== -1) return val &lt;= numVal;
+            if (cleanLabel.indexOf('=') === -1 &amp;&amp; (cleanLabel.indexOf('&gt;') !== -1 || cleanLabel.indexOf('greater') !== -1 || cleanLabel.indexOf('above') !== -1 || cleanLabel.indexOf('more') !== -1)) return val &gt; numVal;
+            if (cleanLabel.indexOf('=') === -1 &amp;&amp; (cleanLabel.indexOf('&lt;') !== -1 || cleanLabel.indexOf('less') !== -1 || cleanLabel.indexOf('below') !== -1)) return val &lt; numVal;
+        }
+        return false;
+    },
+
+    // =========================================================
+    // RATINGS
+    // =========================================================
+    getExternalRating: function(ratingStr, p2Score) {
+        ratingStr = (ratingStr || '').toUpperCase().trim();
+        if (ratingStr) {
+            for (var grade in this.RATING_BANDS) {
+                var bands = this.RATING_BANDS[grade];
+                for (var k = 0; k &lt; bands.length; k++) {
+                    if (ratingStr.indexOf(bands[k]) &gt; -1) return grade;
+                }
+            }
+        }
+        var p2Pct = p2Score * 100;
+        if (p2Pct &gt;= 61) return 'A';
+        if (p2Pct &gt;= 31) return 'B';
+        return 'C';
+    },
+
+    getInternalRating: function(panValue) {
+        var safeL = 0, midM = 0, critN = 0, toxO = 0, recCount = 0;
+
+        var cGr = new GlideRecord(this.TABLES.CUSTOMER);
+        cGr.addQuery('pan', panValue);
+        cGr.query();
+
+        while (cGr.next()) {
+            var custSysId = cGr.getUniqueValue();
+            var oGr = new GlideRecord(this.TABLES.OUTSTANDING);
+            oGr.addQuery('customer', custSysId);
+            oGr.orderByDesc('sys_created_on');
+            oGr.setLimit(6);
+            oGr.query();
+
+            while (oGr.next()) {
+                recCount++;
+                safeL += (parseFloat(oGr.getValue('bucket_0_30_days'))  || 0)
+                       + (parseFloat(oGr.getValue('bucket_31_45_days')) || 0)
+                       + (parseFloat(oGr.getValue('bucket_46_60_days')) || 0);
+                midM  += parseFloat(oGr.getValue('bucket_61_75_days'))  || 0;
+                critN += parseFloat(oGr.getValue('bucket_76_90_days'))  || 0;
+                toxO  += (parseFloat(oGr.getValue('bucket_91_120_days'))  || 0)
+                       + (parseFloat(oGr.getValue('bucket_121_180_days')) || 0)
+                       + (parseFloat(oGr.getValue('bucket_gt120_days'))   || 0);
+            }
+        }
+
+        return this._rateFromBuckets(safeL, midM, critN, toxO, recCount);
+    },
+
+    // Same bucket math, usable directly by the widget's already-fetched
+    // in-memory bucket data (avoids re-querying the DB for the live preview).
+    getInternalRatingFromBuckets: function(customers) {
+        var safeL = 0, midM = 0, critN = 0, toxO = 0, recCount = 0;
+        (customers || []).forEach(function(cust) {
+            (cust.buckets || []).forEach(function(b) {
+                recCount++;
+                safeL += (b.b0_3 || 0) + (b.b4_7 || 0) + (b.b8_21 || 0) + (b.b22_30 || 0) + (b.b31_45 || 0) + (b.b46_60 || 0);
+                midM  += b.b61_75 || 0;
+                critN += b.b76_90 || 0;
+                toxO  += b.b_gt90 || 0;
+            });
+        });
+        return this._rateFromBuckets(safeL, midM, critN, toxO, recCount);
+    },
+
+    _rateFromBuckets: function(safeL, midM, critN, toxO, recCount) {
+        var grand = safeL + midM + critN + toxO;
+        if (grand === 0 || recCount === 0) return 'A';
+
+        var pctL  = (safeL / grand) * 100;
+        var pctCT = ((critN + toxO) / grand) * 100;
+
+        if (pctL &gt;= 80 &amp;&amp; pctCT &lt;= 10) return 'A';
+        if (pctL &gt;= 60 &amp;&amp; pctCT &lt;= 20) return 'B';
+        return 'C';
+    },
+
+    getP3: function(extR, intR) {
+        return (this.P3_GRID[extR] &amp;&amp; this.P3_GRID[extR][intR] !== undefined) ? this.P3_GRID[extR][intR] : 0.00;
+    },
+
+    // =========================================================
+    // P2 (Composite Index) — DB-backed version, used post-submit
+    // once request_parameters records exist.
+    // =========================================================
+    calculateP2FromRequest: function(reqSysId) {
+        var rawScore = 0, totalMax = 0;
+        var pGr = new GlideRecord(this.TABLES.REQ_PARAMS);
+        pGr.addQuery('request', reqSysId);
+        pGr.query();
+
+        while (pGr.next()) {
+            var mGr = new GlideRecord(this.TABLES.RISK_MATRIX);
+            if (mGr.get(pGr.getValue('risk_parameter'))) {
+                var score  = parseFloat(mGr.getValue('score_value'))        || 0;
+                var weight = parseFloat(mGr.getValue('weight_percentage')) || 0;
+                rawScore += score * weight;
+                totalMax += 10 * weight;
+            }
+        }
+        return totalMax &gt; 0 ? parseFloat((rawScore / totalMax).toFixed(4)) : 0;
+    },
+
+    // P2 from an in-memory grouped-parameters structure (pre-submit preview,
+    // shared by the client preview action so it matches post-submit exactly).
+    calculateP2FromParams: function(groupedParameters, segment) {
+        var self = this;
+        var rawScore = 0, totalMax = 0;
+
+        for (var cat in groupedParameters) {
+            var arr = groupedParameters[cat];
+            for (var i = 0; i &lt; arr.length; i++) {
+                var p = arr[i];
+                if (!p.selectedValue || !self.isParamRelevant(p, segment)) continue;
+                var opt = null;
+                for (var j = 0; j &lt; p.options.length; j++) {
+                    if (p.options[j].sys_id === p.selectedValue) { opt = p.options[j]; break; }
+                }
+                if (opt) {
+                    rawScore += (opt.score * opt.weight);
+                    totalMax += (10 * opt.weight);
+                }
+            }
+        }
+        return totalMax &gt; 0 ? (rawScore / totalMax) : 0;
+    },
+
+    // =========================================================
+    // Full batch/PAN-level rollup — used both for the submit-time
+    // persistence step AND (read-only) for the live Step 4 preview,
+    // so the numbers the user sees are guaranteed to match what's saved.
+    // =========================================================
+    computeReviewSummary: function(opts) {
+        // opts: { pan, isListed, panP1IfListed, sites: [{p1, mpq, rate, siteP2}], externalRatingInput }
+        var self = this;
+        var intR = self.getInternalRating(opts.pan);
+
+        var sumP2Num = 0, sumP2Den = 0, batchSafeLimit = 0, aggregatedP1 = 0, totalP3 = 0;
+        var results = [];
+
+        opts.sites.forEach(function(site) {
+            var p1 = parseFloat(site.p1) || 0;
+            var mpq = parseFloat(site.mpq) || 0;
+            var rate = parseFloat(site.rate) || 1;
+            var siteP2 = site.siteP2;
+
+            sumP2Num += (siteP2 * mpq * rate);
+            sumP2Den += (mpq * rate);
+
+            var extR = self.getExternalRating(opts.externalRatingInput, siteP2);
+            var p3 = self.getP3(extR, intR);
+            var safe = parseFloat((p1 * siteP2 * p3).toFixed(4));
+
+            batchSafeLimit += safe;
+            aggregatedP1 += p1;
+            totalP3 += p3;
+
+            results.push({ p1: p1, p2: siteP2, p3: p3, safeLimit: safe, extR: extR, intR: intR });
+        });
+
+        var batchP2Avg = sumP2Den &gt; 0 ? parseFloat((sumP2Num / sumP2Den).toFixed(4)) : 0;
+        var avgP3 = opts.sites.length &gt; 0 ? parseFloat((totalP3 / opts.sites.length).toFixed(4)) : 0;
+
+        var finalSafe;
+        if (opts.isListed) {
+            finalSafe = parseFloat((opts.panP1IfListed * batchP2Avg * avgP3).toFixed(4));
+        } else {
+            finalSafe = parseFloat(batchSafeLimit.toFixed(4));
+        }
+
+        return {
+            intR: intR,
+            batchP2Avg: batchP2Avg,
+            avgP3: avgP3,
+            finalSafe: finalSafe,
+            aggregatedP1: opts.isListed ? opts.panP1IfListed : aggregatedP1,
+            perSite: results
+        };
+    },
+
+    type: 'CLMRiskScoringEngine'
+};]]&gt;&lt;/script&gt;&lt;sys_class_name&gt;sys_script_include&lt;/sys_class_name&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-08-26 10:30:16&lt;/sys_created_on&gt;&lt;sys_id&gt;646fe2bf2bb2cf104572f3745e91bf3c&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_name&gt;CLMRiskScoringEngine&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy&gt;read&lt;/sys_policy&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sys_script_include_646fe2bf2bb2cf104572f3745e91bf3c&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-08-26 10:30:16&lt;/sys_updated_on&gt;&lt;/sys_script_include&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>-1052782456</payload_hash>
+        <record_name>CLMRiskScoringEngine</record_name>
+        <reverted_from/>
+        <source>0d1e00262bb27e104572f3745e91bf51</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-08-26 10:30:16</sys_created_on>
+        <sys_id>ebcf2e332bf2cf104572f3745e91bfbf</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a03d9ede940000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-08-26 10:30:16</sys_updated_on>
+        <type>Script Include</type>
+        <update_guid>abcf2e3393f2cf10f2ba8584c4b7ebbe</update_guid>
+        <update_guid_history>abcf2e3393f2cf10f2ba8584c4b7ebbe:-1052782456</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-08-26 10:32:25</sys_created_on>
+        <sys_db_object display_value="" name="sys_script_include">sys_script_include</sys_db_object>
+        <sys_id>065f2d71bf3d4d9781acfd4fdf301ee9</sys_id>
+        <sys_metadata>646fe2bf2bb2cf104572f3745e91bf3c</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>CLMRiskScoringEngine</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy>read</sys_policy>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sys_script_include_646fe2bf2bb2cf104572f3745e91bf3c</sys_update_name>
+        <sys_update_version display_value="sys_script_include_646fe2bf2bb2cf104572f3745e91bf3c">ebcf2e332bf2cf104572f3745e91bfbf</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-08-26 10:32:25</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

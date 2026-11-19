@@ -1,0 +1,1698 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function ($scope, spUtil, $timeout) {
+  var c = this;
+
+  // ── State ─────────────────────────────────────────────
+  c.panQuery       = '';
+  c.loading        = false;
+  c.errorMsg       = '';
+  c.result         = null;
+  c.activeSeg      = 'ALL';
+  c.expandedCode   = null;
+  c.segTabs        = [];
+  c.filteredCodes  = [];
+  c.suggestions    = [];
+  c.showSuggestions = false;
+  c.selectedIndex  = -1;
+
+  var autocompleteTimer;
+
+  // ── Formatting helpers ────────────────────────────────
+  c.formatINR = function(val) {
+      if (val === undefined || val === null || val === '') return '0.00';
+      var num = parseFloat(val);
+      if (isNaN(num)) return '0.00';
+      return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+
+  // ── Segment tabs ──────────────────────────────────────
+  function buildSegTabs(result) {
+    var counts = { CEMENT: 0, RMC: 0, BPD: 0 };
+    result.codes.forEach(function(code) {
+      if (counts[code.segment] !== undefined) counts[code.segment]++;
+    });
+
+    return [
+      { key: 'ALL',    label: 'All Sites', count: result.codes.length },
+      { key: 'CEMENT', label: 'Cement', count: counts.CEMENT },
+      { key: 'RMC',    label: 'RMC',    count: counts.RMC },
+      { key: 'BPD',    label: 'BPD',    count: counts.BPD }
+    ];
+  }
+
+  // ── Filter ────────────────────────────────────────────
+  function applyFilter() {
+    if (!c.result) return;
+    c.filteredCodes = c.activeSeg === 'ALL'
+      ? c.result.codes
+      : c.result.codes.filter(function (code) { return code.segment === c.activeSeg; });
+  }
+
+  // ── Autocomplete ──────────────────────────────────────
+  c.onPanInput = function () {
+    c.selectedIndex = -1;
+    
+    if (autocompleteTimer) {
+      $timeout.cancel(autocompleteTimer);
+    }
+
+    var query = (c.panQuery || '').trim().toUpperCase();
+    
+    if (query.length < 2) {
+      c.suggestions = [];
+      c.showSuggestions = false;
+      return;
+    }
+
+    autocompleteTimer = $timeout(function () {
+      c.data.action = 'autocomplete';
+      c.data.query = query;
+
+      spUtil.update($scope).then(function () {
+        c.suggestions = c.data.suggestions || [];
+        c.showSuggestions = c.suggestions.length > 0;
+      });
+    }, 300);
+  };
+
+  c.selectSuggestion = function (suggestion) {
+    c.panQuery = suggestion.pan;
+
+    c.suggestions = [];
+    c.showSuggestions = false;
+    c.selectedIndex = -1;
+
+    // Focus back to input for smooth UX
+    $timeout(function () {
+      var input = document.querySelector('.c360-s-input');
+      if (input) {
+        input.focus();
+        input.setSelectionRange(0, input.value.length);
+      }
+    });
+
+    c.search();
+  };
+
+  c.onKeyDown = function ($event) {
+    if (!c.showSuggestions) {
+      if ($event.key === 'Enter') {
+        c.search();
+      }
+      return;
+    }
+
+    switch ($event.key) {
+      case 'ArrowDown':
+        $event.preventDefault();
+        c.selectedIndex = Math.min(c.selectedIndex + 1, c.suggestions.length - 1);
+        break;
+      case 'ArrowUp':
+        $event.preventDefault();
+        c.selectedIndex = Math.max(c.selectedIndex - 1, -1);
+        break;
+      case 'Enter':
+        $event.preventDefault();
+        if (c.selectedIndex >= 0) {
+          c.selectSuggestion(c.suggestions[c.selectedIndex]);
+        } else {
+          c.search();
+        }
+        break;
+      case 'Escape':
+        c.suggestions = [];
+        c.showSuggestions = false;
+        c.selectedIndex = -1;
+        break;
+    }
+  };
+
+  c.hideSuggestions = function () {
+    $timeout(function () {
+      c.suggestions = [];
+      c.showSuggestions = false;
+      c.selectedIndex = -1;
+    }, 200);
+  };
+
+  // ── Public Actions ────────────────────────────────
+  c.switchSeg = function (seg) {
+    c.activeSeg    = seg;
+    c.expandedCode = null;
+    applyFilter();
+  };
+
+  c.toggleCard = function (code) {
+    c.expandedCode = (c.expandedCode === code) ? null : code;
+  };
+
+  c.search = function () {
+    var pan = (c.panQuery || '').trim().toUpperCase();
+
+    if (!pan) {
+      c.errorMsg = 'Please enter a PAN number.';
+      return;
+    }
+    if (pan.length !== 10) {
+      c.errorMsg = 'PAN must be exactly 10 characters (e.g. AKCPC9706D).';
+      return;
+    }
+
+    c.errorMsg       = '';
+    c.loading        = true;
+    c.result         = null;
+    c.expandedCode   = null;
+    c.activeSeg      = 'ALL';
+    c.suggestions    = [];
+    c.showSuggestions = false;
+
+    c.data.pan    = pan;
+    c.data.action = 'search';
+
+    spUtil.update($scope).then(function () {
+      c.loading = false;
+
+      if (c.data.error) {
+        c.errorMsg = c.data.error;
+        return;
+      }
+      
+      c.result  = c.data.result;
+      c.segTabs = buildSegTabs(c.result);
+      applyFilter();
+    });
+  };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* Container &amp; Fonts */
+.abg-widget-container { 
+  background-color: #FFFFFF; 
+  padding: 30px; 
+  border-radius: 8px; 
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06); 
+  font-family: 'Oxygen', Arial, sans-serif; 
+}
+
+/* ── Search with Autocomplete ── */
+.c360-search-block { margin-bottom: 24px; }
+.c360-search-eyebrow { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: #6B6B6B; margin-bottom: 8px; }
+.c360-search-row { display: flex; gap: 8px; max-width: 600px; }
+.c360-s-wrap { position: relative; flex: 1; }
+.c360-s-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); pointer-events: none; z-index: 1; }
+
+.c360-s-input {
+  width: 100%; height: 42px; border: 1.5px solid #EAEAEA; border-radius: 6px;
+  padding: 0 14px 0 38px; font-size: 14px; background: #FAFAF8; color: #333; outline: none; transition: border .2s;
+}
+.c360-s-input:focus { border-color: #1E293B; background: #fff; box-shadow: 0 0 0 3px rgba(30, 41, 59, 0.1); }
+
+/* Autocomplete Dropdown */
+.c360-suggestions {
+  position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px;
+  background: #fff; border: 1.5px solid #EAEAEA; border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,.1); max-height: 280px; overflow-y: auto; z-index: 100;
+}
+.c360-sug-item { padding: 10px 14px; cursor: pointer; border-bottom: 1px solid #F0F0EE; transition: background .1s; }
+.c360-sug-item:last-child { border-bottom: none; }
+.c360-sug-item:hover, .c360-sug-item.selected { background: #f8f9fa; border-left: 3px solid #C8102E; }
+.c360-sug-pan { font-size: 13px; font-weight: 700; color: #333; margin-bottom: 2px; }
+.c360-sug-name { font-size: 11px; color: #6B6B6B; }
+
+.c360-s-btn {
+  height: 42px; padding: 0 24px; background: #C8102E; color: #FFF; border: none; border-radius: 6px;
+  font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; display: flex; align-items: center; gap: 7px; transition: background .2s;
+}
+.c360-s-btn:hover { background: #A00D25; }
+.c360-s-btn:disabled { background: #E0E0E0; color: #9E9E9E; cursor: not-allowed; }
+
+.c360-spinner {
+  width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3);
+  border-top-color: #FFF; border-radius: 50%; animation: c360spin .6s linear infinite; display: inline-block;
+}
+@keyframes c360spin { to { transform: rotate(360deg); } }
+.c360-error { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: #C8102E; font-weight: 600; }
+
+/* ── Empty placeholder ── */
+.c360-empty { text-align: center; padding: 60px 20px; color: #A0A0A0; background: #FAFAF8; border-radius: 8px; border: 1px dashed #EAEAEA; }
+.c360-empty p { font-size: 16px; color: #333; font-weight: 600; margin-bottom: 5px; }
+
+/* ── Profile Header (Sleek Slate Theme) ── */
+.c360-hcard {
+  background: #1E293B; border-radius: 8px; padding: 22px 26px; margin-bottom: 20px;
+  border-top: 4px solid #C8102E; /* ABG Red Accent */
+  display: grid; grid-template-columns: 56px 1fr auto; gap: 18px; align-items: center; color: #FFF;
+}
+.c360-hav {
+  width: 56px; height: 56px; border-radius: 8px; background: #C8102E; color: #FFF;
+  display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 700; flex-shrink: 0;
+}
+.c360-hname { font-size: 20px; font-weight: 700; margin-bottom: 6px; line-height: 1.2; color: #FFF; }
+.c360-hmeta { display: flex; gap: 10px; flex-wrap: wrap; }
+.c360-htag { background: rgba(255,255,255,.1); color: #E2E8F0; font-size: 12px; padding: 4px 10px; border-radius: 20px; display: flex; align-items: center; gap: 4px; }
+.c360-hbadge { background: #334155; color: #F8FAFC; font-size: 10px; font-weight: 700; padding: 4px 12px; border-radius: 4px; letter-spacing: .05em; margin-bottom: 8px; display:inline-block; border: 1px solid #475569;}
+
+/* ── Status Pills &amp; Sections ── */
+.section-title { font-size: 13px; color: #666; letter-spacing: 0.5px; border-bottom: 2px solid #EAEAEA; padding-bottom: 8px; }
+.status-pill { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; display: inline-block; white-space: nowrap;}
+.status-work { background-color: #e2e8f0; color: #0f172a; border: 1px solid #cbd5e1; }
+.shadow-sm { box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
+
+/* Warning Badges */
+.badge-warning { background-color: #ffc107 !important; color: #333 !important; }
+
+/* ── Flexbox Layout Helpers ── */
+.flex-align-center { display: flex; flex-wrap: wrap; align-items: center; }
+
+/* Math Engine Cards */
+.math-card-container { display: flex; flex-wrap: wrap; gap: 15px; }
+.math-card-container &gt; div { flex: 1 1 20%; min-width: 140px; }
+.math-card { background: #fdfdfd; border: 1px solid #e0e0e0; border-left: 4px solid #6c757d; padding: 15px; border-radius: 4px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.02); display: flex; flex-direction: column; justify-content: center; height: 100%; }
+.safe-card { border-color: #28a745 !important; border-left: 4px solid #28a745 !important; }
+.math-title { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+.math-value { font-size: 18px; font-weight: 700; margin: 8px 0 0 0; word-break: break-word; }
+
+/* ── Section header ── */
+.c360-sh { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.c360-sh-label { font-size: 11px; font-weight: 700; color: #6B6B6B; text-transform: uppercase; letter-spacing: .08em; white-space: nowrap; }
+.c360-sh-line { flex: 1; height: 1px; background: #E4E4E0; }
+
+/* ── Segment Pills ── */
+.c360-pills { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.c360-pill { padding: 6px 16px; border-radius: 20px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1.5px solid #EAEAEA; background: #fff; color: #666; transition: all .2s; display: flex; align-items: center; gap: 5px; }
+.c360-pill:hover { border-color: #1E293B; color: #1E293B; }
+.c360-pill.on { background: #1E293B; color: #FFF; border-color: #1E293B; }
+.c360-pill-n { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 10px; background: #EAEAEA; color: #666; }
+.c360-pill.on .c360-pill-n { background: #334155; color: #F8FAFC; }
+
+/* ── Code Cards ── */
+.c360-cards { display: flex; flex-direction: column; gap: 10px; }
+.c360-ccard { background: #fff; border: 1px solid #EAEAEA; border-radius: 6px; overflow: hidden; transition: border .2s, box-shadow .2s; }
+.c360-ccard:hover { border-color: #cbd5e1; }
+.c360-ccard.open { border-color: #1E293B; box-shadow: 0 4px 12px rgba(0,0,0,.08); }
+
+.c360-cmain { padding: 16px 20px; display: grid; grid-template-columns: 48px 1fr auto; gap: 16px; align-items: center; cursor: pointer; user-select: none; }
+
+/* Segment dot */
+.c360-sdot { width: 48px; height: 48px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; letter-spacing: .02em; }
+.c360-sdot.cement { background: #fdf2f2; color: #C8102E; border: 1px solid #fce8ea;}
+.c360-sdot.bpd    { background: #eef6fb; color: #1782c5; border: 1px solid #d2e8f6;}
+.c360-sdot.rmc    { background: #f6eefe; color: #800080; border: 1px solid #ead6fc;}
+
+.c360-ctop { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.c360-ccode { font-size: 14px; font-weight: 700; color: #333; }
+.c360-cname { font-size: 13px; color: #6B6B6B; }
+
+.c360-cbadge { font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: .04em; }
+.c360-cbadge.cement { background: #fce8ea; color: #C8102E; }
+.c360-cbadge.bpd    { background: #eef6fb; color: #1782c5; }
+.c360-cbadge.rmc    { background: #f6eefe; color: #800080; }
+
+.c360-ctag { font-size: 11px; color: #666; background: #F8F9FA; padding: 3px 8px; border-radius: 4px; border: 1px solid #EAEAEA;}
+
+/* Metrics row */
+.c360-cmetrics { display: flex; gap: 24px; flex-wrap: wrap; }
+.c360-cm { display: flex; flex-direction: column; gap: 2px; }
+.c360-cm-l { font-size: 10px; color: #A0A0A0; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+.c360-cm-v { font-size: 14px; font-weight: 700; color: #333; }
+
+.c360-etog { background: none; border: 1px solid #EAEAEA; border-radius: 4px; padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; color: #666; transition: all .2s; }
+.c360-etog:hover, .c360-etog.on { background: #f8f9fa; color: #1E293B; border-color: #1E293B; }
+
+/* ── Detail Panel ── */
+.c360-apanel { border-top: 1px solid #EAEAEA; background: #FAFAF8; }
+.c360-apinner { padding: 20px; }
+
+/* Info strip */
+.c360-info-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; background: #fff; padding: 15px; border-radius: 6px; border: 1px solid #EAEAEA;}
+.c360-is-item { display: flex; flex-direction: column; gap: 4px; }
+.c360-is-label { font-size: 10px; font-weight: 600; text-transform: uppercase; color: #A0A0A0; }
+.c360-is-val { font-size: 13px; font-weight: 600; color: #333; }
+
+/* ── Tables ── */
+.widget-table-wrapper { border-radius: 6px; border: 1px solid #EAEAEA; overflow-x: auto; -webkit-overflow-scrolling: touch;}
+.table-condensed &gt; thead &gt; tr &gt; th { text-transform: uppercase; color: #666; font-size: 10px; border-bottom: 2px solid #EAEAEA;}
+.table-condensed &gt; tbody &gt; tr &gt; td { vertical-align: middle; padding: 10px; }
+
+/* Utilities */
+.slide-down { animation: slideDownFade 0.3s ease-out; }
+@keyframes slideDownFade { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ── Responsive ── */
+@media (max-width: 991px) {
+  .math-card-container &gt; div { flex: 1 1 45%; }
+}
+@media (max-width: 767px) {
+  .abg-widget-container { padding: 15px; }
+  .c360-search-row { flex-direction: column; }
+  .c360-hcard { grid-template-columns: 1fr; text-align: center; gap: 10px; }
+  .c360-hright { align-items: center; }
+  .c360-hmeta { justify-content: center; }
+  .c360-info-strip { grid-template-columns: repeat(2, 1fr); }
+  .c360-cmain { grid-template-columns: 1fr; text-align: left; }
+  .c360-sdot { display: none; } 
+  .c360-cright { align-items: flex-start; margin-top: 10px;}
+  .flex-align-center { flex-direction: column; align-items: stretch; }
+  .m-b-sm-mobile { margin-bottom: 15px !important; }
+  .mobile-left { text-align: left !important; }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>uclm_non_trade_customer_360</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Non-Trade Customer 360</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function () {
+
+  var action = input && input.action ? String(input.action) : '';
+  
+  function getSegmentDisplay(compCode) {
+      if (compCode === 'UTCL') return 'CEMENT';
+      if (compCode === 'URMX') return 'RMC';
+      if (compCode === 'GIL')  return 'BPD';
+      return compCode || 'OTHER';
+  }
+  
+  // ── Autocomplete PAN suggestions ──
+  if (action === 'autocomplete') {
+    var query = input && input.query ? String(input.query).trim().toUpperCase() : '';
+    
+    if (!query || query.length < 2) {
+      data.suggestions = [];
+      return;
+    }
+    
+    var suggestions = [];
+    var seen = {};
+    
+    var gr = new GlideRecord('x_birl3_clm_customer');
+    gr.addEncodedQuery('panSTARTSWITH' + query + '^ORnameLIKE' + query);
+    gr.orderBy('pan');
+    gr.setLimit(20);
+    gr.query();
+    
+    while (gr.next()) {
+      var pan = String(gr.getValue('pan')).trim();
+      var name = String(gr.getValue('group_customer_name') || gr.getValue('name')).trim();
+      
+      if (!seen[pan]) {
+        seen[pan] = true;
+        suggestions.push({
+          pan: pan,
+          name: name
+        });
+      }
+    }
+    
+    data.suggestions = suggestions;
+    return;
+  }
+
+  // ── Full Customer 360 Search by PAN ──
+  if (action === 'search') {
+      var searchPan = input.pan ? String(input.pan).trim().toUpperCase() : '';
+
+      if (!searchPan) {
+        data.error = 'PAN number is required.';
+        return;
+      }
+
+      var grCust = new GlideRecord('x_birl3_clm_customer');
+      grCust.addQuery('pan', searchPan);
+      grCust.orderBy('city');
+      grCust.query();
+
+      if (!grCust.hasNext()) {
+        data.error = 'No records found for PAN: ' + searchPan;
+        return;
+      }
+
+      var panTotals = { limit: 0, bg: 0, outstanding: 0, available: 0 };
+      var sites = [];
+      var canonicalName = '';
+      var canonicalCity = '';
+
+      while (grCust.next()) {
+          var siteCode = grCust.getValue('customer_code');
+          var limitVal = parseFloat(grCust.getValue('credit_limit')) || 0;
+          var bgVal    = parseFloat(grCust.getValue('bank_guarantee')) || 0;
+
+          if (!canonicalName) {
+             canonicalName = grCust.getValue('group_customer_name') || grCust.getValue('name');
+             canonicalCity = grCust.getValue('city');
+          }
+
+          panTotals.limit += limitVal;
+          panTotals.bg += bgVal;
+
+          // Fetch 6-Month Outstanding for this Site
+          var outGr = new GlideRecord('x_birl3_clm_customer_outstanding');
+          outGr.addQuery('customer', siteCode);
+          outGr.orderByDesc('sys_created_on');
+          outGr.setLimit(6);
+          outGr.query();
+
+          var siteOutTotal = 0;
+          var buckets = [];
+          var isFirst = true;
+
+          while(outGr.next()) {
+              var b03  = parseFloat(outGr.getValue('ageing0_3')) || 0;
+              var b47  = parseFloat(outGr.getValue('ageing4_7')) || 0;
+              var b821 = parseFloat(outGr.getValue('ageing8_21')) || 0;
+              var b22  = parseFloat(outGr.getValue('ageing22_30')) || 0;
+              var b31  = parseFloat(outGr.getValue('ageing31_45')) || 0;
+              var b46  = parseFloat(outGr.getValue('ageing46_60')) || 0;
+              var b61  = parseFloat(outGr.getValue('ageing61_75')) || 0;
+              var b76  = parseFloat(outGr.getValue('ageing76_90')) || 0;
+              var bgt  = parseFloat(outGr.getValue('ageing_gt90')) || 0;
+
+              var tot = b03 + b47 + b821 + b22 + b31 + b46 + b61 + b76 + bgt;
+              
+              if (isFirst) {
+                  siteOutTotal = tot;
+                  panTotals.outstanding += tot;
+                  isFirst = false;
+              }
+
+              buckets.push({
+                  month: outGr.getValue('sys_created_on').split(' ')[0],
+                  safe: b03 + b47 + b821 + b22 + b31 + b46,
+                  warning: b61,
+                  critical: b76,
+                  toxic: bgt,
+                  total: tot
+              });
+          }
+
+          // Check if this specific site has an active pending limit request
+          var siteReq = new GlideRecord('x_birl3_clm_non_trade_clr');
+          siteReq.addQuery('customer_code', grCust.getUniqueValue());
+          siteReq.addEncodedQuery('batch_id.approval!=approved^batch_id.approval!=rejected^batch_id.approval!=cancelled');
+          siteReq.query();
+          var activeReqObj = null;
+          if (siteReq.next()) {
+               var sPendingWith = 'System Routing';
+               var sAppGr = new GlideRecord('sysapproval_approver');
+               sAppGr.addQuery('sysapproval', siteReq.getUniqueValue());
+               sAppGr.addQuery('state', 'requested');
+               sAppGr.query();
+               if (sAppGr.next()) {
+                   sPendingWith = sAppGr.getDisplayValue('approver');
+               } else {
+                   // Fallback to Batch-level approval if site is not currently individually routed
+                   var pAppGr = new GlideRecord('sysapproval_approver');
+                   pAppGr.addQuery('sysapproval', siteReq.getValue('batch_id'));
+                   pAppGr.addQuery('state', 'requested');
+                   pAppGr.query();
+                   if(pAppGr.next()) {
+                       sPendingWith = pAppGr.getDisplayValue('approver') + ' (Batch Level)';
+                   }
+               }
+
+               activeReqObj = {
+                   number: siteReq.getDisplayValue('number') || siteReq.batch_id.getDisplayValue(),
+                   state: siteReq.getDisplayValue('approval'),
+                   pending_with: sPendingWith,
+                   desired: parseFloat(siteReq.getValue('site_desired_limit') || 0),
+                   safe: parseFloat(siteReq.getValue('safe_allowable_limit') || 0)
+               };
+          }
+
+          sites.push({
+               sys_id: grCust.getUniqueValue(),
+               code: siteCode,
+               name: grCust.getValue('name'),
+               segment: getSegmentDisplay(grCust.getValue('company_code')),
+               depot: grCust.getValue('sales_office'),
+               zone: grCust.getValue('customer_group'),
+               region: grCust.getValue('cg4'),
+               city: grCust.getValue('city'),
+               limit: limitVal,
+               bg: bgVal,
+               outstanding: siteOutTotal,
+               available: (limitVal - siteOutTotal),
+               buckets: buckets,
+               activeReq: activeReqObj
+          });
+      }
+
+      panTotals.available = panTotals.limit - panTotals.outstanding;
+
+      // Fetch PAN-Level Active Batch Workflow
+      var activeBatchObj = null;
+      var batchGr = new GlideRecord('x_birl3_clm_batch_request');
+      batchGr.addQuery('pan', searchPan);
+      batchGr.addEncodedQuery('approval!=approved^approval!=rejected^approval!=cancelled');
+      batchGr.orderByDesc('sys_created_on');
+      batchGr.setLimit(1);
+      batchGr.query();
+      if(batchGr.next()) {
+          var bPendingWith = 'System Routing';
+          var bAppGr = new GlideRecord('sysapproval_approver');
+          bAppGr.addQuery('sysapproval', batchGr.getUniqueValue());
+          bAppGr.addQuery('state', 'requested');
+          bAppGr.query();
+          if(bAppGr.next()) {
+              bPendingWith = bAppGr.getDisplayValue('approver');
+          }
+
+          activeBatchObj = {
+              sys_id: batchGr.getUniqueValue(),
+              number: batchGr.getValue('number'),
+              state: batchGr.getDisplayValue('approval'),
+              pending_with: bPendingWith,
+              desired: parseFloat(batchGr.getValue('total_desired_limit') || 0),
+              safe: parseFloat(batchGr.getValue('safe_allowable_limit') || 0),
+              created_on: batchGr.getValue('sys_created_on').split(' ')[0],
+              created_by: batchGr.getDisplayValue('sys_created_by')
+          };
+      }
+
+      data.result = {
+          name: canonicalName || 'Unknown Corporate Entity',
+          initials: (canonicalName || 'CE').substring(0, 2).toUpperCase(),
+          pan: searchPan,
+          city: canonicalCity,
+          codes: sites,
+          totals: panTotals,
+          activeBatch: activeBatchObj
+      };
+  }
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-04-17 11:14:53</sys_created_on>
+        <sys_id>ebb1d83d97104314be31fa17f053af69</sys_id>
+        <sys_mod_count>58</sys_mod_count>
+        <sys_name>UCLM Non-Trade Customer 360</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_ebb1d83d97104314be31fa17f053af69</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-06 05:27:07</sys_updated_on>
+        <template><![CDATA[<div class="abg-widget-container">
+
+  <div class="c360-search-block">
+    <div class="c360-search-eyebrow">Customer 360 — Corporate Overview</div>
+    <div class="c360-search-row">
+      <div class="c360-s-wrap">
+        <svg class="c360-s-icon" width="16" height="16" fill="none" stroke="#9E9E9E" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input
+          class="c360-s-input"
+          type="text"
+          ng-model="c.panQuery"
+          ng-change="c.onPanInput()"
+          ng-keydown="c.onKeyDown($event)"
+          ng-blur="c.hideSuggestions()"
+          placeholder="Search by PAN Number or Customer Name..."
+          style="text-transform:uppercase"
+          autocomplete="off"
+        />
+        
+        <div class="c360-suggestions" ng-if="c.showSuggestions">
+          <div 
+            class="c360-sug-item" 
+            ng-class="{selected: $index === c.selectedIndex}"
+            ng-repeat="sug in c.suggestions"
+            ng-mousedown="c.selectSuggestion(sug)">
+            <div class="c360-sug-pan">{{sug.pan}}</div>
+            <div class="c360-sug-name">{{sug.name}}</div>
+          </div>
+        </div>
+      </div>
+      
+      <button class="c360-s-btn" ng-click="c.search()" ng-disabled="c.loading">
+        <svg ng-if="!c.loading" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <span ng-if="c.loading" class="c360-spinner"></span>
+        {{c.loading ? 'Searching...' : 'Search'}}
+      </button>
+    </div>
+    
+    <div class="c360-error" ng-if="c.errorMsg">
+      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      {{c.errorMsg}}
+    </div>
+  </div>
+
+  <div class="c360-empty" ng-if="!c.result && !c.loading && !c.errorMsg">
+    <i class="fa fa-globe" style="font-size: 48px; color: #EAEAEA; margin-bottom: 15px;"></i>
+    <p>Search a PAN to view the complete Customer 360 Profile</p>
+    <small>Includes Limits, Outstanding, Aging, and Ongoing Workflow Approvals</small>
+  </div>
+
+  <div class="slide-down" ng-if="c.result">
+
+    <div class="c360-hcard shadow-sm">
+      <div class="c360-hav">{{c.result.initials}}</div>
+      <div class="c360-hinfo">
+        <div class="c360-hname">{{c.result.name}}</div>
+        <div class="c360-hmeta">
+          <span class="c360-htag">
+            <i class="fa fa-id-card-o"></i> PAN: &nbsp;<b>{{c.result.pan}}</b>
+          </span>
+        </div>
+      </div>
+      <div class="c360-hright text-right">
+        <span class="c360-hbadge"><i class="fa fa-building"></i> CORPORATE ENTITY</span>
+        <span class="c360-hcount">Consolidates {{c.result.codes.length}} Site Code(s)</span>
+      </div>
+    </div>
+
+    <div class="alert alert-warning shadow-sm flex-align-center" style="border-left: 4px solid #ffc107; background-color: #fffdf6;" ng-if="c.result.activeBatch">
+      <div class="col-xs-12 col-sm-8 m-b-sm-mobile" style="padding-left: 0;">
+        <h5 class="m-t-none m-b-xs" style="color: #856404; font-weight: 700;">
+          <i class="fa fa-refresh fa-spin"></i> Active Limit Enhancement in Progress
+        </h5>
+        <p class="m-b-none text-muted" style="font-size: 13px;">Request <strong>{{c.result.activeBatch.number}}</strong> is currently pending approval with: <strong style="color: #333;">{{c.result.activeBatch.pending_with}}</strong>.</p>
+      </div>
+      <div class="col-xs-12 col-sm-4 text-right mobile-left" style="padding-right: 0;">
+        <span class="status-pill status-work" style="font-size: 12px;">State: {{c.result.activeBatch.state}}</span>
+      </div>
+    </div>
+
+    <h4 class="font-weight-bold m-b-sm m-t-lg text-uppercase section-title">PAN-Level Aggregations</h4>
+
+    <div class="math-card-container m-b-lg">
+      <div class="math-card" style="border-left: 4px solid #1782c5;">
+        <div class="math-title" style="color:#1782c5;">Total Credit Limit</div>
+        <div class="math-value">₹ {{c.formatINR(c.result.totals.limit)}}</div>
+      </div>
+      <div class="math-card safe-card">
+        <div class="math-title text-success">Total Collateral (BG/LC)</div>
+        <div class="math-value text-success">₹ {{c.formatINR(c.result.totals.bg)}}</div>
+      </div>
+      <div class="math-card" style="border-left: 4px solid #C8102E;">
+        <div class="math-title text-danger">Total Outstanding</div>
+        <div class="math-value text-danger">₹ {{c.formatINR(c.result.totals.outstanding)}}</div>
+      </div>
+      <div class="math-card" style="border-left: 4px solid #666;">
+        <div class="math-title text-muted">Available Exposure Limit</div>
+        <div class="math-value text-dark">₹ {{c.formatINR(c.result.totals.available)}}</div>
+      </div>
+    </div>
+
+    <div class="c360-sh">
+      <span class="c360-sh-label">Child Sites Directory</span>
+      <div class="c360-sh-line"></div>
+    </div>
+    <div class="c360-pills">
+      <button
+        class="c360-pill"
+        ng-class="{on: c.activeSeg === seg.key}"
+        ng-repeat="seg in c.segTabs"
+        ng-click="c.switchSeg(seg.key)">
+        {{seg.label}}&nbsp;<span class="c360-pill-n">{{seg.count}}</span>
+      </button>
+    </div>
+
+    <div class="c360-cards">
+      <div
+        class="c360-ccard"
+        ng-class="{open: c.expandedCode === code.code}"
+        ng-repeat="code in c.filteredCodes">
+
+        <div class="c360-cmain" ng-click="c.toggleCard(code.code)">
+          <div class="c360-sdot" ng-class="code.segment.toLowerCase()">{{code.segment.substring(0,3)}}</div>
+          <div class="c360-cbody">
+            <div class="c360-ctop">
+              <span class="c360-ccode">{{code.code}}</span>
+              <span class="c360-cbadge" ng-class="code.segment.toLowerCase()">{{code.segment}}</span>
+              <span class="c360-cname">{{code.name}}</span>
+              <span class="c360-ctag" ng-if="code.depot">{{code.depot}}</span>
+              <span class="badge badge-warning" ng-if="code.activeReq" style="font-size: 10px; margin-left: 5px; color: #333 !important; font-weight: 700;">
+                <i class="fa fa-clock-o"></i> Pending: {{code.activeReq.pending_with}}
+              </span>
+            </div>
+            <div class="c360-cmetrics">
+              <div class="c360-cm">
+                <div class="c360-cm-l">Credit Limit</div>
+                <div class="c360-cm-v">₹ {{c.formatINR(code.limit)}}</div>
+              </div>
+              <div class="c360-cm">
+                <div class="c360-cm-l">Outstanding</div>
+                <div class="c360-cm-v text-danger">₹ {{c.formatINR(code.outstanding)}}</div>
+              </div>
+              <div class="c360-cm">
+                <div class="c360-cm-l">Available</div>
+                <div class="c360-cm-v text-success">₹ {{c.formatINR(code.available)}}</div>
+              </div>
+            </div>
+          </div>
+          <div class="c360-cright">
+            <button class="c360-etog" ng-class="{on: c.expandedCode === code.code}" ng-click="$event.stopPropagation(); c.toggleCard(code.code)">
+              <i class="fa" ng-class="c.expandedCode === code.code ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+              Details
+            </button>
+          </div>
+        </div>
+
+        <div class="c360-apanel slide-down" ng-if="c.expandedCode === code.code">
+          <div class="c360-apinner">
+            
+            <h5 class="font-weight-bold text-uppercase m-t-none m-b-sm" style="font-size:11px; color:#1E293B;"><i class="fa fa-info-circle"></i> Geographic & Master Data</h5>
+            <div class="c360-info-strip m-b-md">
+              <div class="c360-is-item">
+                <div class="c360-is-label">Zone</div>
+                <div class="c360-is-val">{{code.zone || '—'}}</div>
+              </div>
+              <div class="c360-is-item">
+                <div class="c360-is-label">Region</div>
+                <div class="c360-is-val">{{code.region || '—'}}</div>
+              </div>
+              <div class="c360-is-item">
+                <div class="c360-is-label">City</div>
+                <div class="c360-is-val">{{code.city || '—'}}</div>
+              </div>
+              <div class="c360-is-item">
+                <div class="c360-is-label">Active BG/LC</div>
+                <div class="c360-is-val text-success font-weight-bold">₹ {{c.formatINR(code.bg)}}</div>
+              </div>
+            </div>
+
+            <h5 class="font-weight-bold text-uppercase m-t-md m-b-sm" style="font-size:11px; color:#1E293B;"><i class="fa fa-bar-chart"></i> 6-Month Trailing Outstanding</h5>
+            <div class="table-responsive widget-table-wrapper m-b-none">
+              <table class="table table-bordered table-condensed m-b-none" style="font-size: 11px; background-color: #fff;">
+                <thead style="background-color: #f8f9fa;">
+                  <tr>
+                    <th>Month</th>
+                    <th class="text-right">Safe (0-60)</th>
+                    <th class="text-right">Warning (61-75)</th>
+                    <th class="text-right">Critical (76-90)</th>
+                    <th class="text-right text-danger">Toxic (>90)</th>
+                    <th class="text-right bg-light">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr ng-repeat="b in code.buckets">
+                    <td class="font-weight-bold">{{::b.month}}</td>
+                    <td class="text-right text-success">₹{{c.formatINR(b.safe)}}</td>
+                    <td class="text-right text-warning">₹{{c.formatINR(b.warning)}}</td>
+                    <td class="text-right text-danger">₹{{c.formatINR(b.critical)}}</td>
+                    <td class="text-right text-danger font-weight-bold">₹{{c.formatINR(b.toxic)}}</td>
+                    <td class="text-right bg-light font-weight-bold">₹{{c.formatINR(b.total)}}</td>
+                  </tr>
+                  <tr ng-if="code.buckets.length === 0">
+                    <td colspan="6" class="text-center text-muted p-md">No historical outstanding data available for this site code.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="alert alert-info m-t-md m-b-none flex-align-center" style="border-left: 4px solid #1782c5; background-color: #f0f8ff;" ng-if="code.activeReq">
+              <div class="col-xs-12 col-sm-8" style="padding-left:0;">
+                <strong style="color: #004085;"><i class="fa fa-info-circle"></i> Site Limit Request Pending</strong>
+                <p class="m-b-none text-muted" style="font-size:12px; margin-top: 4px;">
+                  This site is part of Batch {{code.activeReq.number}} (State: {{code.activeReq.state}}).<br>
+                  Currently Pending With: <strong style="color: #333;">{{code.activeReq.pending_with}}</strong><br>
+                  Desired: <strong>₹ {{c.formatINR(code.activeReq.desired)}}</strong> | Safe Limit: <strong class="text-success">₹ {{c.formatINR(code.activeReq.safe)}}</strong>
+                </p>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>ebb1d83d97104314be31fa17f053af69</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-04-17 11:14:53</sys_created_on>
+        <sys_id>afb1d83d97104314be31fa17f053af70</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-04-17 11:14:53</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_ebb1d83d97104314be31fa17f053af69</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function ($scope, spUtil, $timeout) {
+  var c = this;
+
+  // ── State ─────────────────────────────────────────────
+  c.panQuery       = '';
+  c.loading        = false;
+  c.errorMsg       = '';
+  c.result         = null;
+  c.activeSeg      = 'ALL';
+  c.expandedCode   = null;
+  c.segTabs        = [];
+  c.filteredCodes  = [];
+  c.suggestions    = [];
+  c.showSuggestions = false;
+  c.selectedIndex  = -1;
+
+  var autocompleteTimer;
+
+  // ── Formatting helpers ────────────────────────────────
+  c.formatINR = function(val) {
+      if (val === undefined || val === null || val === '') return '0.00';
+      var num = parseFloat(val);
+      if (isNaN(num)) return '0.00';
+      return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+
+  // ── Segment tabs ──────────────────────────────────────
+  function buildSegTabs(result) {
+    var counts = { CEMENT: 0, RMC: 0, BPD: 0 };
+    result.codes.forEach(function(code) {
+      if (counts[code.segment] !== undefined) counts[code.segment]++;
+    });
+
+    return [
+      { key: 'ALL',    label: 'All Sites', count: result.codes.length },
+      { key: 'CEMENT', label: 'Cement', count: counts.CEMENT },
+      { key: 'RMC',    label: 'RMC',    count: counts.RMC },
+      { key: 'BPD',    label: 'BPD',    count: counts.BPD }
+    ];
+  }
+
+  // ── Filter ────────────────────────────────────────────
+  function applyFilter() {
+    if (!c.result) return;
+    c.filteredCodes = c.activeSeg === 'ALL'
+      ? c.result.codes
+      : c.result.codes.filter(function (code) { return code.segment === c.activeSeg; });
+  }
+
+  // ── Autocomplete ──────────────────────────────────────
+  c.onPanInput = function () {
+    c.selectedIndex = -1;
+    
+    if (autocompleteTimer) {
+      $timeout.cancel(autocompleteTimer);
+    }
+
+    var query = (c.panQuery || '').trim().toUpperCase();
+    
+    if (query.length &lt; 2) {
+      c.suggestions = [];
+      c.showSuggestions = false;
+      return;
+    }
+
+    autocompleteTimer = $timeout(function () {
+      c.data.action = 'autocomplete';
+      c.data.query = query;
+
+      spUtil.update($scope).then(function () {
+        c.suggestions = c.data.suggestions || [];
+        c.showSuggestions = c.suggestions.length &gt; 0;
+      });
+    }, 300);
+  };
+
+  c.selectSuggestion = function (suggestion) {
+    c.panQuery = suggestion.pan;
+
+    c.suggestions = [];
+    c.showSuggestions = false;
+    c.selectedIndex = -1;
+
+    // Focus back to input for smooth UX
+    $timeout(function () {
+      var input = document.querySelector('.c360-s-input');
+      if (input) {
+        input.focus();
+        input.setSelectionRange(0, input.value.length);
+      }
+    });
+
+    c.search();
+  };
+
+  c.onKeyDown = function ($event) {
+    if (!c.showSuggestions) {
+      if ($event.key === 'Enter') {
+        c.search();
+      }
+      return;
+    }
+
+    switch ($event.key) {
+      case 'ArrowDown':
+        $event.preventDefault();
+        c.selectedIndex = Math.min(c.selectedIndex + 1, c.suggestions.length - 1);
+        break;
+      case 'ArrowUp':
+        $event.preventDefault();
+        c.selectedIndex = Math.max(c.selectedIndex - 1, -1);
+        break;
+      case 'Enter':
+        $event.preventDefault();
+        if (c.selectedIndex &gt;= 0) {
+          c.selectSuggestion(c.suggestions[c.selectedIndex]);
+        } else {
+          c.search();
+        }
+        break;
+      case 'Escape':
+        c.suggestions = [];
+        c.showSuggestions = false;
+        c.selectedIndex = -1;
+        break;
+    }
+  };
+
+  c.hideSuggestions = function () {
+    $timeout(function () {
+      c.suggestions = [];
+      c.showSuggestions = false;
+      c.selectedIndex = -1;
+    }, 200);
+  };
+
+  // ── Public Actions ────────────────────────────────
+  c.switchSeg = function (seg) {
+    c.activeSeg    = seg;
+    c.expandedCode = null;
+    applyFilter();
+  };
+
+  c.toggleCard = function (code) {
+    c.expandedCode = (c.expandedCode === code) ? null : code;
+  };
+
+  c.search = function () {
+    var pan = (c.panQuery || '').trim().toUpperCase();
+
+    if (!pan) {
+      c.errorMsg = 'Please enter a PAN number.';
+      return;
+    }
+    if (pan.length !== 10) {
+      c.errorMsg = 'PAN must be exactly 10 characters (e.g. AKCPC9706D).';
+      return;
+    }
+
+    c.errorMsg       = '';
+    c.loading        = true;
+    c.result         = null;
+    c.expandedCode   = null;
+    c.activeSeg      = 'ALL';
+    c.suggestions    = [];
+    c.showSuggestions = false;
+
+    c.data.pan    = pan;
+    c.data.action = 'search';
+
+    spUtil.update($scope).then(function () {
+      c.loading = false;
+
+      if (c.data.error) {
+        c.errorMsg = c.data.error;
+        return;
+      }
+      
+      c.result  = c.data.result;
+      c.segTabs = buildSegTabs(c.result);
+      applyFilter();
+    });
+  };
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;/* Container &amp;amp; Fonts */
+.abg-widget-container { 
+  background-color: #FFFFFF; 
+  padding: 30px; 
+  border-radius: 8px; 
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06); 
+  font-family: 'Oxygen', Arial, sans-serif; 
+}
+
+/* ── Search with Autocomplete ── */
+.c360-search-block { margin-bottom: 24px; }
+.c360-search-eyebrow { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: #6B6B6B; margin-bottom: 8px; }
+.c360-search-row { display: flex; gap: 8px; max-width: 600px; }
+.c360-s-wrap { position: relative; flex: 1; }
+.c360-s-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); pointer-events: none; z-index: 1; }
+
+.c360-s-input {
+  width: 100%; height: 42px; border: 1.5px solid #EAEAEA; border-radius: 6px;
+  padding: 0 14px 0 38px; font-size: 14px; background: #FAFAF8; color: #333; outline: none; transition: border .2s;
+}
+.c360-s-input:focus { border-color: #1E293B; background: #fff; box-shadow: 0 0 0 3px rgba(30, 41, 59, 0.1); }
+
+/* Autocomplete Dropdown */
+.c360-suggestions {
+  position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px;
+  background: #fff; border: 1.5px solid #EAEAEA; border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,.1); max-height: 280px; overflow-y: auto; z-index: 100;
+}
+.c360-sug-item { padding: 10px 14px; cursor: pointer; border-bottom: 1px solid #F0F0EE; transition: background .1s; }
+.c360-sug-item:last-child { border-bottom: none; }
+.c360-sug-item:hover, .c360-sug-item.selected { background: #f8f9fa; border-left: 3px solid #C8102E; }
+.c360-sug-pan { font-size: 13px; font-weight: 700; color: #333; margin-bottom: 2px; }
+.c360-sug-name { font-size: 11px; color: #6B6B6B; }
+
+.c360-s-btn {
+  height: 42px; padding: 0 24px; background: #C8102E; color: #FFF; border: none; border-radius: 6px;
+  font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; display: flex; align-items: center; gap: 7px; transition: background .2s;
+}
+.c360-s-btn:hover { background: #A00D25; }
+.c360-s-btn:disabled { background: #E0E0E0; color: #9E9E9E; cursor: not-allowed; }
+
+.c360-spinner {
+  width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3);
+  border-top-color: #FFF; border-radius: 50%; animation: c360spin .6s linear infinite; display: inline-block;
+}
+@keyframes c360spin { to { transform: rotate(360deg); } }
+.c360-error { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: #C8102E; font-weight: 600; }
+
+/* ── Empty placeholder ── */
+.c360-empty { text-align: center; padding: 60px 20px; color: #A0A0A0; background: #FAFAF8; border-radius: 8px; border: 1px dashed #EAEAEA; }
+.c360-empty p { font-size: 16px; color: #333; font-weight: 600; margin-bottom: 5px; }
+
+/* ── Profile Header (Sleek Slate Theme) ── */
+.c360-hcard {
+  background: #1E293B; border-radius: 8px; padding: 22px 26px; margin-bottom: 20px;
+  border-top: 4px solid #C8102E; /* ABG Red Accent */
+  display: grid; grid-template-columns: 56px 1fr auto; gap: 18px; align-items: center; color: #FFF;
+}
+.c360-hav {
+  width: 56px; height: 56px; border-radius: 8px; background: #C8102E; color: #FFF;
+  display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 700; flex-shrink: 0;
+}
+.c360-hname { font-size: 20px; font-weight: 700; margin-bottom: 6px; line-height: 1.2; color: #FFF; }
+.c360-hmeta { display: flex; gap: 10px; flex-wrap: wrap; }
+.c360-htag { background: rgba(255,255,255,.1); color: #E2E8F0; font-size: 12px; padding: 4px 10px; border-radius: 20px; display: flex; align-items: center; gap: 4px; }
+.c360-hbadge { background: #334155; color: #F8FAFC; font-size: 10px; font-weight: 700; padding: 4px 12px; border-radius: 4px; letter-spacing: .05em; margin-bottom: 8px; display:inline-block; border: 1px solid #475569;}
+
+/* ── Status Pills &amp;amp; Sections ── */
+.section-title { font-size: 13px; color: #666; letter-spacing: 0.5px; border-bottom: 2px solid #EAEAEA; padding-bottom: 8px; }
+.status-pill { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; display: inline-block; white-space: nowrap;}
+.status-work { background-color: #e2e8f0; color: #0f172a; border: 1px solid #cbd5e1; }
+.shadow-sm { box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
+
+/* Warning Badges */
+.badge-warning { background-color: #ffc107 !important; color: #333 !important; }
+
+/* ── Flexbox Layout Helpers ── */
+.flex-align-center { display: flex; flex-wrap: wrap; align-items: center; }
+
+/* Math Engine Cards */
+.math-card-container { display: flex; flex-wrap: wrap; gap: 15px; }
+.math-card-container &amp;gt; div { flex: 1 1 20%; min-width: 140px; }
+.math-card { background: #fdfdfd; border: 1px solid #e0e0e0; border-left: 4px solid #6c757d; padding: 15px; border-radius: 4px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.02); display: flex; flex-direction: column; justify-content: center; height: 100%; }
+.safe-card { border-color: #28a745 !important; border-left: 4px solid #28a745 !important; }
+.math-title { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+.math-value { font-size: 18px; font-weight: 700; margin: 8px 0 0 0; word-break: break-word; }
+
+/* ── Section header ── */
+.c360-sh { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.c360-sh-label { font-size: 11px; font-weight: 700; color: #6B6B6B; text-transform: uppercase; letter-spacing: .08em; white-space: nowrap; }
+.c360-sh-line { flex: 1; height: 1px; background: #E4E4E0; }
+
+/* ── Segment Pills ── */
+.c360-pills { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.c360-pill { padding: 6px 16px; border-radius: 20px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1.5px solid #EAEAEA; background: #fff; color: #666; transition: all .2s; display: flex; align-items: center; gap: 5px; }
+.c360-pill:hover { border-color: #1E293B; color: #1E293B; }
+.c360-pill.on { background: #1E293B; color: #FFF; border-color: #1E293B; }
+.c360-pill-n { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 10px; background: #EAEAEA; color: #666; }
+.c360-pill.on .c360-pill-n { background: #334155; color: #F8FAFC; }
+
+/* ── Code Cards ── */
+.c360-cards { display: flex; flex-direction: column; gap: 10px; }
+.c360-ccard { background: #fff; border: 1px solid #EAEAEA; border-radius: 6px; overflow: hidden; transition: border .2s, box-shadow .2s; }
+.c360-ccard:hover { border-color: #cbd5e1; }
+.c360-ccard.open { border-color: #1E293B; box-shadow: 0 4px 12px rgba(0,0,0,.08); }
+
+.c360-cmain { padding: 16px 20px; display: grid; grid-template-columns: 48px 1fr auto; gap: 16px; align-items: center; cursor: pointer; user-select: none; }
+
+/* Segment dot */
+.c360-sdot { width: 48px; height: 48px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; letter-spacing: .02em; }
+.c360-sdot.cement { background: #fdf2f2; color: #C8102E; border: 1px solid #fce8ea;}
+.c360-sdot.bpd    { background: #eef6fb; color: #1782c5; border: 1px solid #d2e8f6;}
+.c360-sdot.rmc    { background: #f6eefe; color: #800080; border: 1px solid #ead6fc;}
+
+.c360-ctop { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.c360-ccode { font-size: 14px; font-weight: 700; color: #333; }
+.c360-cname { font-size: 13px; color: #6B6B6B; }
+
+.c360-cbadge { font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: .04em; }
+.c360-cbadge.cement { background: #fce8ea; color: #C8102E; }
+.c360-cbadge.bpd    { background: #eef6fb; color: #1782c5; }
+.c360-cbadge.rmc    { background: #f6eefe; color: #800080; }
+
+.c360-ctag { font-size: 11px; color: #666; background: #F8F9FA; padding: 3px 8px; border-radius: 4px; border: 1px solid #EAEAEA;}
+
+/* Metrics row */
+.c360-cmetrics { display: flex; gap: 24px; flex-wrap: wrap; }
+.c360-cm { display: flex; flex-direction: column; gap: 2px; }
+.c360-cm-l { font-size: 10px; color: #A0A0A0; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+.c360-cm-v { font-size: 14px; font-weight: 700; color: #333; }
+
+.c360-etog { background: none; border: 1px solid #EAEAEA; border-radius: 4px; padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; color: #666; transition: all .2s; }
+.c360-etog:hover, .c360-etog.on { background: #f8f9fa; color: #1E293B; border-color: #1E293B; }
+
+/* ── Detail Panel ── */
+.c360-apanel { border-top: 1px solid #EAEAEA; background: #FAFAF8; }
+.c360-apinner { padding: 20px; }
+
+/* Info strip */
+.c360-info-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; background: #fff; padding: 15px; border-radius: 6px; border: 1px solid #EAEAEA;}
+.c360-is-item { display: flex; flex-direction: column; gap: 4px; }
+.c360-is-label { font-size: 10px; font-weight: 600; text-transform: uppercase; color: #A0A0A0; }
+.c360-is-val { font-size: 13px; font-weight: 600; color: #333; }
+
+/* ── Tables ── */
+.widget-table-wrapper { border-radius: 6px; border: 1px solid #EAEAEA; overflow-x: auto; -webkit-overflow-scrolling: touch;}
+.table-condensed &amp;gt; thead &amp;gt; tr &amp;gt; th { text-transform: uppercase; color: #666; font-size: 10px; border-bottom: 2px solid #EAEAEA;}
+.table-condensed &amp;gt; tbody &amp;gt; tr &amp;gt; td { vertical-align: middle; padding: 10px; }
+
+/* Utilities */
+.slide-down { animation: slideDownFade 0.3s ease-out; }
+@keyframes slideDownFade { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ── Responsive ── */
+@media (max-width: 991px) {
+  .math-card-container &amp;gt; div { flex: 1 1 45%; }
+}
+@media (max-width: 767px) {
+  .abg-widget-container { padding: 15px; }
+  .c360-search-row { flex-direction: column; }
+  .c360-hcard { grid-template-columns: 1fr; text-align: center; gap: 10px; }
+  .c360-hright { align-items: center; }
+  .c360-hmeta { justify-content: center; }
+  .c360-info-strip { grid-template-columns: repeat(2, 1fr); }
+  .c360-cmain { grid-template-columns: 1fr; text-align: left; }
+  .c360-sdot { display: none; } 
+  .c360-cright { align-items: flex-start; margin-top: 10px;}
+  .flex-align-center { flex-direction: column; align-items: stretch; }
+  .m-b-sm-mobile { margin-bottom: 15px !important; }
+  .mobile-left { text-align: left !important; }
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id&gt;uclm_non_trade_customer_360&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;UCLM Non-Trade Customer 360&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function () {
+
+  var action = input &amp;&amp; input.action ? String(input.action) : '';
+  
+  function getSegmentDisplay(compCode) {
+      if (compCode === 'UTCL') return 'CEMENT';
+      if (compCode === 'URMX') return 'RMC';
+      if (compCode === 'GIL')  return 'BPD';
+      return compCode || 'OTHER';
+  }
+  
+  // ── Autocomplete PAN suggestions ──
+  if (action === 'autocomplete') {
+    var query = input &amp;&amp; input.query ? String(input.query).trim().toUpperCase() : '';
+    
+    if (!query || query.length &lt; 2) {
+      data.suggestions = [];
+      return;
+    }
+    
+    var suggestions = [];
+    var seen = {};
+    
+    var gr = new GlideRecord('x_birl3_clm_customer');
+    gr.addEncodedQuery('panSTARTSWITH' + query + '^ORnameLIKE' + query);
+    gr.orderBy('pan');
+    gr.setLimit(20);
+    gr.query();
+    
+    while (gr.next()) {
+      var pan = String(gr.getValue('pan')).trim();
+      var name = String(gr.getValue('group_customer_name') || gr.getValue('name')).trim();
+      
+      if (!seen[pan]) {
+        seen[pan] = true;
+        suggestions.push({
+          pan: pan,
+          name: name
+        });
+      }
+    }
+    
+    data.suggestions = suggestions;
+    return;
+  }
+
+  // ── Full Customer 360 Search by PAN ──
+  if (action === 'search') {
+      var searchPan = input.pan ? String(input.pan).trim().toUpperCase() : '';
+
+      if (!searchPan) {
+        data.error = 'PAN number is required.';
+        return;
+      }
+
+      var grCust = new GlideRecord('x_birl3_clm_customer');
+      grCust.addQuery('pan', searchPan);
+      grCust.orderBy('city');
+      grCust.query();
+
+      if (!grCust.hasNext()) {
+        data.error = 'No records found for PAN: ' + searchPan;
+        return;
+      }
+
+      var panTotals = { limit: 0, bg: 0, outstanding: 0, available: 0 };
+      var sites = [];
+      var canonicalName = '';
+      var canonicalCity = '';
+
+      while (grCust.next()) {
+          var siteCode = grCust.getValue('customer_code');
+          var limitVal = parseFloat(grCust.getValue('credit_limit')) || 0;
+          var bgVal    = parseFloat(grCust.getValue('bank_guarantee')) || 0;
+
+          if (!canonicalName) {
+             canonicalName = grCust.getValue('group_customer_name') || grCust.getValue('name');
+             canonicalCity = grCust.getValue('city');
+          }
+
+          panTotals.limit += limitVal;
+          panTotals.bg += bgVal;
+
+          // Fetch 6-Month Outstanding for this Site
+          var outGr = new GlideRecord('x_birl3_clm_customer_outstanding');
+          outGr.addQuery('customer', siteCode);
+          outGr.orderByDesc('sys_created_on');
+          outGr.setLimit(6);
+          outGr.query();
+
+          var siteOutTotal = 0;
+          var buckets = [];
+          var isFirst = true;
+
+          while(outGr.next()) {
+              var b03  = parseFloat(outGr.getValue('ageing0_3')) || 0;
+              var b47  = parseFloat(outGr.getValue('ageing4_7')) || 0;
+              var b821 = parseFloat(outGr.getValue('ageing8_21')) || 0;
+              var b22  = parseFloat(outGr.getValue('ageing22_30')) || 0;
+              var b31  = parseFloat(outGr.getValue('ageing31_45')) || 0;
+              var b46  = parseFloat(outGr.getValue('ageing46_60')) || 0;
+              var b61  = parseFloat(outGr.getValue('ageing61_75')) || 0;
+              var b76  = parseFloat(outGr.getValue('ageing76_90')) || 0;
+              var bgt  = parseFloat(outGr.getValue('ageing_gt90')) || 0;
+
+              var tot = b03 + b47 + b821 + b22 + b31 + b46 + b61 + b76 + bgt;
+              
+              if (isFirst) {
+                  siteOutTotal = tot;
+                  panTotals.outstanding += tot;
+                  isFirst = false;
+              }
+
+              buckets.push({
+                  month: outGr.getValue('sys_created_on').split(' ')[0],
+                  safe: b03 + b47 + b821 + b22 + b31 + b46,
+                  warning: b61,
+                  critical: b76,
+                  toxic: bgt,
+                  total: tot
+              });
+          }
+
+          // Check if this specific site has an active pending limit request
+          var siteReq = new GlideRecord('x_birl3_clm_non_trade_clr');
+          siteReq.addQuery('customer_code', grCust.getUniqueValue());
+          siteReq.addEncodedQuery('batch_id.approval!=approved^batch_id.approval!=rejected^batch_id.approval!=cancelled');
+          siteReq.query();
+          var activeReqObj = null;
+          if (siteReq.next()) {
+               var sPendingWith = 'System Routing';
+               var sAppGr = new GlideRecord('sysapproval_approver');
+               sAppGr.addQuery('sysapproval', siteReq.getUniqueValue());
+               sAppGr.addQuery('state', 'requested');
+               sAppGr.query();
+               if (sAppGr.next()) {
+                   sPendingWith = sAppGr.getDisplayValue('approver');
+               } else {
+                   // Fallback to Batch-level approval if site is not currently individually routed
+                   var pAppGr = new GlideRecord('sysapproval_approver');
+                   pAppGr.addQuery('sysapproval', siteReq.getValue('batch_id'));
+                   pAppGr.addQuery('state', 'requested');
+                   pAppGr.query();
+                   if(pAppGr.next()) {
+                       sPendingWith = pAppGr.getDisplayValue('approver') + ' (Batch Level)';
+                   }
+               }
+
+               activeReqObj = {
+                   number: siteReq.getDisplayValue('number') || siteReq.batch_id.getDisplayValue(),
+                   state: siteReq.getDisplayValue('approval'),
+                   pending_with: sPendingWith,
+                   desired: parseFloat(siteReq.getValue('site_desired_limit') || 0),
+                   safe: parseFloat(siteReq.getValue('safe_allowable_limit') || 0)
+               };
+          }
+
+          sites.push({
+               sys_id: grCust.getUniqueValue(),
+               code: siteCode,
+               name: grCust.getValue('name'),
+               segment: getSegmentDisplay(grCust.getValue('company_code')),
+               depot: grCust.getValue('sales_office'),
+               zone: grCust.getValue('customer_group'),
+               region: grCust.getValue('cg4'),
+               city: grCust.getValue('city'),
+               limit: limitVal,
+               bg: bgVal,
+               outstanding: siteOutTotal,
+               available: (limitVal - siteOutTotal),
+               buckets: buckets,
+               activeReq: activeReqObj
+          });
+      }
+
+      panTotals.available = panTotals.limit - panTotals.outstanding;
+
+      // Fetch PAN-Level Active Batch Workflow
+      var activeBatchObj = null;
+      var batchGr = new GlideRecord('x_birl3_clm_batch_request');
+      batchGr.addQuery('pan', searchPan);
+      batchGr.addEncodedQuery('approval!=approved^approval!=rejected^approval!=cancelled');
+      batchGr.orderByDesc('sys_created_on');
+      batchGr.setLimit(1);
+      batchGr.query();
+      if(batchGr.next()) {
+          var bPendingWith = 'System Routing';
+          var bAppGr = new GlideRecord('sysapproval_approver');
+          bAppGr.addQuery('sysapproval', batchGr.getUniqueValue());
+          bAppGr.addQuery('state', 'requested');
+          bAppGr.query();
+          if(bAppGr.next()) {
+              bPendingWith = bAppGr.getDisplayValue('approver');
+          }
+
+          activeBatchObj = {
+              sys_id: batchGr.getUniqueValue(),
+              number: batchGr.getValue('number'),
+              state: batchGr.getDisplayValue('approval'),
+              pending_with: bPendingWith,
+              desired: parseFloat(batchGr.getValue('total_desired_limit') || 0),
+              safe: parseFloat(batchGr.getValue('safe_allowable_limit') || 0),
+              created_on: batchGr.getValue('sys_created_on').split(' ')[0],
+              created_by: batchGr.getDisplayValue('sys_created_by')
+          };
+      }
+
+      data.result = {
+          name: canonicalName || 'Unknown Corporate Entity',
+          initials: (canonicalName || 'CE').substring(0, 2).toUpperCase(),
+          pan: searchPan,
+          city: canonicalCity,
+          codes: sites,
+          totals: panTotals,
+          activeBatch: activeBatchObj
+      };
+  }
+
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-04-17 11:14:53&lt;/sys_created_on&gt;&lt;sys_id&gt;ebb1d83d97104314be31fa17f053af69&lt;/sys_id&gt;&lt;sys_mod_count&gt;58&lt;/sys_mod_count&gt;&lt;sys_name&gt;UCLM Non-Trade Customer 360&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_ebb1d83d97104314be31fa17f053af69&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-07-06 05:27:07&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="abg-widget-container"&gt;
+
+  &lt;div class="c360-search-block"&gt;
+    &lt;div class="c360-search-eyebrow"&gt;Customer 360 — Corporate Overview&lt;/div&gt;
+    &lt;div class="c360-search-row"&gt;
+      &lt;div class="c360-s-wrap"&gt;
+        &lt;svg class="c360-s-icon" width="16" height="16" fill="none" stroke="#9E9E9E" stroke-width="2" viewBox="0 0 24 24"&gt;
+          &lt;circle cx="11" cy="11" r="8"/&gt;&lt;line x1="21" y1="21" x2="16.65" y2="16.65"/&gt;
+        &lt;/svg&gt;
+        &lt;input
+          class="c360-s-input"
+          type="text"
+          ng-model="c.panQuery"
+          ng-change="c.onPanInput()"
+          ng-keydown="c.onKeyDown($event)"
+          ng-blur="c.hideSuggestions()"
+          placeholder="Search by PAN Number or Customer Name..."
+          style="text-transform:uppercase"
+          autocomplete="off"
+        /&gt;
+        
+        &lt;div class="c360-suggestions" ng-if="c.showSuggestions"&gt;
+          &lt;div 
+            class="c360-sug-item" 
+            ng-class="{selected: $index === c.selectedIndex}"
+            ng-repeat="sug in c.suggestions"
+            ng-mousedown="c.selectSuggestion(sug)"&gt;
+            &lt;div class="c360-sug-pan"&gt;{{sug.pan}}&lt;/div&gt;
+            &lt;div class="c360-sug-name"&gt;{{sug.name}}&lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      
+      &lt;button class="c360-s-btn" ng-click="c.search()" ng-disabled="c.loading"&gt;
+        &lt;svg ng-if="!c.loading" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"&gt;
+          &lt;circle cx="11" cy="11" r="8"/&gt;&lt;line x1="21" y1="21" x2="16.65" y2="16.65"/&gt;
+        &lt;/svg&gt;
+        &lt;span ng-if="c.loading" class="c360-spinner"&gt;&lt;/span&gt;
+        {{c.loading ? 'Searching...' : 'Search'}}
+      &lt;/button&gt;
+    &lt;/div&gt;
+    
+    &lt;div class="c360-error" ng-if="c.errorMsg"&gt;
+      &lt;svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"&gt;
+        &lt;circle cx="12" cy="12" r="10"/&gt;&lt;line x1="12" y1="8" x2="12" y2="12"/&gt;&lt;line x1="12" y1="16" x2="12.01" y2="16"/&gt;
+      &lt;/svg&gt;
+      {{c.errorMsg}}
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;div class="c360-empty" ng-if="!c.result &amp;&amp; !c.loading &amp;&amp; !c.errorMsg"&gt;
+    &lt;i class="fa fa-globe" style="font-size: 48px; color: #EAEAEA; margin-bottom: 15px;"&gt;&lt;/i&gt;
+    &lt;p&gt;Search a PAN to view the complete Customer 360 Profile&lt;/p&gt;
+    &lt;small&gt;Includes Limits, Outstanding, Aging, and Ongoing Workflow Approvals&lt;/small&gt;
+  &lt;/div&gt;
+
+  &lt;div class="slide-down" ng-if="c.result"&gt;
+
+    &lt;div class="c360-hcard shadow-sm"&gt;
+      &lt;div class="c360-hav"&gt;{{c.result.initials}}&lt;/div&gt;
+      &lt;div class="c360-hinfo"&gt;
+        &lt;div class="c360-hname"&gt;{{c.result.name}}&lt;/div&gt;
+        &lt;div class="c360-hmeta"&gt;
+          &lt;span class="c360-htag"&gt;
+            &lt;i class="fa fa-id-card-o"&gt;&lt;/i&gt; PAN: &amp;nbsp;&lt;b&gt;{{c.result.pan}}&lt;/b&gt;
+          &lt;/span&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="c360-hright text-right"&gt;
+        &lt;span class="c360-hbadge"&gt;&lt;i class="fa fa-building"&gt;&lt;/i&gt; CORPORATE ENTITY&lt;/span&gt;
+        &lt;span class="c360-hcount"&gt;Consolidates {{c.result.codes.length}} Site Code(s)&lt;/span&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="alert alert-warning shadow-sm flex-align-center" style="border-left: 4px solid #ffc107; background-color: #fffdf6;" ng-if="c.result.activeBatch"&gt;
+      &lt;div class="col-xs-12 col-sm-8 m-b-sm-mobile" style="padding-left: 0;"&gt;
+        &lt;h5 class="m-t-none m-b-xs" style="color: #856404; font-weight: 700;"&gt;
+          &lt;i class="fa fa-refresh fa-spin"&gt;&lt;/i&gt; Active Limit Enhancement in Progress
+        &lt;/h5&gt;
+        &lt;p class="m-b-none text-muted" style="font-size: 13px;"&gt;Request &lt;strong&gt;{{c.result.activeBatch.number}}&lt;/strong&gt; is currently pending approval with: &lt;strong style="color: #333;"&gt;{{c.result.activeBatch.pending_with}}&lt;/strong&gt;.&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class="col-xs-12 col-sm-4 text-right mobile-left" style="padding-right: 0;"&gt;
+        &lt;span class="status-pill status-work" style="font-size: 12px;"&gt;State: {{c.result.activeBatch.state}}&lt;/span&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;h4 class="font-weight-bold m-b-sm m-t-lg text-uppercase section-title"&gt;PAN-Level Aggregations&lt;/h4&gt;
+
+    &lt;div class="math-card-container m-b-lg"&gt;
+      &lt;div class="math-card" style="border-left: 4px solid #1782c5;"&gt;
+        &lt;div class="math-title" style="color:#1782c5;"&gt;Total Credit Limit&lt;/div&gt;
+        &lt;div class="math-value"&gt;₹ {{c.formatINR(c.result.totals.limit)}}&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="math-card safe-card"&gt;
+        &lt;div class="math-title text-success"&gt;Total Collateral (BG/LC)&lt;/div&gt;
+        &lt;div class="math-value text-success"&gt;₹ {{c.formatINR(c.result.totals.bg)}}&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="math-card" style="border-left: 4px solid #C8102E;"&gt;
+        &lt;div class="math-title text-danger"&gt;Total Outstanding&lt;/div&gt;
+        &lt;div class="math-value text-danger"&gt;₹ {{c.formatINR(c.result.totals.outstanding)}}&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class="math-card" style="border-left: 4px solid #666;"&gt;
+        &lt;div class="math-title text-muted"&gt;Available Exposure Limit&lt;/div&gt;
+        &lt;div class="math-value text-dark"&gt;₹ {{c.formatINR(c.result.totals.available)}}&lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="c360-sh"&gt;
+      &lt;span class="c360-sh-label"&gt;Child Sites Directory&lt;/span&gt;
+      &lt;div class="c360-sh-line"&gt;&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="c360-pills"&gt;
+      &lt;button
+        class="c360-pill"
+        ng-class="{on: c.activeSeg === seg.key}"
+        ng-repeat="seg in c.segTabs"
+        ng-click="c.switchSeg(seg.key)"&gt;
+        {{seg.label}}&amp;nbsp;&lt;span class="c360-pill-n"&gt;{{seg.count}}&lt;/span&gt;
+      &lt;/button&gt;
+    &lt;/div&gt;
+
+    &lt;div class="c360-cards"&gt;
+      &lt;div
+        class="c360-ccard"
+        ng-class="{open: c.expandedCode === code.code}"
+        ng-repeat="code in c.filteredCodes"&gt;
+
+        &lt;div class="c360-cmain" ng-click="c.toggleCard(code.code)"&gt;
+          &lt;div class="c360-sdot" ng-class="code.segment.toLowerCase()"&gt;{{code.segment.substring(0,3)}}&lt;/div&gt;
+          &lt;div class="c360-cbody"&gt;
+            &lt;div class="c360-ctop"&gt;
+              &lt;span class="c360-ccode"&gt;{{code.code}}&lt;/span&gt;
+              &lt;span class="c360-cbadge" ng-class="code.segment.toLowerCase()"&gt;{{code.segment}}&lt;/span&gt;
+              &lt;span class="c360-cname"&gt;{{code.name}}&lt;/span&gt;
+              &lt;span class="c360-ctag" ng-if="code.depot"&gt;{{code.depot}}&lt;/span&gt;
+              &lt;span class="badge badge-warning" ng-if="code.activeReq" style="font-size: 10px; margin-left: 5px; color: #333 !important; font-weight: 700;"&gt;
+                &lt;i class="fa fa-clock-o"&gt;&lt;/i&gt; Pending: {{code.activeReq.pending_with}}
+              &lt;/span&gt;
+            &lt;/div&gt;
+            &lt;div class="c360-cmetrics"&gt;
+              &lt;div class="c360-cm"&gt;
+                &lt;div class="c360-cm-l"&gt;Credit Limit&lt;/div&gt;
+                &lt;div class="c360-cm-v"&gt;₹ {{c.formatINR(code.limit)}}&lt;/div&gt;
+              &lt;/div&gt;
+              &lt;div class="c360-cm"&gt;
+                &lt;div class="c360-cm-l"&gt;Outstanding&lt;/div&gt;
+                &lt;div class="c360-cm-v text-danger"&gt;₹ {{c.formatINR(code.outstanding)}}&lt;/div&gt;
+              &lt;/div&gt;
+              &lt;div class="c360-cm"&gt;
+                &lt;div class="c360-cm-l"&gt;Available&lt;/div&gt;
+                &lt;div class="c360-cm-v text-success"&gt;₹ {{c.formatINR(code.available)}}&lt;/div&gt;
+              &lt;/div&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+          &lt;div class="c360-cright"&gt;
+            &lt;button class="c360-etog" ng-class="{on: c.expandedCode === code.code}" ng-click="$event.stopPropagation(); c.toggleCard(code.code)"&gt;
+              &lt;i class="fa" ng-class="c.expandedCode === code.code ? 'fa-chevron-up' : 'fa-chevron-down'"&gt;&lt;/i&gt;
+              Details
+            &lt;/button&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="c360-apanel slide-down" ng-if="c.expandedCode === code.code"&gt;
+          &lt;div class="c360-apinner"&gt;
+            
+            &lt;h5 class="font-weight-bold text-uppercase m-t-none m-b-sm" style="font-size:11px; color:#1E293B;"&gt;&lt;i class="fa fa-info-circle"&gt;&lt;/i&gt; Geographic &amp; Master Data&lt;/h5&gt;
+            &lt;div class="c360-info-strip m-b-md"&gt;
+              &lt;div class="c360-is-item"&gt;
+                &lt;div class="c360-is-label"&gt;Zone&lt;/div&gt;
+                &lt;div class="c360-is-val"&gt;{{code.zone || '—'}}&lt;/div&gt;
+              &lt;/div&gt;
+              &lt;div class="c360-is-item"&gt;
+                &lt;div class="c360-is-label"&gt;Region&lt;/div&gt;
+                &lt;div class="c360-is-val"&gt;{{code.region || '—'}}&lt;/div&gt;
+              &lt;/div&gt;
+              &lt;div class="c360-is-item"&gt;
+                &lt;div class="c360-is-label"&gt;City&lt;/div&gt;
+                &lt;div class="c360-is-val"&gt;{{code.city || '—'}}&lt;/div&gt;
+              &lt;/div&gt;
+              &lt;div class="c360-is-item"&gt;
+                &lt;div class="c360-is-label"&gt;Active BG/LC&lt;/div&gt;
+                &lt;div class="c360-is-val text-success font-weight-bold"&gt;₹ {{c.formatINR(code.bg)}}&lt;/div&gt;
+              &lt;/div&gt;
+            &lt;/div&gt;
+
+            &lt;h5 class="font-weight-bold text-uppercase m-t-md m-b-sm" style="font-size:11px; color:#1E293B;"&gt;&lt;i class="fa fa-bar-chart"&gt;&lt;/i&gt; 6-Month Trailing Outstanding&lt;/h5&gt;
+            &lt;div class="table-responsive widget-table-wrapper m-b-none"&gt;
+              &lt;table class="table table-bordered table-condensed m-b-none" style="font-size: 11px; background-color: #fff;"&gt;
+                &lt;thead style="background-color: #f8f9fa;"&gt;
+                  &lt;tr&gt;
+                    &lt;th&gt;Month&lt;/th&gt;
+                    &lt;th class="text-right"&gt;Safe (0-60)&lt;/th&gt;
+                    &lt;th class="text-right"&gt;Warning (61-75)&lt;/th&gt;
+                    &lt;th class="text-right"&gt;Critical (76-90)&lt;/th&gt;
+                    &lt;th class="text-right text-danger"&gt;Toxic (&gt;90)&lt;/th&gt;
+                    &lt;th class="text-right bg-light"&gt;Total&lt;/th&gt;
+                  &lt;/tr&gt;
+                &lt;/thead&gt;
+                &lt;tbody&gt;
+                  &lt;tr ng-repeat="b in code.buckets"&gt;
+                    &lt;td class="font-weight-bold"&gt;{{::b.month}}&lt;/td&gt;
+                    &lt;td class="text-right text-success"&gt;₹{{c.formatINR(b.safe)}}&lt;/td&gt;
+                    &lt;td class="text-right text-warning"&gt;₹{{c.formatINR(b.warning)}}&lt;/td&gt;
+                    &lt;td class="text-right text-danger"&gt;₹{{c.formatINR(b.critical)}}&lt;/td&gt;
+                    &lt;td class="text-right text-danger font-weight-bold"&gt;₹{{c.formatINR(b.toxic)}}&lt;/td&gt;
+                    &lt;td class="text-right bg-light font-weight-bold"&gt;₹{{c.formatINR(b.total)}}&lt;/td&gt;
+                  &lt;/tr&gt;
+                  &lt;tr ng-if="code.buckets.length === 0"&gt;
+                    &lt;td colspan="6" class="text-center text-muted p-md"&gt;No historical outstanding data available for this site code.&lt;/td&gt;
+                  &lt;/tr&gt;
+                &lt;/tbody&gt;
+              &lt;/table&gt;
+            &lt;/div&gt;
+
+            &lt;div class="alert alert-info m-t-md m-b-none flex-align-center" style="border-left: 4px solid #1782c5; background-color: #f0f8ff;" ng-if="code.activeReq"&gt;
+              &lt;div class="col-xs-12 col-sm-8" style="padding-left:0;"&gt;
+                &lt;strong style="color: #004085;"&gt;&lt;i class="fa fa-info-circle"&gt;&lt;/i&gt; Site Limit Request Pending&lt;/strong&gt;
+                &lt;p class="m-b-none text-muted" style="font-size:12px; margin-top: 4px;"&gt;
+                  This site is part of Batch {{code.activeReq.number}} (State: {{code.activeReq.state}}).&lt;br&gt;
+                  Currently Pending With: &lt;strong style="color: #333;"&gt;{{code.activeReq.pending_with}}&lt;/strong&gt;&lt;br&gt;
+                  Desired: &lt;strong&gt;₹ {{c.formatINR(code.activeReq.desired)}}&lt;/strong&gt; | Safe Limit: &lt;strong class="text-success"&gt;₹ {{c.formatINR(code.activeReq.safe)}}&lt;/strong&gt;
+                &lt;/p&gt;
+              &lt;/div&gt;
+            &lt;/div&gt;
+
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+  &lt;/div&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;ebb1d83d97104314be31fa17f053af69&lt;/id&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-04-17 11:14:53&lt;/sys_created_on&gt;&lt;sys_id&gt;afb1d83d97104314be31fa17f053af70&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-04-17 11:14:53&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>-222867175</payload_hash>
+        <record_name>UCLM Non-Trade Customer 360</record_name>
+        <reverted_from/>
+        <source>0d1e00262bb27e104572f3745e91bf51</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-06 05:27:07</sys_created_on>
+        <sys_id>115183df977d4710be31fa17f053af71</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>19f35e4fe2d0000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-06 05:27:07</sys_updated_on>
+        <type>Widget</type>
+        <update_guid>995183df817d4710be9d0d8c9a65a36f</update_guid>
+        <update_guid_history>995183df817d4710be9d0d8c9a65a36f:-222867175,d1296657f3b547107928c6734ca182b5:-82950747,61d27d6ea13d03509bdf3009e203f5c2:-1288711887,0a1a992a79e04fd4f4a98d8248af7b0c:-1319743672,fcd9112aede04fd4409d17b05ba98927:-1921773858,5e78d9665de04fd44659ef78041b96b4:1460417719,7f68996603e04fd42fa0cc3da38f2663:-1505540442,30689966fde04fd4b0166eff212e5d3c:65262370,d5385d268ee04fd42b395ebbce4c3d09:-2033114806,bc465d621de04fd4e5919499f7672671:-1460051428,8916d562c1e04fd4e763a5db1305801d:-1825764515,7606956208e04fd45ae748801d98f2f0:1209073949,9d3d00aabf600394fb52233c0479b165:-1460051428,4a2d4c6a7360039459cdf8c64095566d:1157087300,fe1dc46abb600394943d4f8e25685e1b:-1125358343,4a0d406a4760039427dac1f532b3e307:-1409716652,d39c002aa0600394d614bae58ca921da:1046697684,309c802a656003941381eeb4ef66d74c:-1804664206,6a8c802ad860039449e1071cce8b290a:-1922770409,108c002a1d60039405f2ef285eef4cbd:-57208229,f7ed75da96e4cbd48487797409b2cf05:-387290708,7edc795adde4cbd48eb59fbf604dc28d:2030333527,90dcf55a14e4cbd4f7dfedea057065fe:1078534137,09ccb15ac2e4cbd4d2c7cd5a2ed24cc9:-1293996811,aabc3d1ac0e4cbd4b63c31d2446dd8f2:-662451044,618a7d920ee4cbd49f8c57b952b1d454:1691609799,177a3d92ede4cbd4955405b5bbb81e8b:972929486,0d7ab99293e4cbd4e68b354af9a1a380:1980299238,b96ab99202e4cbd4a56504643e458e4c:-1314878407,574b54c6e1e40bd4163e7a90d0b29d1c:-31898435,b44bd0c601e40bd48bff896922c285fd:-224410480,253b50c684e40bd49724e46fac50a21c:2100103868,532b10c6c9e40bd4c07dfc9f0181c4e2:2045656144,c9e8ccae7e1c8b142f98eeb481eaf58f:-1460051428,b9d84c6ebf1c8b140e57643a0e8d2239:-1198112841,3148842e231c8b14644fe9e391c99d67:1964981211,9067cc6aac1c8b14da0023f3b4e78d42:250617413,dad6406a2f1c8b1473399395d9dc6a40:1164454755,78a6c82afd1c8b14401aae01a4351f87:-1708190459,29c404664e1c8b1458fa10ca671a9941:127748021,dee34ce2221c8b14c1eed67ea6654972:-1561086763,ffb344e22f1c8b146258722fec821e7e:-2144611337,b0df37daecd88b140ee48d35f70ef850:-1639775537,958f73da94d88b14b6e8a73be5fec0dd:-1384228225,5f2e3b1a3cd88b143700984e74452596:-399741530,19ec37969fd88b14d4ebf27d1c3a5bc4:-1226507940,ef6c375651d88b146abf22aa02d6f3fb:-34271375,c86a3352f6d88b14e26cbede493b5143:1997475923,b5b83f9e1a988b14362927bd6af370c2:1628712947,cad57b5aa0988b148808f56c7f5e3ecf:-1327024137,e1b5775a31988b14d088bbb89b6537f2:-2050064855,12888bd603548b146d735ece02f93b43:-2141043306,00884bd673548b14e94e9fde8fe7f000:-776995054,4d5843d6bb548b14398a4ba6d9d8d89d:-2141043306,39b78f56d7548b14dc53410e8024dd03:1723256310,89a70f563a548b1474147bb997c09440:-1273995689,1d770b5612548b1433b619b5ce5ffea4:-724405703,2c67475695548b142c7350d7890c73f9:-1866109990,6bb1d83da41043140a7f82d40433636e:-1492311753</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="">2809e2df2bcf83104572f3745e91bfd5</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-06 06:59:20</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>13743461a30440b581f3c1a103dc5021</sys_id>
+        <sys_metadata>ebb1d83d97104314be31fa17f053af69</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>UCLM Non-Trade Customer 360</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_ebb1d83d97104314be31fa17f053af69</sys_update_name>
+        <sys_update_version display_value="sp_widget_ebb1d83d97104314be31fa17f053af69">115183df977d4710be31fa17f053af71</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-06 06:59:20</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

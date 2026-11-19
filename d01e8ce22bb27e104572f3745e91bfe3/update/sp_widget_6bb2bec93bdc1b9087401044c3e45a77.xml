@@ -1,0 +1,1171 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $timeout, $sce, $rootScope) {
+	var c = this;
+	var POLL_MS = 5000;
+	var MAX_POLLS = 48; // 4 minutes
+	var polls = 0;
+	var pollPromise = null;
+
+	// Accordion State: Default expanded (false)
+	c.isCollapsed = false;
+	c.toggleCollapse = function() {
+		c.isCollapsed = !c.isCollapsed;
+	};
+
+	c.customer = { value: '', displayValue: '' };
+	c.running = false;
+	c.view = null;
+	c.error = '';
+
+	c.panDisplay = c.data.pan || '';
+	c.customerName = c.data.customerName || '';
+
+	// ============================================================
+	// 1. POLLING & STOP FUNCTIONS
+	// ============================================================
+	function stopPolling() {
+		if (pollPromise) $timeout.cancel(pollPromise);
+		pollPromise = null;
+	}
+
+	function poll(recordId) {
+		pollPromise = $timeout(function() {
+			polls++;
+			c.server.get({ action: 'poll', recordId: recordId }).then(function(r) {
+				var res = r.data.result;
+				if (res && res.status === 'completed') {
+					c.running = false;
+					setResult(res);
+				} else if (res && res.status === 'failed') {
+					c.running = false;
+					c.error = 'Assessment failed. Click Re-assess to try again.';
+				} else if (polls >= MAX_POLLS) {
+					c.running = false;
+					c.error = 'Assessment is taking longer than expected. Please refresh shortly.';
+				} else {
+					poll(recordId);
+				}
+			});
+		}, POLL_MS);
+	}
+
+	// ============================================================
+	// 2. START / RE-ASSESS ACTION
+	// ============================================================
+	c.start = function($event) {
+		if ($event) $event.stopPropagation(); // Prevent accordion from toggling
+
+		var targetPan = c.panDisplay || c.data.pan;
+		var targetCust = c.customer.value || c.data.customerSysId;
+		var targetName = c.customerName || c.customer.displayValue;
+
+		// Safety: Do not fire if no PAN or customer is present
+		if (!targetPan && !targetCust) return;
+
+		stopPolling();
+		c.error = '';
+		c.running = true;
+		polls = 0;
+
+		c.server.get({
+			action: 'start',
+			pan: targetPan,
+			customer: targetCust,
+			customerName: targetName
+		}).then(function(r) {
+			if (r.data.error || !r.data.recordId) {
+				c.running = false;
+				c.error = r.data.error || 'Could not initiate Gen AI assessment.';
+				return;
+			}
+			poll(r.data.recordId);
+		});
+	};
+
+	// ============================================================
+	// 3. PARSING & VIEW BINDING HELPERS
+	// ============================================================
+	function setResult(res) {
+		var risk = parseRisk(res.final_recommendation);
+		var news = parseNews(res.recent_news);
+		var alerts = news.filter(function(n) { return n.alert; });
+		var others = news.filter(function(n) { return !n.alert; });
+		if (res.pan) c.panDisplay = res.pan;
+		c.view = {
+			updated: res.updated,
+			company: res.company_name || res.customer || c.customerName,
+			price: res.current_stock_price,
+			overview: cleanText(res.company_overview),
+			financials: parseBullets(res.financial_highlights),
+			developments: parseBullets(res.major_developments),
+			news: alerts.concat(others),
+			alertCount: alerts.length,
+			risk: risk,
+			riskClass: (risk.split(' ')[0] || '').toLowerCase(),
+			verdict: parseVerdict(res.final_recommendation),
+			recoHtml: toHtml(res.final_recommendation)
+		};
+		publish(res);
+
+	}
+
+	function cleanText(text) {
+		return (text || '').replace(/\r/g, '')
+			.replace(/^[ \t\u00a0]+/gm, '')
+			.replace(/\n{3,}/g, '\n\n')
+			.trim();
+	}
+
+	function parseBullets(text) {
+		return lines(text).map(function(l) {
+			var idx = l.indexOf(':');
+			if (idx > 0 && idx < 45) {
+				return { label: l.substring(0, idx).trim(), text: l.substring(idx + 1).trim() };
+			}
+			return { label: '', text: l };
+		});
+	}
+
+	function parseNews(text) {
+		return lines(text).map(function(l) {
+			var url = '';
+			var pipe = l.lastIndexOf('|');
+			if (pipe > -1) {
+				var tail = l.substring(pipe + 1).trim();
+				if (/^https?:\/\//i.test(tail)) url = tail;
+				l = l.substring(0, pipe).trim();
+			}
+			var alert = /^\[ALERT\]/i.test(l);
+			l = l.replace(/^\[ALERT\]\s*/i, '');
+			var meta = '';
+			var m = l.match(/\(([^()]*)\)\s*$/);
+			if (m) {
+				meta = m[1];
+				l = l.substring(0, m.index).trim();
+			}
+			return { title: l, meta: meta, url: url, alert: alert };
+		});
+	}
+
+	function lines(text) {
+		return (text || '').split(/\r?\n/)
+			.map(function(l) { return l.trim(); })
+			.filter(function(l) { return /^[\*\-•]/.test(l); })
+			.map(function(l) { return l.replace(/^[\*\-•]\s*/, ''); })
+			.filter(Boolean);
+	}
+
+	function parseRisk(txt) {
+		var m = (txt || '').match(/Risk Category:\s*(Low|Moderate|High)\s*Risk/i);
+		return m ? m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase() + ' Risk' : '';
+	}
+
+	// Splits final_recommendation into labelled sections:
+	// Risk Category / Reason / Strengths / Concerns / Recommendation.
+	// Text before the first label goes into "other" (shown as a Summary row).
+	// found=false -> template falls back to the plain recoHtml text.
+	function parseVerdict(text) {
+		var out = { found: false, other: [] };
+		var cur = null;
+		var HEAD = /^(Risk Category|Reason|Strengths|Concerns|Recommendation)\s*:\s*(.*)$/i;
+
+		(text || '').split(/\r?\n/).forEach(function(raw) {
+			var l = raw.replace(/\*\*/g, '').replace(/^#+\s*/, '').trim();
+			if (!l) return;
+			var isBullet = /^[\*\-•]\s*/.test(l);
+			var m = !isBullet && l.match(HEAD);
+			if (m) {
+				var key = m[1].toLowerCase() === 'risk category' ? 'risk' : m[1].toLowerCase();
+				cur = { text: (m[2] || '').trim(), items: [] };
+				out[key] = cur;
+				out.found = true;
+				return;
+			}
+			if (!cur) {
+				cur = { k: 'Summary', text: '', items: [] };
+				out.other.push(cur);
+			}
+			if (isBullet) {
+				var item = l.replace(/^[\*\-•]\s*/, '').trim();
+				if (item) cur.items.push(item);
+			} else {
+				cur.text = cur.text ? cur.text + '\n' + l : l;
+			}
+		});
+		return out;
+	}
+
+	function toHtml(text) {
+		if (!text) return '';
+		var html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+		.replace(/^(Risk Category:|Reason:|Strengths:|Concerns:|Recommendation:)/gm, '<strong>$1</strong>');
+		return $sce.trustAsHtml(html);
+	}
+
+	function publish(res) {
+		if (!c.view) return;
+		var v = angular.copy(c.view);
+		delete v.recoHtml;                       // $sce object, not needed
+		v.pan = c.panDisplay;
+		v.rawVerdict = res.final_recommendation || '';   // fallback when verdict.found is false
+		$rootScope.$broadcast('clm.genai.ready', v);
+	}
+
+	// ============================================================
+	// 4. INITIAL EXECUTION & EVENT LISTENERS
+	// ============================================================
+	if (c.data.result) {
+		if (c.data.reusable) {
+			setResult(c.data.result);
+		} else if (c.data.inProgress && c.data.recordId) {
+			c.running = true;
+			polls = 0;
+			poll(c.data.recordId);
+		} else {
+			c.start();
+		}
+	}
+
+	// Standalone Dropdown Selection Listener
+	$scope.$on('field.change', function(evt, parms) {
+		if (parms.field !== c.customer) return;
+		stopPolling();
+		c.view = null;
+		c.error = '';
+		c.running = false;
+		if (!c.customer.value) return;
+
+		c.server.get({
+			action: 'load',
+			customer: c.customer.value
+		}).then(function(r) {
+			var d = r.data;
+			c.panDisplay = d.pan || '';
+			c.customerName = d.customerName || c.customer.displayValue;
+
+			if (d.reusable) {
+				setResult(d.result);
+			} else if (d.inProgress) {
+				c.running = true;
+				polls = 0;
+				poll(d.recordId);
+			} else {
+				c.start();
+			}
+		});
+	});
+
+	$scope.$on('$destroy', stopPolling);
+};
+]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+/* ============================================================
+   SHELL
+   ============================================================ */
+.vra { width: 100%; margin: 16px 0 20px; color: #1a1a1a; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+.vra *, .vra *::before, .vra *::after { box-sizing: border-box; }
+.vra .slide-down { animation: vraSlide .3s ease-out; }
+
+.vra .vra-card {
+  background: #ffffff; border: 1px solid #dde3ea; border-radius: 10px; overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+/* ============================================================
+   KEYFRAMES
+   ============================================================ */
+@keyframes vraSlide  { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes vraRise   { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes vraSpin   { to { transform: rotate(360deg); } }
+@keyframes vraGlow   { 0%, 100% { box-shadow: 0 0 0 0 rgba(243, 213, 78, 0.6); } 50% { box-shadow: 0 0 0 7px rgba(243, 213, 78, 0); } }
+@keyframes vraFloat  { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+@keyframes vraSweep  { 0% { left: -40%; } 100% { left: 100%; } }
+@keyframes vraRing   { 0% { transform: scale(.7); opacity: .7; } 100% { transform: scale(1.7); opacity: 0; } }
+@keyframes vraBlink  { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
+@keyframes vraShow   { to { opacity: 1; } }
+@keyframes vraHide   { to { opacity: 0; } }
+@keyframes vraStepOn { to { opacity: 1; } }
+@keyframes vraPulse  { 0%, 100% { opacity: .9; transform: scale(1); } 50% { opacity: 0; transform: scale(1.12); } }
+@keyframes vraTwinkle { 0%, 100% { opacity: 1; transform: rotate(0) scale(1); } 50% { opacity: .55; transform: rotate(45deg) scale(.85); } }
+@keyframes vraMeter  { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+/* ============================================================
+   HEADER (click to collapse)
+   ============================================================ */
+.vra .vra-head {
+  position: relative; overflow: hidden;
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 20px;
+  padding: 16px 20px 18px;
+  background:
+    radial-gradient(circle at 92% -40%, rgba(243, 206, 82, 0.28) 0, rgba(243, 206, 82, 0) 45%),
+    linear-gradient(100deg, #fff8ec 0%, #ffffff 48%, #fffaf3 100%);
+  cursor: pointer; user-select: none; -webkit-tap-highlight-color: transparent;
+}
+.vra .vra-head::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+  background: linear-gradient(90deg, #7A1012 0%, #DA1D26 30%, #F3712A 62%, #F3CE52 100%);
+}
+.vra .vra-head-left { position: relative; display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1 1 320px; }
+.vra .vra-head-meta { position: relative; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.vra .vra-orb {
+  position: relative; flex-shrink: 0; width: 44px; height: 44px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #7A1012 0%, #DA1D26 55%, #F3712A 100%); color: #F3CE52; font-size: 18px;
+  box-shadow: 0 6px 14px rgba(122, 16, 18, 0.25);
+}
+.vra .vra-orb-ring {
+  position: absolute; inset: -4px; border-radius: 15px; border: 2px solid rgba(243, 206, 82, 0.7);
+  animation: vraPulse 2.6s ease-in-out infinite;
+}
+.vra .vra-heading { min-width: 0; }
+.vra .vra-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: 17px; font-weight: 700; line-height: 1.25; color: #1a1a1a; }
+.vra .vra-title-accent { color: #AF272F; }
+.vra .vra-ai-pill {
+  display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px;
+  background: linear-gradient(90deg, #1a1a1a, #3a2a10); color: #F3D54E;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase;
+}
+.vra .vra-ai-spark { display: inline-block; animation: vraTwinkle 2.4s ease-in-out infinite; }
+.vra .vra-head-sub { margin-top: 4px; font-size: 12.5px; line-height: 1.45; color: #5a6a7a; }
+
+.vra .vra-toggle {
+  display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
+  border: 1px solid #cdd4dc; border-radius: 6px; background: #ffffff; color: #3a4451;
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; cursor: pointer; white-space: nowrap;
+  transition: background .15s ease, border-color .15s ease;
+}
+.vra .vra-toggle:hover { background: #eef1f5; border-color: #b8c2cd; }
+.vra .vra-toggle .fa { font-size: 10px; }
+
+.vra .vra-body { padding: 18px 20px 20px; background: #F9FAFB; }
+
+/* ============================================================
+   CHIPS
+   ============================================================ */
+.vra .vra-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: #fff; border: 1px solid #dde3ea;
+  border-radius: 12px; font-size: 12px; font-weight: 700; color: #1a1a1a; white-space: nowrap;
+}
+.vra .vra-chip-k { font-weight: 400; color: #5a6a7a; }
+.vra .vra-chip-ico { color: #8a96a3; }
+.vra .vra-chip-dev { background: #fdecea; border-color: #f5c2bc; color: #b3261e; }
+.vra .vra-chip-run { background: #fff8e1; border-color: #f3d54e; color: #7a5a00; }
+.vra .vra-mini-spin {
+  width: 11px; height: 11px; border-radius: 50%; border: 2px solid #f3d54e; border-top-color: #AF272F;
+  animation: vraSpin .8s linear infinite;
+}
+
+/* ============================================================
+   BUTTONS
+   ============================================================ */
+.vra .vra-btn {
+  padding: 0 14px; height: 34px; border-radius: 6px; font-size: 12px; font-weight: 700; cursor: pointer; border: none;
+  text-transform: uppercase; letter-spacing: .5px; display: inline-flex; align-items: center; justify-content: center;
+  gap: 8px; white-space: nowrap; transition: all .2s ease;
+}
+.vra .vra-btn:disabled { opacity: .6; cursor: not-allowed; }
+.vra .vra-btn-primary { background: #1a1a1a; color: #F3D54E; box-shadow: 0 2px 6px rgba(0,0,0,.15); }
+.vra .vra-btn-primary:hover { background: #000; transform: translateY(-1px); box-shadow: 0 4px 10px rgba(0,0,0,.2); }
+.vra .vra-btn-primary:hover .fa-refresh { animation: vraSpin .8s linear infinite; }
+.vra .vra-btn-lg { height: 42px; padding: 0 22px; font-size: 13px; }
+
+/* ============================================================
+   CARD (block)
+   ============================================================ */
+.vra .vra-block { margin-top: 16px; min-width: 0; background: #fff; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden; }
+.vra .vra-block-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px 20px; flex-wrap: wrap;
+  padding: 12px 18px; background: #fafbfc; border-bottom: 1px solid #dde3ea;
+}
+.vra .vra-block-heading { min-width: 0; }
+.vra .vra-block-title {
+  display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 700; color: #1a1a1a;
+  text-transform: uppercase; letter-spacing: .8px;
+}
+.vra .vra-block-title::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: #F3D54E; flex-shrink: 0; }
+.vra .vra-block-sub { margin: 3px 0 0 14px; font-size: 12px; color: #5a6a7a; }
+.vra .vra-block-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.vra .vra-block-body { padding: 16px 18px; }
+
+.vra .vra-picker { margin-top: 0; margin-bottom: 4px; }
+.vra .vra-label { display: block; margin-bottom: 8px; font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+
+.vra .vra-grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.vra .vra-grid2 &gt; .vra-block { display: flex; flex-direction: column; }
+.vra .vra-grid2 &gt; .vra-block &gt; .vra-block-body { flex: 1 1 auto; }
+
+/* ============================================================
+   TEXT / LISTS / EMPTY
+   ============================================================ */
+.vra .vra-text { font-size: 13px; line-height: 1.65; white-space: pre-line; word-wrap: break-word; color: #1a1a1a; }
+.vra .vra-text strong { color: #1a1a1a; }
+.vra .vra-empty { font-size: 13px; color: #7f8c9a; text-align: center; padding: 6px 0; }
+
+.vra .vra-list { margin: 0; padding: 0; list-style: none; }
+.vra .vra-text + .vra-list { margin-top: 8px; }
+.vra .vra-list li { position: relative; margin-bottom: 7px; padding-left: 16px; font-size: 13px; line-height: 1.6; color: #1a1a1a; }
+.vra .vra-list li::before { content: ""; position: absolute; left: 0; top: 8px; width: 6px; height: 6px; border-radius: 50%; background: #F3D54E; }
+.vra .vra-list li:last-child { margin-bottom: 0; }
+
+/* label / value rows (Financials, Developments) */
+.vra .vra-kv { display: flex; flex-direction: column; }
+.vra .vra-kv-row {
+  display: grid; grid-template-columns: minmax(110px, 38%) minmax(0, 1fr); gap: 4px 14px;
+  padding: 9px 0; border-bottom: 1px solid #eef1f5; font-size: 13px; line-height: 1.55;
+}
+.vra .vra-kv-row:first-child { padding-top: 0; }
+.vra .vra-kv-row:last-child { padding-bottom: 0; border-bottom: 0; }
+.vra .vra-kv-row.no-k { grid-template-columns: minmax(0, 1fr); }
+.vra .vra-kv-k { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .4px; padding-top: 1px; }
+.vra .vra-kv-v { color: #1a1a1a; word-wrap: break-word; }
+
+/* ============================================================
+   AI AGENT WORKING
+   ============================================================ */
+.vra .vra-think {
+  position: relative; overflow: hidden; background: #ffffff;
+  border: 1px solid #F3D54E; border-radius: 8px; box-shadow: 0 4px 14px rgba(243, 213, 78, 0.22);
+}
+.vra .vra-picker + .vra-think { margin-top: 16px; }
+.vra .vra-think-bar { position: relative; height: 4px; background: #fff3b0; overflow: hidden; }
+.vra .vra-think-bar span {
+  position: absolute; top: 0; bottom: 0; left: -40%; width: 40%;
+  background: linear-gradient(90deg, #AF272F, #E87722, #F3D54E); border-radius: 2px;
+  animation: vraSweep 1.4s ease-in-out infinite;
+}
+.vra .vra-think-body { display: flex; gap: 16px; padding: 18px 20px 20px; }
+.vra .vra-think-orb {
+  flex-shrink: 0; width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  background: #1a1a1a; color: #F3D54E; font-size: 18px;
+  animation: vraFloat 2.2s ease-in-out infinite;
+}
+.vra .vra-think-main { flex: 1 1 auto; min-width: 0; }
+.vra .vra-think-title { font-size: 15px; font-weight: 700; color: #1a1a1a; }
+.vra .vra-think-sub { margin-top: 3px; font-size: 12.5px; line-height: 1.5; color: #5a6a7a; }
+.vra .vra-dots i { font-style: normal; animation: vraBlink 1.2s infinite; }
+.vra .vra-dots i:nth-child(2) { animation-delay: .2s; }
+.vra .vra-dots i:nth-child(3) { animation-delay: .4s; }
+
+/* step checklist — time based visual */
+.vra .vra-steps { margin-top: 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; }
+.vra .vra-step { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 700; color: #3a4451; opacity: .38; animation: vraStepOn .3s ease forwards; }
+.vra .vra-step-ico { position: relative; flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%; border: 2px solid #dde3ea; background: #fff; }
+.vra .vra-spin, .vra .vra-tick { position: absolute; inset: -2px; border-radius: 50%; opacity: 0; }
+.vra .vra-spin::before {
+  content: ""; position: absolute; inset: 0; border-radius: 50%; border: 2px solid #f3d54e; border-top-color: #AF272F;
+  animation: vraSpin .8s linear infinite;
+}
+.vra .vra-tick { display: flex; align-items: center; justify-content: center; background: #27ae60; color: #fff; font-size: 12px; font-weight: 700; }
+
+.vra .vra-step:nth-child(1) { animation-delay: .2s; }
+.vra .vra-step:nth-child(2) { animation-delay: 5s; }
+.vra .vra-step:nth-child(3) { animation-delay: 14s; }
+.vra .vra-step:nth-child(4) { animation-delay: 26s; }
+.vra .vra-step:nth-child(1) .vra-spin { animation: vraShow .01s .2s forwards, vraHide .01s 5s forwards; }
+.vra .vra-step:nth-child(2) .vra-spin { animation: vraShow .01s 5s forwards, vraHide .01s 14s forwards; }
+.vra .vra-step:nth-child(3) .vra-spin { animation: vraShow .01s 14s forwards, vraHide .01s 26s forwards; }
+.vra .vra-step:nth-child(4) .vra-spin { animation: vraShow .01s 26s forwards; }
+.vra .vra-step:nth-child(1) .vra-tick { animation: vraShow .01s 5s forwards; }
+.vra .vra-step:nth-child(2) .vra-tick { animation: vraShow .01s 14s forwards; }
+.vra .vra-step:nth-child(3) .vra-tick { animation: vraShow .01s 26s forwards; }
+
+/* ============================================================
+   BANNER (errors)
+   ============================================================ */
+.vra .vra-banner {
+  display: flex; gap: 12px; align-items: flex-start; padding: 12px 16px; margin-top: 16px;
+  border: 1px solid; border-radius: 8px; font-size: 13px; color: #1a1a1a;
+}
+.vra .vra-body &gt; .vra-banner:first-child { margin-top: 0; }
+.vra .vra-banner.is-bad { background: #fef5f4; border-color: #f5c2bc; color: #8f1d16; border-left: 5px solid #E23D28; }
+.vra .vra-banner-ico { font-size: 18px; line-height: 1.2; color: #c0392b; }
+
+/* ============================================================
+   REVEAL (staggered fade-in when the result is ready)
+   ============================================================ */
+.vra .vra-reveal { opacity: 0; animation: vraRise .45s ease forwards; }
+.vra .vra-reveal.d1 { animation-delay: .05s; }
+.vra .vra-reveal.d2 { animation-delay: .15s; }
+.vra .vra-reveal.d3 { animation-delay: .25s; }
+.vra .vra-reveal.d4 { animation-delay: .35s; }
+.vra .vra-reveal.d5 { animation-delay: .45s; }
+.vra .vra-reveal.d6 { animation-delay: .55s; }
+
+/* ============================================================
+   KPI TILES
+   ============================================================ */
+.vra .vra-tiles { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.15fr); gap: 12px; }
+.vra .vra-tile { min-width: 0; padding: 14px 16px; background: #ffffff; border: 1px solid #dde3ea; border-radius: 8px; }
+.vra .vra-tile-k { margin-bottom: 6px; font-size: 12px; color: #5a6a7a; }
+.vra .vra-tile-v { font-size: 20px; font-weight: 700; line-height: 1.2; color: #1a1a1a; word-break: break-word; }
+.vra .vra-tile-v.vra-tile-text { font-size: 16px; line-height: 1.35; }
+.vra .vra-tile-s { margin-top: 5px; font-size: 11px; line-height: 1.4; color: #7f8c9a; }
+
+.vra .vra-tile.is-price { background: #f3f8fd; border-color: #cfe2f3; border-left: 4px solid #1782c5; }
+.vra .vra-tile.is-price .vra-tile-v { color: #0b5394; }
+.vra .vra-tile.is-ok  { background: #f4fbf6; border-color: #cfead8; border-left: 4px solid #27ae60; }
+.vra .vra-tile.is-ok  .vra-tile-v { color: #1e8449; }
+.vra .vra-tile.is-bad { background: #fef5f4; border-color: #f5c2bc; border-left: 4px solid #E23D28; }
+.vra .vra-tile.is-bad .vra-tile-v { color: #c0392b; }
+.vra .vra-tile.is-low      { background: #f4fbf6; border-color: #cfead8; border-left: 4px solid #27ae60; }
+.vra .vra-tile.is-moderate { background: #fffaf2; border-color: #fde4c4; border-left: 4px solid #E87722; }
+.vra .vra-tile.is-high     { background: #fef5f4; border-color: #f5c2bc; border-left: 4px solid #E23D28; }
+
+.vra .vra-badge {
+  display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 700;
+  letter-spacing: .5px; text-transform: uppercase; color: #fff; background: #8a96a3; white-space: nowrap;
+}
+.vra .vra-badge.low { background: #27ae60; }
+.vra .vra-badge.moderate { background: #E87722; }
+.vra .vra-badge.high { background: #E23D28; }
+
+/* 3-segment risk meter */
+.vra .vra-meter { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 12px; }
+.vra .vra-seg { display: block; height: 7px; border-radius: 4px; background: #e6eaef; transform-origin: left; }
+.vra .vra-meter.low .vra-seg:nth-child(-n+1)      { background: #27ae60; animation: vraMeter .7s ease .4s both; }
+.vra .vra-meter.moderate .vra-seg:nth-child(-n+2) { background: #E87722; animation: vraMeter .7s ease .4s both; }
+.vra .vra-meter.high .vra-seg:nth-child(-n+3)     { background: #E23D28; animation: vraMeter .7s ease .4s both; }
+.vra .vra-meter-l { display: flex; justify-content: space-between; margin-top: 4px; font-size: 10px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; color: #8a96a3; }
+
+/* ============================================================
+   AI VERDICT
+   ============================================================ */
+.vra .vra-verdict { border-left: 4px solid #8a96a3; }
+.vra .vra-verdict.low      { border-left-color: #27ae60; }
+.vra .vra-verdict.moderate { border-left-color: #E87722; }
+.vra .vra-verdict.high     { border-left-color: #E23D28; }
+
+.vra .vra-vbody { display: flex; flex-direction: column; gap: 14px; }
+.vra .vra-vsec { min-width: 0; }
+.vra .vra-vsec-k {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+  font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px;
+}
+.vra .vra-vsec-k .fa { color: #8a96a3; }
+
+.vra .vra-sc { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.vra .vra-sc-box { min-width: 0; padding: 12px 14px; border: 1px solid #e0e6ed; border-left-width: 4px; border-radius: 6px; background: #fafbfc; }
+.vra .vra-sc-h { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; }
+.vra .vra-sc-box.is-ok  { background: #f4fbf6; border-color: #cfead8; border-left-color: #27ae60; }
+.vra .vra-sc-box.is-ok  .vra-sc-h { color: #1e8449; }
+.vra .vra-sc-box.is-ok  .vra-list li::before { background: #27ae60; }
+.vra .vra-sc-box.is-bad { background: #fef5f4; border-color: #f5c2bc; border-left-color: #E23D28; }
+.vra .vra-sc-box.is-bad .vra-sc-h { color: #c0392b; }
+.vra .vra-sc-box.is-bad .vra-list li::before { background: #E23D28; }
+.vra .vra-sc-box:only-child { grid-column: 1 / -1; }
+
+/* result row (Recommendation) */
+.vra .vra-res {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 14px 18px; background: #fffcf0; border-top: 1px solid #f1e2a0;
+}
+.vra .vra-res-ico {
+  flex-shrink: 0; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  background: #8a96a3; color: #fff; font-size: 13px; margin-top: 1px;
+}
+.vra .vra-res-main { min-width: 0; flex: 1 1 auto; }
+.vra .vra-res-k { margin-bottom: 3px; font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.vra .vra-res-v { font-size: 14px; font-weight: 700; line-height: 1.55; color: #1a1a1a; }
+.vra .vra-res-v + .vra-list { margin-top: 6px; }
+.vra .vra-res .vra-list li { font-size: 13.5px; font-weight: 700; }
+.vra .vra-res.low      { background: #f4fbf6; border-top-color: #b9e3c6; }
+.vra .vra-res.low .vra-res-ico { background: #27ae60; }
+.vra .vra-res.low .vra-res-v, .vra .vra-res.low .vra-list li { color: #1e8449; }
+.vra .vra-res.moderate { background: #fffaf2; border-top-color: #fde4c4; }
+.vra .vra-res.moderate .vra-res-ico { background: #E87722; }
+.vra .vra-res.moderate .vra-res-v, .vra .vra-res.moderate .vra-list li { color: #8a4b00; }
+.vra .vra-res.high     { background: #fef5f4; border-top-color: #f5c2bc; }
+.vra .vra-res.high .vra-res-ico { background: #E23D28; }
+.vra .vra-res.high .vra-res-v, .vra .vra-res.high .vra-list li { color: #c0392b; }
+
+/* ============================================================
+   NEWS
+   ============================================================ */
+.vra .vra-news { display: flex; flex-direction: column; }
+.vra .vra-news-item {
+  position: relative; padding: 11px 18px 11px 22px; border-bottom: 1px solid #eef1f5;
+  font-size: 13px; line-height: 1.5; transition: background .15s ease;
+}
+.vra .vra-news-item:last-child { border-bottom: 0; }
+.vra .vra-news-item::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: #cdd4dc; }
+.vra .vra-news-item:hover { background: #fafbfc; }
+.vra .vra-news-item.is-alert { background: #fef5f4; }
+.vra .vra-news-item.is-alert::before { background: #E23D28; }
+.vra .vra-news-main { display: flex; align-items: baseline; gap: 8px; }
+.vra .vra-news-item a { font-weight: 700; color: #1782c5; text-decoration: none; }
+.vra .vra-news-item a:hover { text-decoration: underline; }
+.vra .vra-news-item a .fa { font-size: 11px; margin-left: 2px; }
+.vra .vra-news-title { font-weight: 700; color: #1a1a1a; }
+.vra .vra-meta { margin-top: 3px; font-size: 12px; color: #7f8c9a; }
+.vra .vra-news-item.is-alert .vra-meta { padding-left: 0; }
+.vra .vra-alert {
+  flex-shrink: 0; display: inline-block; padding: 2px 8px; border-radius: 4px; background: #E23D28;
+  color: #fff; font-size: 10.5px; font-weight: 700; letter-spacing: .5px; line-height: 1.5;
+}
+
+/* ============================================================
+   FOOTER
+   ============================================================ */
+.vra .vra-foot { margin-top: 16px; padding-top: 12px; border-top: 1px dashed #dde3ea; font-size: 11.5px; color: #7f8c9a; text-align: center; }
+.vra .vra-star { color: #d4b21f; }
+
+/* ============================================================
+   EMPTY STATES
+   ============================================================ */
+.vra .vra-empty-state { text-align: center; padding: 32px 20px 28px; background: #ffffff; border: 1px solid #dde3ea; border-radius: 8px; }
+.vra .vra-picker + .vra-empty-state { margin-top: 16px; }
+.vra .vra-banner + .vra-empty-state { margin-top: 16px; }
+.vra .vra-empty-orb {
+  position: relative; display: inline-flex; align-items: center; justify-content: center; width: 60px; height: 60px; margin-bottom: 14px;
+  border-radius: 50%; background: #1a1a1a; color: #F3D54E; font-size: 24px;
+  animation: vraFloat 2.6s ease-in-out infinite;
+}
+.vra .vra-empty-orb.is-sm { width: 46px; height: 46px; font-size: 18px; }
+.vra .vra-ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid #F3D54E; animation: vraRing 2.4s ease-out infinite; }
+.vra .vra-ring.r2 { animation-delay: 1.2s; }
+.vra .vra-empty-h { margin-bottom: 6px; font-size: 16px; font-weight: 700; color: #1a1a1a; }
+.vra .vra-empty-h b { color: #AF272F; }
+.vra .vra-empty-s { max-width: 460px; margin: 0 auto 18px; font-size: 13px; line-height: 1.55; color: #5a6a7a; }
+.vra .vra-empty-state .vra-empty-s:last-child { margin-bottom: 0; }
+
+/* ============================================================
+   RESPONSIVE
+   ============================================================ */
+@media (max-width: 1100px) {
+  .vra .vra-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  .vra .vra-grid2 { grid-template-columns: 1fr; gap: 0; }
+}
+@media (max-width: 640px) {
+  .vra .vra-head { padding: 12px 14px; }
+  .vra .vra-head-sub { display: none; }
+  .vra .vra-head-meta { width: 100%; }
+  .vra .vra-head-meta .vra-toggle { margin-left: auto; }
+  .vra .vra-body { padding: 12px; }
+  .vra .vra-tiles { grid-template-columns: 1fr; gap: 8px; }
+  .vra .vra-tile { padding: 10px 12px; }
+  .vra .vra-tile-v { font-size: 17px; }
+  .vra .vra-block-head { padding: 10px 14px; }
+  .vra .vra-block-body { padding: 12px 14px; }
+  .vra .vra-kv-row { grid-template-columns: 1fr; }
+  .vra .vra-title { font-size: 15px; }
+  .vra .vra-orb { width: 38px; height: 38px; font-size: 16px; }
+  .vra .vra-res { padding: 12px 14px; }
+  .vra .vra-sc { grid-template-columns: 1fr; }
+  .vra .vra-steps { grid-template-columns: 1fr; }
+  .vra .vra-think-body { flex-direction: column; gap: 12px; padding: 14px; }
+  .vra .vra-news-item { padding: 10px 14px 10px 18px; }
+}
+
+/* ============================================================
+   REDUCED MOTION
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  .vra *, .vra *::before, .vra *::after { animation: none !important; transition: none !important; }
+  .vra .vra-reveal { opacity: 1; }
+  .vra .vra-step { opacity: 1; }
+}
+
+/* ============================================================
+   FONT (keep last)
+   ============================================================ */
+.vra, .vra *, .vra input, .vra select, .vra textarea, .vra button {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+.vra .fa { font-family: FontAwesome; }
+</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>uclm_genai_news</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM GenAI News</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    var PERF_TABLE = 'x_birl3_clm_customer_performance';
+    var CUST_TABLE = 'x_birl3_clm_clm_customer_master1';
+    var STALE_MINUTES = 10;
+
+    // 1. Resolve PAN & Customer inputs
+    var inputPan = (options && options.pan) ? String(options.pan).trim() : ($sp.getParameter('pan') || '');
+    var inputCust = (options && options.customer) ? String(options.customer).trim() : ($sp.getParameter('customer') || '');
+
+    data.isEmbedded = !!(inputPan || (options && options.embedded));
+    data.pan = inputPan;
+    data.customerSysId = inputCust;
+    data.customerName = (options && options.customer_name) ? String(options.customer_name).trim() : '';
+
+    // If PAN is passed directly (Embedded Mode), resolve reference sys_id
+    if (data.pan && !data.customerSysId) {
+        var cm = new GlideRecordSecure(CUST_TABLE);
+        cm.addQuery('pan', data.pan);
+        cm.setLimit(1);
+        cm.query();
+        if (cm.next()) {
+            data.customerSysId = cm.getUniqueValue();
+            if (!data.customerName) data.customerName = cm.getValue('customer_name') || cm.getValue('name') || '';
+        }
+    }
+
+    // 2. Initial Page Load (Embedded Mode Auto-Check)
+    if (!input && data.isEmbedded && data.pan) {
+        var existingRec = getLatestPanRecord(data.pan);
+        if (existingRec) {
+            evaluateRecordState(existingRec);
+        }
+        return;
+    }
+
+    if (!input) return;
+
+    // 3. Action: 'load' (Customer selected in dropdown)
+    if (input.action === 'load' && input.customer) {
+        var targetPan = '';
+        var cRef = new GlideRecordSecure(CUST_TABLE);
+        if (cRef.get(input.customer)) {
+            targetPan = cRef.getValue('pan') || '';
+            data.customerName = cRef.getValue('customer_name') || '';
+        }
+        data.pan = targetPan;
+
+        var pRec = getLatestPanRecord(targetPan, input.customer);
+        if (pRec) {
+            evaluateRecordState(pRec);
+        } else {
+            data.notFound = true;
+        }
+        return;
+    }
+
+    // 4. Action: 'start' (Triggered when missing or user requests re-assessment)
+    if (input.action === 'start') {
+        var panVal = input.pan || data.pan;
+        var custVal = input.customer || data.customerSysId;
+
+        if (!custVal && panVal) {
+            var cFind = new GlideRecordSecure(CUST_TABLE);
+            cFind.addQuery('pan', panVal);
+            cFind.setLimit(1);
+            cFind.query();
+            if (cFind.next()) custVal = cFind.getUniqueValue();
+        }
+
+        var gr = getLatestPanRecord(panVal, custVal);
+        var exists = gr && gr.isValidRecord();
+
+        if (exists && gr.getValue('assessment_status') === 'requested') {
+            var upd = new GlideDateTime(gr.getValue('sys_updated_on'));
+            var now = new GlideDateTime();
+            if (((now.getNumericValue() - upd.getNumericValue()) / 60000) < STALE_MINUTES) {
+                data.recordId = gr.getUniqueValue();
+                return;
+            }
+        }
+
+        var saveGr = exists ? gr : new GlideRecordSecure(PERF_TABLE);
+        if (!exists) {
+            saveGr.initialize();
+            if (custVal) saveGr.setValue('customer_name', custVal); // Reference field
+        }
+
+        saveGr.setValue('company_name', input.customerName || data.customerName || '');
+        saveGr.setValue('current_stock_price', '');
+        saveGr.setValue('market_stock_insight', '');
+        saveGr.setValue('financial_highlights', '');
+        saveGr.setValue('major_developments', '');
+        saveGr.setValue('key_news_highlights', '');
+        saveGr.setValue('final_recommendation', '');
+        saveGr.setValue('requested_by', gs.getUserID());
+        saveGr.setValue('assessment_status', 'requested');
+
+        data.recordId = exists ? saveGr.update() : saveGr.insert();
+        if (!data.recordId) {
+            data.error = 'Could not start assessment: ' + saveGr.getLastErrorMessage();
+        }
+        return;
+    }
+
+    // 5. Action: 'poll'
+    if (input.action === 'poll' && input.recordId) {
+        var pollGr = new GlideRecordSecure(PERF_TABLE);
+        if (pollGr.get(input.recordId)) {
+            data.result = pack(pollGr);
+        }
+        return;
+    }
+
+    // Query dot-walked customer_name.pan so all sites under this PAN share one row
+    function getLatestPanRecord(panNum, custId) {
+        var gr = new GlideRecordSecure(PERF_TABLE);
+        if (panNum) {
+            gr.addQuery('customer_name.pan', panNum);
+        } else if (custId) {
+            gr.addQuery('customer_name', custId);
+        } else {
+            return null;
+        }
+        gr.orderByDesc('sys_updated_on');
+        gr.setLimit(1);
+        gr.query();
+        return gr.next() ? gr : null;
+    }
+
+    function evaluateRecordState(rec) {
+        var updatedGDT = new GlideDateTime(rec.getValue('sys_updated_on'));
+        var nowGDT = new GlideDateTime();
+        var diffHours = (nowGDT.getNumericValue() - updatedGDT.getNumericValue()) / 3600000;
+        var isCurrentDay = (updatedGDT.getLocalDate().getValue() === nowGDT.getLocalDate().getValue());
+        var status = rec.getValue('assessment_status');
+
+        data.result = pack(rec);
+        data.recordId = rec.getUniqueValue();
+        data.pan = rec.customer_name ? rec.customer_name.pan.toString() : data.pan;
+        data.isCurrentDay = isCurrentDay;
+
+        // Reusable if completed from the current day or < 24 hours
+        data.reusable = (status === 'completed' && (isCurrentDay || diffHours < 24));
+        data.inProgress = (status === 'requested' && (diffHours * 60) < STALE_MINUTES);
+    }
+
+    function pack(r) {
+        return {
+            status: r.getValue('assessment_status'),
+            customer: r.getDisplayValue('customer_name'),
+            pan: r.customer_name ? r.customer_name.pan.toString() : '',
+            company_name: r.getValue('company_name') || r.getDisplayValue('customer_name'),
+            current_stock_price: r.getValue('current_stock_price'),
+            company_overview: r.getValue('market_stock_insight'),
+            financial_highlights: r.getValue('financial_highlights'),
+            major_developments: r.getValue('major_developments'),
+            recent_news: r.getValue('key_news_highlights'),
+            final_recommendation: r.getValue('final_recommendation'),
+            updated: r.getDisplayValue('sys_updated_on')
+        };
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-31 11:14:00</sys_created_on>
+        <sys_id>6bb2bec93bdc1b9087401044c3e45a77</sys_id>
+        <sys_mod_count>18</sys_mod_count>
+        <sys_name>UCLM GenAI News</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_6bb2bec93bdc1b9087401044c3e45a77</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-02 15:23:07</sys_updated_on>
+        <template><![CDATA[<div class="vra">
+  <div class="vra-card" ng-class="{'is-collapsed': c.isCollapsed}">
+
+    <!-- ═════ HEADER (click to collapse) ═════ -->
+    <div class="vra-head" ng-click="c.toggleCollapse()">
+      <div class="vra-head-left">
+        <div class="vra-orb"><span class="vra-orb-ring"></span><i class="fa fa-magic"></i></div>
+        <div class="vra-heading">
+          <div class="vra-title">
+            <span>Gen AI <span class="vra-title-accent">News Summary</span></span>
+            <span class="vra-ai-pill"><span class="vra-ai-spark">✦</span> AI Agent</span>
+          </div>
+          <div class="vra-head-sub">Live web news, financials and credit-risk view for this PAN, scanned and summarised by the AI agent</div>
+        </div>
+      </div>
+      <div class="vra-head-meta">
+        <span class="vra-chip" ng-if="c.panDisplay"><span class="vra-chip-k">PAN</span> {{c.panDisplay}}</span>
+        <span class="vra-chip" ng-if="c.view.updated && !c.running">
+          <i class="fa fa-clock-o vra-chip-ico"></i><span class="vra-chip-k">Last refreshed</span> {{c.view.updated}}
+        </span>
+        <span class="vra-chip vra-chip-run" ng-if="c.running"><span class="vra-mini-spin"></span> Assessing…</span>
+        <button type="button" class="vra-btn vra-btn-primary" ng-if="(c.view || c.error) && !c.running"
+                ng-click="c.start($event)" title="Run a fresh AI assessment">
+          <i class="fa fa-refresh"></i> Re-assess
+        </button>
+        <button type="button" class="vra-toggle" title="{{c.isCollapsed ? 'Expand' : 'Collapse'}}">
+          <i class="fa" ng-class="c.isCollapsed ? 'fa-chevron-down' : 'fa-chevron-up'"></i>
+          {{c.isCollapsed ? 'Show' : 'Hide'}}
+        </button>
+      </div>
+    </div>
+
+    <!-- ═════ BODY ═════ -->
+    <div class="vra-body slide-down" ng-show="!c.isCollapsed">
+
+      <!-- Standalone customer picker (hidden in embedded mode) -->
+      <div class="vra-block vra-picker" ng-if="!c.data.isEmbedded">
+        <div class="vra-block-body">
+          <label class="vra-label">Customer Name or Code</label>
+          <sn-record-picker
+            field="c.customer"
+            table="'x_birl3_clm_clm_customer_master1'"
+            display-field="'customer_name'"
+            display-fields="'customer_code_sap,pan'"
+            value-field="'sys_id'"
+            search-fields="'customer_name,customer_code_sap,pan'"
+            default-query="'is_active=true'"
+            page-size="25"
+            placeholder="Select or search a customer...">
+          </sn-record-picker>
+        </div>
+      </div>
+
+      <!-- ═════ AI AGENT WORKING ═════ -->
+      <div class="vra-think" ng-if="c.running">
+        <div class="vra-think-bar"><span></span></div>
+        <div class="vra-think-body">
+          <div class="vra-think-orb"><i class="fa fa-magic"></i></div>
+          <div class="vra-think-main">
+            <div class="vra-think-title">
+              AI Agent is analysing {{c.customerName || c.panDisplay}}<span class="vra-dots"><i>.</i><i>.</i><i>.</i></span>
+            </div>
+            <div class="vra-think-sub">Scanning exchanges, stock filings, credit reports and recent financial news. This usually takes 30–60 seconds.</div>
+
+            <div class="vra-steps">
+              <div class="vra-step">
+                <span class="vra-step-ico"><span class="vra-spin"></span><span class="vra-tick">✓</span></span>
+                <span class="vra-step-t">Searching exchanges &amp; stock filings</span>
+              </div>
+              <div class="vra-step">
+                <span class="vra-step-ico"><span class="vra-spin"></span><span class="vra-tick">✓</span></span>
+                <span class="vra-step-t">Reading credit reports &amp; financials</span>
+              </div>
+              <div class="vra-step">
+                <span class="vra-step-ico"><span class="vra-spin"></span><span class="vra-tick">✓</span></span>
+                <span class="vra-step-t">Scanning recent news for adverse items</span>
+              </div>
+              <div class="vra-step">
+                <span class="vra-step-ico"><span class="vra-spin"></span></span>
+                <span class="vra-step-t">Summarising and rating the risk</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Error -->
+      <div class="vra-banner is-bad" ng-if="c.error">
+        <span class="vra-banner-ico">⚠</span>
+        <div>{{c.error}}</div>
+      </div>
+
+      <!-- ═════ AI RESULT ═════ -->
+      <div class="vra-view" ng-if="c.view && !c.running">
+
+        <!-- 1. Key figures -->
+        <div class="vra-tiles vra-reveal d1">
+          <div class="vra-tile">
+            <div class="vra-tile-k">Company</div>
+            <div class="vra-tile-v vra-tile-text">{{c.view.company || 'Not available'}}</div>
+          </div>
+
+          <div class="vra-tile is-price">
+            <div class="vra-tile-k">Current Stock Price</div>
+            <div class="vra-tile-v">{{c.view.price || '—'}}</div>
+            <div class="vra-tile-s" ng-if="!c.view.price">Unlisted or not available</div>
+          </div>
+
+          <div class="vra-tile" ng-class="c.view.alertCount > 0 ? 'is-bad' : 'is-ok'">
+            <div class="vra-tile-k">Adverse News</div>
+            <div class="vra-tile-v">{{c.view.alertCount}}</div>
+            <div class="vra-tile-s">{{c.view.alertCount > 0 ? 'Flagged item(s), shown first in Recent News' : 'No adverse items found'}}</div>
+          </div>
+
+          <div class="vra-tile vra-tile-risk" ng-class="{'is-low': c.view.riskClass == 'low', 'is-moderate': c.view.riskClass == 'moderate', 'is-high': c.view.riskClass == 'high'}">
+            <div class="vra-tile-k">AI Risk Category</div>
+            <div class="vra-tile-v">
+              <span class="vra-badge" ng-class="c.view.riskClass">{{c.view.risk || 'Not Rated'}}</span>
+            </div>
+            <div class="vra-meter" ng-class="c.view.riskClass">
+              <span class="vra-seg"></span><span class="vra-seg"></span><span class="vra-seg"></span>
+            </div>
+            <div class="vra-meter-l"><span>Low</span><span>Moderate</span><span>High</span></div>
+          </div>
+        </div>
+
+        <!-- 2. AI Verdict -->
+        <div class="vra-block vra-verdict vra-reveal d2" ng-class="c.view.riskClass">
+          <div class="vra-block-head">
+            <div class="vra-block-heading">
+              <div class="vra-block-title">AI Verdict</div>
+              <div class="vra-block-sub">Recommendation and risk assessment to support the credit decision</div>
+            </div>
+            <div class="vra-block-meta">
+              <span class="vra-badge" ng-class="c.view.riskClass" ng-if="c.view.risk">{{c.view.risk}}</span>
+            </div>
+          </div>
+
+          <!-- Structured verdict -->
+          <div class="vra-block-body vra-vbody" ng-if="c.view.verdict.found">
+            <div class="vra-vsec" ng-repeat="s in c.view.verdict.other track by $index">
+              <div class="vra-vsec-k">{{s.k}}</div>
+              <div class="vra-text" ng-if="s.text" ng-bind="s.text"></div>
+              <ul class="vra-list" ng-if="s.items.length"><li ng-repeat="i in s.items track by $index" ng-bind="i"></li></ul>
+            </div>
+
+            <div class="vra-vsec" ng-if="c.view.verdict.reason">
+              <div class="vra-vsec-k"><i class="fa fa-info-circle"></i> Reason</div>
+              <div class="vra-text" ng-if="c.view.verdict.reason.text" ng-bind="c.view.verdict.reason.text"></div>
+              <ul class="vra-list" ng-if="c.view.verdict.reason.items.length"><li ng-repeat="i in c.view.verdict.reason.items track by $index" ng-bind="i"></li></ul>
+            </div>
+
+            <div class="vra-sc" ng-if="c.view.verdict.strengths || c.view.verdict.concerns">
+              <div class="vra-sc-box is-ok" ng-if="c.view.verdict.strengths">
+                <div class="vra-sc-h"><i class="fa fa-thumbs-o-up"></i> Strengths</div>
+                <div class="vra-text" ng-if="c.view.verdict.strengths.text" ng-bind="c.view.verdict.strengths.text"></div>
+                <ul class="vra-list" ng-if="c.view.verdict.strengths.items.length"><li ng-repeat="i in c.view.verdict.strengths.items track by $index" ng-bind="i"></li></ul>
+              </div>
+              <div class="vra-sc-box is-bad" ng-if="c.view.verdict.concerns">
+                <div class="vra-sc-h"><i class="fa fa-exclamation-triangle"></i> Concerns</div>
+                <div class="vra-text" ng-if="c.view.verdict.concerns.text" ng-bind="c.view.verdict.concerns.text"></div>
+                <ul class="vra-list" ng-if="c.view.verdict.concerns.items.length"><li ng-repeat="i in c.view.verdict.concerns.items track by $index" ng-bind="i"></li></ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- Fallback: verdict text could not be split into sections -->
+          <div class="vra-block-body" ng-if="!c.view.verdict.found">
+            <div class="vra-text" ng-if="c.view.recoHtml" ng-bind-html="c.view.recoHtml"></div>
+            <div class="vra-empty" ng-if="!c.view.recoHtml">Verdict not available.</div>
+          </div>
+
+          <!-- Result row -->
+          <div class="vra-res" ng-if="c.view.verdict.recommendation" ng-class="c.view.riskClass">
+            <div class="vra-res-ico"><i class="fa fa-check"></i></div>
+            <div class="vra-res-main">
+              <div class="vra-res-k">Recommendation</div>
+              <div class="vra-res-v" ng-if="c.view.verdict.recommendation.text" ng-bind="c.view.verdict.recommendation.text"></div>
+              <ul class="vra-list" ng-if="c.view.verdict.recommendation.items.length"><li ng-repeat="i in c.view.verdict.recommendation.items track by $index" ng-bind="i"></li></ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Company Overview -->
+        <div class="vra-block vra-reveal d3">
+          <div class="vra-block-head">
+            <div class="vra-block-heading">
+              <div class="vra-block-title">Company Overview</div>
+              <div class="vra-block-sub">Business profile and market position</div>
+            </div>
+          </div>
+          <div class="vra-block-body">
+            <div class="vra-text" ng-if="c.view.overview" ng-bind="c.view.overview"></div>
+            <div class="vra-empty" ng-if="!c.view.overview">Overview not available.</div>
+          </div>
+        </div>
+
+        <!-- 4. Financials + Developments -->
+        <div class="vra-grid2 vra-reveal d4">
+          <div class="vra-block">
+            <div class="vra-block-head">
+              <div class="vra-block-heading">
+                <div class="vra-block-title">Financial Highlights</div>
+                <div class="vra-block-sub">Latest reported figures</div>
+              </div>
+            </div>
+            <div class="vra-block-body">
+              <div class="vra-kv" ng-if="c.view.financials.length">
+                <div class="vra-kv-row" ng-repeat="b in c.view.financials track by $index" ng-class="{'no-k': !b.label}">
+                  <div class="vra-kv-k" ng-if="b.label" ng-bind="b.label"></div>
+                  <div class="vra-kv-v" ng-bind="b.text"></div>
+                </div>
+              </div>
+              <div class="vra-empty" ng-if="!c.view.financials.length">Not available.</div>
+            </div>
+          </div>
+
+          <div class="vra-block">
+            <div class="vra-block-head">
+              <div class="vra-block-heading">
+                <div class="vra-block-title">Major Orders &amp; Developments</div>
+                <div class="vra-block-sub">Recent orders, expansions and corporate actions</div>
+              </div>
+            </div>
+            <div class="vra-block-body">
+              <div class="vra-kv" ng-if="c.view.developments.length">
+                <div class="vra-kv-row" ng-repeat="b in c.view.developments track by $index" ng-class="{'no-k': !b.label}">
+                  <div class="vra-kv-k" ng-if="b.label" ng-bind="b.label"></div>
+                  <div class="vra-kv-v" ng-bind="b.text"></div>
+                </div>
+              </div>
+              <div class="vra-empty" ng-if="!c.view.developments.length">Not available.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Recent News -->
+        <div class="vra-block vra-reveal d5">
+          <div class="vra-block-head">
+            <div class="vra-block-heading">
+              <div class="vra-block-title">Recent News</div>
+              <div class="vra-block-sub">Adverse items are listed first</div>
+            </div>
+            <div class="vra-block-meta">
+              <span class="vra-chip vra-chip-dev" ng-if="c.view.alertCount > 0">⚠ {{c.view.alertCount}} adverse</span>
+              <span class="vra-chip" ng-if="c.view.news.length"><span class="vra-chip-k">Items</span> {{c.view.news.length}}</span>
+            </div>
+          </div>
+          <div class="vra-news" ng-if="c.view.news.length">
+            <div class="vra-news-item" ng-repeat="n in c.view.news track by $index" ng-class="{'is-alert': n.alert}">
+              <div class="vra-news-main">
+                <span class="vra-alert" ng-if="n.alert">ALERT</span>
+                <a ng-if="n.url" ng-href="{{n.url}}" target="_blank" rel="noopener noreferrer">{{n.title}} <i class="fa fa-external-link"></i></a>
+                <span class="vra-news-title" ng-if="!n.url">{{n.title}}</span>
+              </div>
+              <div class="vra-meta" ng-if="n.meta" ng-bind="n.meta"></div>
+            </div>
+          </div>
+          <div class="vra-block-body" ng-if="!c.view.news.length">
+            <div class="vra-empty">No recent news available.</div>
+          </div>
+        </div>
+
+        <div class="vra-foot vra-reveal d6">
+          <span class="vra-star">✦</span> AI-generated from public web data. Verify key facts before taking a credit decision.
+        </div>
+      </div>
+
+      <!-- ═════ EMPTY STATE: EMBEDDED ═════ -->
+      <div class="vra-empty-state" ng-if="!c.view && !c.running && !c.error && c.data.isEmbedded">
+        <div class="vra-empty-orb"><span class="vra-ring r1"></span><span class="vra-ring r2"></span><i class="fa fa-magic"></i></div>
+        <div class="vra-empty-h">No AI assessment yet for PAN <b>{{c.panDisplay}}</b></div>
+        <div class="vra-empty-s">The AI agent will scan the web for news, filings and ratings, then summarise the credit risk for you.</div>
+        <button type="button" class="vra-btn vra-btn-primary vra-btn-lg" ng-click="c.start($event)">
+          <i class="fa fa-bolt"></i> Generate Gen AI Assessment
+        </button>
+      </div>
+
+      <!-- ═════ EMPTY STATE: STANDALONE ═════ -->
+      <div class="vra-empty-state" ng-if="!c.customer.value && !c.data.isEmbedded && !c.running">
+        <div class="vra-empty-orb is-sm"><span class="vra-ring r1"></span><i class="fa fa-magic"></i></div>
+        <div class="vra-empty-s">Select a customer above to view its Gen AI risk and news assessment.</div>
+      </div>
+
+    </div>
+  </div>
+</div>
+]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>6bb2bec93bdc1b9087401044c3e45a77</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-31 11:14:00</sys_created_on>
+        <sys_id>e7b2bec93bdc1b9087401044c3e45a7b</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-31 11:14:00</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

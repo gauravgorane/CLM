@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.CLM_NEW_WSDL1</api_name>
+        <caller_access/>
+        <client_callable>true</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>CLM_NEW_WSDL1</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var CLM_NEW_WSDL1 = Class.create();
+CLM_NEW_WSDL1.prototype = Object.extendsObject(global.AbstractAjaxProcessor, {
+    getCreditDetails: function(customerCode, salesOrg) {
+
+        var customer = customerCode || this.getParameter('sysparm_customer_code');
+        var salesOrgValue = salesOrg || this.getParameter('sysparm_sales_org');
+
+        try {
+
+            var req = new sn_ws.RESTMessageV2();
+
+            req.setEndpoint("http://vs4grqapqas.abgplanet.abg.com:8000/sap/bc/srt/rfc/sap/zfsd_snow_credit_limit/300/zfsd_snow_credit_limit/zfsd_snow_credit_limit");
+
+            // MID Server
+            req.setMIDServer("linux-mid-server-dev-1");
+
+            req.setHttpMethod("POST");
+
+            req.setRequestHeader("Content-Type", "text/xml; charset=utf-8");
+            req.setRequestHeader("Accept", "text/xml");
+
+            req.setRequestHeader(
+                "SOAPAction",
+                "urn:sap-com:document:sap:soap:functions:mc-style:ZFSD_SNOW_CREDIT_LIMIT:ZfsdSnowCreditLimitRequest"
+            );
+
+            req.setAuthenticationProfile('basic', '9b873b49977d8f50be31fa17f053af59');
+
+            var body =
+                '<?xml version="1.0" encoding="UTF-8"?>' +
+                '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:urn="urn:sap-com:document:sap:soap:functions:mc-style">' +
+                '<soapenv:Header/>' +
+                '<soapenv:Body>' +
+                '<urn:ZfsdSnowCreditLimit>' +
+                '<FromCustomer>' + customer + '</FromCustomer>' +
+                '<ItFinal/>' +
+                '<SalesOrg>' + salesOrgValue + '</SalesOrg>' +
+                '<ToCustomer>' + customer + '</ToCustomer>' +
+                '</urn:ZfsdSnowCreditLimit>' +
+                '</soapenv:Body>' +
+                '</soapenv:Envelope>';
+
+            // gs.info("SOAP Request:");
+            // gs.info(body);
+
+            req.setRequestBody(body);
+            req.setHttpTimeout(60000);
+
+            var response = req.execute();
+
+            // gs.info("HTTP Status : " + response.getStatusCode());
+
+            var responseBody = response.getBody();
+
+            // gs.info("SOAP Response:");
+            // gs.info(responseBody);
+
+            var xml = new XMLDocument2();
+            xml.parseXML(responseBody);
+
+            var result = {
+                customer: xml.getNodeText("//*[local-name()='Kunnr']"),
+                customerName: xml.getNodeText("//*[local-name()='Name1']"),
+                salesOrg: xml.getNodeText("//*[local-name()='Vkorg']"),
+                customerGroup: xml.getNodeText("//*[local-name()='Kdgrp']"),
+                customerGroupText: xml.getNodeText("//*[local-name()='Ktext']"),
+                state: xml.getNodeText("//*[local-name()='StateName']"),
+                creditLimit: xml.getNodeText("//*[local-name()='CreditLimit']"),
+                tempCreditLimit: xml.getNodeText("//*[local-name()='TempCl']"),
+                availableCredit: xml.getNodeText("//*[local-name()='AvlCrLimit']"),
+                outstandingAmount: xml.getNodeText("//*[local-name()='OustAmount']"),
+                followUpDate: xml.getNodeText("//*[local-name()='FollowUpDt']"),
+                companyCode: xml.getNodeText("//*[local-name()='Zbukrs']"),
+                ASDAmount: xml.getNodeText("//*[local-name()='AsdAmount']"),
+                advance: xml.getNodeText("//*[local-name()='Advance']"),
+                firstOrderDate: xml.getNodeText("//*[local-name()='FirstOrderPdate']"),
+                nod: xml.getNodeText("//*[local-name()='Nod']"),
+                cg1: xml.getNodeText("//*[local-name()='Kvgr1']"),
+                customerTypeName: xml.getNodeText("//*[local-name()='Bezei']"),
+                region: xml.getNodeText("//*[local-name()='Regio']"),
+                actBg: xml.getNodeText("//*[local-name()='ActBg']"),
+                expryDate: xml.getNodeText("//*[local-name()='ExpryDate']"),
+
+                // newly added fields
+                ooid: xml.getNodeText("//*[local-name()='Ooid']"),
+                validFrom: xml.getNodeText("//*[local-name()='ValidFrom']"),
+                validTo: xml.getNodeText("//*[local-name()='ValidTo']"),
+                bkt030: xml.getNodeText("//*[local-name()='Bkt030']"),
+                bkt3160: xml.getNodeText("//*[local-name()='Bkt3160']"),
+                bkt6190: xml.getNodeText("//*[local-name()='Bkt6190']"),
+                bkt91120: xml.getNodeText("//*[local-name()='Bkt91120']"),
+                bkt121150: xml.getNodeText("//*[local-name()='Bkt121150']"),
+                bkt151180: xml.getNodeText("//*[local-name()='Bkt151180']"),
+                bkt181210: xml.getNodeText("//*[local-name()='Bkt181210']"),
+                bkt211240: xml.getNodeText("//*[local-name()='Bkt211240']"),
+                bkt241270: xml.getNodeText("//*[local-name()='Bkt241270']"),
+                bkt271300: xml.getNodeText("//*[local-name()='Bkt271300']"),
+                bkt301330: xml.getNodeText("//*[local-name()='Bkt301330']"),
+                bkt331360: xml.getNodeText("//*[local-name()='Bkt331360']"),
+                bkt361390: xml.getNodeText("//*[local-name()='Bkt361390']"),
+                bktG390: xml.getNodeText("//*[local-name()='BktG390']")
+
+            };
+
+            // SAP sends 0000-00-00 for empty dates; clear it so date fields don't fail
+            ['followUpDate', 'firstOrderDate', 'expryDate', 'validFrom', 'validTo'].forEach(function(k) {
+                if (result[k] == '0000-00-00') result[k] = '';
+            });
+
+            // gs.info("Parsed Result : " + JSON.stringify(result));
+
+            return JSON.stringify(result);
+
+        } catch (ex) {
+
+            gs.error("CLM_NEW_WSDL Error : " + ex.message);
+            return '';
+
+        }
+
+    },
+
+    type: 'CLM_NEW_WSDL1'
+});]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-03 12:03:18</sys_created_on>
+        <sys_id>502f306297b5c7d0be31fa17f053afa7</sys_id>
+        <sys_mod_count>20</sys_mod_count>
+        <sys_name>CLM_NEW_WSDL1</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_502f306297b5c7d0be31fa17f053afa7</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-17 07:01:14</sys_updated_on>
+    </sys_script_include>
+</record_update>

@@ -1,0 +1,949 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[function widgetcontroller($scope) {
+  var c = this;
+
+  c.filters = {
+    status: '',
+    period: c.data.selectedPeriod || 'current_month',
+    customFrom: '',
+    customTo: '',
+    search: ''
+  };
+
+  // Tooltip tracking states
+  c.hoverIndex = -1;
+  c.showTooltip = false;
+  c.tooltipLeft = 0;
+  c.tooltipTop = 0;
+
+  c.onPeriodChange = function() {
+    if (c.filters.period !== 'custom') {
+      c.applyFilters();
+    }
+  };
+
+  c.applyFilters = function() {
+    if (c.filters.period === 'custom' && (!c.filters.customFrom || !c.filters.customTo)) {
+      return;
+    }
+    c.data.filters = {
+      status: c.filters.status,
+      period: c.filters.period,
+      customFrom: c.filters.customFrom,
+      customTo: c.filters.customTo
+    };
+    c.server.update().then(function() { c.runSearch(); });
+  };
+
+  c.runSearch = function() {
+    var term = (c.filters.search || '').toString().toLowerCase().trim();
+    (c.data.requests || []).forEach(function(r) {
+      if (!term) { r._hidden = false; return; }
+      var fields = [r.requestCode, r.customerCode, r.customerName, r.pan];
+      var matched = fields.some(function(f) {
+        return (f || '').toString().toLowerCase().indexOf(term) > -1;
+      });
+      r._hidden = !matched;
+    });
+  };
+  $scope.$watch('c.filters.search', c.runSearch);
+
+  c.chartX = function(i) {
+    var n = (c.data.chart.months || []).length;
+    if (n <= 1) return 40;
+    return 40 + (i * (860 / (n - 1)));
+  };
+
+  c.linePoints = function(key) {
+    var months = c.data.chart.months || [];
+    var series = (c.data.chart.series || {})[key] || [];
+    var max = c.data.chart.max || 1;
+    var pts = [];
+    months.forEach(function(m, i) {
+      var v = series[i] || 0;
+      pts.push(c.chartX(i) + ',' + (220 - (v / max) * 200));
+    });
+    return pts.join(' ');
+  };
+
+  c.onMouseOverMonth = function(ev, index) {
+    c.hoverIndex = index;
+    c.showTooltip = true;
+    
+    var targetRect = ev.currentTarget.getBoundingClientRect();
+    var containerRect = ev.currentTarget.closest('.clm-chart-body').getBoundingClientRect();
+    
+    c.tooltipLeft = (targetRect.left + targetRect.width / 2) - containerRect.left;
+    c.tooltipTop = (targetRect.top - containerRect.top) + 40;
+  };
+
+  c.onMouseLeaveChart = function() {
+    c.hoverIndex = -1;
+    c.showTooltip = false;
+  };
+
+  c.statusClass = function(status) {
+    var s = (status || '').toLowerCase();
+    if (s.indexOf('submit') > -1) return 'st-submitted';
+    if (s.indexOf('approv') > -1) return 'st-approved';
+    if (s.indexOf('pend') > -1) return 'st-pending';
+    if (s.indexOf('return') > -1 || s.indexOf('send') > -1) return 'st-sendback';
+    if (s.indexOf('reject') > -1) return 'st-rejected';
+    return 'st-default';
+  };
+
+  c.segClass = function(seg) {
+    var s = (seg || '').toLowerCase();
+    if (s.indexOf('cement') > -1) return 'seg-cement';
+    if (s.indexOf('rmc') > -1) return 'seg-rmc';
+    if (s.indexOf('bpd') > -1) return 'seg-bpd';
+    return 'seg-default';
+  };
+
+  c.yAxisTicks = [];
+  for (var val = 0; val <= 8; val++) {
+    var yCoord = 220 - (val / 8) * 200;
+    c.yAxisTicks.push({
+      label: val,
+      y: yCoord
+    });
+  }
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.clm-dash {
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: #1f2937;
+  font-size: 13px;
+
+  .clm-filterbar {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-top: 3px solid #f2b90c;
+    border-radius: 4px;
+    padding: 10px 16px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+  
+  .clm-filter-group {
+    display: flex;
+    flex-direction: row; 
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap; 
+    
+    label { 
+      color: #6b7280; 
+      font-size: 12px; 
+      margin: 0; 
+    }
+    
+    select.form-control {
+      height: 30px;
+      padding: 2px 8px;
+      font-size: 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 4px;
+      min-width: 170px;
+    }
+  }
+
+  .clm-period-group {
+    flex-wrap: nowrap; 
+  }
+  
+  .clm-custom-range {
+    display: flex;
+    align-items: center;
+    flex-direction: row;
+    gap: 6px;
+    margin-left: 8px;
+    
+    input[type="date"] {
+      height: 30px;
+      padding: 2px 8px;
+      font-size: 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 4px;
+    }
+    span { color: #6b7280; font-size: 12px; }
+  }
+  
+  .clm-apply-btn {
+    height: 30px;
+    padding: 0 14px;
+    font-size: 12px;
+    font-weight: 600;
+    border: none;
+    border-radius: 4px;
+    background: #2f6fed;
+    color: #fff;
+    cursor: pointer;
+    &amp;:hover { background: #2559c9; }
+  }
+
+  .clm-scorecards {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .clm-card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-left: 4px solid #ccc;
+    border-radius: 4px;
+    padding: 12px 14px;
+  }
+  .clm-card-id { font-size: 11px; font-weight: 700; letter-spacing: .3px; color: #6b7280; margin-bottom: 6px; }
+  .clm-card-value { font-size: 26px; font-weight: 700; line-height: 1.1; }
+  .clm-card-sub { font-size: 11.5px; color: #6b7280; margin-top: 4px; }
+  .clm-card-blue   { border-left-color: #2f6fed; .clm-card-value { color: #2f6fed; } }
+  .clm-card-green  { border-left-color: #1e9e5a; .clm-card-value { color: #1e9e5a; } }
+  .clm-card-purple { border-left-color: #7c5cf0; .clm-card-value { color: #7c5cf0; } }
+  .clm-card-red    { border-left-color: #dc3545; .clm-card-value { color: #dc3545; } }
+  .clm-card-orange { border-left-color: #d97b0d; .clm-card-value { color: #d97b0d; } }
+
+  .clm-chart-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 4px; padding: 14px 16px; margin-bottom: 14px; }
+  .clm-chart-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .clm-chart-title { font-weight: 700; font-size: 13px; }
+  .clm-chart-badge { background: #f3e8ff; color: #7c5cf0; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; }
+  .clm-legend { margin-left: auto; display: flex; gap: 14px; }
+  .legend-item { font-size: 11.5px; color: #4b5563; display: flex; align-items: center; gap: 5px; }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+    &amp;.blue   { background: #2f6fed; }
+    &amp;.green  { background: #1e9e5a; }
+    &amp;.orange { background: #d97b0d; }
+    &amp;.purple { background: #7c5cf0; }
+    &amp;.red    { background: #dc3545; }
+  }
+  .clm-chart-body { position: relative; }
+  .clm-svg { width: 100%; height: 240px; }
+  .grid-line { stroke: #f1f1f1; stroke-width: 1; }
+  .axis-label { font-size: 10px; fill: #9ca3af; }
+  polyline { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .line-blue   { stroke: #2f6fed; }
+  .line-green  { stroke: #1e9e5a; }
+  .line-orange { stroke: #d97b0d; }
+  .line-purple { stroke: #7c5cf0; }
+  .line-red    { stroke: #dc3545; }
+
+  /* Popover Black Dark Tooltip Design Block */
+  .clm-chart-tooltip {
+    position: absolute;
+    background: #111111;
+    color: #ffffff;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 11px;
+    pointer-events: none;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    transform: translate(-50%, -50%);
+    min-width: 110px;
+    text-align: left;
+
+    .tooltip-title {
+      font-weight: 700;
+      font-size: 12px;
+      margin-bottom: 6px;
+      border-bottom: 1px solid #333;
+      padding-bottom: 3px;
+    }
+    .tooltip-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 3px 0;
+      font-weight: 500;
+    }
+    .tooltip-color {
+      width: 9px;
+      height: 9px;
+      display: inline-block;
+      border-radius: 1px;
+      &amp;.blue   { background: #2f6fed; }
+      &amp;.green  { background: #1e9e5a; }
+      &amp;.orange { background: #d97b0d; }
+      &amp;.purple { background: #7c5cf0; }
+      &amp;.red    { background: #dc3545; }
+    }
+  }
+
+  .clm-table-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 4px; padding: 14px 16px; }
+  .clm-table-header { display: flex; align-items: center; margin-bottom: 10px; }
+  .clm-table-title { font-weight: 700; font-size: 13px; }
+  .clm-record-count { background: #f3f4f6; color: #6b7280; font-size: 11px; padding: 2px 8px; border-radius: 10px; margin-left: 6px; font-weight: 500; }
+  .clm-search-box {
+    margin-left: auto; display: flex; align-items: center;
+    border: 1px solid #d1d5db; border-radius: 4px; padding: 4px 10px; width: 260px;
+    i { color: #9ca3af; margin-right: 6px; font-size: 12px; }
+    input { border: none; outline: none; font-size: 12px; width: 100%; }
+  }
+  .clm-table-scroll { overflow-x: auto; }
+  .clm-table {
+    width: 100%; border-collapse: collapse; font-size: 12.5px;
+    thead th { text-align: left; color: #6b7280; font-weight: 600; font-size: 11px; letter-spacing: .3px; padding: 8px 10px; border-bottom: 1px solid #e5e7eb; white-space: nowrap; }
+    tbody td { padding: 10px 10px; border-bottom: 1px solid #f3f4f6; white-space: nowrap; }
+    tbody tr:hover { background: #fafafa; }
+  }
+  .clm-link { color: #2f6fed; text-decoration: none; font-weight: 600; }
+  .clm-cust-name { font-weight: 500; }
+  .clm-cust-code { font-size: 11px; color: #9ca3af; }
+  .clm-no-data { text-align: center; color: #9ca3af; padding: 20px 0; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+  .status-badge {
+    &amp;.st-submitted { background: #e6efff; color: #2f6fed; }
+    &amp;.st-approved  { background: #e6f7ee; color: #1e9e5a; }
+    &amp;.st-pending   { background: #fff3e0; color: #d97b0d; }
+    &amp;.st-sendback  { background: #f1eaff; color: #7c5cf0; }
+    &amp;.st-rejected  { background: #fdeaea; color: #dc3545; }
+    &amp;.st-default   { background: #f3f4f6; color: #6b7280; }
+  }
+  .stage-badge { background: #eef2ff; color: #4f46e5; }
+  .seg-badge {
+    &amp;.seg-cement  { background: #fff3e0; color: #d97b0d; }
+    &amp;.seg-rmc      { background: #e6f7ee; color: #1e9e5a; }
+    &amp;.seg-bpd      { background: #fffbe6; color: #b8860b; }
+    &amp;.seg-default { background: #f3f4f6; color: #6b7280; }
+  }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clm_approval</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>CLM Approval </name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+  var REQUEST_TABLE  = 'x_birl3_clm_clm_new_credit_request';
+  var CUSTOMER_TABLE = 'x_birl3_clm_clm_customer_master1';
+  var AGING_TABLE    = 'x_birl3_clm_clm_aging_snapshot';
+
+  var F_STATE          = 'state';
+  var F_STAGE          = 'u_choice_1';
+  var F_CUSTOMER_NAME  = 'customer';       
+  var F_REQUESTED_AMT  = 'requested_limit';
+  var F_APPROVED_AMT   = 'approved_limit';
+  var F_SUBMITTED_BY   = 'sys_created_by';
+  var F_SUBMITTED_ON   = 'sys_created_on';
+  var F_REQ_NUMBER     = 'number';
+  var F_DEVIATION      = 'is_deviation';
+
+  var F_CUST_CODE      = 'customer_code_sap';
+  var F_CUST_NAME      = 'customer_name';
+  var F_CUST_SEGMENT   = 'segment';
+  var F_CUST_PREVLIMIT = 'current_credit_limit';
+  var F_CUST_PAN       = 'pan';
+
+  var F_SNAP_MONTH     = 'snapshot_month';
+  var F_SNAP_OUTSTAND  = 'total_outstanding';
+  var F_SNAP_CUSTOMER  = 'customer';        
+
+  var ALLOWED_STATUS_KEYWORDS = ['approv', 'submit', 'return', 'reject'];
+
+  var monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function norm(s) { return (s || '').toString().trim().toUpperCase().replace(/\s+/g, ' '); }
+  function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
+
+  // ===== APPROVAL CHAIN DEFINITIONS =====
+  var CEMENT_CHAIN = [
+    { label: 'TSH',     field: 'u_approver_tsh'     },
+    { label: 'RHM',     field: 'u_approver_rhm'     },
+    { label: 'ZHM',     field: 'u_approver_zhm'     },
+    { label: 'ZCH',     field: 'u_approver_zch'     },
+    { label: 'HO',      field: 'u_approver_ho'      },
+    { label: 'NSH',     field: 'u_approver_nsh'     },
+    { label: 'NSH CCH', field: 'u_approver_nsh_cch' },
+    { label: 'CMO',     field: 'u_approver_cmo'     },
+    { label: 'CMO CFO', field: 'u_approver_cmo_cfo' },
+    { label: 'MD',      field: 'u_approver_md'      }
+  ];
+
+  var RMC_CHAIN = [
+    { label: 'TSM',          field: 'u_approver_tsm'            },
+    { label: 'RH CH RMC',    field: 'u_approver_rh_ch_rmc'      },
+    { label: 'ZH RMC',       field: 'u_approver_zh_rmc'         },
+    { label: 'ZCH',          field: 'u_approver_zch'            },
+    { label: 'HO',           field: 'u_approver_ho'             },
+    { label: 'HEAD RMC',     field: 'u_approver_head_rmc'       },
+    { label: 'HEAD KEY CH',  field: 'u_approver_head_key_ch_rmc' },
+    { label: 'HEAD KEY CCH', field: 'u_approver_head_key_cch'   },
+    { label: 'BH',           field: 'u_approver_bh'             },
+    { label: 'BH CFO',       field: 'u_approver_bh_cfo'         },
+    { label: 'MD',           field: 'u_approver_md'             }
+  ];
+
+  var BPD_CHAIN = [
+    { label: 'TSH BPD',  field: 'u_approver_tsh_bpd'  },
+    { label: 'ZH BPD',   field: 'u_approver_zh_bpd'   },
+    { label: 'HSBPD',    field: 'u_approver_hsbpd'    },
+    { label: 'ZCH',      field: 'u_approver_zch'      },
+    { label: 'HO',       field: 'u_approver_ho'       },
+    { label: 'HBPD',     field: 'u_approver_hbpd'     },
+    { label: 'CCH HBPD', field: 'u_approver_cch_hbpd' },
+    { label: 'BH',       field: 'u_approver_bh'       },
+    { label: 'CFO',      field: 'u_approver_cfo'      },
+    { label: 'MD',       field: 'u_approver_md'       }
+  ];
+
+  // ===== FUNCTION TO DETERMINE PENDING AT STEP =====
+  function getPendingAtStep(gr) {
+    var segmentRaw = (gr.getValue('segment') || '').toLowerCase().trim();
+    var segment = segmentRaw.split('|')[0].trim();
+
+    var chain = (segment === 'rmc') ? RMC_CHAIN
+              : (segment === 'bpd') ? BPD_CHAIN
+              : CEMENT_CHAIN;
+
+    // Build map of approver sys_id -> status
+    var mapBySysId = {};
+    var lastSubmitted = gr.getValue('u_last_submitted_on');
+    
+    var saGR = new GlideRecord('sysapproval_approver');
+    var saQuery = saGR.addQuery('sysapproval', gr.sys_id);
+    saQuery.addOrCondition('document_id', gr.sys_id);
+    if (lastSubmitted) {
+      saGR.addQuery('sys_created_on', '>=', lastSubmitted);
+    }
+    saGR.orderByDesc('sys_updated_on');
+    saGR.query();
+
+    while (saGR.next()) {
+      var aSysId = saGR.getValue('approver') + '';
+      var aRaw   = (saGR.getValue('state') + '').toLowerCase().trim();
+      var aSt    = (aRaw === 'approved') ? 'approved'
+                 : (aRaw === 'rejected') ? 'rejected'
+                 : (aRaw === 'cancelled') ? 'returned' 
+                 : 'pending';
+
+      // Only map the FIRST (newest) status found
+      if (typeof mapBySysId[aSysId] === 'undefined') {
+        mapBySysId[aSysId] = aSt;
+      }
+    }
+
+    // Iterate through approval chain and find first pending step
+    for (var i = 0; i < chain.length; i++) {
+      var entry = chain[i];
+      var rawVal = (gr.getValue(entry.field) || '').trim();
+
+      if (!rawVal || rawVal === '' || rawVal === 'null' || rawVal === 'undefined') {
+        continue;
+      }
+
+      var stepState = mapBySysId[rawVal] || 'pending';
+
+      if (stepState === 'pending') {
+        return entry.label;
+      }
+    }
+
+    return ''; // All steps completed or no pending steps
+  }
+
+  // ===== END PENDING AT LOGIC =====
+
+  function monthRangeQuery(gr, dateField, year, month) {
+    var startGdt = new GlideDateTime();
+    startGdt.setValue(year + '-' + pad(month) + '-01 00:00:00');
+    var endMonth = month + 1, endYear = year;
+    if (endMonth > 12) { endMonth = 1; endYear = year + 1; }
+    var endGdt = new GlideDateTime();
+    endGdt.setValue(endYear + '-' + pad(endMonth) + '-01 00:00:00');
+    gr.addQuery(dateField, '>=', startGdt);
+    gr.addQuery(dateField, '<', endGdt);
+  }
+
+  function getFilteredStatusOptions(table, field) {
+    var arr = [], seen = {};
+    var gr = new GlideRecord('sys_choice');
+    gr.addQuery('name', table);
+    gr.addQuery('element', field);
+    gr.addQuery('inactive', false);
+    gr.orderBy('sequence');
+    gr.query();
+    while (gr.next()) {
+      var v = gr.getValue('value');
+      var lbl = gr.getValue('label') || '';
+      if (!v || seen[v]) continue;
+      var lower = lbl.toLowerCase();
+      var allowed = ALLOWED_STATUS_KEYWORDS.some(function(kw) { return lower.indexOf(kw) > -1; });
+      if (!allowed) continue;
+      seen[v] = true;
+      arr.push({ value: v, label: lbl });
+    }
+    return arr;
+  }
+
+  function formatAmt(v) {
+    if (v === undefined || v === null || v === '') return '';
+    var n = parseFloat(v);
+    if (isNaN(n)) return v;
+    return '\u20B9' + (n / 100000).toFixed(1) + 'L';
+  }
+
+  function buildCustomerMap() {
+    var map = {};
+    var gr = new GlideRecord(CUSTOMER_TABLE);
+    gr.query();
+    while (gr.next()) {
+      var sysId = gr.getUniqueValue();
+      var entry = {
+        sysId: sysId,
+        code: gr.getValue(F_CUST_CODE),
+        name: gr.getValue(F_CUST_NAME),
+        segment: gr.getValue(F_CUST_SEGMENT),
+        prevLimit: gr.getValue(F_CUST_PREVLIMIT),
+        pan: gr.getValue(F_CUST_PAN) 
+      };
+      map[sysId] = entry;
+      var key = norm(entry.name);
+      if (key) map[key] = entry;
+    }
+    return map;
+  }
+
+  function buildSnapshotMap() {
+    var map = {};
+    var gr = new GlideRecord(AGING_TABLE);
+    gr.query();
+    while (gr.next()) {
+      var custSysId = gr.getValue(F_SNAP_CUSTOMER);
+      if (!custSysId) continue;
+      var monthVal = gr.getValue(F_SNAP_MONTH) || '';
+      var outVal = gr.getValue(F_SNAP_OUTSTAND);
+      if (!map[custSysId] || monthVal > map[custSysId].month) {
+        map[custSysId] = { month: monthVal, outstanding: outVal };
+      }
+    }
+    return map;
+  }
+
+  function resolveCustomer(reqGr, custMap) {
+    var rawVal  = reqGr.getValue(F_CUSTOMER_NAME);
+    var dispVal = reqGr.getDisplayValue(F_CUSTOMER_NAME);
+    if (rawVal && custMap[rawVal]) return custMap[rawVal];
+    var key = norm(dispVal);
+    if (key && custMap[key]) return custMap[key];
+    if (key) {
+      for (var k in custMap) {
+        if (k.length === 32) continue;
+        if (k.indexOf(key) > -1 || key.indexOf(k) > -1) return custMap[k];
+      }
+    }
+    return null;
+  }
+
+  function resolveOutstanding(custEntry, snapMap) {
+    if (!custEntry || !custEntry.sysId) return '';
+    var hit = snapMap[custEntry.sysId];
+    return hit ? hit.outstanding : '';
+  }
+
+  function buildPeriodRange(period, customFrom, customTo) {
+    var nowStr = new GlideDateTime().getValue();
+    var curYear  = parseInt(nowStr.substr(0, 4), 10);
+    var curMonth = parseInt(nowStr.substr(5, 2), 10);
+    var curDay   = parseInt(nowStr.substr(8, 2), 10);
+
+    data.lastYear = curYear - 1;
+
+    var startGdt = new GlideDateTime();
+    var endGdt   = new GlideDateTime();
+    var label = '';
+
+    if (period === 'previous_month') {
+      var prevMonth = curMonth - 1, prevYear = curYear;
+      if (prevMonth < 1) { prevMonth = 12; prevYear -= 1; }
+      var dim = daysInMonth(prevYear, prevMonth);
+      startGdt.setValue(prevYear + '-' + pad(prevMonth) + '-01 00:00:00');
+      endGdt.setValue(prevYear + '-' + pad(prevMonth) + '-' + pad(dim) + ' 23:59:59');
+      label = monthNames[prevMonth - 1] + ' ' + prevYear;
+
+    } else if (period === 'current_year') {
+      startGdt.setValue(curYear + '-01-01 00:00:00');
+      endGdt.setValue(nowStr);
+      label = 'Jan 1 – ' + monthNames[curMonth - 1] + ' ' + curDay + ', ' + curYear;
+
+    } else if (period === 'last_year') {
+      var lastYear = curYear - 1;
+      startGdt.setValue(lastYear + '-01-01 00:00:00');
+      endGdt.setValue(lastYear + '-12-31 23:59:59');
+      label = 'Jan 1 – Dec 31, ' + lastYear;
+
+    } else if (period === 'custom' && customFrom && customTo) {
+      startGdt.setValue(customFrom + ' 00:00:00');
+      endGdt.setValue(customTo + ' 23:59:59');
+      label = customFrom + ' to ' + customTo;
+
+    } else {
+      startGdt.setValue(curYear + '-' + pad(curMonth) + '-01 00:00:00');
+      endGdt.setValue(nowStr);
+      label = monthNames[curMonth - 1] + ' ' + curYear;
+    }
+
+    return { start: startGdt, end: endGdt, label: label };
+  }
+
+  data.filters = (input && input.filters) ? input.filters : (data.filters || {});
+  var statusFilter = data.filters.status || '';
+  var period        = data.filters.period || 'current_month';
+  var customFrom     = data.filters.customFrom || '';
+  var customTo       = data.filters.customTo || '';
+
+  data.selectedPeriod = period;
+
+  var range = buildPeriodRange(period, customFrom, customTo);
+  data.periodLabel = range.label;
+
+  data.statusOptions = getFilteredStatusOptions(REQUEST_TABLE, F_STATE);
+
+  data.scorecards = { submitted: 0, approved: 0, sendback: 0, rejected: 0, deviated: 0 };
+
+  var agg = new GlideAggregate(REQUEST_TABLE);
+  agg.addAggregate('COUNT', F_STATE);
+  agg.groupBy(F_STATE);
+  agg.addQuery(F_SUBMITTED_ON, '>=', range.start);
+  agg.addQuery(F_SUBMITTED_ON, '<=', range.end);
+  agg.query();
+  while (agg.next()) {
+    var st = (agg.getValue(F_STATE) || '').toLowerCase();
+    var cnt = parseInt(agg.getAggregate('COUNT', F_STATE), 10) || 0;
+    if (st.indexOf('submit') > -1) data.scorecards.submitted += cnt;
+    else if (st.indexOf('approv') > -1) data.scorecards.approved += cnt;
+    else if (st.indexOf('reject') > -1) data.scorecards.rejected += cnt;
+  }
+
+  var aggSB = new GlideAggregate(REQUEST_TABLE);
+  aggSB.addAggregate('COUNT', F_STATE);
+  aggSB.groupBy(F_STATE);
+  aggSB.query();
+  while (aggSB.next()) {
+    var st2 = (aggSB.getValue(F_STATE) || '').toLowerCase();
+    if (st2.indexOf('send') > -1 || st2.indexOf('return') > -1) {
+      data.scorecards.sendback += parseInt(aggSB.getAggregate('COUNT', F_STATE), 10) || 0;
+    }
+  }
+
+  var devGr = new GlideAggregate(REQUEST_TABLE);
+  devGr.addQuery(F_DEVIATION, true);
+  devGr.addQuery(F_SUBMITTED_ON, '>=', range.start);
+  devGr.addQuery(F_SUBMITTED_ON, '<=', range.end);
+  devGr.addAggregate('COUNT');
+  devGr.query();
+  if (devGr.next()) {
+    data.scorecards.deviated = parseInt(devGr.getAggregate('COUNT'), 10) || 0;
+  }
+
+  var nowStr2 = new GlideDateTime().getValue();
+  var chartYear = parseInt(nowStr2.substr(0, 4), 10);
+
+  var monthKeys = [];
+  for (var mm = 1; mm <= 12; mm++) {
+    monthKeys.push(chartYear + '-' + pad(mm));
+  }
+
+  var series = { submitted: [], approved: [], pending: [], sendback: [], rejected: [] };
+  var maxVal = 1;
+
+  monthKeys.forEach(function(mKey) {
+    var parts = mKey.split('-');
+    var y = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+    var counts = { submitted: 0, approved: 0, pending: 0, sendback: 0, rejected: 0 };
+    var ga = new GlideAggregate(REQUEST_TABLE);
+    ga.addAggregate('COUNT', F_STATE);
+    ga.groupBy(F_STATE);
+    monthRangeQuery(ga, F_SUBMITTED_ON, y, m);
+    ga.query();
+    while (ga.next()) {
+      var s3 = (ga.getValue(F_STATE) || '').toLowerCase();
+      var c3 = parseInt(ga.getAggregate('COUNT', F_STATE), 10) || 0;
+      if (s3.indexOf('submit') > -1) counts.submitted += c3;
+      else if (s3.indexOf('approv') > -1) counts.approved += c3;
+      else if (s3.indexOf('pend') > -1) counts.pending += c3;
+      else if (s3.indexOf('send') > -1 || s3.indexOf('return') > -1) counts.sendback += c3;
+      else if (s3.indexOf('reject') > -1) counts.rejected += c3;
+    }
+    Object.keys(counts).forEach(function(k) {
+      series[k].push(counts[k]);
+      if (counts[k] > maxVal) maxVal = counts[k];
+    });
+  });
+
+  data.chart = {
+    year: chartYear,
+    months: monthKeys.map(function(mKey) {
+      var m = parseInt(mKey.split('-')[1], 10);
+      return monthNames[m - 1];
+    }),
+    series: series,
+    max: maxVal
+  };
+
+  var custMap = buildCustomerMap();
+  var snapMap = buildSnapshotMap();
+
+  data.requests = [];
+
+  var reqGr = new GlideRecord(REQUEST_TABLE);
+  if (statusFilter) { reqGr.addQuery(F_STATE, statusFilter); }
+  reqGr.addQuery(F_SUBMITTED_ON, '>=', range.start);
+  reqGr.addQuery(F_SUBMITTED_ON, '<=', range.end);
+  reqGr.orderByDesc(F_SUBMITTED_ON);
+  reqGr.setLimit(500);
+  reqGr.query();
+
+  while (reqGr.next()) {
+    var cust = resolveCustomer(reqGr, custMap);
+
+    var custCode = '', custName = reqGr.getDisplayValue(F_CUSTOMER_NAME), segment = '', prevLimit = '', pan = '';
+    if (cust) {
+      custCode  = cust.code;
+      custName  = cust.name || custName;
+      segment   = cust.segment;
+      prevLimit = cust.prevLimit;
+      pan       = cust.pan;
+    }
+
+    var outstanding = resolveOutstanding(cust, snapMap);
+    var reqNumber = reqGr.getDisplayValue(F_REQ_NUMBER);
+    var pendingAtStep = getPendingAtStep(reqGr);
+
+    data.requests.push({
+      requestCode:  reqNumber || reqGr.getUniqueValue(),
+      customerCode: custCode,
+      customerName: custName,
+      pan:          pan,
+      segment:      segment,
+      status:       reqGr.getValue(F_STATE),
+      statusLabel:  reqGr.getDisplayValue(F_STATE),
+      stage:        pendingAtStep,
+      submittedBy:  reqGr.getDisplayValue(F_SUBMITTED_BY),
+      submittedOn:  reqGr.getDisplayValue(F_SUBMITTED_ON),
+      prevLimit:    formatAmt(prevLimit),
+      requested:    formatAmt(reqGr.getValue(F_REQUESTED_AMT)),
+      approved:     formatAmt(reqGr.getValue(F_APPROVED_AMT)),
+      outstanding:  formatAmt(outstanding)
+    });
+  }
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-03 06:33:47</sys_created_on>
+        <sys_id>7cd3ffda97f587d0be31fa17f053affd</sys_id>
+        <sys_mod_count>13</sys_mod_count>
+        <sys_name>CLM Approval </sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_7cd3ffda97f587d0be31fa17f053affd</sys_update_name>
+        <sys_updated_by>jatin.sharma@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-06 20:47:08</sys_updated_on>
+        <template><![CDATA[<div class="clm-dash" ng-cloak>
+
+  <div class="clm-filterbar">
+    <div class="clm-filter-group">
+      <label>Status</label>
+      <select class="form-control" ng-model="c.filters.status" ng-change="c.applyFilters()">
+        <option value="">All Statuses</option>
+        <option ng-repeat="s in data.statusOptions" value="{{s.value}}">{{s.label}}</option>
+      </select>
+    </div>
+
+    <div class="clm-filter-group clm-period-group">
+      <label>Period</label>
+      <select class="form-control" ng-model="c.filters.period" ng-change="c.onPeriodChange()">
+        <option value="current_month">This Month</option>
+        <option value="previous_month">Last Month</option>
+        <option value="current_year">This Year (Jan 1 – Today)</option>
+        <option value="last_year">Last Year ({{data.lastYear}})</option>
+        <option value="custom">Custom Range…</option>
+      </select>
+
+      <div class="clm-custom-range" ng-if="c.filters.period === 'custom'">
+        <input type="date" ng-model="c.filters.customFrom">
+        <span>to</span>
+        <input type="date" ng-model="c.filters.customTo">
+        <button type="button" class="clm-apply-btn" ng-click="c.applyFilters()">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="clm-scorecards">
+    <div class="clm-card clm-card-blue">
+      <div class="clm-card-id">IND-016 · SUBMITTED</div>
+      <div class="clm-card-value">{{data.scorecards.submitted}}</div>
+      <div class="clm-card-sub">New in {{data.periodLabel}}</div>
+    </div>
+    <div class="clm-card clm-card-green">
+      <div class="clm-card-id">IND-017 · APPROVED</div>
+      <div class="clm-card-value">{{data.scorecards.approved}}</div>
+      <div class="clm-card-sub">Final approval received</div>
+    </div>
+    <div class="clm-card clm-card-purple">
+      <div class="clm-card-id">IND-019 · SEND-BACK (ALL TIME)</div>
+      <div class="clm-card-value">{{data.scorecards.sendback}}</div>
+      <div class="clm-card-sub">Awaiting resubmission</div>
+    </div>
+    <div class="clm-card clm-card-red">
+      <div class="clm-card-id">IND-020 · REJECTED</div>
+      <div class="clm-card-value">{{data.scorecards.rejected}}</div>
+      <div class="clm-card-sub">Declined in {{data.periodLabel}}</div>
+    </div>
+    <div class="clm-card clm-card-orange">
+      <div class="clm-card-id">IND-021 · DEVIATED REQUESTS</div>
+      <div class="clm-card-value">{{data.scorecards.deviated}}</div>
+      <div class="clm-card-sub">Flagged in {{data.periodLabel}}</div>
+    </div>
+  </div>
+
+  <div class="clm-chart-panel">
+    <div class="clm-chart-header">
+      <span class="clm-chart-title">Approval Pipeline — State-wise ({{data.chart.year}})</span>
+      <span class="clm-chart-badge">Multi-Line</span>
+      <div class="clm-legend">
+        <span class="legend-item"><i class="dot blue"></i>Submitted</span>
+        <span class="legend-item"><i class="dot green"></i>Approved</span>
+        <span class="legend-item"><i class="dot orange"></i>Pending</span>
+        <span class="legend-item"><i class="dot purple"></i>Send-Back</span>
+        <span class="legend-item"><i class="dot red"></i>Rejected</span>
+      </div>
+    </div>
+    <div class="clm-chart-body" ng-mouseleave="c.onMouseLeaveChart()">
+      <svg viewBox="0 0 900 260" preserveAspectRatio="none" class="clm-svg" ng-if="data.chart.months.length">
+        <line ng-repeat="m in data.chart.months track by $index"
+              x1="{{c.chartX($index)}}" y1="0" x2="{{c.chartX($index)}}" y2="220"
+              class="grid-line"></line>
+
+        <g class="y-axis-labels">
+          <text ng-repeat="tick in c.yAxisTicks" 
+                ng-attr-x="25" 
+                ng-attr-y="{{tick.y + 4}}" 
+                text-anchor="end" 
+                fill="#888888" 
+                style="font-size: 11px;">
+            {{tick.label}}
+          </text>
+        </g>
+
+        <polyline class="line-blue"    points="{{c.linePoints('submitted')}}"></polyline>
+        <polyline class="line-green"   points="{{c.linePoints('approved')}}"></polyline>
+        <polyline class="line-orange"  points="{{c.linePoints('pending')}}"></polyline>
+        <polyline class="line-purple"  points="{{c.linePoints('sendback')}}"></polyline>
+        <polyline class="line-red"     points="{{c.linePoints('rejected')}}"></polyline>
+
+        <rect ng-repeat="m in data.chart.months track by $index"
+              ng-attr-x="{{c.chartX($index) - (860 / (data.chart.months.length - 1 || 1)) / 2}}"
+              y="0"
+              ng-attr-width="{{860 / (data.chart.months.length - 1 || 1)}}"
+              height="220"
+              fill="transparent"
+              style="cursor: pointer;"
+              ng-mouseover="c.onMouseOverMonth($event, $index)">
+        </rect>
+
+        <g ng-repeat="m in data.chart.months track by $index">
+          <text x="{{c.chartX($index)}}" y="245" class="axis-label" text-anchor="middle">{{m}}</text>
+        </g>
+      </svg>
+      
+      <div class="clm-chart-tooltip" ng-if="c.showTooltip" ng-style="{'left': c.tooltipLeft + 'px', 'top': c.tooltipTop + 'px'}">
+        <div class="tooltip-title">{{data.chart.months[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color blue"></span>Submitted: {{data.chart.series.submitted[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color green"></span>Approved: {{data.chart.series.approved[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color orange"></span>Pending: {{data.chart.series.pending[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color purple"></span>SendBack: {{data.chart.series.sendback[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color red"></span>Rejected: {{data.chart.series.rejected[c.hoverIndex]}}</div>
+      </div>
+
+      <div ng-if="!data.chart.months.length" class="clm-no-data">No data available.</div>
+    </div>
+  </div>
+
+  <div class="clm-table-panel">
+    <div class="clm-table-header">
+      <span class="clm-table-title">Approval Requests <span class="clm-record-count">{{data.requests.length}} records</span></span>
+      <div class="clm-search-box">
+        <i class="fa fa-search"></i>
+        <input type="text" ng-model="c.filters.search" placeholder="Search by Request ID, customer, PAN...">
+      </div>
+    </div>
+
+    <div class="clm-table-scroll">
+      <table class="clm-table">
+        <thead>
+          <tr>
+            <th>Request ID</th>
+            <th>Customer</th>
+            <th>PAN</th> 
+            <th>SEG</th>
+            <th>Status</th>
+            <th>Prev Limit</th>
+            <th>Requested</th>
+            <th>Approved</th>
+            <th>Outstanding</th>
+            <th>Pending At</th>
+            <th>Submitted By</th>
+            <th>Submitted On</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr ng-repeat="r in data.requests" ng-if="!r._hidden">
+            <td><a href="javascript:void(0)" class="clm-link">{{r.requestCode}}</a></td>
+            <td>
+              <div class="clm-cust-name">{{r.customerName}}</div>
+              <div class="clm-cust-code">{{r.customerCode}}</div>
+            </td>
+            <td>{{r.pan}}</td> 
+            <td><span class="badge seg-badge" ng-class="c.segClass(r.segment)">{{r.segment}}</span></td>
+            <td><span class="badge status-badge" ng-class="c.statusClass(r.status)">{{r.statusLabel}}</span></td>
+            <td>{{r.prevLimit}}</td>
+            <td>{{r.requested}}</td>
+            <td>{{r.approved || '—'}}</td>
+            <td>{{r.outstanding}}</td>
+            <td>
+              <span class="badge stage-badge" ng-if="r.stage">{{r.stage}}</span>
+              <span ng-if="!r.stage">—</span>
+            </td>
+            <td>{{r.submittedBy}}</td>
+            <td>{{r.submittedOn}}</td>
+          </tr>
+          <tr ng-if="!data.requests.length">
+            <td colspan="12" class="clm-no-data">No approval requests found for the selected filters.</td> 
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>7cd3ffda97f587d0be31fa17f053affd</id>
+        <sys_created_by>devendra.pandey@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-03 06:33:47</sys_created_on>
+        <sys_id>30d3331e97f587d0be31fa17f053af66</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>devendra.pandey@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-03 06:33:47</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

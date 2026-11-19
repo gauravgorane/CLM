@@ -1,0 +1,305 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sn_aia_tool">
+    <sn_aia_tool action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <description>Searches the web for a company's latest share price, market cap, quarterly results, business news, exchange filings and analyst outlook. Input: company_name. Returns JSON with one search result per topic.</description>
+        <input_schema>[{"name":"company_name","description":"","mandatory":false}]</input_schema>
+        <name>Get Vendor Market Intelligence</name>
+        <record_type>custom</record_type>
+        <script><![CDATA[(function(inputs, _agentic_context_) {
+    var CAP_ID = '5817eb2b9f36121029ead63a6a0a1c7c'; // Web Search
+    var NEWS_DOMAINS = 'economictimes.indiatimes.com,livemint.com,business-standard.com,' +
+                       'thehindubusinessline.com,moneycontrol.com,financialexpress.com,' +
+                       'thehindu.com,reuters.com,bseindia.com,nseindia.com';
+
+    var company = (inputs.company_name || '').toString().trim();
+    if (!company) return JSON.stringify({ status: 'error', message: 'company_name is required' });
+
+    var today = new GlideDate().getByFormat('dd MMM yyyy');
+
+    var searches = [
+        {
+            key: 'company_snapshot', domains: '', links: false,
+            q: company + ' as of ' + today + ': share price NSE BSE, market capitalisation, 52 week range, ' +
+               'latest quarterly revenue and net profit with YoY change, debt position, credit rating, ' +
+               'major recent orders, leadership changes, analyst rating and target price'
+        },
+        {
+            key: 'latest_news', domains: NEWS_DOMAINS, links: true,
+            q: 'Latest business news about ' + company + ' published in the last 7 days up to ' + today +
+               '. List up to 6 separate news articles, newest first. For each give the publication date, ' +
+               'headline, publisher and a two line summary.'
+        },
+        {
+            key: 'risk_alerts', domains: NEWS_DOMAINS, links: true,
+            q: company + ' news in the last 90 days about payment default, debt stress, insolvency or NCLT, ' +
+               'credit rating downgrade, fraud, tax or ED raid, regulatory penalty, labour strike or plant shutdown. ' +
+               'Give the publication date and publisher for each. If none, say no adverse news found.'
+        }
+    ];
+
+    var out = { status: 'success', company: company, searched_on: today, results: {} };
+    var gotAny = false;
+
+    for (var i = 0; i < searches.length; i++) {
+        var s = searches[i];
+        var r = runSearch(s.q, s.domains, s.links);
+        // Retry on the open web only if the restricted search returned nothing
+        if (s.domains && !r.answer) {
+            var retry = runSearch(s.q, '', s.links);
+            if (retry.answer) r = retry;
+        }
+        out.results[s.key] = r;
+        if (r.answer) gotAny = true;
+    }
+
+    if (!gotAny) out.status = 'no_results';
+    out.instructions = 'In latest_news and risk_alerts each fact is followed by (Link: url | publisher). ' +
+        'Use that url as the Link for that news item only. Copy urls exactly. Never invent or reuse links.';
+    return JSON.stringify(out);
+
+    // ---------------- helpers ----------------
+
+    function runSearch(q, domains, withLinks) {
+        try {
+            var payload = { query: q };
+            if (domains) payload.search_domains = domains;
+
+            var response = sn_one_extend.OneExtendUtil.execute({
+                executionRequests: [{ payload: payload, capabilityId: CAP_ID }]
+            });
+            var caps = (response && response.capabilities) || {};
+            var res = caps[CAP_ID] && caps[CAP_ID].response;
+
+            if (Array.isArray(res) && res.length > 0 && res[0].answer) {
+                var chunks = res[0].groundingChunks || [];
+                var sources = [];
+                for (var c = 0; c < chunks.length; c++) {
+                    sources.push({ n: c + 1, publisher: chunks[c].title || '', url: chunks[c].url || '' });
+                }
+                return {
+                    query: q,
+                    answer: withLinks ? inlineLinks(res[0].answer, sources) : stripMarkers(res[0].answer),
+                    error: null
+                };
+            }
+
+            for (var id in caps) {
+                if (typeof caps[id].response === 'string' && caps[id].response) {
+                    return { query: q, answer: stripMarkers(caps[id].response), error: null };
+                }
+            }
+            return { query: q, answer: '', error: 'Empty response' };
+
+        } catch (e) {
+            gs.error('[CLM VRI] Search failed for "' + q + '": ' + (e.message || e));
+            return { query: q, answer: '', error: String(e.message || e) };
+        }
+    }
+
+    // [1] / [1, 2] -> "(Link: url | publisher)" right next to the fact
+    function inlineLinks(text, sources) {
+        return (text || '')
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/\s*\[cite:[^\]]*\]?/gi, '')
+            .replace(/\s*\[(\d+(?:\s*,\s*\d+)*)\]/g, function(m, nums) {
+                var links = [];
+                nums.split(',').forEach(function(n) {
+                    var src = sources[parseInt(n.trim(), 10) - 1];
+                    if (src && src.url) links.push('(Link: ' + src.url + ' | ' + src.publisher + ')');
+                });
+                return links.length ? ' ' + links.join(' ') : '';
+            })
+            .trim();
+    }
+
+    function stripMarkers(text) {
+        return (text || '')
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/\s*\[cite:[^\]]*\]?/gi, '')
+            .replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, '')
+            .trim();
+    }
+
+})(inputs, _agentic_context_);
+
+// (function(inputs, _agentic_context_) {
+//     var CAP_ID = '5817eb2b9f36121029ead63a6a0a1c7c'; // Web Search
+//     var NEWS_DOMAINS = 'economictimes.indiatimes.com,livemint.com,business-standard.com,' +
+//                        'thehindubusinessline.com,moneycontrol.com,financialexpress.com,' +
+//                        'thehindu.com,reuters.com,bseindia.com,nseindia.com';
+//     var MAX_LINK_RESOLVES = 15;
+//     var resolvedCount = 0;
+
+//     var company = (inputs.company_name || '').toString().trim();
+//     if (!company) return JSON.stringify({ status: 'error', message: 'company_name is required' });
+
+//     var today = new GlideDate().getByFormat('dd MMM yyyy');
+
+//     var searches = [
+//         {
+//             key: 'stock_and_financials', domains: '', links: false,
+//             q: company + ' share price today NSE BSE, market capitalisation, 52 week range, ' +
+//                'latest quarterly results revenue and net profit, debt position, credit rating, as of ' + today
+//         },
+//         {
+//             key: 'latest_news', domains: NEWS_DOMAINS, links: true,
+//             q: 'Latest business news about ' + company + ' published in the last 7 days up to ' + today +
+//                '. List up to 6 separate news articles, newest first. For each give the publication date, ' +
+//                'headline, publisher and a two line summary.'
+//         },
+//         {
+//             key: 'risk_alerts', domains: NEWS_DOMAINS, links: true,
+//             q: company + ' news in the last 90 days about payment default, debt stress, insolvency or NCLT, ' +
+//                'credit rating downgrade, fraud, tax or ED raid, regulatory penalty, labour strike or plant shutdown. ' +
+//                'Give the publication date and publisher for each. If none, say no adverse news found.'
+//         },
+//         {
+//             key: 'filings_and_outlook', domains: '', links: false,
+//             q: company + ' latest stock exchange filings, press releases, major orders, leadership changes, ' +
+//                'analyst ratings and target price'
+//         }
+//     ];
+
+//     var out = { status: 'success', company: company, searched_on: today, results: {} };
+//     var gotAny = false;
+
+//     for (var i = 0; i < searches.length; i++) {
+//         var s = searches[i];
+//         var r = runSearch(s.q, s.domains, s.links);
+//         // Retry on the open web if the restricted search returned nothing or no sources
+//         if (s.domains && (!r.answer || (s.links && r.sources.length === 0))) {
+//             var retry = runSearch(s.q, '', s.links);
+//             if (retry.answer) r = retry;
+//         }
+//         out.results[s.key] = r;
+//         if (r.answer) gotAny = true;
+//     }
+
+//     if (!gotAny) out.status = 'no_results';
+//     out.instructions = 'In latest_news and risk_alerts, each fact is followed by (Link: url). ' +
+//         'Use that url as the Link for the news item. If an item has no inline link, use the url from ' +
+//         'all_links whose publisher best matches the item. Copy urls exactly. Never invent links.';
+//     return JSON.stringify(out);
+
+//     // ---------------- helpers ----------------
+
+//     function runSearch(q, domains, withLinks) {
+//         try {
+//             var payload = { query: q };
+//             if (domains) payload.search_domains = domains;
+
+//             var response = sn_one_extend.OneExtendUtil.execute({
+//                 executionRequests: [{ payload: payload, capabilityId: CAP_ID }]
+//             });
+//             var caps = (response && response.capabilities) || {};
+//             var res = caps[CAP_ID] && caps[CAP_ID].response;
+
+//             if (Array.isArray(res) && res.length > 0 && res[0].answer) {
+//                 var chunks = res[0].groundingChunks || [];
+//                 var sources = [];
+//                 for (var c = 0; c < chunks.length; c++) {
+//                     sources.push({
+//                         n: c + 1,
+//                         publisher: chunks[c].title || '',
+//                         url: withLinks ? resolveUrl(chunks[c].url || '') : (chunks[c].url || '')
+//                     });
+//                 }
+//                 var answer = withLinks ? inlineLinks(res[0].answer, sources) : stripMarkers(res[0].answer);
+//                 var result = { query: q, answer: answer, sources: sources.length, error: null };
+//                 if (withLinks) {
+//                     result.sources = sources;
+//                     result.all_links = sources.map(function(x) { return x.publisher + ' - ' + x.url; });
+//                 }
+//                 return result;
+//             }
+
+//             // Fallback: a capability returning a plain string (no sources available)
+//             for (var id in caps) {
+//                 if (typeof caps[id].response === 'string' && caps[id].response) {
+//                     return { query: q, answer: stripMarkers(caps[id].response), sources: [], all_links: [], error: null };
+//                 }
+//             }
+//             return { query: q, answer: '', sources: [], all_links: [], error: 'Empty response' };
+
+//         } catch (e) {
+//             gs.error('[CLM VRI] Search failed for "' + q + '": ' + (e.message || e));
+//             return { query: q, answer: '', sources: [], all_links: [], error: String(e.message || e) };
+//         }
+//     }
+
+//     // Replace [1] / [1, 2] markers with "(Link: url)" right next to the fact
+//     function inlineLinks(text, sources) {
+//         var t = (text || '')
+//             .replace(/[\u200B-\u200D\uFEFF]/g, '')
+//             .replace(/\s*\[cite:[^\]]*\]?/gi, '');
+
+//         var used = {};
+//         t = t.replace(/\s*\[(\d+(?:\s*,\s*\d+)*)\]/g, function(m, nums) {
+//             var links = [];
+//             nums.split(',').forEach(function(n) {
+//                 var idx = parseInt(n.trim(), 10) - 1;
+//                 var src = sources[idx];
+//                 if (src && src.url && !used[idx + '|' + m]) {
+//                     links.push('(Link: ' + src.url + ' | ' + src.publisher + ')');
+//                     used[idx + '|' + m] = true;
+//                 }
+//             });
+//             return links.length ? ' ' + links.join(' ') : '';
+//         });
+
+//         // If the answer had no markers at all, append every link at the end
+//         if (t.indexOf('(Link: ') === -1 && sources.length) {
+//             t += '\n\nSources for this answer:\n' + sources.map(function(x) {
+//                 return '- ' + x.publisher + ': ' + x.url;
+//             }).join('\n');
+//         }
+//         return t.trim();
+//     }
+
+//     function stripMarkers(text) {
+//         return (text || '')
+//             .replace(/[\u200B-\u200D\uFEFF]/g, '')
+//             .replace(/\s*\[cite:[^\]]*\]?/gi, '')
+//             .replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, '')
+//             .trim();
+//     }
+
+//     // Google grounding links are redirects; try to get the real article URL
+//     function resolveUrl(u) {
+//         if (!u || u.indexOf('grounding-api-redirect') === -1) return u;
+//         if (resolvedCount >= MAX_LINK_RESOLVES) return u;
+//         resolvedCount++;
+//         try {
+//             var rm = new sn_ws.RESTMessageV2();
+//             rm.setEndpoint(u);
+//             rm.setHttpMethod('head');
+//             rm.setHttpTimeout(4000);
+//             var resp = rm.execute();
+//             var loc = resp.getHeader('Location') || resp.getHeader('location');
+//             return loc || u;
+//         } catch (e) {
+//             return u;
+//         }
+//     }
+
+// })(inputs, _agentic_context_);]]></script>
+        <sys_class_name>sn_aia_tool</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-29 06:32:26</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>ef1f539c97505b50be31fa17f053af1d</sys_id>
+        <sys_mod_count>4</sys_mod_count>
+        <sys_name>Get Vendor Market Intelligence</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sn_aia_tool_ef1f539c97505b50be31fa17f053af1d</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-29 17:10:18</sys_updated_on>
+        <target_document/>
+        <target_document_table>sn_aia_tool</target_document_table>
+        <type>script</type>
+    </sn_aia_tool>
+</record_update>

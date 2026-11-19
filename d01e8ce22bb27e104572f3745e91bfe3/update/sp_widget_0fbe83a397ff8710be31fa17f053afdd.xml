@@ -1,0 +1,391 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $window, $sce) {
+	var c = this;
+
+	var CALENDAR_SVG = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>';
+
+	// ── 3 Side-by-Side Customer Segment Cards ──
+	c.cards = [
+		{
+			id: 'trade',
+			segment: 'Trade',
+			level: 'Code Level',
+			pillClass: 'pill-trade',
+			label: 'Trade Next Review Bulk Update',
+			desc: 'Bulk update Next Review Dates at customer code level for Trade accounts.',
+			page: 'bulkreviewupdate',
+			iconBg: 'green',
+			iconHtml: $sce.trustAsHtml(CALENDAR_SVG)
+		},
+		{
+			id: 'nontrade',
+			segment: 'Non-Trade',
+			level: 'PAN Level',
+			pillClass: 'pill-nontrade',
+			label: 'Non-Trade Next Review Bulk Update',
+			desc: 'Bulk update Next Review Dates at PAN level for Non-Trade accounts.',
+			page: 'uclm_nt_next_review_date',
+			iconBg: 'blue',
+			iconHtml: $sce.trustAsHtml(CALENDAR_SVG)
+		},
+		{
+			id: 'key',
+			segment: 'Key Customer',
+			level: 'Group Level',
+			pillClass: 'pill-key',
+			label: 'Key Customer Next Review Bulk Update',
+			desc: 'Bulk update Next Review Dates at Group level across all linked zones and sites.',
+			page: 'uclm_key_bulk_review_update',
+			iconBg: 'orange',
+			iconHtml: $sce.trustAsHtml(CALENDAR_SVG)
+		}
+	];
+
+	// Safe Navigation Function
+	c.navigate = function(pageId) {
+		if (pageId && pageId.trim() !== '') {
+			$window.location.href = '/uclm?id=' + pageId;
+		} else {
+			$window.location.href = '/uclm';
+		}
+	};
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Wrapper ── */
+.db-wrap {
+  width: 100%;
+  min-height: 90vh;
+  background: #F9FAFB;
+  font-family: 'Oxygen', "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  padding: clamp(16px, 3vw, 48px);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ── Content Container ── */
+.db-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* ── Section Header ── */
+.clm-hb-section       { margin-bottom: 32px; flex-shrink: 0; }
+.clm-hb-section-head  { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+.clm-hb-badge {
+  display: inline-flex; align-items: center; height: 32px; padding: 0 18px; border-radius: 16px;
+  background: #062a62; color: #FFE100; font-size: 12px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 1px; white-space: nowrap;
+}
+.clm-hb-line          { flex: 1; height: 1px; background: #dde3ea; }
+
+/* ── Balanced 3-Column Grid ── */
+.clm-review-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+  width: 100%;
+}
+
+/* ── Tile Card ── */
+.clm-review-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 240px;
+  padding: 24px 22px 20px;
+  background: #ffffff;
+  border: 1px solid #dde3ea;
+  border-top: 4px solid #FFE100;
+  border-radius: 10px;
+  box-shadow: 0 2px 6px rgba(0,0,0,.03), 0 6px 16px rgba(0,0,0,.04);
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  transition: transform .25s ease, box-shadow .25s ease, border-color .25s ease;
+}
+
+.clm-review-tile:hover {
+  transform: translateY(-4px);
+  border-color: #F3D54E;
+  box-shadow: 0 0 0 2px rgba(243, 213, 78, .25), 0 12px 28px rgba(0,0,0,.09);
+}
+
+.clm-review-tile:focus {
+  outline: none;
+  border-color: #AF272F;
+  box-shadow: 0 0 0 3px rgba(175, 39, 47, .15);
+}
+
+/* ── Segment Header Row in Tile ── */
+.clm-tile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.clm-segment-pill {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: 12px;
+}
+.clm-segment-pill.pill-trade    { background: #e6f4ea; color: #1e7e34; border: 1px solid #c3e6cb; }
+.clm-segment-pill.pill-nontrade { background: #e3eefa; color: #0b5394; border: 1px solid #b8daff; }
+.clm-segment-pill.pill-key      { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+
+.clm-level-tag {
+  font-size: 11px;
+  font-weight: 600;
+  color: #7f8c9a;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+/* ── Tile Icons ── */
+.clm-hb-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 12px;
+  flex-shrink: 0;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform .2s ease;
+}
+.clm-hb-icon span { display: flex; }
+.clm-hb-icon svg  { width: 26px; height: 26px; }
+.clm-review-tile:hover .clm-hb-icon { transform: scale(1.06); }
+
+.clm-hb-icon.green  { background: #e6f4ea; color: #2e7d32; }
+.clm-hb-icon.blue   { background: #e3eefa; color: #0b5394; }
+.clm-hb-icon.orange { background: #fde8dc; color: #E87722; }
+
+/* ── Tile Typography ── */
+.clm-hb-label {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1a1a1a;
+  line-height: 1.35;
+}
+.clm-hb-desc {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #5a6a7a;
+  line-height: 1.5;
+}
+
+/* ── Tile Footer ── */
+.clm-hb-foot {
+  margin-top: auto;
+  padding-top: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.clm-action-text {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #062a62;
+  transition: color .2s ease;
+}
+.clm-review-tile:hover .clm-action-text {
+  color: #E87722;
+}
+.clm-hb-arrow {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #062a62;
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform .2s ease, background .2s ease;
+}
+.clm-review-tile:hover .clm-hb-arrow {
+  transform: translateX(4px);
+  background: #E87722;
+}
+
+/* ── Access Denied State ── */
+.clm-access-denied {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+  border: 1px solid #dde3ea;
+  border-radius: 8px;
+  padding: 56px 24px;
+  text-align: center;
+  margin-top: 24px;
+}
+.clm-denied-icon { margin-bottom: 16px; }
+.clm-denied-title { font-size: 18px; font-weight: 700; color: #1a1a1a; margin-bottom: 8px; }
+.clm-denied-desc { font-size: 14px; color: #5a6a7a; max-width: 480px; line-height: 1.5; }
+
+/* ── Responsive ── */
+@media (max-width: 992px) {
+  .clm-review-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+}
+
+@media (max-width: 600px) {
+  .clm-review-grid { grid-template-columns: 1fr; }
+  .clm-review-tile { min-height: 0; padding: 18px 16px; }
+}
+
+/* ── Font Enforcement ── */
+.clm-widget, .clm-widget *, .clm-widget input, .clm-widget select,
+.clm-widget textarea, .clm-widget button, .clm-widget table {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>false</has_preview>
+        <id>uclm_next_review_date</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Next Review Date</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+	var userId = gs.getUserID();
+
+	// ── Group Authorization Verification ──────────────────────────────
+	var isZch = false;
+	var isDev = false;
+	var isAdmin = false;
+
+	var gmGr = new GlideRecord('sys_user_grmember');
+	gmGr.addQuery('user', userId);
+	gmGr.query();
+	while (gmGr.next()) {
+		var gName = (gmGr.getDisplayValue('group') || '').toUpperCase().trim();
+		if (gName === 'CLM: ZCH INITIATOR') {
+			isZch = true;
+		} else if (gName === 'CLM: DEVELOPER') {
+			isDev = true;
+		} else if (gName === 'CLM: ADMIN') {
+			isAdmin = true;
+		}
+	}
+
+	// Also verify against the Role/Approval Matrix for ZCH assignment (fallback validation)
+	if (!isZch) {
+		var roleMapGr = new GlideRecord('x_birl3_clm_role_user_mapping');
+		roleMapGr.addQuery('u_user', userId);
+		roleMapGr.addQuery('u_role', 'CONTAINS', 'zch');
+		roleMapGr.setLimit(1);
+		roleMapGr.query();
+		if (roleMapGr.hasNext()) {
+			isZch = true;
+		}
+	}
+
+	// Enforce strict access: ZCH Initiator persona, Admin, or Developer
+	data.isZchAuthorized = (isZch || isDev || isAdmin);
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-14 11:09:44</sys_created_on>
+        <sys_id>0fbe83a397ff8710be31fa17f053afdd</sys_id>
+        <sys_mod_count>7</sys_mod_count>
+        <sys_name>UCLM Next Review Date</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_0fbe83a397ff8710be31fa17f053afdd</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-03 11:16:53</sys_updated_on>
+        <template><![CDATA[<div class="db-wrap clm-widget">
+  <div class="db-content">
+
+    <!-- Access Restriction Warning (If User is NOT ZCH / Admin / Dev) -->
+    <div class="clm-access-denied" ng-if="!c.data.isZchAuthorized">
+      <div class="clm-denied-icon">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#E23D28" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="12" y1="8" x2="12" y2="12"></line>
+          <line x1="12" y1="16" x2="12.01" y2="16"></line>
+        </svg>
+      </div>
+      <div class="clm-denied-title">Access Restricted</div>
+      <div class="clm-denied-desc">The Next Review Date update functionality is reserved exclusively for ZCH personnel.</div>
+    </div>
+
+    <!-- ── Unified Next Review Date Section (Trade, Non-Trade, Key Side-by-Side) ── -->
+    <div class="clm-hb-section" ng-if="c.data.isZchAuthorized">
+      <div class="clm-hb-section-head">
+        <span class="clm-hb-badge">Next Review Date</span>
+        <div class="clm-hb-line"></div>
+      </div>
+
+      <div class="clm-review-grid">
+        <div class="clm-hb-tile clm-review-tile"
+             ng-repeat="card in c.cards"
+             ng-click="c.navigate(card.page)"
+             role="button"
+             tabindex="0">
+          
+          <!-- Segment Header Tag -->
+          <div class="clm-tile-header">
+            <span class="clm-segment-pill {{card.pillClass}}">{{card.segment}}</span>
+            <span class="clm-level-tag">{{card.level}}</span>
+          </div>
+
+          <!-- Icon & Details -->
+          <div class="clm-hb-icon {{card.iconBg}}">
+            <span ng-bind-html="card.iconHtml"></span>
+          </div>
+
+          <div class="clm-hb-label">{{card.label}}</div>
+          <div class="clm-hb-desc">{{card.desc}}</div>
+
+          <div class="clm-hb-foot">
+            <span class="clm-action-text">Proceed to Update</span>
+            <span class="clm-hb-arrow" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 12h14M13 6l6 6-6 6"/>
+              </svg>
+            </span>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>0fbe83a397ff8710be31fa17f053afdd</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-14 11:09:44</sys_created_on>
+        <sys_id>4fbe0ba397ff8710be31fa17f053af46</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-14 11:09:44</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_include">
+    <sys_script_include action="INSERT_OR_UPDATE">
+        <access>package_private</access>
+        <active>true</active>
+        <api_name>x_birl3_clm.wsdl.clm</api_name>
+        <caller_access/>
+        <client_callable>true</client_callable>
+        <description/>
+        <mobile_callable>false</mobile_callable>
+        <name>wsdl.clm</name>
+        <sandbox_callable>false</sandbox_callable>
+        <script><![CDATA[var wsdl_clm = Class.create();
+wsdl_clm.prototype = Object.extendsObject(global.AbstractAjaxProcessor, {
+	getlimit: function(){
+		var credlimit = this.getParameter('sysparm_customer_code');
+    var req = new sn_ws.RESTMessageV2();
+    // Unescape the endpoint (real '&' not &amp;)
+    req.setEndpoint('https://speed.eye2serve.com:7777/XISOAPAdapter/MessageServlet?senderParty=&senderService=BC_OneUltratech&receiverParty=&receiverService=&interface=SI_Customer_AVL_Credit_Limit_REQ&interfaceNamespace=http://Oneultratechapp.com/OUS/Customer_AVL_Credit_Limit');
+    // Correct headers for SOAP 1.1
+    req.setRequestHeader('Content-Type', 'text/xml; charset=utf-8');
+    req.setRequestHeader('Accept', 'text/xml');
+req.setHttpMethod('POST');
+    var body =
+      '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:cus="http://Oneultratechapp.com/OUS/Customer_AVL_Credit_Limit">' +
+      '  <soapenv:Header/>' +
+      '  <soapenv:Body>' +
+      '    <cus:MT_Customer_AVL_Credit_Limit_REQ>' +
+      // NOTE: Depending on the provider’s schema, this child element may need the 'cus' prefix as well.
+      // If they require namespaced children, change to <cus:Customer_Code>...</cus:Customer_Code>
+      '      <CUSTOMER_CODE>'+credlimit+'</CUSTOMER_CODE>' +
+      '    </cus:MT_Customer_AVL_Credit_Limit_REQ>' +
+      '  </soapenv:Body>' +
+      '</soapenv:Envelope>';
+
+    req.setRequestBody(body);
+    req.setBasicAuth('po_wsdl', 'Poqa@2019');
+
+    // Optional: timeout and MID routing
+    req.setHttpTimeout(60000);
+    // req.setMIDServer('YOUR_MID_NAME'); // if endpoint is reachable only via MID
+
+    var res = req.execute();
+    var status = res.getStatusCode();
+    var bodyOut = res.getBody();
+    var err = res.getErrorMessage();
+
+   // gs.info('[SOAP via REST] HTTP ' + status);
+   // gs.info(bodyOut);
+	
+var x = new XMLDocument2();
+x.parseXML(bodyOut);
+
+var cred = x.getNodeText("//*[local-name()='LT_OUT']/*[local-name()='item']/*[local-name()='AVAILABLE_CREDIT_LIMIT']");
+return cred;
+	},
+    type: 'wsdl_clm'
+});]]></script>
+        <sys_class_name>sys_script_include</sys_class_name>
+        <sys_created_by>balwinder.singh@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-04-16 09:39:29</sys_created_on>
+        <sys_id>c2d0365d9710cbd0be31fa17f053af20</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>wsdl.clm</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy>read</sys_policy>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_include_c2d0365d9710cbd0be31fa17f053af20</sys_update_name>
+        <sys_updated_by>balwinder.singh@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-04-16 09:39:29</sys_updated_on>
+    </sys_script_include>
+</record_update>

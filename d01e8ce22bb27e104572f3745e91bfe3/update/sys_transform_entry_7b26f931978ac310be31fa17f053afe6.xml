@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_transform_entry">
+    <sys_transform_entry action="INSERT_OR_UPDATE">
+        <choice_action>create</choice_action>
+        <coalesce>false</coalesce>
+        <coalesce_case_sensitive>false</coalesce_case_sensitive>
+        <coalesce_empty_fields>false</coalesce_empty_fields>
+        <date_format>yyyy-MM-dd HH:mm:ss</date_format>
+        <map display_value="Testing approver data">e69531fd974ac310be31fa17f053afdf</map>
+        <reference_value_field/>
+        <source_field>[Script]</source_field>
+        <source_script><![CDATA[answer = (function transformEntry(source) {
+    
+    var email = source.u_email_id; // adjust if your source field name differs
+    
+    if (!email) {
+        return '';
+    }
+    
+    var gr = new GlideRecord('sys_user');
+    gr.addQuery('email', email);
+    gr.setLimit(1);
+    gr.query();
+    
+    if (gr.next()) {
+        return gr.sys_id; // returns sys_id, ServiceNow stores this in the reference field
+    }
+    
+    return ''; // no match found, leave blank
+    
+})(source);]]></source_script>
+        <source_table>x_birl3_clm_testing_approvers_data</source_table>
+        <sys_class_name>sys_transform_entry</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-13 18:23:36</sys_created_on>
+        <sys_id>7b26f931978ac310be31fa17f053afe6</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>[Script]</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_transform_entry_7b26f931978ac310be31fa17f053afe6</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-13 18:26:15</sys_updated_on>
+        <target_field>u_user</target_field>
+        <target_table>x_birl3_clm_role_user_mapping</target_table>
+        <use_source_script>true</use_source_script>
+    </sys_transform_entry>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>7b26f931978ac310be31fa17f053afe6</id>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-13 18:26:15</sys_created_on>
+        <sys_id>72c6b131978ac310be31fa17f053af11</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-13 18:26:15</sys_updated_on>
+        <table>sys_transform_entry</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

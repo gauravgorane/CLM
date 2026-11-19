@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_transform_entry">
+    <sys_transform_entry action="INSERT_OR_UPDATE">
+        <choice_action>create</choice_action>
+        <coalesce>true</coalesce>
+        <coalesce_case_sensitive>false</coalesce_case_sensitive>
+        <coalesce_empty_fields>false</coalesce_empty_fields>
+        <date_format>yyyyMMdd</date_format>
+        <map display_value="CLM Outstanding data">c8ba8aae97310bd0be31fa17f053af86</map>
+        <reference_value_field/>
+        <source_field>[Script]</source_field>
+        <source_script><![CDATA[// answer = (function transformEntry(source) {
+
+//     // Safely get the value from the staging table
+//     var rawValue = source.u_time_sid ? source.u_time_sid.toString() : "";
+    
+//     // Remove commas, decimals, and any non-numeric characters
+//     var cleanValue = rawValue.replace(/[^0-9]/g, '');
+    
+//     // If it's a valid 8-digit number (e.g., 20260430), return it directly
+//     if (cleanValue.length >= 8) {
+//         return cleanValue.substring(0, 8);
+//     }
+    
+//     // Return empty string if the row is blank or invalid so it doesn't error out
+//     return ""; 
+
+// })(source);
+answer = (function transformEntry(source) {
+
+    // Safely get the value from the staging table
+    var rawValue = source.u_time_sid ? source.u_time_sid.toString() : "";
+
+    // Remove commas, decimals, and any non-numeric characters
+    var cleanValue = rawValue.replace(/[^0-9]/g, '');
+
+    // Must be a valid 8-digit date (YYYYMMDD)
+    if (cleanValue.length >= 8) {
+        var datePart = cleanValue.substring(0, 8);
+
+        var year = parseInt(datePart.substring(0, 4), 10);
+        var month = parseInt(datePart.substring(4, 6), 10); // 1-12
+
+        // JS Date trick: day 0 of "next month" = last day of "this month"
+        // new Date(year, month, 0) -> month here is already 1-based next-month index
+        var lastDay = new Date(year, month, 0).getDate();
+
+        var mm = (month < 10 ? "0" : "") + month;
+        var dd = (lastDay < 10 ? "0" : "") + lastDay;
+
+        // Always returns the true calendar month-end, e.g. 20260731, 20260228, 20260229 (leap year)
+        return "" + year + mm + dd;
+    }
+
+    // Return empty string if the row is blank or invalid so it doesn't error out
+    return "";
+
+})(source);]]></source_script>
+        <source_table>x_birl3_clm_outstanding_6_months</source_table>
+        <sys_class_name>sys_transform_entry</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-03 17:35:40</sys_created_on>
+        <sys_id>a43bca2297710bd0be31fa17f053af6d</sys_id>
+        <sys_mod_count>10</sys_mod_count>
+        <sys_name>[Script]</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_transform_entry_a43bca2297710bd0be31fa17f053af6d</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-08-19 08:22:32</sys_updated_on>
+        <target_field>snapshot_month</target_field>
+        <target_table>x_birl3_clm_clm_aging_snapshot</target_table>
+        <use_source_script>true</use_source_script>
+    </sys_transform_entry>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>a43bca2297710bd0be31fa17f053af6d</id>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-03 17:47:02</sys_created_on>
+        <sys_id>b2edc6e697710bd0be31fa17f053af66</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-03 17:47:02</sys_updated_on>
+        <table>sys_transform_entry</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

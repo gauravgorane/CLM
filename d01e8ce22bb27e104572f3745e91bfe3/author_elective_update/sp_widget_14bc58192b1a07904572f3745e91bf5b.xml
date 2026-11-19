@@ -1,0 +1,4434 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[function widgetcontroller($scope, $rootScope, $timeout) {
+  var c = this;
+
+  c.filters = {
+    // Company Code (Segment) — always one of the user's role-allowed codes,
+    // there is no "All" option, same pattern as the trade widget.
+    segment: c.data.selectedSegment || '',
+    zones: [],    // Customer Group
+    regions: [],  // CG4
+    depots: [],   // Sales Office
+    status: '',
+    period: c.data.selectedPeriod || 'latest',
+    customFrom: '',
+    customTo: '',
+    search: ''
+  };
+
+  c.rowsPerPageOptions = [10, 15, 20, 50, 100];
+  c.pagination = { currentPage: 1, rowsPerPage: 10 };
+  c.hoverIndex = -1;
+  c.showTooltip = false;
+  c.tooltipLeft = 0;
+  c.tooltipTop = 0;
+  c.paginatedRequests = [];
+  c.kpiFilter = '';
+
+  // ===================== CUSTOMER GROUP (Zone) multiselect =====================
+  c.zoneDropdownOpen = false;
+  c.zoneSearch = '';
+
+  c.closeAllDropdowns = function() {
+      c.zoneDropdownOpen = false;
+      c.regionDropdownOpen = false;
+      c.depotDropdownOpen = false;
+  };
+
+  c.openZoneDropdown = function() { c.zoneDropdownOpen = true; };
+  c.closeZoneDropdown = function() { c.zoneDropdownOpen = false; };
+
+  c.toggleZone = function(z) {
+      var idx = c.filters.zones.indexOf(z);
+      if (idx === -1) {
+          c.filters.zones.push(z);
+      } else {
+          c.filters.zones.splice(idx, 1);
+      }
+      // Customer Group changed -> clear dependent CG4/Sales Office (cascade)
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.zoneSearch = '';
+      c.applyFilters();
+  };
+
+  c.selectAllZones = function() {
+      var allZones = (c.data && c.data.filterOpts && c.data.filterOpts.zones) || [];
+      c.filters.zones = allZones.slice();
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.zoneSearch = '';
+      c.applyFilters();
+  };
+
+  c.clearAllZones = function() {
+      c.filters.zones = [];
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.zoneSearch = '';
+      c.applyFilters();
+  };
+
+  c.isZoneSelected = function(z) {
+      return c.filters.zones.indexOf(z) !== -1;
+  };
+
+  c.getFilteredZones = function() {
+      var all = (c.data && c.data.filterOpts && c.data.filterOpts.zones) || [];
+      var term = (c.zoneSearch || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(z) { return String(z).toLowerCase().indexOf(term) !== -1; });
+  };
+
+  c.getZoneDisplayText = function() {
+      if (!c.filters.zones || c.filters.zones.length === 0) return 'All Customer Groups';
+      if (c.filters.zones.length === 1) return c.filters.zones[0];
+      return c.filters.zones.length + ' groups selected';
+  };
+
+  // ===================== CG4 (Region) multiselect (cascades off Customer Group) =====================
+  c.regionDropdownOpen = false;
+  c.regionSearch = '';
+
+  c.openRegionDropdown = function() { c.regionDropdownOpen = true; };
+  c.closeRegionDropdown = function() { c.regionDropdownOpen = false; };
+
+  c.toggleRegion = function(r) {
+      var idx = c.filters.regions.indexOf(r);
+      if (idx === -1) {
+          c.filters.regions.push(r);
+      } else {
+          c.filters.regions.splice(idx, 1);
+      }
+      // CG4 changed -> clear dependent Sales Office (cascade)
+      c.filters.depots = [];
+      c.regionSearch = '';
+      c.applyFilters();
+  };
+
+  c.selectAllRegions = function() {
+      var allRegions = (c.data && c.data.filterOpts && c.data.filterOpts.regions) || [];
+      c.filters.regions = allRegions.slice();
+      c.filters.depots = [];
+      c.regionSearch = '';
+      c.applyFilters();
+  };
+
+  c.clearAllRegions = function() {
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.regionSearch = '';
+      c.applyFilters();
+  };
+
+  c.isRegionSelected = function(r) {
+      return c.filters.regions.indexOf(r) !== -1;
+  };
+
+  c.getFilteredRegions = function() {
+      var all = (c.data && c.data.filterOpts && c.data.filterOpts.regions) || [];
+      var term = (c.regionSearch || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(r) { return String(r).toLowerCase().indexOf(term) !== -1; });
+  };
+
+  c.getRegionDisplayText = function() {
+      if (!c.filters.regions || c.filters.regions.length === 0) return 'All CG4';
+      if (c.filters.regions.length === 1) return c.filters.regions[0];
+      return c.filters.regions.length + ' CG4 selected';
+  };
+
+  // ===================== SALES OFFICE (Depot) multiselect =====================
+  c.depotDropdownOpen = false;
+  c.depotSearch = '';
+
+  c.openDepotDropdown = function() { c.depotDropdownOpen = true; };
+  c.closeDepotDropdown = function() { c.depotDropdownOpen = false; };
+
+  c.toggleDepot = function(d) {
+      var idx = c.filters.depots.indexOf(d);
+      if (idx === -1) {
+          c.filters.depots.push(d);
+      } else {
+          c.filters.depots.splice(idx, 1);
+      }
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.selectAllDepots = function() {
+      var allDepots = (c.data && c.data.filterOpts && c.data.filterOpts.depots) || [];
+      c.filters.depots = allDepots.slice();
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.clearAllDepots = function() {
+      c.filters.depots = [];
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.isDepotSelected = function(d) {
+      return c.filters.depots.indexOf(d) !== -1;
+  };
+
+  c.getFilteredDepots = function() {
+      var all = (c.data && c.data.filterOpts && c.data.filterOpts.depots) || [];
+      var term = (c.depotSearch || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(d) { return String(d).toLowerCase().indexOf(term) !== -1; });
+  };
+
+  c.getDepotDisplayText = function() {
+      if (!c.filters.depots || c.filters.depots.length === 0) return 'All Sales Offices';
+      if (c.filters.depots.length === 1) return c.filters.depots[0];
+      return c.filters.depots.length + ' offices selected';
+  };
+
+  c.onSegmentChange = function() {
+      c.filters.zones = [];
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.zoneSearch = '';
+      c.regionSearch = '';
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.onPeriodChange = function() {
+    if (c.filters.period !== 'custom') {
+      c.applyFilters();
+    }
+  };
+
+  // ========================================================
+  // Broadcast Payload -> non-trade request detail widget listens for this
+  // ========================================================
+  c.openRequestDetail = function(r) {
+      if (!r || !r.requestCode) return;
+      $rootScope.clmPendingRequestNumber = r.requestCode;
+      $rootScope.$broadcast('clm.request.selected', { number: r.requestCode });
+      $rootScope.$broadcast('clm.switch.tab', 'request_detail');
+  };
+
+  c.applyFilters = function() {
+    if (c.filters.period === 'custom' && (!c.filters.customFrom || !c.filters.customTo)) {
+      return;
+    }
+    c.pagination.currentPage = 1;
+    c.data.filters = {
+      segment: c.filters.segment,
+      zones: c.filters.zones,
+      regions: c.filters.regions,
+      depots: c.filters.depots,
+      status: c.filters.status,
+      period: c.filters.period,
+      customFrom: c.filters.customFrom,
+      customTo: c.filters.customTo
+    };
+    c.server.update().then(function() {
+      if (c.data && c.data.selectedSegment) {
+          c.filters.segment = c.data.selectedSegment;
+      }
+      c.runSearch();
+    });
+  };
+
+  c.setKpiFilter = function(state) {
+      if (c.kpiFilter === state) {
+          c.kpiFilter = '';
+      } else {
+          c.kpiFilter = state;
+          c.pagination.currentPage = 1;
+          $timeout(function() {
+              var el = document.getElementById('clmRequestsTableContainer');
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }, 100);
+      }
+      c.runSearch();
+  };
+
+  c.runSearch = function() {
+    var term = (c.filters.search || '').toString().toLowerCase().trim();
+
+    (c.data.requests || []).forEach(function(r) {
+      var isHidden = false;
+
+      if (term) {
+        var fields = [r.requestCode, r.customerCode, r.customerName, r.pan];
+        var matched = fields.some(function(f) {
+          return (f || '').toString().toLowerCase().indexOf(term) > -1;
+        });
+        if (!matched) isHidden = true;
+      }
+
+      if (!isHidden && c.kpiFilter) {
+          if (c.kpiFilter === 'deviated') {
+              if (!r.isDeviation) isHidden = true;
+          } else {
+              var statLower = (r.status || '').toLowerCase();
+              if (c.kpiFilter === 'pending' && statLower.indexOf('submit') === -1) isHidden = true;
+              if (c.kpiFilter === 'approved' && statLower.indexOf('approv') === -1) isHidden = true;
+              if (c.kpiFilter === 'sendback' && statLower.indexOf('return') === -1 && statLower.indexOf('send') === -1) isHidden = true;
+              if (c.kpiFilter === 'rejected' && statLower.indexOf('reject') === -1) isHidden = true;
+          }
+      }
+
+      r._hidden = isHidden;
+    });
+
+    c.pagination.currentPage = 1;
+    c.updatePaginatedRequests();
+  };
+
+  c.updatePaginatedRequests = function() {
+    var visible = (c.data.requests || []).filter(function(r) { return !r._hidden; });
+    var start = (c.pagination.currentPage - 1) * c.pagination.rowsPerPage;
+    var end = start + c.pagination.rowsPerPage;
+    c.paginatedRequests = visible.slice(start, end);
+  };
+
+  c.getVisibleRecordsCount = function() {
+    return (c.data.requests || []).filter(function(r) { return !r._hidden; }).length;
+  };
+
+  c.getTotalPages = function() {
+    var visible = (c.data.requests || []).filter(function(r) { return !r._hidden; });
+    return Math.ceil(visible.length / c.pagination.rowsPerPage) || 1;
+  };
+
+  c.getPageNumbers = function() {
+    var total = c.getTotalPages();
+    var pages = [];
+    var maxVisible = 5;
+    var start = Math.max(1, c.pagination.currentPage - Math.floor(maxVisible / 2));
+    var end = Math.min(total, start + maxVisible - 1);
+
+    if (end - start < maxVisible - 1) {
+      start = Math.max(1, end - maxVisible + 1);
+    }
+
+    for (var i = start; i <= end; i++) {
+      pages.push(i);
+    }
+    return pages;
+  };
+
+  c.previousPage = function() {
+    if (c.pagination.currentPage > 1) { c.pagination.currentPage--; c.updatePaginatedRequests(); }
+  };
+  c.nextPage = function() {
+    if (c.pagination.currentPage < c.getTotalPages()) { c.pagination.currentPage++; c.updatePaginatedRequests(); }
+  };
+  c.goToPage = function(pageNum) {
+    c.pagination.currentPage = pageNum; c.updatePaginatedRequests();
+  };
+  c.onRowsPerPageChange = function() {
+    c.pagination.currentPage = 1; c.updatePaginatedRequests();
+  };
+
+  $scope.$watch('c.filters.search', c.runSearch);
+
+  // ===================== Approval Pipeline chart helpers (unchanged) =====================
+  c.chartX = function(i) {
+    var n = (c.data.chart.months || []).length;
+    if (n <= 1) return 40;
+    return 40 + (i * (860 / (n - 1)));
+  };
+
+  c.linePoints = function(key) {
+    var months = c.data.chart.months || [];
+    var series = (c.data.chart.series || {})[key] || [];
+    var max = c.data.chart.max || 1;
+    var pts = [];
+    months.forEach(function(m, i) {
+      var v = series[i] || 0;
+      pts.push(c.chartX(i) + ',' + (220 - (v / max) * 200));
+    });
+    return pts.join(' ');
+  };
+
+  c.onMouseOverMonth = function(ev, index) {
+    c.hoverIndex = index;
+    c.showTooltip = true;
+    var targetRect = ev.currentTarget.getBoundingClientRect();
+    var containerRect = ev.currentTarget.closest('.clm-chart-body').getBoundingClientRect();
+    c.tooltipLeft = (targetRect.left + targetRect.width / 2) - containerRect.left;
+    c.tooltipTop = (targetRect.top - containerRect.top) + 40;
+  };
+
+  c.onMouseLeaveChart = function() { c.hoverIndex = -1; c.showTooltip = false; };
+
+  // ===================== NEW: Total Outstanding MoM Trend chart helpers =====================
+  c.momChartX = function(i) {
+    var n = (c.data.momTrend && c.data.momTrend.months || []).length;
+    if (n <= 1) return 40;
+    return 40 + (i * (860 / (n - 1)));
+  };
+
+  c.momPointY = function(i) {
+    var series = (c.data.momTrend && c.data.momTrend.series) || [];
+    var max = (c.data.momTrend && c.data.momTrend.max) || 1;
+    var v = series[i] || 0;
+    return 220 - (v / max) * 200;
+  };
+
+  c.momLinePoints = function() {
+    var months = (c.data.momTrend && c.data.momTrend.months) || [];
+    var pts = [];
+    months.forEach(function(m, i) {
+      pts.push(c.momChartX(i) + ',' + c.momPointY(i));
+    });
+    return pts.join(' ');
+  };
+
+  // ===================== NEW: Ageing Breakdown (6M) stacked bar helpers =====================
+  c.ageingBarX = function(i) {
+    var n = (c.data.ageingBreakdown && c.data.ageingBreakdown.months || []).length;
+    if (n <= 1) return 40;
+    return 40 + (i * (860 / (n - 1)));
+  };
+
+  c.ageingBarWidth = function() {
+    var n = (c.data.ageingBreakdown && c.data.ageingBreakdown.months || []).length;
+    return (860 / (n - 1 || 1)) * 0.5;
+  };
+
+  // Returns the 4 stacked rects (current, 31-60, 61-90, >90) for month index i
+  c.ageingSegmentRects = function(i) {
+    var ab = c.data.ageingBreakdown;
+    if (!ab || !ab.series) return [];
+    var s = ab.series;
+    var max = ab.max || 1;
+    var baseline = 220;
+    var scale = 200 / max;
+    var w = c.ageingBarWidth();
+    var x = c.ageingBarX(i) - w / 2;
+
+    var segments = [
+      { key: '0-30D',  v: (s.current && s.current[i]) || 0, cls: 'bar-current' },
+      { key: '31-60D', v: (s.b31_60  && s.b31_60[i])  || 0, cls: 'bar-3160' },
+      { key: '61-90D', v: (s.b61_90  && s.b61_90[i])  || 0, cls: 'bar-6190' },
+      { key: '>90D',   v: (s.gt90    && s.gt90[i])    || 0, cls: 'bar-gt90' }
+    ];
+
+    var yCursor = baseline;
+    var rects = [];
+    segments.forEach(function(seg) {
+      var h = seg.v * scale;
+      yCursor -= h;
+      rects.push({ x: x, y: yCursor, width: w, height: h, cls: seg.cls, value: seg.v, key: seg.key });
+    });
+    return rects;
+  };
+
+  // ===================== NEW: Region Risk Matrix badge class =====================
+  c.riskClass = function(level) {
+    var l = (level || '').toLowerCase();
+    if (l === 'critical') return 'risk-critical';
+    if (l === 'elevated') return 'risk-elevated';
+    return 'risk-normal';
+  };
+
+  c.statusClass = function(status) {
+    var s = (status || '').toLowerCase();
+    if (s.indexOf('submit') > -1 || s.indexOf('pend') > -1) return 'st-submitted';
+    if (s.indexOf('approv') > -1) return 'st-approved';
+    if (s.indexOf('return') > -1 || s.indexOf('send') > -1) return 'st-sendback';
+    if (s.indexOf('reject') > -1) return 'st-rejected';
+    return 'st-default';
+  };
+
+  // NOTE: "segment" here is Company Code. Kept generic since company codes
+  // won't map to the Cement/RMC/BPD naming used in trade — falls back to
+  // a neutral badge class unless a code happens to contain one of these words.
+  c.segClass = function(seg) {
+    var s = (seg || '').toLowerCase();
+    if (s.indexOf('cement') > -1) return 'seg-cement';
+    if (s.indexOf('rmc') > -1) return 'seg-rmc';
+    if (s.indexOf('bpd') > -1) return 'seg-bpd';
+    return 'seg-default';
+  };
+
+  c.yAxisTicks = [];
+  for (var val = 0; val <= 8; val++) {
+    var yCoord = 220 - (val / 8) * 200;
+    c.yAxisTicks.push({ label: val, y: yCoord });
+  }
+
+  c.updatePaginatedRequests();
+}]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.clm-dash {
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  color: #1f2937;
+  font-size: 13px;
+  padding: 20px;
+
+  /* ===================== Filter Card ===================== */
+  .clm-filter-card {
+    margin: 0 0 16px 0;
+    background: #fff;
+    border: 1px solid #e3e6eb;
+    border-radius: 8px;
+    padding: 14px 18px;
+    overflow: visible;
+  }
+
+  .clm-filter-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    flex-wrap: nowrap;
+    overflow-x: visible;
+  }
+
+  .clm-filter-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+    color: #5b6470;
+    margin-bottom: 0;
+    font-weight: normal;
+    flex: 1;
+    min-width: 0;
+    position: relative;
+
+    select {
+      width: 100%;
+      min-width: 160px;
+      height: 34px;
+      font-size: 13px;
+      border-radius: 4px;
+      border: 1px solid #cbd5e1;
+      background-color: #ffffff;
+      padding: 0 10px;
+      outline: none;
+      cursor: pointer;
+      box-sizing: border-box;
+      transition: all 0.2s ease;
+
+      &amp;:hover { border-color: #a0aec0; background-color: #f7fafc; }
+    }
+  }
+
+  /* ---------- Multiselect (Customer Group / CG4 / Sales Office) ---------- */
+  .clm-multiselect-field { position: relative; }
+
+  .clm-multiselect-container {
+    position: relative;
+    width: 100%;
+    min-width: 160px;
+  }
+
+  .clm-multiselect-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    height: 34px;
+    padding: 0 10px;
+    font-size: 13px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background: #ffffff;
+    cursor: pointer;
+    box-sizing: border-box;
+    transition: border-color 0.2s;
+
+    &amp;:hover { border-color: #a0aec0; }
+  }
+
+  .clm-multiselect-container.open .clm-multiselect-trigger {
+    border-color: #1c4e9c;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+
+  .clm-multiselect-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #5b6470;
+    flex: 1;
+  }
+
+  .clm-multiselect-arrow {
+    color: #a0aec0;
+    font-size: 10px;
+    margin-left: 6px;
+  }
+
+  .clm-multiselect-dropdown {
+    position: absolute;
+    top: 34px;
+    left: 0;
+    right: 0;
+    z-index: 60;
+    background: #fff;
+    border: 1px solid #1c4e9c;
+    border-top: none;
+    border-bottom-left-radius: 6px;
+    border-bottom-right-radius: 6px;
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.12);
+    max-height: 280px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .clm-multiselect-actions {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 10px;
+    border-bottom: 1px solid #e3e6eb;
+    background: #f8f9fa;
+
+    a {
+      font-size: 11px;
+      color: #5b6470;
+      cursor: pointer;
+      font-weight: 600;
+      &amp;:hover { text-decoration: underline; }
+    }
+  }
+
+  .clm-multiselect-search {
+    width: 100%;
+    height: 32px;
+    padding: 0 10px;
+    border: none;
+    border-bottom: 1px solid #e3e6eb;
+    font-size: 12px;
+    outline: none;
+    box-sizing: border-box;
+  }
+
+  .clm-multiselect-list {
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+    overflow-y: auto;
+    max-height: 180px;
+
+    li {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      color: 5b6470;
+
+      &amp;:hover { background: #f0f4f9; }
+      &amp;.selected { background: #ebf5ff; }
+    }
+  }
+
+  .clm-checkbox {
+    width: 14px;
+    height: 14px;
+    border: 2px solid #cbd5e1;
+    border-radius: 3px;
+    display: inline-block;
+    flex-shrink: 0;
+    position: relative;
+
+    &amp;.checked {
+      background: #1c4e9c;
+      border-color: #1c4e9c;
+
+      &amp;::after {
+        content: '';
+        position: absolute;
+        left: 3px;
+        top: 1px;
+        width: 4px;
+        height: 7px;
+        border: solid #fff;
+        border-width: 0 2px 2px 0;
+        transform: rotate(45deg);
+      }
+    }
+  }
+
+  .clm-dropdown-empty {
+    color: #a0aec0 !important;
+    cursor: default !important;
+    font-style: italic;
+    &amp;:hover { background-color: #ffffff !important; }
+  }
+
+  /* ---------- Custom Date Range ---------- */
+  .clm-custom-range {
+    display: flex;
+    align-items: center;
+    flex-direction: row;
+    gap: 6px;
+    margin-top: 12px;
+
+    input[type="date"] {
+      height: 30px;
+      padding: 2px 8px;
+      font-size: 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 4px;
+    }
+    span { color: #6b7280; font-size: 12px; }
+  }
+
+  .clm-apply-btn {
+    height: 30px;
+    padding: 0 14px;
+    font-size: 12px;
+    font-weight: 600;
+    border: none;
+    border-radius: 4px;
+    background: #2f6fed;
+    color: #fff;
+    cursor: pointer;
+    &amp;:hover { background: #2559c9; }
+  }
+
+  /* ===================== Scorecards ===================== */
+  .clm-scorecards {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+    margin: 0 0 16px 0;
+  }
+
+  /* NEW: portfolio KPI row only has 4 tiles, so widen columns a touch */
+  .clm-portfolio-cards {
+    grid-template-columns: repeat(4, 1fr);
+  }
+
+.clm-card {
+    position: relative;
+    background: #fff;
+    border: 1px solid #e3e6eb;
+    border-left: 4px solid #c9ced6;
+    border-radius: 6px;
+    padding: 14px 16px;
+    min-height: 100px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+    transition: background-color 0.3s, box-shadow 0.3s;
+    box-sizing: border-box;
+  }
+  .clm-card-id { font-size: 10px; font-weight: 700; letter-spacing: .3px; color: #718096; margin-bottom: 6px; }
+  .clm-card-value { font-size: 24px; font-weight: 700; line-height: 1.1; }
+  .clm-card-sub { font-size: 11px; color: #8a93a0; margin-top: 4px; }
+
+  .clm-card-blue   { border-left-color: #1c4e9c; .clm-card-value { color: #1c4e9c; } }
+  .clm-card-green  { border-left-color: #38a169; .clm-card-value { color: #38a169; } }
+  .clm-card-purple { border-left-color: #7c5cf0; .clm-card-value { color: #7c5cf0; } }
+  .clm-card-red    { border-left-color: #e53e3e; .clm-card-value { color: #e53e3e; } }
+  .clm-card-orange { border-left-color: #dd6b20; .clm-card-value { color: #dd6b20; } }
+
+  /* ---- Info Icon on KPI Tiles ---- */
+ .clm-kpi-info {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    color: #2b6cb0;
+    font-size: 15px;
+    transition: all 0.2s ease;
+    cursor: pointer;
+    z-index: 5;
+  }
+  .clm-kpi-info:hover {
+    color: #1c4e9c;
+    transform: scale(1.15);
+  }
+
+  /* ===================== Chart ===================== */
+  .clm-chart-panel {
+    background: #fff;
+    border: 1px solid #e3e6eb;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    width: 100%;
+    box-sizing: border-box;
+  }
+ .clm-chart-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .clm-chart-title { font-weight: 700; font-size: 13px; color: #1f2933; }
+  .clm-chart-badge { background: #f0e6ff; color: #6b21a8; font-size: 11px; font-weight: 700; padding: 2px 10px; border-radius: 10px; }
+  .clm-legend { margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; }
+  .legend-item { font-size: 11px; font-weight: 700; color: #1f2933; display: flex; align-items: center; gap: 6px; }
+  .dot {
+    width: 10px; height: 10px; border-radius: 2px; display: inline-block;
+    &amp;.blue   { background: #1c4e9c; }
+    &amp;.green  { background: #38a169; }
+    &amp;.orange { background: #dd6b20; }
+    &amp;.purple { background: #7c5cf0; }
+    &amp;.red    { background: #e53e3e; }
+  }
+  .clm-chart-body {
+    position: relative;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+  }
+  .clm-svg {
+    width: 100%;
+    height: 280px;
+    display: block;
+    overflow: visible;
+  }
+
+  .clm-svg polyline, .clm-svg line {
+    vector-effect: non-scaling-stroke;
+  }
+
+ .grid-line { stroke: #e2e8f0; stroke-width: 1; stroke-dasharray: 4; }
+  .axis-label { font-size: 11px; fill: #718096; font-family: "Helvetica Neue", Arial, sans-serif; }
+  polyline { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+  .line-blue   { stroke: #1c4e9c; }
+  .line-green  { stroke: #38a169; }
+  .line-orange { stroke: #dd6b20; }
+  .line-purple { stroke: #7c5cf0; }
+  .line-red    { stroke: #e53e3e; }
+
+  /* NEW: stacked ageing-breakdown bar segment colors */
+  .bar-current { fill: #1c4e9c; }
+  .bar-3160    { fill: #dd6b20; }
+  .bar-6190    { fill: #7c5cf0; }
+  .bar-gt90    { fill: #e53e3e; }
+
+  .clm-chart-tooltip {
+    position: absolute;
+    background: rgba(30, 30, 30, 0.85);
+    color: #ffffff;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 11.5px;
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    pointer-events: none;
+    z-index: 100;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    transform: translate(-50%, -100%);
+    min-width: 110px;
+    text-align: left;
+    white-space: nowrap;
+
+    .tooltip-title {
+      font-weight: 700;
+      margin-bottom: 6px;
+      border-bottom: 1px solid rgba(255,255,255,0.2);
+      padding-bottom: 4px;
+    }
+    .tooltip-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 3px 0;
+      font-weight: 500;
+    }
+    .tooltip-color {
+      width: 10px;
+      height: 10px;
+      display: inline-block;
+      border-radius: 2px;
+      &amp;.blue   { background: #1c4e9c; }
+      &amp;.green  { background: #38a169; }
+      &amp;.orange { background: #dd6b20; }
+      &amp;.purple { background: #7c5cf0; }
+      &amp;.red    { background: #e53e3e; }
+    }
+  }
+
+  /* ===================== Table ===================== */
+  .clm-table-panel {
+    background: #fff;
+    border: 1px solid #e3e6eb;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .clm-table-header {
+    display: flex;
+    align-items: center;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .clm-table-title { font-weight: 700; font-size: 13px; color: #1f2933; }
+
+  .clm-table-wrapper {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+
+  .clm-search-section {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+  }
+
+  .clm-search-box {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: 420px;
+    max-width: 100%;
+
+    i {
+      position: absolute;
+      left: 12px;
+      color: #a0aec0;
+      font-size: 13px;
+    }
+    input {
+      width: 100%;
+      height: 34px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      padding: 0 10px 0 32px;
+      font-size: 13px;
+      color: #1f2933;
+      outline: none;
+      transition: border 0.2s;
+      box-sizing: border-box;
+
+      &amp;:focus { border-color: #1c4e9c; }
+      &amp;::placeholder { color: #6b7280; }
+    }
+  }
+
+  .clm-table-top-controls {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    justify-content: flex-end;
+    font-size: 12px;
+    color: #4a5568;
+    flex-wrap: wrap;
+  }
+
+  .clm-records-label {
+    color: #4a5568;
+    font-weight: 500;
+    strong { color: #1f2933; font-weight: 600; }
+  }
+
+  .clm-rows-label {
+    color: #4a5568;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .clm-rows-select {
+    padding: 4px 8px;
+    height: 32px;
+    font-size: 12px;
+    color: #1f2933;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background: #fff;
+    cursor: pointer;
+    min-width: 60px;
+    outline: none;
+  }
+
+  .clm-table-scroll {
+    overflow-y: auto;
+    max-height: 380px;
+    border: 1px solid #e3e6eb;
+    border-radius: 6px;
+    width: 100%;
+
+    &amp;::-webkit-scrollbar { width: 8px; height: 8px; }
+    &amp;::-webkit-scrollbar-track { background: #f8f9fa; border-radius: 4px; }
+    &amp;::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+      &amp;:hover { background: #a0aec0; }
+    }
+  }
+
+  .clm-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    table-layout: auto;
+
+    thead {
+      position: sticky;
+      top: 0;
+      background: #f8f9fa;
+      z-index: 10;
+    }
+    thead th {
+      text-align: left;
+      color: #718096;
+      font-weight: 600;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: .3px;
+      padding: 10px 6px;
+      border-bottom: 2px solid #cbd5e1;
+      box-shadow: 0 2px 2px -1px rgba(0,0,0,0.1);
+      white-space: nowrap;
+    }
+    tbody td {
+      padding: 8px 6px;
+      border-bottom: 1px solid #edf2f7;
+      color: #1f2933;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    tbody td.col-customer,
+    thead th.col-customer {
+      white-space: normal;
+      word-break: break-word;
+      min-width: 130px;
+      max-width: 180px;
+    }
+
+    tbody td.col-submitted-by,
+    thead th.col-submitted-by {
+      white-space: normal;
+      word-break: break-all;
+      min-width: 110px;
+      max-width: 150px;
+    }
+    tbody td.col-zone,
+    thead td.col-zone,
+    tbody td.col-region,
+    thead th.col-region,
+    tbody td.col-depot,
+    thead th.col-depot {
+      white-space: normal;
+      max-width: 110px;
+    }
+
+    tbody tr:hover { background: #f7fafc; }
+  }
+
+  .clm-link { color: #1c4e9c; text-decoration: none; font-weight: 600; }
+  .clm-cust-name { font-weight: 600; }
+  .clm-cust-code { font-size: 10px; color: #718096; }
+  .clm-no-data { text-align: center; color: #a0aec0; padding: 20px 0; font-style: italic; }
+
+  /* ---- Pagination Controls ---- */
+  .clm-pagination-bottom {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    margin-top: 14px;
+    padding: 10px 0;
+    border-top: 1px solid #edf2f7;
+  }
+
+  .clm-pagination-controls {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .clm-page-btn {
+    min-width: 32px;
+    height: 32px;
+    padding: 0 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background: #fff;
+    color: #4a5568;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s ease;
+
+    &amp;:hover:not(:disabled) {
+      background: #eef2f7;
+    }
+
+    &amp;.active {
+      background: #1c4e9c;
+      color: #fff;
+      border-color: #1c4e9c;
+    }
+
+    &amp;:disabled {
+      color: #a0aec0;
+      background: #f8f9fa;
+      border-color: #e2e8f0;
+      cursor: not-allowed;
+    }
+  }
+
+  .badge { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+  .status-badge {
+    &amp;.st-submitted { background: #e6efff; color: #2f6fed; }
+    &amp;.st-approved  { background: #e6f7ee; color: #1e9e5a; }
+    &amp;.st-pending   { background: #fff3e0; color: #d97b0d; }
+    &amp;.st-sendback  { background: #f1eaff; color: #7c5cf0; }
+    &amp;.st-rejected  { background: #fdeaea; color: #dc3545; }
+    &amp;.st-default   { background: #f3f4f6; color: #6b7280; }
+  }
+  .stage-badge { background: #eef2ff; color: #4f46e5; }
+  .seg-badge {
+    &amp;.seg-cement  { background: #fff3e0; color: #d97b0d; }
+    &amp;.seg-rmc      { background: #e6f7ee; color: #1e9e5a; }
+    &amp;.seg-bpd      { background: #fffbe6; color: #b8860b; }
+    &amp;.seg-default { background: #f3f4f6; color: #6b7280; }
+  }
+
+  /* NEW: risk classification badges (Region Risk Matrix) */
+  .risk-badge {
+    &amp;.risk-critical { background: #fdeaea; color: #dc3545; }
+    &amp;.risk-elevated { background: #fff3e0; color: #d97b0d; }
+    &amp;.risk-normal   { background: #e6f7ee; color: #1e9e5a; }
+  }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>clm_nt_nsh_approval_requests</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>clm_nt_nsh_approval_requests</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+    // =========================================================
+    // TABLES
+    // =========================================================
+    var REQUEST_TABLE      = 'x_birl3_clm_non_trade_clr';
+    var CUSTOMER_TABLE     = 'x_birl3_clm_customer';
+    var ROLE_MAP_TABLE     = 'x_birl3_clm_approval_matrix';
+    var OUTSTANDING_TABLE  = 'x_birl3_clm_customer_outstanding';
+
+    // =========================================================
+    // REQUEST TABLE FIELDS (x_birl3_clm_non_trade_clr)
+    // =========================================================
+    var F_STATE         = 'state';
+    var F_REQ_NUMBER    = 'number';
+    var F_CUSTOMER_CODE = 'customer_code'; // matches x_birl3_clm_customer.customer_code (plain string)
+
+    // NOT specified in your mapping — placeholders, please confirm.
+    var F_REQUESTED_AMT = 'requested_limit';  // <-- CONFIRM
+    var F_APPROVED_AMT  = 'approved_limit';   // <-- CONFIRM
+    var F_SUBMITTED_BY  = 'sys_created_by';
+    var F_SUBMITTED_ON  = 'sys_created_on';
+    var F_DEVIATION     = 'is_deviation';     // <-- CONFIRM
+
+    var ALLOWED_STATUS_KEYWORDS = ['approv', 'submit', 'return', 'reject'];
+    var monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    // =========================================================
+    // CUSTOMER MASTER FIELDS (x_birl3_clm_customer)
+    // =========================================================
+    var F_CUST_CODE          = 'customer_code';
+    var F_CUST_NAME          = 'name';
+    var F_CUST_SEGMENT       = 'company_code';    // e.g. UTCL, GIL, URMX
+    var F_CUST_ZONE          = 'customer_group';  // e.g. 60, 61
+    var F_CUST_REGION        = 'cg4';             // e.g. 100, 110, 150
+    var F_CUST_DEPOT         = 'sales_office';    // e.g. 6536, 6530, 6550, 6532
+    var F_CUST_CREDIT_LIMIT  = 'credit_limit';
+    var F_CUST_PAN           = 'pan';
+    var F_CUST_NEXT_REVIEW   = 'next_review_date';
+
+    // =========================================================
+    // CUSTOMER OUTSTANDING FIELDS (x_birl3_clm_customer_outstanding)
+    // =========================================================
+    var F_OUT_CUSTOMER    = 'customer';
+    var F_OUT_TOTAL        = 'outstanding';
+    var F_OUT_CREATED      = 'created_on';
+
+    var F_AGE_0_3   = 'ageing0_3';
+    var F_AGE_4_7   = 'ageing4_7';
+    var F_AGE_8_21  = 'ageing8_21';
+    var F_AGE_22_30 = 'ageing22_30';
+    var F_AGE_31_45 = 'ageing31_45';
+    var F_AGE_46_60 = 'ageing46_60';
+    var F_AGE_61_75 = 'ageing61_75';
+    var F_AGE_76_90 = 'ageing76_90';
+    var F_AGE_GT90  = 'ageing_gt90';
+
+    // =========================================================
+    // ROLE MAPPING FIELDS (x_birl3_clm_approval_matrix)
+    // =========================================================
+    var F_ROLE_USER    = 'approver_user';
+    var F_ROLE_SEGMENT = 'segment';
+
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    function norm(s) { return (s || '').toString().trim().toUpperCase().replace(/\s+/g, ' '); }
+    function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
+    function formatAmt(v) {
+      if (v === undefined || v === null || v === '') return '';
+      var n = parseFloat(v);
+      if (isNaN(n)) return v;
+      return '\u20B9' + (n / 100000).toFixed(1) + 'L';
+    }
+    // Trimmed-but-case-preserved value, used for display / grouping so the
+    // dropdown shows the value exactly as entered in the master, while
+    // comparisons elsewhere are done case-insensitively via norm().
+    function clean(v) { return (v || '').toString().trim(); }
+
+    var currentUserId = gs.getUserID();
+
+    // =========================================================
+    // STEP 0: Determine allowed Company Codes for this user, read directly
+    // from x_birl3_clm_approval_matrix (segment column), matched against
+    // approver_user. Union across all matching rows.
+    // =========================================================
+    var allowedSegmentsNorm = {};   // normalized(UPPER+trim) -> true
+    var allowedSegmentsDisplay = {}; // normalized -> original display value seen in role table
+
+    var grUserRoles = new GlideRecord(ROLE_MAP_TABLE);
+    grUserRoles.addQuery(F_ROLE_USER, currentUserId);
+    grUserRoles.query();
+    while (grUserRoles.next()) {
+        var segVal = clean(grUserRoles.getValue(F_ROLE_SEGMENT));
+        if (segVal) {
+            var key = norm(segVal);
+            allowedSegmentsNorm[key] = true;
+            if (!allowedSegmentsDisplay[key]) allowedSegmentsDisplay[key] = segVal;
+        }
+    }
+    var isAuthorized = Object.keys(allowedSegmentsNorm).length > 0;
+
+    data.accessDenied = !isAuthorized;
+    if (!isAuthorized) {
+        data.filterOpts = { segments: [], zones: [], regions: [], depots: [], periods: [] };
+        data.statusOptions = [];
+        data.scorecards = { submitted: 0, approved: 0, sendback: 0, rejected: 0, deviated: 0 };
+        data.chart = { year: new Date().getFullYear(), months: [], series: {}, max: 1 };
+        data.requests = [];
+        data.periodLabel = '';
+        data.portfolio = { totalOutstanding: '', availableLimit: '', utilizationPct: '0', overdue90: '', riskHigh: 0, riskMedium: 0, riskLow: 0 };
+        data.momTrend = { months: [], series: [], max: 1 };
+        data.ageingBreakdown = { months: [], series: { current: [], b31_60: [], b61_90: [], gt90: [] }, max: 1 };
+        data.regionRisk = [];
+        return;
+    }
+
+    var inputFilters = (input && input.filters) ? input.filters : {};
+
+    function normalizeArray(val) {
+        if (typeof val === 'string') {
+            try { val = JSON.parse(val); }
+            catch (e) { val = val ? [val] : []; }
+        }
+        if (!Array.isArray(val)) { val = val ? [val] : []; }
+        return val;
+    }
+    inputFilters.zones   = normalizeArray(inputFilters.zones);
+    inputFilters.regions = normalizeArray(inputFilters.regions);
+    inputFilters.depots  = normalizeArray(inputFilters.depots);
+    data.filters = inputFilters;
+
+    var zonesSelected   = inputFilters.zones;
+    var regionsSelected = inputFilters.regions;
+    var depotsSelected  = inputFilters.depots;
+    var statusFilter    = inputFilters.status || '';
+    var period          = inputFilters.period || 'latest';
+    var customFrom      = inputFilters.customFrom || '';
+    var customTo        = inputFilters.customTo || '';
+    data.selectedPeriod = period;
+
+    // =========================================================
+    // Load the ENTIRE customer master ONCE into memory. Every dropdown
+    // option and every filter/scoping decision below is derived from this
+    // in-memory array using trimmed, case-insensitive comparisons — this
+    // is what fixes the empty-dropdown issue: it no longer depends on
+    // GlideAggregate group-by behavior or on exact-case DB matches between
+    // x_birl3_clm_approval_matrix.segment and x_birl3_clm_customer.company_code.
+    // =========================================================
+    var allCustomers = [];
+    var custByCode = {};
+    var custBySysId = {};
+    (function loadCustomers() {
+        var gr = new GlideRecord(CUSTOMER_TABLE);
+        gr.query();
+        while (gr.next()) {
+            var rec = {
+                sysId:   gr.getUniqueValue(),
+                code:    clean(gr.getValue(F_CUST_CODE)),
+                name:    gr.getValue(F_CUST_NAME),
+                pan:     gr.getValue(F_CUST_PAN),
+                segment: clean(gr.getValue(F_CUST_SEGMENT)),
+                zone:    clean(gr.getValue(F_CUST_ZONE)),
+                region:  clean(gr.getValue(F_CUST_REGION)),
+                depot:   clean(gr.getValue(F_CUST_DEPOT)),
+                creditLimit: parseFloat(gr.getValue(F_CUST_CREDIT_LIMIT)) || 0,
+                nextReviewDate: gr.getValue(F_CUST_NEXT_REVIEW)
+            };
+            allCustomers.push(rec);
+            if (rec.code) custByCode[rec.code] = rec;
+            custBySysId[rec.sysId] = rec;
+        }
+    })();
+
+    // Distinct, sorted, non-blank values for a given key on allCustomers,
+    // scoped to whichever upstream filters are already chosen. Returns the
+    // values exactly as they appear in the master (no reformatting).
+    function distinctValues(key, scope) {
+        var seenNorm = {};
+        var out = [];
+        allCustomers.forEach(function(rec) {
+            if (!rec[key]) return;
+            if (scope.segment && norm(rec.segment) !== norm(scope.segment)) return;
+            if (scope.zones && scope.zones.length && zoneNotIn(rec.zone, scope.zones)) return;
+            if (scope.regions && scope.regions.length && zoneNotIn(rec.region, scope.regions)) return;
+            var nk = norm(rec[key]);
+            if (!seenNorm[nk]) {
+                seenNorm[nk] = true;
+                out.push(rec[key]);
+            }
+        });
+        return out.sort();
+    }
+    function zoneNotIn(val, arr) {
+        var nv = norm(val);
+        return !arr.some(function(a) { return norm(a) === nv; });
+    }
+
+    // =========================================================
+    // Company Code (Segment) options = distinct company_code values present
+    // in the customer master, intersected with what this user's role allows.
+    // =========================================================
+    var allSegmentsInMaster = distinctValues('segment', {});
+    var allowedSegmentsInMaster = allSegmentsInMaster.filter(function(s) {
+        return !!allowedSegmentsNorm[norm(s)];
+    });
+
+    // Safety net: if the role-mapping segment values don't line up with any
+    // company_code actually present in the master (e.g. mismatched casing/
+    // spacing/format between the two tables), fall back to showing every
+    // company code in the master rather than presenting an empty dropdown.
+    // Remove this fallback once you've confirmed the two tables agree.
+    var segmentsForDropdown = allowedSegmentsInMaster.length ? allowedSegmentsInMaster : allSegmentsInMaster;
+    if (!allowedSegmentsInMaster.length) {
+        gs.warn('[Non-Trade NSH widget] No x_birl3_clm_customer.company_code value matched this user\'s ' +
+                'x_birl3_clm_approval_matrix.segment value(s). Falling back to showing all company codes. ' +
+                'Please verify the segment values line up between the two tables.');
+    }
+
+    var segmentFilter = clean(inputFilters.segment);
+    var segmentIsValid = segmentsForDropdown.some(function(s) { return norm(s) === norm(segmentFilter); });
+    if (!segmentIsValid) {
+        segmentFilter = segmentsForDropdown[0] || '';
+    }
+    data.selectedSegment = segmentFilter;
+
+    // =========================================================
+    // Cascading Zone (Customer Group) / Region (CG4) / Depot (Sales Office)
+    // options — all pulled live from the in-memory customer master.
+    // =========================================================
+    data.filterOpts = {
+        segments: segmentsForDropdown,
+        zones:    distinctValues('zone',   { segment: segmentFilter }),
+        regions:  distinctValues('region', { segment: segmentFilter, zones: zonesSelected }),
+        depots:   distinctValues('depot',  { segment: segmentFilter, zones: zonesSelected, regions: regionsSelected }),
+        periods: [
+            { label: 'All Time (Latest)', value: 'latest' },
+            { label: 'This Month', value: 'current_month' },
+            { label: 'Last Month', value: 'previous_month' },
+            { label: 'This Year', value: 'current_year' },
+            { label: 'Last Year', value: 'last_year' },
+            { label: 'Custom Range…', value: 'custom' }
+        ]
+    };
+
+    // =========================================================
+    // Resolve the list of customer_codes matching the full current filter
+    // scope (segment + zones + regions + depots).
+    // Now expanded to include ALL customer records sharing the same PAN.
+    // =========================================================
+    var scopedCodes = [];
+    var scopedSysIds = []; // Added for safety if field is a reference
+    var validPans = {};
+
+    // First pass: identify valid sites and PANs based on the user's filters
+    allCustomers.forEach(function(rec) {
+        if (segmentFilter && norm(rec.segment) !== norm(segmentFilter)) return;
+        if (zonesSelected.length && zoneNotIn(rec.zone, zonesSelected)) return;
+        if (regionsSelected.length && zoneNotIn(rec.region, regionsSelected)) return;
+        if (depotsSelected.length && zoneNotIn(rec.depot, depotsSelected)) return;
+
+        if (rec.code) scopedCodes.push(rec.code);
+        if (rec.sysId) scopedSysIds.push(rec.sysId);
+        if (rec.pan) validPans[norm(rec.pan)] = true;
+    });
+
+    // Second pass: include ANY customer record (like Parent records) that shares a valid PAN
+    allCustomers.forEach(function(rec) {
+        if (rec.pan && validPans[norm(rec.pan)]) {
+            if (rec.code && scopedCodes.indexOf(rec.code) === -1) {
+                scopedCodes.push(rec.code);
+            }
+            if (rec.sysId && scopedSysIds.indexOf(rec.sysId) === -1) {
+                scopedSysIds.push(rec.sysId);
+            }
+        }
+    });
+
+    function applyAppFilters(gr) {
+        if (scopedCodes.length) {
+            var qc = gr.addQuery(F_CUSTOMER_CODE, 'IN', scopedCodes);
+            // Also check sys_ids in case F_CUSTOMER_CODE is a reference or GlideList
+            qc.addOrCondition(F_CUSTOMER_CODE, 'IN', scopedSysIds);
+        } else {
+            gr.addQuery(F_CUSTOMER_CODE, '__none__');
+        }
+    }
+
+    // =========================================================
+    // Approval chain — placeholders, not covered by your mapping. Confirm
+    // and replace with the real approver fields on x_birl3_clm_non_trade_clr.
+    // =========================================================
+    var NON_TRADE_CHAIN = [
+      { label: 'Step 1', field: 'u_approver_step1' },  // <-- CONFIRM
+      { label: 'Step 2', field: 'u_approver_step2' },  // <-- CONFIRM
+      { label: 'Step 3', field: 'u_approver_step3' },  // <-- CONFIRM
+      { label: 'Final',  field: 'u_approver_final' }   // <-- CONFIRM
+    ];
+
+    function getPendingAtStep(gr) {
+      var mapBySysId = {};
+      var lastSubmitted = gr.getValue('u_last_submitted_on'); // <-- CONFIRM field exists
+
+      var saGR = new GlideRecord('sysapproval_approver');
+      var saQuery = saGR.addQuery('sysapproval', gr.sys_id);
+      saQuery.addOrCondition('document_id', gr.sys_id);
+      if (lastSubmitted) saGR.addQuery('sys_created_on', '>=', lastSubmitted);
+      saGR.orderByDesc('sys_updated_on');
+      saGR.query();
+
+      while (saGR.next()) {
+        var aSysId = saGR.getValue('approver') + '';
+        var aRaw   = (saGR.getValue('state') + '').toLowerCase().trim();
+        var aSt    = (aRaw === 'approved') ? 'approved' : (aRaw === 'rejected') ? 'rejected' : (aRaw === 'cancelled') ? 'returned' : 'pending';
+        if (typeof mapBySysId[aSysId] === 'undefined') mapBySysId[aSysId] = aSt;
+      }
+
+      for (var i = 0; i < NON_TRADE_CHAIN.length; i++) {
+        var entry = NON_TRADE_CHAIN[i];
+        var rawVal = (gr.getValue(entry.field) || '').trim();
+        if (!rawVal || rawVal === '' || rawVal === 'null' || rawVal === 'undefined') continue;
+
+        var stepState = mapBySysId[rawVal] || 'pending';
+        if (stepState === 'pending') {
+          var approverName = '';
+          try { approverName = gr[entry.field].getDisplayValue() + ''; } catch(e) { approverName = entry.label; }
+          return approverName || entry.label;
+        }
+      }
+      return '';
+    }
+
+    function monthRangeQuery(gr, dateField, year, month) {
+      var startGdt = new GlideDateTime();
+      startGdt.setValue(year + '-' + pad(month) + '-01 00:00:00');
+      var endMonth = month + 1, endYear = year;
+      if (endMonth > 12) { endMonth = 1; endYear = year + 1; }
+      var endGdt = new GlideDateTime();
+      endGdt.setValue(endYear + '-' + pad(endMonth) + '-01 00:00:00');
+      gr.addQuery(dateField, '>=', startGdt);
+      gr.addQuery(dateField, '<', endGdt);
+    }
+
+    function getFilteredStatusOptions(table, field) {
+      var arr = [], seen = {};
+      var gr = new GlideRecord('sys_choice');
+      gr.addQuery('name', table);
+      gr.addQuery('element', field);
+      gr.addQuery('inactive', false);
+      gr.orderBy('sequence');
+      gr.query();
+      while (gr.next()) {
+        var v = gr.getValue('value');
+        var lbl = gr.getValue('label') || '';
+        if (!v || seen[v]) continue;
+        var lower = lbl.toLowerCase();
+        if (!ALLOWED_STATUS_KEYWORDS.some(function(kw) { return lower.indexOf(kw) > -1; })) continue;
+        seen[v] = true;
+        arr.push({ value: v, label: lbl });
+      }
+      return arr;
+    }
+
+    function resolveCustomer(reqGr) {
+        var rawVal  = clean(reqGr.getValue(F_CUSTOMER_CODE));
+        var dispVal = clean(reqGr.getDisplayValue(F_CUSTOMER_CODE));
+
+        // Handle comma-separated values if multiple sites are selected on one request
+        var firstRaw = rawVal.split(',')[0].trim();
+        var firstDisp = dispVal.split(',')[0].trim();
+
+        if (firstRaw && custByCode[firstRaw]) return custByCode[firstRaw];
+        if (firstRaw && custBySysId[firstRaw]) return custBySysId[firstRaw];
+        if (firstDisp && custByCode[firstDisp]) return custByCode[firstDisp];
+
+        var key = norm(firstDisp);
+        if (key) {
+            for (var i = 0; i < allCustomers.length; i++) {
+                if (norm(allCustomers[i].name) === key || norm(allCustomers[i].code) === key) return allCustomers[i];
+            }
+        }
+        return null;
+    }
+
+    // =========================================================
+    // Outstanding / ageing snapshot helpers
+    // =========================================================
+    function readAgeingRecord(gr) {
+      return {
+        total:  parseFloat(gr.getValue(F_OUT_TOTAL)) || 0,
+        a0_3:   parseFloat(gr.getValue(F_AGE_0_3))   || 0,
+        a4_7:   parseFloat(gr.getValue(F_AGE_4_7))   || 0,
+        a8_21:  parseFloat(gr.getValue(F_AGE_8_21))  || 0,
+        a22_30: parseFloat(gr.getValue(F_AGE_22_30)) || 0,
+        a31_45: parseFloat(gr.getValue(F_AGE_31_45)) || 0,
+        a46_60: parseFloat(gr.getValue(F_AGE_46_60)) || 0,
+        a61_75: parseFloat(gr.getValue(F_AGE_61_75)) || 0,
+        a76_90: parseFloat(gr.getValue(F_AGE_76_90)) || 0,
+        gt90:   parseFloat(gr.getValue(F_AGE_GT90))  || 0,
+        snapshotDate: gr.getValue(F_OUT_CREATED)
+      };
+    }
+
+    function buildLatestSnapshotMap(codesScope) {
+      var map = {};
+      var gr = new GlideRecord(OUTSTANDING_TABLE);
+      if (codesScope && codesScope.length) gr.addQuery(F_OUT_CUSTOMER, 'IN', codesScope);
+      gr.orderByDesc(F_OUT_CREATED);
+      gr.query();
+      while (gr.next()) {
+        var code = clean(gr.getValue(F_OUT_CUSTOMER));
+        if (code && typeof map[code] === 'undefined') map[code] = readAgeingRecord(gr);
+      }
+      return map;
+    }
+
+    function buildSnapshotMapForMonth(codesScope, year, month) {
+      var start = new GlideDateTime();
+      start.setValue(year + '-' + pad(month) + '-01 00:00:00');
+      var endMonth = month + 1, endYear = year;
+      if (endMonth > 12) { endMonth = 1; endYear += 1; }
+      var end = new GlideDateTime();
+      end.setValue(endYear + '-' + pad(endMonth) + '-01 00:00:00');
+
+      var map = {};
+      var gr = new GlideRecord(OUTSTANDING_TABLE);
+      if (codesScope && codesScope.length) gr.addQuery(F_OUT_CUSTOMER, 'IN', codesScope);
+      gr.addQuery(F_OUT_CREATED, '>=', start);
+      gr.addQuery(F_OUT_CREATED, '<', end);
+      gr.orderByDesc(F_OUT_CREATED);
+      gr.query();
+      while (gr.next()) {
+        var code = clean(gr.getValue(F_OUT_CUSTOMER));
+        if (code && typeof map[code] === 'undefined') map[code] = readAgeingRecord(gr);
+      }
+      return map;
+    }
+
+    function getLastNMonthKeys(n) {
+      var arr = [];
+      var nowStr = new GlideDateTime().getValue();
+      var y = parseInt(nowStr.substr(0, 4), 10);
+      var m = parseInt(nowStr.substr(5, 2), 10);
+      for (var i = n - 1; i >= 0; i--) {
+        var mm = m - i, yy = y;
+        while (mm <= 0) { mm += 12; yy -= 1; }
+        arr.push({ year: yy, month: mm, label: monthNames[mm - 1] + ' ' + yy });
+      }
+      return arr;
+    }
+
+    function buildPeriodRange(period, customFrom, customTo) {
+      var nowStr = new GlideDateTime().getValue();
+      var curYear  = parseInt(nowStr.substr(0, 4), 10);
+      var curMonth = parseInt(nowStr.substr(5, 2), 10);
+      var curDay   = parseInt(nowStr.substr(8, 2), 10);
+      data.lastYear = curYear - 1;
+      var startGdt = new GlideDateTime();
+      var endGdt   = new GlideDateTime();
+      var label = '';
+
+      if (period === 'latest') {
+        startGdt.setValue('1990-01-01 00:00:00');
+        endGdt.setValue(nowStr);
+        label = 'All Time (Latest)';
+      } else if (period === 'previous_month') {
+        var prevMonth = curMonth - 1, prevYear = curYear;
+        if (prevMonth < 1) { prevMonth = 12; prevYear -= 1; }
+        var dim = daysInMonth(prevYear, prevMonth);
+        startGdt.setValue(prevYear + '-' + pad(prevMonth) + '-01 00:00:00');
+        endGdt.setValue(prevYear + '-' + pad(prevMonth) + '-' + pad(dim) + ' 23:59:59');
+        label = monthNames[prevMonth - 1] + ' ' + prevYear;
+      } else if (period === 'current_year') {
+        startGdt.setValue(curYear + '-01-01 00:00:00');
+        endGdt.setValue(nowStr);
+        label = 'Jan 1 – ' + monthNames[curMonth - 1] + ' ' + curDay + ', ' + curYear;
+      } else if (period === 'last_year') {
+        var lastYear = curYear - 1;
+        startGdt.setValue(lastYear + '-01-01 00:00:00');
+        endGdt.setValue(lastYear + '-12-31 23:59:59');
+        label = 'Jan 1 – Dec 31, ' + lastYear;
+      } else if (period === 'custom' && customFrom && customTo) {
+        startGdt.setValue(customFrom + ' 00:00:00');
+        endGdt.setValue(customTo + ' 23:59:59');
+        label = customFrom + ' to ' + customTo;
+      } else {
+        startGdt.setValue(curYear + '-' + pad(curMonth) + '-01 00:00:00');
+        endGdt.setValue(nowStr);
+        label = monthNames[curMonth - 1] + ' ' + curYear;
+      }
+      return { start: startGdt, end: endGdt, label: label };
+    }
+
+    var range = buildPeriodRange(period, customFrom, customTo);
+    data.periodLabel = range.label;
+    data.statusOptions = getFilteredStatusOptions(REQUEST_TABLE, F_STATE);
+    data.scorecards = { submitted: 0, approved: 0, sendback: 0, rejected: 0, deviated: 0 };
+
+    // --- Scorecards Aggregate ---
+    var agg = new GlideAggregate(REQUEST_TABLE);
+    agg.addAggregate('COUNT', F_STATE);
+    agg.groupBy(F_STATE);
+    agg.addQuery(F_SUBMITTED_ON, '>=', range.start);
+    agg.addQuery(F_SUBMITTED_ON, '<=', range.end);
+    applyAppFilters(agg);
+    agg.query();
+
+    while (agg.next()) {
+      var st = (agg.getValue(F_STATE) || '').toLowerCase();
+      var cnt = parseInt(agg.getAggregate('COUNT', F_STATE), 10) || 0;
+      if (st.indexOf('submit') > -1) data.scorecards.submitted += cnt;
+      else if (st.indexOf('approv') > -1) data.scorecards.approved += cnt;
+      else if (st.indexOf('reject') > -1) data.scorecards.rejected += cnt;
+    }
+
+    var aggSB = new GlideAggregate(REQUEST_TABLE);
+    aggSB.addAggregate('COUNT', F_STATE);
+    aggSB.groupBy(F_STATE);
+    applyAppFilters(aggSB);
+    aggSB.query();
+
+    while (aggSB.next()) {
+      var st2 = (aggSB.getValue(F_STATE) || '').toLowerCase();
+      if (st2.indexOf('send') > -1 || st2.indexOf('return') > -1) {
+        data.scorecards.sendback += parseInt(aggSB.getAggregate('COUNT', F_STATE), 10) || 0;
+      }
+    }
+
+    var devGr = new GlideAggregate(REQUEST_TABLE);
+    devGr.addQuery(F_DEVIATION, true);
+    devGr.addQuery(F_SUBMITTED_ON, '>=', range.start);
+    devGr.addQuery(F_SUBMITTED_ON, '<=', range.end);
+    devGr.addAggregate('COUNT');
+    applyAppFilters(devGr);
+    devGr.query();
+
+    if (devGr.next()) {
+      data.scorecards.deviated = parseInt(devGr.getAggregate('COUNT'), 10) || 0;
+    }
+
+    // --- Approval Pipeline Chart (12 months, current year) ---
+    var nowStr2 = new GlideDateTime().getValue();
+    var chartYear = parseInt(nowStr2.substr(0, 4), 10);
+    var monthKeys = [];
+    for (var mm = 1; mm <= 12; mm++) monthKeys.push(chartYear + '-' + pad(mm));
+
+    var series = { submitted: [], approved: [], pending: [], sendback: [], rejected: [] };
+    var maxVal = 1;
+
+    monthKeys.forEach(function(mKey) {
+      var parts = mKey.split('-');
+      var y = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+      var counts = { submitted: 0, approved: 0, pending: 0, sendback: 0, rejected: 0 };
+
+      var ga = new GlideAggregate(REQUEST_TABLE);
+      ga.addAggregate('COUNT', F_STATE);
+      ga.groupBy(F_STATE);
+      monthRangeQuery(ga, F_SUBMITTED_ON, y, m);
+      applyAppFilters(ga);
+      ga.query();
+
+      while (ga.next()) {
+        var s3 = (ga.getValue(F_STATE) || '').toLowerCase();
+        var c3 = parseInt(ga.getAggregate('COUNT', F_STATE), 10) || 0;
+        if (s3.indexOf('submit') > -1) counts.submitted += c3;
+        else if (s3.indexOf('approv') > -1) counts.approved += c3;
+        else if (s3.indexOf('pend') > -1) counts.pending += c3;
+        else if (s3.indexOf('send') > -1 || s3.indexOf('return') > -1) counts.sendback += c3;
+        else if (s3.indexOf('reject') > -1) counts.rejected += c3;
+      }
+      Object.keys(counts).forEach(function(k) {
+        series[k].push(counts[k]);
+        if (counts[k] > maxVal) maxVal = counts[k];
+      });
+    });
+
+    data.chart = {
+      year: chartYear,
+      months: monthKeys.map(function(mKey) { return monthNames[parseInt(mKey.split('-')[1], 10) - 1]; }),
+      series: series,
+      max: maxVal
+    };
+
+    // =========================================================
+    // Latest outstanding snapshot (shared by table + portfolio KPIs)
+    // =========================================================
+    var latestSnapMap = buildLatestSnapshotMap(scopedCodes);
+
+    // --- Portfolio KPIs ---
+    var portfolio = { totalOutstanding: 0, totalCreditLimit: 0, overdue90: 0, riskHigh: 0, riskMedium: 0, riskLow: 0 };
+    scopedCodes.forEach(function(code) {
+      var cust = custByCode[code];
+      var snap = latestSnapMap[code];
+      portfolio.totalCreditLimit += (cust ? cust.creditLimit : 0);
+      if (snap) {
+        portfolio.totalOutstanding += snap.total;
+        portfolio.overdue90 += snap.gt90;
+        var ratio = snap.total > 0 ? (snap.gt90 / snap.total) : 0;
+        if (ratio >= 0.20) portfolio.riskHigh++;
+        else if (ratio >= 0.05) portfolio.riskMedium++;
+        else portfolio.riskLow++;
+      }
+    });
+
+    var available = portfolio.totalCreditLimit - portfolio.totalOutstanding;
+    var utilPct = portfolio.totalCreditLimit > 0 ? (portfolio.totalOutstanding / portfolio.totalCreditLimit * 100) : 0;
+
+    data.portfolio = {
+      totalOutstanding: formatAmt(portfolio.totalOutstanding),
+      availableLimit: formatAmt(available),
+      utilizationPct: utilPct.toFixed(1),
+      overdue90: formatAmt(portfolio.overdue90),
+      riskHigh: portfolio.riskHigh,
+      riskMedium: portfolio.riskMedium,
+      riskLow: portfolio.riskLow
+    };
+
+    // --- Region Risk Matrix (by CG4) ---
+    var regionAgg = {};
+    scopedCodes.forEach(function(code) {
+      var cust = custByCode[code];
+      if (!cust || !cust.region) return;
+      if (!regionAgg[cust.region]) regionAgg[cust.region] = { region: cust.region, total: 0, gt90: 0 };
+      var snap = latestSnapMap[code];
+      if (snap) {
+        regionAgg[cust.region].total += snap.total;
+        regionAgg[cust.region].gt90  += snap.gt90;
+      }
+    });
+
+    var regionRisk = Object.keys(regionAgg).map(function(r) {
+      var row = regionAgg[r];
+      var pct = row.total > 0 ? (row.gt90 / row.total * 100) : 0;
+      var level = pct >= 20 ? 'Critical' : (pct >= 5 ? 'Elevated' : 'Normal');
+      return {
+        region: row.region,
+        totalOutstanding: formatAmt(row.total),
+        overdue90: formatAmt(row.gt90),
+        pct: pct.toFixed(1),
+        level: level
+      };
+    });
+    regionRisk.sort(function(a, b) { return parseFloat(b.pct) - parseFloat(a.pct); });
+    data.regionRisk = regionRisk;
+
+    // --- Total Outstanding MoM Trend + Ageing Breakdown (6 months) ---
+    var months6 = getLastNMonthKeys(6);
+    var momSeries = [];
+    var ageingSeries = { current: [], b31_60: [], b61_90: [], gt90: [] };
+
+    months6.forEach(function(mk) {
+      var monthMap = buildSnapshotMapForMonth(scopedCodes, mk.year, mk.month);
+      var totalM = 0, cur = 0, b3160 = 0, b6190 = 0, gt90m = 0;
+      scopedCodes.forEach(function(code) {
+        var snap = monthMap[code];
+        if (!snap) return;
+        totalM += snap.total;
+        cur    += (snap.a0_3 + snap.a4_7 + snap.a8_21 + snap.a22_30);
+        b3160  += (snap.a31_45 + snap.a46_60);
+        b6190  += (snap.a61_75 + snap.a76_90);
+        gt90m  += snap.gt90;
+      });
+      momSeries.push(totalM);
+      ageingSeries.current.push(cur);
+      ageingSeries.b31_60.push(b3160);
+      ageingSeries.b61_90.push(b6190);
+      ageingSeries.gt90.push(gt90m);
+    });
+
+    data.momTrend = {
+      months: months6.map(function(m) { return m.label; }),
+      series: momSeries,
+      max: Math.max.apply(null, momSeries.concat([1]))
+    };
+
+    var stackedMax = 1;
+    months6.forEach(function(m, i) {
+      var stackTotal = ageingSeries.current[i] + ageingSeries.b31_60[i] + ageingSeries.b61_90[i] + ageingSeries.gt90[i];
+      if (stackTotal > stackedMax) stackedMax = stackTotal;
+    });
+
+    data.ageingBreakdown = {
+      months: months6.map(function(m) { return m.label; }),
+      series: ageingSeries,
+      max: stackedMax
+    };
+
+    // =========================================================
+    // Main List Data (Approval Requests table)
+    // =========================================================
+    data.requests = [];
+
+    var reqGr = new GlideRecord(REQUEST_TABLE);
+    if (statusFilter) reqGr.addQuery(F_STATE, statusFilter);
+    reqGr.addQuery(F_SUBMITTED_ON, '>=', range.start);
+    reqGr.addQuery(F_SUBMITTED_ON, '<=', range.end);
+    applyAppFilters(reqGr);
+    reqGr.orderByDesc(F_SUBMITTED_ON);
+    reqGr.setLimit(500);
+    reqGr.query();
+
+    while (reqGr.next()) {
+      var cust = resolveCustomer(reqGr);
+
+      var custCode = '', custName = reqGr.getDisplayValue(F_CUSTOMER_CODE), segment = '', pan = '', zone = '', region = '', depot = '';
+      var prevLimitVal = 0;
+      if (cust) {
+        custCode = cust.code;
+        custName = cust.name || custName;
+        segment  = cust.segment;
+        pan      = cust.pan;
+        zone     = cust.zone;
+        region   = cust.region;
+        depot    = cust.depot;
+        prevLimitVal = cust.creditLimit;
+      }
+
+      var reqNumber = reqGr.getDisplayValue(F_REQ_NUMBER);
+      var pendingAtStep = getPendingAtStep(reqGr);
+      var isDev = (reqGr.getValue(F_DEVIATION) == '1' || reqGr.getValue(F_DEVIATION) == 'true');
+
+      var statVal = reqGr.getValue(F_STATE);
+      var statLabel = reqGr.getDisplayValue(F_STATE);
+      if ((statVal || '').toLowerCase().indexOf('submit') > -1) {
+          statLabel = 'Pending';
+      }
+
+      var outstanding = (cust && latestSnapMap[cust.code]) ? latestSnapMap[cust.code].total : 0;
+
+      data.requests.push({
+        requestCode:  reqNumber || reqGr.getUniqueValue(),
+        customerCode: custCode,
+        customerName: custName,
+        pan:          pan,
+        segment:      segment,
+        zone:         zone,
+        region:       region,
+        depot:        depot,
+        status:       statVal,
+        statusLabel:  statLabel,
+        isDeviation:  isDev,
+        stage:        pendingAtStep,
+        submittedBy:  reqGr.getDisplayValue(F_SUBMITTED_BY),
+        submittedOn:  reqGr.getDisplayValue(F_SUBMITTED_ON),
+        prevLimit:    formatAmt(prevLimitVal),
+        requested:    formatAmt(reqGr.getValue(F_REQUESTED_AMT)),
+        approved:     formatAmt(reqGr.getValue(F_APPROVED_AMT)),
+        outstanding:  formatAmt(outstanding)
+      });
+    }
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-24 08:51:20</sys_created_on>
+        <sys_id>14bc58192b1a07904572f3745e91bf5b</sys_id>
+        <sys_mod_count>9</sys_mod_count>
+        <sys_name>clm_nt_nsh_approval_requests</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_14bc58192b1a07904572f3745e91bf5b</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-30 07:45:15</sys_updated_on>
+        <template><![CDATA[<div class="clm-dash" ng-cloak ng-click="c.closeAllDropdowns()">
+
+  <!-- ===================== Filters ===================== -->
+  <div class="clm-filter-card">
+    <div class="clm-filter-row">
+
+      <!-- SEGMENT = Company Code (role-scoped; no "All" option) -->
+      <label class="clm-filter-field">
+        <span>Company Code</span>
+        <select class="form-control" ng-model="c.filters.segment" ng-change="c.onSegmentChange()">
+          <option ng-repeat="s in c.data.filterOpts.segments track by s" value="{{s}}">{{s}}</option>
+        </select>
+      </label>
+
+      <!-- ZONE = Customer Group (MULTISELECT) -->
+      <label class="clm-filter-field clm-multiselect-field">
+        <span>Zone</span>
+        <div class="clm-multiselect-container" ng-class="{open: c.zoneDropdownOpen}">
+          <div class="clm-multiselect-trigger"
+               ng-click="$event.stopPropagation(); c.zoneDropdownOpen ? c.closeZoneDropdown() : c.openZoneDropdown()">
+            <span class="clm-multiselect-text">{{c.getZoneDisplayText()}}</span>
+            <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+          </div>
+          <div class="clm-multiselect-dropdown" ng-show="c.zoneDropdownOpen" ng-click="$event.stopPropagation()">
+            <div class="clm-multiselect-actions">
+              <a ng-click="c.selectAllZones()">Select All</a>
+              <a ng-click="c.clearAllZones()">Clear</a>
+            </div>
+            <input type="text" class="clm-multiselect-search" ng-model="c.zoneSearch"
+                   ng-click="$event.stopPropagation()" placeholder="Search customer groups...">
+            <ul class="clm-multiselect-list">
+              <li ng-repeat="z in c.getFilteredZones() track by z"
+                  ng-click="$event.stopPropagation(); c.toggleZone(z)"
+                  ng-class="{selected: c.isZoneSelected(z)}">
+                <span class="clm-checkbox" ng-class="{checked: c.isZoneSelected(z)}"></span>
+                {{z}}
+              </li>
+              <li class="clm-dropdown-empty" ng-if="c.getFilteredZones().length === 0">No matches</li>
+            </ul>
+          </div>
+        </div>
+      </label>
+
+      <!-- REGION = CG4 (MULTISELECT) -->
+      <label class="clm-filter-field clm-multiselect-field">
+        <span>Region</span>
+        <div class="clm-multiselect-container" ng-class="{open: c.regionDropdownOpen}">
+          <div class="clm-multiselect-trigger"
+               ng-click="$event.stopPropagation(); c.regionDropdownOpen ? c.closeRegionDropdown() : c.openRegionDropdown()">
+            <span class="clm-multiselect-text">{{c.getRegionDisplayText()}}</span>
+            <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+          </div>
+          <div class="clm-multiselect-dropdown" ng-show="c.regionDropdownOpen" ng-click="$event.stopPropagation()">
+            <div class="clm-multiselect-actions">
+              <a ng-click="c.selectAllRegions()">Select All</a>
+              <a ng-click="c.clearAllRegions()">Clear</a>
+            </div>
+            <input type="text" class="clm-multiselect-search" ng-model="c.regionSearch"
+                   ng-click="$event.stopPropagation()" placeholder="Search CG4...">
+            <ul class="clm-multiselect-list">
+              <li ng-repeat="r in c.getFilteredRegions() track by r"
+                  ng-click="$event.stopPropagation(); c.toggleRegion(r)"
+                  ng-class="{selected: c.isRegionSelected(r)}">
+                <span class="clm-checkbox" ng-class="{checked: c.isRegionSelected(r)}"></span>
+                {{r}}
+              </li>
+              <li class="clm-dropdown-empty" ng-if="c.getFilteredRegions().length === 0">No matches</li>
+            </ul>
+          </div>
+        </div>
+      </label>
+
+      <!-- DEPOT = Sales Office (MULTISELECT) -->
+      <label class="clm-filter-field clm-multiselect-field">
+        <span>Depot</span>
+        <div class="clm-multiselect-container" ng-class="{open: c.depotDropdownOpen}">
+          <div class="clm-multiselect-trigger"
+               ng-click="$event.stopPropagation(); c.depotDropdownOpen ? c.closeDepotDropdown() : c.openDepotDropdown()">
+            <span class="clm-multiselect-text">{{c.getDepotDisplayText()}}</span>
+            <i class="fa fa-chevron-down clm-multiselect-arrow"></i>
+          </div>
+          <div class="clm-multiselect-dropdown" ng-show="c.depotDropdownOpen" ng-click="$event.stopPropagation()">
+            <div class="clm-multiselect-actions">
+              <a ng-click="c.selectAllDepots()">Select All</a>
+              <a ng-click="c.clearAllDepots()">Clear</a>
+            </div>
+            <input type="text" class="clm-multiselect-search" ng-model="c.depotSearch"
+                   ng-click="$event.stopPropagation()" placeholder="Search sales offices...">
+            <ul class="clm-multiselect-list">
+              <li ng-repeat="d in c.getFilteredDepots() track by d"
+                  ng-click="$event.stopPropagation(); c.toggleDepot(d)"
+                  ng-class="{selected: c.isDepotSelected(d)}">
+                <span class="clm-checkbox" ng-class="{checked: c.isDepotSelected(d)}"></span>
+                {{d}}
+              </li>
+              <li class="clm-dropdown-empty" ng-if="c.getFilteredDepots().length === 0">No matches</li>
+            </ul>
+          </div>
+        </div>
+      </label>
+
+      <!-- STATUS -->
+      <label class="clm-filter-field">
+        <span>Status</span>
+        <select class="form-control" ng-model="c.filters.status" ng-change="c.applyFilters()">
+          <option value="">All Statuses</option>
+          <option ng-repeat="s in data.statusOptions track by s.value" value="{{s.value}}">{{s.label === 'Submitted' ? 'Pending' : s.label}}</option>
+        </select>
+      </label>
+
+      <!-- PERIOD -->
+      <label class="clm-filter-field">
+        <span>Period</span>
+        <select class="form-control" ng-model="c.filters.period" ng-change="c.onPeriodChange()">
+          <option ng-repeat="p in c.data.filterOpts.periods track by p.value" value="{{p.value}}">{{p.label}}</option>
+        </select>
+      </label>
+    </div>
+
+    <!-- CUSTOM DATE RANGE -->
+    <div class="clm-custom-range" ng-if="c.filters.period === 'custom'">
+      <input type="date" ng-model="c.filters.customFrom">
+      <span>to</span>
+      <input type="date" ng-model="c.filters.customTo">
+      <button type="button" class="clm-apply-btn" ng-click="c.applyFilters()">Apply Range</button>
+    </div>
+  </div>
+
+  <!-- ===================== Access Denied ===================== -->
+  <div ng-if="data.accessDenied" class="clm-no-data" style="padding: 40px 0; background:#fff; border:1px solid #e3e6eb; border-radius:8px;">
+    You do not have a role mapped to any Company Code to view this dashboard.
+  </div>
+
+  <div ng-if="!data.accessDenied">
+
+  <!-- ===================== Approval Request Scorecards ===================== -->
+  <div class="clm-scorecards">
+    <div class="clm-card clm-card-blue" style="cursor: pointer;" ng-click="c.setKpiFilter('pending')" ng-style="c.kpiFilter === 'pending' ? {'box-shadow': '0 0 0 2px #1c4e9c', 'background-color': '#ebf8ff'} : {}">
+      <i class="fa fa-info-circle clm-kpi-info" title="Filter by Pending" ng-click="c.setKpiFilter('pending'); $event.stopPropagation();"></i>
+      <div class="clm-card-id">REQUESTS PENDING</div>
+      <div class="clm-card-value">{{data.scorecards.submitted}}</div>
+      <div class="clm-card-sub">New in {{data.periodLabel}}</div>
+    </div>
+    <div class="clm-card clm-card-green" style="cursor: pointer;" ng-click="c.setKpiFilter('approved')" ng-style="c.kpiFilter === 'approved' ? {'box-shadow': '0 0 0 2px #38a169', 'background-color': '#e3f4ea'} : {}">
+      <i class="fa fa-info-circle clm-kpi-info" title="Filter by Approved" ng-click="c.setKpiFilter('approved'); $event.stopPropagation();"></i>
+      <div class="clm-card-id">APPROVED</div>
+      <div class="clm-card-value">{{data.scorecards.approved}}</div>
+      <div class="clm-card-sub">Final approval received</div>
+    </div>
+    <div class="clm-card clm-card-purple" style="cursor: pointer;" ng-click="c.setKpiFilter('sendback')" ng-style="c.kpiFilter === 'sendback' ? {'box-shadow': '0 0 0 2px #7c5cf0', 'background-color': '#f0e6ff'} : {}">
+      <i class="fa fa-info-circle clm-kpi-info" title="Filter by Send-Back" ng-click="c.setKpiFilter('sendback'); $event.stopPropagation();"></i>
+      <div class="clm-card-id">SEND-BACK</div>
+      <div class="clm-card-value">{{data.scorecards.sendback}}</div>
+      <div class="clm-card-sub">Awaiting resubmission</div>
+    </div>
+    <div class="clm-card clm-card-red" style="cursor: pointer;" ng-click="c.setKpiFilter('rejected')" ng-style="c.kpiFilter === 'rejected' ? {'box-shadow': '0 0 0 2px #e53e3e', 'background-color': '#fdeaea'} : {}">
+      <i class="fa fa-info-circle clm-kpi-info" title="Filter by Rejected" ng-click="c.setKpiFilter('rejected'); $event.stopPropagation();"></i>
+      <div class="clm-card-id">REJECTED</div>
+      <div class="clm-card-value">{{data.scorecards.rejected}}</div>
+      <div class="clm-card-sub">Declined in {{data.periodLabel}}</div>
+    </div>
+    <div class="clm-card clm-card-orange" style="cursor: pointer;" ng-click="c.setKpiFilter('deviated')" ng-style="c.kpiFilter === 'deviated' ? {'box-shadow': '0 0 0 2px #dd6b20', 'background-color': '#fffdf0'} : {}">
+      <i class="fa fa-info-circle clm-kpi-info" title="Filter by Deviated" ng-click="c.setKpiFilter('deviated'); $event.stopPropagation();"></i>
+      <div class="clm-card-id">DEVIATED REQUESTS</div>
+      <div class="clm-card-value">{{data.scorecards.deviated}}</div>
+      <div class="clm-card-sub">Flagged in {{data.periodLabel}}</div>
+    </div>
+  </div>
+
+
+  <!-- ===================== Approval Pipeline Chart ===================== -->
+    <div class="clm-chart-panel">
+    <div class="clm-chart-header">
+      <span class="clm-chart-title">Approval Pipeline — State-wise ({{data.chart.year}})</span>
+      <span class="clm-chart-badge">Multi-Line</span>
+      <div class="clm-legend">
+        <span class="legend-item"><i class="dot blue"></i>Pending</span>
+        <span class="legend-item"><i class="dot green"></i>Approved</span>
+        <span class="legend-item"><i class="dot orange"></i>Stage Pending</span>
+        <span class="legend-item"><i class="dot purple"></i>Send-Back</span>
+        <span class="legend-item"><i class="dot red"></i>Rejected</span>
+      </div>
+    </div>
+    <div class="clm-chart-body" ng-mouseleave="c.onMouseLeaveChart()">
+      <svg viewBox="0 0 900 260" preserveAspectRatio="none" class="clm-svg" ng-if="data.chart.months.length">
+        <line ng-repeat="m in data.chart.months track by $index"
+              x1="{{c.chartX($index)}}" y1="0" x2="{{c.chartX($index)}}" y2="220"
+              class="grid-line"></line>
+
+        <g class="y-axis-labels">
+          <text ng-repeat="tick in c.yAxisTicks"
+                ng-attr-x="25"
+                ng-attr-y="{{tick.y + 4}}"
+                text-anchor="end"
+                fill="#718096"
+                style="font-size: 11px;">
+            {{tick.label}}
+          </text>
+        </g>
+
+        <polyline class="line-blue"    points="{{c.linePoints('submitted')}}"></polyline>
+        <polyline class="line-green"   points="{{c.linePoints('approved')}}"></polyline>
+        <polyline class="line-orange"  points="{{c.linePoints('pending')}}"></polyline>
+        <polyline class="line-purple"  points="{{c.linePoints('sendback')}}"></polyline>
+        <polyline class="line-red"     points="{{c.linePoints('rejected')}}"></polyline>
+
+        <rect ng-repeat="m in data.chart.months track by $index"
+              ng-attr-x="{{c.chartX($index) - (860 / (data.chart.months.length - 1 || 1)) / 2}}"
+              y="0"
+              ng-attr-width="{{860 / (data.chart.months.length - 1 || 1)}}"
+              height="220"
+              fill="transparent"
+              style="cursor: pointer;"
+              ng-mouseover="c.onMouseOverMonth($event, $index)">
+        </rect>
+
+        <g ng-repeat="m in data.chart.months track by $index">
+          <text x="{{c.chartX($index)}}" y="245" class="axis-label" text-anchor="middle">{{m}}</text>
+        </g>
+      </svg>
+
+      <div class="clm-chart-tooltip" ng-if="c.showTooltip" ng-style="{'left': c.tooltipLeft + 'px', 'top': c.tooltipTop + 'px'}">
+        <div class="tooltip-title">{{data.chart.months[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color blue"></span>Pending: {{data.chart.series.submitted[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color green"></span>Approved: {{data.chart.series.approved[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color orange"></span>Stage Pending: {{data.chart.series.pending[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color purple"></span>Send-Back: {{data.chart.series.sendback[c.hoverIndex]}}</div>
+        <div class="tooltip-row"><span class="tooltip-color red"></span>Rejected: {{data.chart.series.rejected[c.hoverIndex]}}</div>
+      </div>
+
+      <div ng-if="!data.chart.months.length" class="clm-no-data">No data available.</div>
+    </div>
+  </div>
+
+  <!-- ===================== Data Table ===================== -->
+  <div class="clm-table-panel" id="clmRequestsTableContainer">
+    <div class="clm-table-header">
+      <span class="clm-table-title">Approval Requests <span ng-if="c.kpiFilter" style="font-size: 13px; font-weight: normal; color: #718096; margin-left: 8px;">(Filtered by {{c.kpiFilter}})</span></span>
+    </div>
+
+    <div class="clm-table-wrapper">
+      <div class="clm-search-section">
+        <div class="clm-search-box">
+          <i class="fa fa-search"></i>
+          <input type="text" ng-model="c.filters.search" ng-change="c.runSearch()" placeholder="Search by Req ID, Name, PAN...">
+        </div>
+      </div>
+
+      <div class="clm-table-top-controls">
+        <span class="clm-records-label">Records: <strong>{{c.getVisibleRecordsCount()}}</strong></span>
+        <span class="clm-rows-label">Rows:
+          <select class="clm-rows-select"
+                  ng-model="c.pagination.rowsPerPage"
+                  ng-change="c.onRowsPerPageChange()"
+                  ng-options="opt for opt in c.rowsPerPageOptions track by opt">
+          </select>
+        </span>
+      </div>
+    </div>
+
+    <div class="clm-table-scroll">
+      <table class="clm-table">
+        <thead>
+          <tr>
+            <th>Request ID</th>
+            <th class="col-customer">Customer</th>
+            <th>PAN</th>
+            <th>Segment</th>
+            <th class="col-zone">Zone</th>
+            <th class="col-region">Region</th>
+            <th class="col-depot">Sales Office</th>
+            <th>Status</th>
+            <th>Prev Limit</th>
+            <th>Requested</th>
+            <th>Approved</th>
+            <th>Outstanding</th>
+            <th>Pending At</th>
+            <th class="col-submitted-by">Submitted By</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr ng-repeat="r in c.paginatedRequests">
+            <td><a href="javascript:void(0)" class="clm-link" ng-click="c.openRequestDetail(r)">{{r.requestCode}}</a></td>
+            <td class="col-customer">
+              <div class="clm-cust-name" ng-click="c.openRequestDetail(r)" style="cursor: pointer;">{{r.customerName}}</div>
+              <div class="clm-cust-code clm-link" ng-click="c.openRequestDetail(r)" style="cursor: pointer;">{{r.customerCode}}</div>
+            </td>
+            <td>{{r.pan}}</td>
+            <td><span class="badge seg-badge" ng-class="c.segClass(r.segment)">{{r.segment}}</span></td>
+             <td class="col-zone">{{r.zone}}</td>
+            <td class="col-region">{{r.region}}</td>
+            <td class="col-depot">{{r.depot}}</td>
+            <td><span class="badge status-badge" ng-class="c.statusClass(r.status)">{{r.statusLabel}}</span></td>
+            <td>{{r.prevLimit}}</td>
+            <td>{{r.requested}}</td>
+            <td>{{r.approved || '—'}}</td>
+            <td>{{r.outstanding}}</td>
+            <td>
+              <span class="badge stage-badge" ng-if="r.stage">{{r.stage}}</span>
+              <span ng-if="!r.stage">—</span>
+            </td>
+            <td class="col-submitted-by">{{r.submittedBy}}</td>
+          </tr>
+          <tr ng-if="!c.paginatedRequests.length && c.getVisibleRecordsCount()">
+            <td colspan="13" class="clm-no-data">No records to display on this page.</td>
+          </tr>
+          <tr ng-if="c.getVisibleRecordsCount() === 0">
+            <td colspan="13" class="clm-no-data">No approval requests found for the selected filters.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="clm-pagination-bottom" ng-if="c.getVisibleRecordsCount() > 0">
+      <div class="clm-pagination-controls">
+        <button class="clm-page-btn" ng-click="c.previousPage()" ng-disabled="c.pagination.currentPage === 1">‹</button>
+        <button ng-repeat="page in c.getPageNumbers()"
+                class="clm-page-btn"
+                ng-class="{active: page === c.pagination.currentPage}"
+                ng-click="c.goToPage(page)">{{page}}</button>
+        <button class="clm-page-btn" ng-click="c.nextPage()" ng-disabled="c.pagination.currentPage >= c.getTotalPages()">›</button>
+      </div>
+    </div>
+  </div>
+
+  </div><!-- /ng-if !data.accessDenied -->
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>14bc58192b1a07904572f3745e91bf5b</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-24 08:51:20</sys_created_on>
+        <sys_id>5cbc58192b1a07904572f3745e91bf60</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-24 08:51:20</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_14bc58192b1a07904572f3745e91bf5b</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[function widgetcontroller($scope, $rootScope, $timeout) {
+  var c = this;
+
+  c.filters = {
+    // Company Code (Segment) — always one of the user's role-allowed codes,
+    // there is no "All" option, same pattern as the trade widget.
+    segment: c.data.selectedSegment || '',
+    zones: [],    // Customer Group
+    regions: [],  // CG4
+    depots: [],   // Sales Office
+    status: '',
+    period: c.data.selectedPeriod || 'latest',
+    customFrom: '',
+    customTo: '',
+    search: ''
+  };
+
+  c.rowsPerPageOptions = [10, 15, 20, 50, 100];
+  c.pagination = { currentPage: 1, rowsPerPage: 10 };
+  c.hoverIndex = -1;
+  c.showTooltip = false;
+  c.tooltipLeft = 0;
+  c.tooltipTop = 0;
+  c.paginatedRequests = [];
+  c.kpiFilter = '';
+
+  // ===================== CUSTOMER GROUP (Zone) multiselect =====================
+  c.zoneDropdownOpen = false;
+  c.zoneSearch = '';
+
+  c.closeAllDropdowns = function() {
+      c.zoneDropdownOpen = false;
+      c.regionDropdownOpen = false;
+      c.depotDropdownOpen = false;
+  };
+
+  c.openZoneDropdown = function() { c.zoneDropdownOpen = true; };
+  c.closeZoneDropdown = function() { c.zoneDropdownOpen = false; };
+
+  c.toggleZone = function(z) {
+      var idx = c.filters.zones.indexOf(z);
+      if (idx === -1) {
+          c.filters.zones.push(z);
+      } else {
+          c.filters.zones.splice(idx, 1);
+      }
+      // Customer Group changed -&gt; clear dependent CG4/Sales Office (cascade)
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.zoneSearch = '';
+      c.applyFilters();
+  };
+
+  c.selectAllZones = function() {
+      var allZones = (c.data &amp;&amp; c.data.filterOpts &amp;&amp; c.data.filterOpts.zones) || [];
+      c.filters.zones = allZones.slice();
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.zoneSearch = '';
+      c.applyFilters();
+  };
+
+  c.clearAllZones = function() {
+      c.filters.zones = [];
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.zoneSearch = '';
+      c.applyFilters();
+  };
+
+  c.isZoneSelected = function(z) {
+      return c.filters.zones.indexOf(z) !== -1;
+  };
+
+  c.getFilteredZones = function() {
+      var all = (c.data &amp;&amp; c.data.filterOpts &amp;&amp; c.data.filterOpts.zones) || [];
+      var term = (c.zoneSearch || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(z) { return String(z).toLowerCase().indexOf(term) !== -1; });
+  };
+
+  c.getZoneDisplayText = function() {
+      if (!c.filters.zones || c.filters.zones.length === 0) return 'All Customer Groups';
+      if (c.filters.zones.length === 1) return c.filters.zones[0];
+      return c.filters.zones.length + ' groups selected';
+  };
+
+  // ===================== CG4 (Region) multiselect (cascades off Customer Group) =====================
+  c.regionDropdownOpen = false;
+  c.regionSearch = '';
+
+  c.openRegionDropdown = function() { c.regionDropdownOpen = true; };
+  c.closeRegionDropdown = function() { c.regionDropdownOpen = false; };
+
+  c.toggleRegion = function(r) {
+      var idx = c.filters.regions.indexOf(r);
+      if (idx === -1) {
+          c.filters.regions.push(r);
+      } else {
+          c.filters.regions.splice(idx, 1);
+      }
+      // CG4 changed -&gt; clear dependent Sales Office (cascade)
+      c.filters.depots = [];
+      c.regionSearch = '';
+      c.applyFilters();
+  };
+
+  c.selectAllRegions = function() {
+      var allRegions = (c.data &amp;&amp; c.data.filterOpts &amp;&amp; c.data.filterOpts.regions) || [];
+      c.filters.regions = allRegions.slice();
+      c.filters.depots = [];
+      c.regionSearch = '';
+      c.applyFilters();
+  };
+
+  c.clearAllRegions = function() {
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.regionSearch = '';
+      c.applyFilters();
+  };
+
+  c.isRegionSelected = function(r) {
+      return c.filters.regions.indexOf(r) !== -1;
+  };
+
+  c.getFilteredRegions = function() {
+      var all = (c.data &amp;&amp; c.data.filterOpts &amp;&amp; c.data.filterOpts.regions) || [];
+      var term = (c.regionSearch || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(r) { return String(r).toLowerCase().indexOf(term) !== -1; });
+  };
+
+  c.getRegionDisplayText = function() {
+      if (!c.filters.regions || c.filters.regions.length === 0) return 'All CG4';
+      if (c.filters.regions.length === 1) return c.filters.regions[0];
+      return c.filters.regions.length + ' CG4 selected';
+  };
+
+  // ===================== SALES OFFICE (Depot) multiselect =====================
+  c.depotDropdownOpen = false;
+  c.depotSearch = '';
+
+  c.openDepotDropdown = function() { c.depotDropdownOpen = true; };
+  c.closeDepotDropdown = function() { c.depotDropdownOpen = false; };
+
+  c.toggleDepot = function(d) {
+      var idx = c.filters.depots.indexOf(d);
+      if (idx === -1) {
+          c.filters.depots.push(d);
+      } else {
+          c.filters.depots.splice(idx, 1);
+      }
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.selectAllDepots = function() {
+      var allDepots = (c.data &amp;&amp; c.data.filterOpts &amp;&amp; c.data.filterOpts.depots) || [];
+      c.filters.depots = allDepots.slice();
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.clearAllDepots = function() {
+      c.filters.depots = [];
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.isDepotSelected = function(d) {
+      return c.filters.depots.indexOf(d) !== -1;
+  };
+
+  c.getFilteredDepots = function() {
+      var all = (c.data &amp;&amp; c.data.filterOpts &amp;&amp; c.data.filterOpts.depots) || [];
+      var term = (c.depotSearch || '').toLowerCase();
+      if (!term) return all;
+      return all.filter(function(d) { return String(d).toLowerCase().indexOf(term) !== -1; });
+  };
+
+  c.getDepotDisplayText = function() {
+      if (!c.filters.depots || c.filters.depots.length === 0) return 'All Sales Offices';
+      if (c.filters.depots.length === 1) return c.filters.depots[0];
+      return c.filters.depots.length + ' offices selected';
+  };
+
+  c.onSegmentChange = function() {
+      c.filters.zones = [];
+      c.filters.regions = [];
+      c.filters.depots = [];
+      c.zoneSearch = '';
+      c.regionSearch = '';
+      c.depotSearch = '';
+      c.applyFilters();
+  };
+
+  c.onPeriodChange = function() {
+    if (c.filters.period !== 'custom') {
+      c.applyFilters();
+    }
+  };
+
+  // ========================================================
+  // Broadcast Payload -&gt; non-trade request detail widget listens for this
+  // ========================================================
+  c.openRequestDetail = function(r) {
+      if (!r || !r.requestCode) return;
+      $rootScope.clmPendingRequestNumber = r.requestCode;
+      $rootScope.$broadcast('clm.request.selected', { number: r.requestCode });
+      $rootScope.$broadcast('clm.switch.tab', 'request_detail');
+  };
+
+  c.applyFilters = function() {
+    if (c.filters.period === 'custom' &amp;&amp; (!c.filters.customFrom || !c.filters.customTo)) {
+      return;
+    }
+    c.pagination.currentPage = 1;
+    c.data.filters = {
+      segment: c.filters.segment,
+      zones: c.filters.zones,
+      regions: c.filters.regions,
+      depots: c.filters.depots,
+      status: c.filters.status,
+      period: c.filters.period,
+      customFrom: c.filters.customFrom,
+      customTo: c.filters.customTo
+    };
+    c.server.update().then(function() {
+      if (c.data &amp;&amp; c.data.selectedSegment) {
+          c.filters.segment = c.data.selectedSegment;
+      }
+      c.runSearch();
+    });
+  };
+
+  c.setKpiFilter = function(state) {
+      if (c.kpiFilter === state) {
+          c.kpiFilter = '';
+      } else {
+          c.kpiFilter = state;
+          c.pagination.currentPage = 1;
+          $timeout(function() {
+              var el = document.getElementById('clmRequestsTableContainer');
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }, 100);
+      }
+      c.runSearch();
+  };
+
+  c.runSearch = function() {
+    var term = (c.filters.search || '').toString().toLowerCase().trim();
+
+    (c.data.requests || []).forEach(function(r) {
+      var isHidden = false;
+
+      if (term) {
+        var fields = [r.requestCode, r.customerCode, r.customerName, r.pan];
+        var matched = fields.some(function(f) {
+          return (f || '').toString().toLowerCase().indexOf(term) &gt; -1;
+        });
+        if (!matched) isHidden = true;
+      }
+
+      if (!isHidden &amp;&amp; c.kpiFilter) {
+          if (c.kpiFilter === 'deviated') {
+              if (!r.isDeviation) isHidden = true;
+          } else {
+              var statLower = (r.status || '').toLowerCase();
+              if (c.kpiFilter === 'pending' &amp;&amp; statLower.indexOf('submit') === -1) isHidden = true;
+              if (c.kpiFilter === 'approved' &amp;&amp; statLower.indexOf('approv') === -1) isHidden = true;
+              if (c.kpiFilter === 'sendback' &amp;&amp; statLower.indexOf('return') === -1 &amp;&amp; statLower.indexOf('send') === -1) isHidden = true;
+              if (c.kpiFilter === 'rejected' &amp;&amp; statLower.indexOf('reject') === -1) isHidden = true;
+          }
+      }
+
+      r._hidden = isHidden;
+    });
+
+    c.pagination.currentPage = 1;
+    c.updatePaginatedRequests();
+  };
+
+  c.updatePaginatedRequests = function() {
+    var visible = (c.data.requests || []).filter(function(r) { return !r._hidden; });
+    var start = (c.pagination.currentPage - 1) * c.pagination.rowsPerPage;
+    var end = start + c.pagination.rowsPerPage;
+    c.paginatedRequests = visible.slice(start, end);
+  };
+
+  c.getVisibleRecordsCount = function() {
+    return (c.data.requests || []).filter(function(r) { return !r._hidden; }).length;
+  };
+
+  c.getTotalPages = function() {
+    var visible = (c.data.requests || []).filter(function(r) { return !r._hidden; });
+    return Math.ceil(visible.length / c.pagination.rowsPerPage) || 1;
+  };
+
+  c.getPageNumbers = function() {
+    var total = c.getTotalPages();
+    var pages = [];
+    var maxVisible = 5;
+    var start = Math.max(1, c.pagination.currentPage - Math.floor(maxVisible / 2));
+    var end = Math.min(total, start + maxVisible - 1);
+
+    if (end - start &lt; maxVisible - 1) {
+      start = Math.max(1, end - maxVisible + 1);
+    }
+
+    for (var i = start; i &lt;= end; i++) {
+      pages.push(i);
+    }
+    return pages;
+  };
+
+  c.previousPage = function() {
+    if (c.pagination.currentPage &gt; 1) { c.pagination.currentPage--; c.updatePaginatedRequests(); }
+  };
+  c.nextPage = function() {
+    if (c.pagination.currentPage &lt; c.getTotalPages()) { c.pagination.currentPage++; c.updatePaginatedRequests(); }
+  };
+  c.goToPage = function(pageNum) {
+    c.pagination.currentPage = pageNum; c.updatePaginatedRequests();
+  };
+  c.onRowsPerPageChange = function() {
+    c.pagination.currentPage = 1; c.updatePaginatedRequests();
+  };
+
+  $scope.$watch('c.filters.search', c.runSearch);
+
+  // ===================== Approval Pipeline chart helpers (unchanged) =====================
+  c.chartX = function(i) {
+    var n = (c.data.chart.months || []).length;
+    if (n &lt;= 1) return 40;
+    return 40 + (i * (860 / (n - 1)));
+  };
+
+  c.linePoints = function(key) {
+    var months = c.data.chart.months || [];
+    var series = (c.data.chart.series || {})[key] || [];
+    var max = c.data.chart.max || 1;
+    var pts = [];
+    months.forEach(function(m, i) {
+      var v = series[i] || 0;
+      pts.push(c.chartX(i) + ',' + (220 - (v / max) * 200));
+    });
+    return pts.join(' ');
+  };
+
+  c.onMouseOverMonth = function(ev, index) {
+    c.hoverIndex = index;
+    c.showTooltip = true;
+    var targetRect = ev.currentTarget.getBoundingClientRect();
+    var containerRect = ev.currentTarget.closest('.clm-chart-body').getBoundingClientRect();
+    c.tooltipLeft = (targetRect.left + targetRect.width / 2) - containerRect.left;
+    c.tooltipTop = (targetRect.top - containerRect.top) + 40;
+  };
+
+  c.onMouseLeaveChart = function() { c.hoverIndex = -1; c.showTooltip = false; };
+
+  // ===================== NEW: Total Outstanding MoM Trend chart helpers =====================
+  c.momChartX = function(i) {
+    var n = (c.data.momTrend &amp;&amp; c.data.momTrend.months || []).length;
+    if (n &lt;= 1) return 40;
+    return 40 + (i * (860 / (n - 1)));
+  };
+
+  c.momPointY = function(i) {
+    var series = (c.data.momTrend &amp;&amp; c.data.momTrend.series) || [];
+    var max = (c.data.momTrend &amp;&amp; c.data.momTrend.max) || 1;
+    var v = series[i] || 0;
+    return 220 - (v / max) * 200;
+  };
+
+  c.momLinePoints = function() {
+    var months = (c.data.momTrend &amp;&amp; c.data.momTrend.months) || [];
+    var pts = [];
+    months.forEach(function(m, i) {
+      pts.push(c.momChartX(i) + ',' + c.momPointY(i));
+    });
+    return pts.join(' ');
+  };
+
+  // ===================== NEW: Ageing Breakdown (6M) stacked bar helpers =====================
+  c.ageingBarX = function(i) {
+    var n = (c.data.ageingBreakdown &amp;&amp; c.data.ageingBreakdown.months || []).length;
+    if (n &lt;= 1) return 40;
+    return 40 + (i * (860 / (n - 1)));
+  };
+
+  c.ageingBarWidth = function() {
+    var n = (c.data.ageingBreakdown &amp;&amp; c.data.ageingBreakdown.months || []).length;
+    return (860 / (n - 1 || 1)) * 0.5;
+  };
+
+  // Returns the 4 stacked rects (current, 31-60, 61-90, &gt;90) for month index i
+  c.ageingSegmentRects = function(i) {
+    var ab = c.data.ageingBreakdown;
+    if (!ab || !ab.series) return [];
+    var s = ab.series;
+    var max = ab.max || 1;
+    var baseline = 220;
+    var scale = 200 / max;
+    var w = c.ageingBarWidth();
+    var x = c.ageingBarX(i) - w / 2;
+
+    var segments = [
+      { key: '0-30D',  v: (s.current &amp;&amp; s.current[i]) || 0, cls: 'bar-current' },
+      { key: '31-60D', v: (s.b31_60  &amp;&amp; s.b31_60[i])  || 0, cls: 'bar-3160' },
+      { key: '61-90D', v: (s.b61_90  &amp;&amp; s.b61_90[i])  || 0, cls: 'bar-6190' },
+      { key: '&gt;90D',   v: (s.gt90    &amp;&amp; s.gt90[i])    || 0, cls: 'bar-gt90' }
+    ];
+
+    var yCursor = baseline;
+    var rects = [];
+    segments.forEach(function(seg) {
+      var h = seg.v * scale;
+      yCursor -= h;
+      rects.push({ x: x, y: yCursor, width: w, height: h, cls: seg.cls, value: seg.v, key: seg.key });
+    });
+    return rects;
+  };
+
+  // ===================== NEW: Region Risk Matrix badge class =====================
+  c.riskClass = function(level) {
+    var l = (level || '').toLowerCase();
+    if (l === 'critical') return 'risk-critical';
+    if (l === 'elevated') return 'risk-elevated';
+    return 'risk-normal';
+  };
+
+  c.statusClass = function(status) {
+    var s = (status || '').toLowerCase();
+    if (s.indexOf('submit') &gt; -1 || s.indexOf('pend') &gt; -1) return 'st-submitted';
+    if (s.indexOf('approv') &gt; -1) return 'st-approved';
+    if (s.indexOf('return') &gt; -1 || s.indexOf('send') &gt; -1) return 'st-sendback';
+    if (s.indexOf('reject') &gt; -1) return 'st-rejected';
+    return 'st-default';
+  };
+
+  // NOTE: "segment" here is Company Code. Kept generic since company codes
+  // won't map to the Cement/RMC/BPD naming used in trade — falls back to
+  // a neutral badge class unless a code happens to contain one of these words.
+  c.segClass = function(seg) {
+    var s = (seg || '').toLowerCase();
+    if (s.indexOf('cement') &gt; -1) return 'seg-cement';
+    if (s.indexOf('rmc') &gt; -1) return 'seg-rmc';
+    if (s.indexOf('bpd') &gt; -1) return 'seg-bpd';
+    return 'seg-default';
+  };
+
+  c.yAxisTicks = [];
+  for (var val = 0; val &lt;= 8; val++) {
+    var yCoord = 220 - (val / 8) * 200;
+    c.yAxisTicks.push({ label: val, y: yCoord });
+  }
+
+  c.updatePaginatedRequests();
+}]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;.clm-dash {
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  color: #1f2937;
+  font-size: 13px;
+  padding: 20px;
+
+  /* ===================== Filter Card ===================== */
+  .clm-filter-card {
+    margin: 0 0 16px 0;
+    background: #fff;
+    border: 1px solid #e3e6eb;
+    border-radius: 8px;
+    padding: 14px 18px;
+    overflow: visible;
+  }
+
+  .clm-filter-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    flex-wrap: nowrap;
+    overflow-x: visible;
+  }
+
+  .clm-filter-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+    color: #5b6470;
+    margin-bottom: 0;
+    font-weight: normal;
+    flex: 1;
+    min-width: 0;
+    position: relative;
+
+    select {
+      width: 100%;
+      min-width: 160px;
+      height: 34px;
+      font-size: 13px;
+      border-radius: 4px;
+      border: 1px solid #cbd5e1;
+      background-color: #ffffff;
+      padding: 0 10px;
+      outline: none;
+      cursor: pointer;
+      box-sizing: border-box;
+      transition: all 0.2s ease;
+
+      &amp;amp;:hover { border-color: #a0aec0; background-color: #f7fafc; }
+    }
+  }
+
+  /* ---------- Multiselect (Customer Group / CG4 / Sales Office) ---------- */
+  .clm-multiselect-field { position: relative; }
+
+  .clm-multiselect-container {
+    position: relative;
+    width: 100%;
+    min-width: 160px;
+  }
+
+  .clm-multiselect-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    height: 34px;
+    padding: 0 10px;
+    font-size: 13px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background: #ffffff;
+    cursor: pointer;
+    box-sizing: border-box;
+    transition: border-color 0.2s;
+
+    &amp;amp;:hover { border-color: #a0aec0; }
+  }
+
+  .clm-multiselect-container.open .clm-multiselect-trigger {
+    border-color: #1c4e9c;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+
+  .clm-multiselect-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #5b6470;
+    flex: 1;
+  }
+
+  .clm-multiselect-arrow {
+    color: #a0aec0;
+    font-size: 10px;
+    margin-left: 6px;
+  }
+
+  .clm-multiselect-dropdown {
+    position: absolute;
+    top: 34px;
+    left: 0;
+    right: 0;
+    z-index: 60;
+    background: #fff;
+    border: 1px solid #1c4e9c;
+    border-top: none;
+    border-bottom-left-radius: 6px;
+    border-bottom-right-radius: 6px;
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.12);
+    max-height: 280px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .clm-multiselect-actions {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 10px;
+    border-bottom: 1px solid #e3e6eb;
+    background: #f8f9fa;
+
+    a {
+      font-size: 11px;
+      color: #5b6470;
+      cursor: pointer;
+      font-weight: 600;
+      &amp;amp;:hover { text-decoration: underline; }
+    }
+  }
+
+  .clm-multiselect-search {
+    width: 100%;
+    height: 32px;
+    padding: 0 10px;
+    border: none;
+    border-bottom: 1px solid #e3e6eb;
+    font-size: 12px;
+    outline: none;
+    box-sizing: border-box;
+  }
+
+  .clm-multiselect-list {
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+    overflow-y: auto;
+    max-height: 180px;
+
+    li {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      color: 5b6470;
+
+      &amp;amp;:hover { background: #f0f4f9; }
+      &amp;amp;.selected { background: #ebf5ff; }
+    }
+  }
+
+  .clm-checkbox {
+    width: 14px;
+    height: 14px;
+    border: 2px solid #cbd5e1;
+    border-radius: 3px;
+    display: inline-block;
+    flex-shrink: 0;
+    position: relative;
+
+    &amp;amp;.checked {
+      background: #1c4e9c;
+      border-color: #1c4e9c;
+
+      &amp;amp;::after {
+        content: '';
+        position: absolute;
+        left: 3px;
+        top: 1px;
+        width: 4px;
+        height: 7px;
+        border: solid #fff;
+        border-width: 0 2px 2px 0;
+        transform: rotate(45deg);
+      }
+    }
+  }
+
+  .clm-dropdown-empty {
+    color: #a0aec0 !important;
+    cursor: default !important;
+    font-style: italic;
+    &amp;amp;:hover { background-color: #ffffff !important; }
+  }
+
+  /* ---------- Custom Date Range ---------- */
+  .clm-custom-range {
+    display: flex;
+    align-items: center;
+    flex-direction: row;
+    gap: 6px;
+    margin-top: 12px;
+
+    input[type="date"] {
+      height: 30px;
+      padding: 2px 8px;
+      font-size: 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 4px;
+    }
+    span { color: #6b7280; font-size: 12px; }
+  }
+
+  .clm-apply-btn {
+    height: 30px;
+    padding: 0 14px;
+    font-size: 12px;
+    font-weight: 600;
+    border: none;
+    border-radius: 4px;
+    background: #2f6fed;
+    color: #fff;
+    cursor: pointer;
+    &amp;amp;:hover { background: #2559c9; }
+  }
+
+  /* ===================== Scorecards ===================== */
+  .clm-scorecards {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+    margin: 0 0 16px 0;
+  }
+
+  /* NEW: portfolio KPI row only has 4 tiles, so widen columns a touch */
+  .clm-portfolio-cards {
+    grid-template-columns: repeat(4, 1fr);
+  }
+
+.clm-card {
+    position: relative;
+    background: #fff;
+    border: 1px solid #e3e6eb;
+    border-left: 4px solid #c9ced6;
+    border-radius: 6px;
+    padding: 14px 16px;
+    min-height: 100px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+    transition: background-color 0.3s, box-shadow 0.3s;
+    box-sizing: border-box;
+  }
+  .clm-card-id { font-size: 10px; font-weight: 700; letter-spacing: .3px; color: #718096; margin-bottom: 6px; }
+  .clm-card-value { font-size: 24px; font-weight: 700; line-height: 1.1; }
+  .clm-card-sub { font-size: 11px; color: #8a93a0; margin-top: 4px; }
+
+  .clm-card-blue   { border-left-color: #1c4e9c; .clm-card-value { color: #1c4e9c; } }
+  .clm-card-green  { border-left-color: #38a169; .clm-card-value { color: #38a169; } }
+  .clm-card-purple { border-left-color: #7c5cf0; .clm-card-value { color: #7c5cf0; } }
+  .clm-card-red    { border-left-color: #e53e3e; .clm-card-value { color: #e53e3e; } }
+  .clm-card-orange { border-left-color: #dd6b20; .clm-card-value { color: #dd6b20; } }
+
+  /* ---- Info Icon on KPI Tiles ---- */
+ .clm-kpi-info {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    color: #2b6cb0;
+    font-size: 15px;
+    transition: all 0.2s ease;
+    cursor: pointer;
+    z-index: 5;
+  }
+  .clm-kpi-info:hover {
+    color: #1c4e9c;
+    transform: scale(1.15);
+  }
+
+  /* ===================== Chart ===================== */
+  .clm-chart-panel {
+    background: #fff;
+    border: 1px solid #e3e6eb;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    width: 100%;
+    box-sizing: border-box;
+  }
+ .clm-chart-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .clm-chart-title { font-weight: 700; font-size: 13px; color: #1f2933; }
+  .clm-chart-badge { background: #f0e6ff; color: #6b21a8; font-size: 11px; font-weight: 700; padding: 2px 10px; border-radius: 10px; }
+  .clm-legend { margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; }
+  .legend-item { font-size: 11px; font-weight: 700; color: #1f2933; display: flex; align-items: center; gap: 6px; }
+  .dot {
+    width: 10px; height: 10px; border-radius: 2px; display: inline-block;
+    &amp;amp;.blue   { background: #1c4e9c; }
+    &amp;amp;.green  { background: #38a169; }
+    &amp;amp;.orange { background: #dd6b20; }
+    &amp;amp;.purple { background: #7c5cf0; }
+    &amp;amp;.red    { background: #e53e3e; }
+  }
+  .clm-chart-body {
+    position: relative;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+  }
+  .clm-svg {
+    width: 100%;
+    height: 280px;
+    display: block;
+    overflow: visible;
+  }
+
+  .clm-svg polyline, .clm-svg line {
+    vector-effect: non-scaling-stroke;
+  }
+
+ .grid-line { stroke: #e2e8f0; stroke-width: 1; stroke-dasharray: 4; }
+  .axis-label { font-size: 11px; fill: #718096; font-family: "Helvetica Neue", Arial, sans-serif; }
+  polyline { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+  .line-blue   { stroke: #1c4e9c; }
+  .line-green  { stroke: #38a169; }
+  .line-orange { stroke: #dd6b20; }
+  .line-purple { stroke: #7c5cf0; }
+  .line-red    { stroke: #e53e3e; }
+
+  /* NEW: stacked ageing-breakdown bar segment colors */
+  .bar-current { fill: #1c4e9c; }
+  .bar-3160    { fill: #dd6b20; }
+  .bar-6190    { fill: #7c5cf0; }
+  .bar-gt90    { fill: #e53e3e; }
+
+  .clm-chart-tooltip {
+    position: absolute;
+    background: rgba(30, 30, 30, 0.85);
+    color: #ffffff;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 11.5px;
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    pointer-events: none;
+    z-index: 100;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    transform: translate(-50%, -100%);
+    min-width: 110px;
+    text-align: left;
+    white-space: nowrap;
+
+    .tooltip-title {
+      font-weight: 700;
+      margin-bottom: 6px;
+      border-bottom: 1px solid rgba(255,255,255,0.2);
+      padding-bottom: 4px;
+    }
+    .tooltip-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 3px 0;
+      font-weight: 500;
+    }
+    .tooltip-color {
+      width: 10px;
+      height: 10px;
+      display: inline-block;
+      border-radius: 2px;
+      &amp;amp;.blue   { background: #1c4e9c; }
+      &amp;amp;.green  { background: #38a169; }
+      &amp;amp;.orange { background: #dd6b20; }
+      &amp;amp;.purple { background: #7c5cf0; }
+      &amp;amp;.red    { background: #e53e3e; }
+    }
+  }
+
+  /* ===================== Table ===================== */
+  .clm-table-panel {
+    background: #fff;
+    border: 1px solid #e3e6eb;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .clm-table-header {
+    display: flex;
+    align-items: center;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .clm-table-title { font-weight: 700; font-size: 13px; color: #1f2933; }
+
+  .clm-table-wrapper {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+
+  .clm-search-section {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+  }
+
+  .clm-search-box {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: 420px;
+    max-width: 100%;
+
+    i {
+      position: absolute;
+      left: 12px;
+      color: #a0aec0;
+      font-size: 13px;
+    }
+    input {
+      width: 100%;
+      height: 34px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      padding: 0 10px 0 32px;
+      font-size: 13px;
+      color: #1f2933;
+      outline: none;
+      transition: border 0.2s;
+      box-sizing: border-box;
+
+      &amp;amp;:focus { border-color: #1c4e9c; }
+      &amp;amp;::placeholder { color: #6b7280; }
+    }
+  }
+
+  .clm-table-top-controls {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    justify-content: flex-end;
+    font-size: 12px;
+    color: #4a5568;
+    flex-wrap: wrap;
+  }
+
+  .clm-records-label {
+    color: #4a5568;
+    font-weight: 500;
+    strong { color: #1f2933; font-weight: 600; }
+  }
+
+  .clm-rows-label {
+    color: #4a5568;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .clm-rows-select {
+    padding: 4px 8px;
+    height: 32px;
+    font-size: 12px;
+    color: #1f2933;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background: #fff;
+    cursor: pointer;
+    min-width: 60px;
+    outline: none;
+  }
+
+  .clm-table-scroll {
+    overflow-y: auto;
+    max-height: 380px;
+    border: 1px solid #e3e6eb;
+    border-radius: 6px;
+    width: 100%;
+
+    &amp;amp;::-webkit-scrollbar { width: 8px; height: 8px; }
+    &amp;amp;::-webkit-scrollbar-track { background: #f8f9fa; border-radius: 4px; }
+    &amp;amp;::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+      &amp;amp;:hover { background: #a0aec0; }
+    }
+  }
+
+  .clm-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    table-layout: auto;
+
+    thead {
+      position: sticky;
+      top: 0;
+      background: #f8f9fa;
+      z-index: 10;
+    }
+    thead th {
+      text-align: left;
+      color: #718096;
+      font-weight: 600;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: .3px;
+      padding: 10px 6px;
+      border-bottom: 2px solid #cbd5e1;
+      box-shadow: 0 2px 2px -1px rgba(0,0,0,0.1);
+      white-space: nowrap;
+    }
+    tbody td {
+      padding: 8px 6px;
+      border-bottom: 1px solid #edf2f7;
+      color: #1f2933;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    tbody td.col-customer,
+    thead th.col-customer {
+      white-space: normal;
+      word-break: break-word;
+      min-width: 130px;
+      max-width: 180px;
+    }
+
+    tbody td.col-submitted-by,
+    thead th.col-submitted-by {
+      white-space: normal;
+      word-break: break-all;
+      min-width: 110px;
+      max-width: 150px;
+    }
+    tbody td.col-zone,
+    thead td.col-zone,
+    tbody td.col-region,
+    thead th.col-region,
+    tbody td.col-depot,
+    thead th.col-depot {
+      white-space: normal;
+      max-width: 110px;
+    }
+
+    tbody tr:hover { background: #f7fafc; }
+  }
+
+  .clm-link { color: #1c4e9c; text-decoration: none; font-weight: 600; }
+  .clm-cust-name { font-weight: 600; }
+  .clm-cust-code { font-size: 10px; color: #718096; }
+  .clm-no-data { text-align: center; color: #a0aec0; padding: 20px 0; font-style: italic; }
+
+  /* ---- Pagination Controls ---- */
+  .clm-pagination-bottom {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    margin-top: 14px;
+    padding: 10px 0;
+    border-top: 1px solid #edf2f7;
+  }
+
+  .clm-pagination-controls {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .clm-page-btn {
+    min-width: 32px;
+    height: 32px;
+    padding: 0 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background: #fff;
+    color: #4a5568;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s ease;
+
+    &amp;amp;:hover:not(:disabled) {
+      background: #eef2f7;
+    }
+
+    &amp;amp;.active {
+      background: #1c4e9c;
+      color: #fff;
+      border-color: #1c4e9c;
+    }
+
+    &amp;amp;:disabled {
+      color: #a0aec0;
+      background: #f8f9fa;
+      border-color: #e2e8f0;
+      cursor: not-allowed;
+    }
+  }
+
+  .badge { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+  .status-badge {
+    &amp;amp;.st-submitted { background: #e6efff; color: #2f6fed; }
+    &amp;amp;.st-approved  { background: #e6f7ee; color: #1e9e5a; }
+    &amp;amp;.st-pending   { background: #fff3e0; color: #d97b0d; }
+    &amp;amp;.st-sendback  { background: #f1eaff; color: #7c5cf0; }
+    &amp;amp;.st-rejected  { background: #fdeaea; color: #dc3545; }
+    &amp;amp;.st-default   { background: #f3f4f6; color: #6b7280; }
+  }
+  .stage-badge { background: #eef2ff; color: #4f46e5; }
+  .seg-badge {
+    &amp;amp;.seg-cement  { background: #fff3e0; color: #d97b0d; }
+    &amp;amp;.seg-rmc      { background: #e6f7ee; color: #1e9e5a; }
+    &amp;amp;.seg-bpd      { background: #fffbe6; color: #b8860b; }
+    &amp;amp;.seg-default { background: #f3f4f6; color: #6b7280; }
+  }
+
+  /* NEW: risk classification badges (Region Risk Matrix) */
+  .risk-badge {
+    &amp;amp;.risk-critical { background: #fdeaea; color: #dc3545; }
+    &amp;amp;.risk-elevated { background: #fff3e0; color: #d97b0d; }
+    &amp;amp;.risk-normal   { background: #e6f7ee; color: #1e9e5a; }
+  }
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id&gt;clm_nt_nsh_approval_requests&lt;/id&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;clm_nt_nsh_approval_requests&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+
+    // =========================================================
+    // TABLES
+    // =========================================================
+    var REQUEST_TABLE      = 'x_birl3_clm_non_trade_clr';
+    var CUSTOMER_TABLE     = 'x_birl3_clm_customer';
+    var ROLE_MAP_TABLE     = 'x_birl3_clm_approval_matrix';
+    var OUTSTANDING_TABLE  = 'x_birl3_clm_customer_outstanding';
+
+    // =========================================================
+    // REQUEST TABLE FIELDS (x_birl3_clm_non_trade_clr)
+    // =========================================================
+    var F_STATE         = 'state';
+    var F_REQ_NUMBER    = 'number';
+    var F_CUSTOMER_CODE = 'customer_code'; // matches x_birl3_clm_customer.customer_code (plain string)
+
+    // NOT specified in your mapping — placeholders, please confirm.
+    var F_REQUESTED_AMT = 'requested_limit';  // &lt;-- CONFIRM
+    var F_APPROVED_AMT  = 'approved_limit';   // &lt;-- CONFIRM
+    var F_SUBMITTED_BY  = 'sys_created_by';
+    var F_SUBMITTED_ON  = 'sys_created_on';
+    var F_DEVIATION     = 'is_deviation';     // &lt;-- CONFIRM
+
+    var ALLOWED_STATUS_KEYWORDS = ['approv', 'submit', 'return', 'reject'];
+    var monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    // =========================================================
+    // CUSTOMER MASTER FIELDS (x_birl3_clm_customer)
+    // =========================================================
+    var F_CUST_CODE          = 'customer_code';
+    var F_CUST_NAME          = 'name';
+    var F_CUST_SEGMENT       = 'company_code';    // e.g. UTCL, GIL, URMX
+    var F_CUST_ZONE          = 'customer_group';  // e.g. 60, 61
+    var F_CUST_REGION        = 'cg4';             // e.g. 100, 110, 150
+    var F_CUST_DEPOT         = 'sales_office';    // e.g. 6536, 6530, 6550, 6532
+    var F_CUST_CREDIT_LIMIT  = 'credit_limit';
+    var F_CUST_PAN           = 'pan';
+    var F_CUST_NEXT_REVIEW   = 'next_review_date';
+
+    // =========================================================
+    // CUSTOMER OUTSTANDING FIELDS (x_birl3_clm_customer_outstanding)
+    // =========================================================
+    var F_OUT_CUSTOMER    = 'customer';
+    var F_OUT_TOTAL        = 'outstanding';
+    var F_OUT_CREATED      = 'created_on';
+
+    var F_AGE_0_3   = 'ageing0_3';
+    var F_AGE_4_7   = 'ageing4_7';
+    var F_AGE_8_21  = 'ageing8_21';
+    var F_AGE_22_30 = 'ageing22_30';
+    var F_AGE_31_45 = 'ageing31_45';
+    var F_AGE_46_60 = 'ageing46_60';
+    var F_AGE_61_75 = 'ageing61_75';
+    var F_AGE_76_90 = 'ageing76_90';
+    var F_AGE_GT90  = 'ageing_gt90';
+
+    // =========================================================
+    // ROLE MAPPING FIELDS (x_birl3_clm_approval_matrix)
+    // =========================================================
+    var F_ROLE_USER    = 'approver_user';
+    var F_ROLE_SEGMENT = 'segment';
+
+    function pad(n) { return (n &lt; 10 ? '0' : '') + n; }
+    function norm(s) { return (s || '').toString().trim().toUpperCase().replace(/\s+/g, ' '); }
+    function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
+    function formatAmt(v) {
+      if (v === undefined || v === null || v === '') return '';
+      var n = parseFloat(v);
+      if (isNaN(n)) return v;
+      return '\u20B9' + (n / 100000).toFixed(1) + 'L';
+    }
+    // Trimmed-but-case-preserved value, used for display / grouping so the
+    // dropdown shows the value exactly as entered in the master, while
+    // comparisons elsewhere are done case-insensitively via norm().
+    function clean(v) { return (v || '').toString().trim(); }
+
+    var currentUserId = gs.getUserID();
+
+    // =========================================================
+    // STEP 0: Determine allowed Company Codes for this user, read directly
+    // from x_birl3_clm_approval_matrix (segment column), matched against
+    // approver_user. Union across all matching rows.
+    // =========================================================
+    var allowedSegmentsNorm = {};   // normalized(UPPER+trim) -&gt; true
+    var allowedSegmentsDisplay = {}; // normalized -&gt; original display value seen in role table
+
+    var grUserRoles = new GlideRecord(ROLE_MAP_TABLE);
+    grUserRoles.addQuery(F_ROLE_USER, currentUserId);
+    grUserRoles.query();
+    while (grUserRoles.next()) {
+        var segVal = clean(grUserRoles.getValue(F_ROLE_SEGMENT));
+        if (segVal) {
+            var key = norm(segVal);
+            allowedSegmentsNorm[key] = true;
+            if (!allowedSegmentsDisplay[key]) allowedSegmentsDisplay[key] = segVal;
+        }
+    }
+    var isAuthorized = Object.keys(allowedSegmentsNorm).length &gt; 0;
+
+    data.accessDenied = !isAuthorized;
+    if (!isAuthorized) {
+        data.filterOpts = { segments: [], zones: [], regions: [], depots: [], periods: [] };
+        data.statusOptions = [];
+        data.scorecards = { submitted: 0, approved: 0, sendback: 0, rejected: 0, deviated: 0 };
+        data.chart = { year: new Date().getFullYear(), months: [], series: {}, max: 1 };
+        data.requests = [];
+        data.periodLabel = '';
+        data.portfolio = { totalOutstanding: '', availableLimit: '', utilizationPct: '0', overdue90: '', riskHigh: 0, riskMedium: 0, riskLow: 0 };
+        data.momTrend = { months: [], series: [], max: 1 };
+        data.ageingBreakdown = { months: [], series: { current: [], b31_60: [], b61_90: [], gt90: [] }, max: 1 };
+        data.regionRisk = [];
+        return;
+    }
+
+    var inputFilters = (input &amp;&amp; input.filters) ? input.filters : {};
+
+    function normalizeArray(val) {
+        if (typeof val === 'string') {
+            try { val = JSON.parse(val); }
+            catch (e) { val = val ? [val] : []; }
+        }
+        if (!Array.isArray(val)) { val = val ? [val] : []; }
+        return val;
+    }
+    inputFilters.zones   = normalizeArray(inputFilters.zones);
+    inputFilters.regions = normalizeArray(inputFilters.regions);
+    inputFilters.depots  = normalizeArray(inputFilters.depots);
+    data.filters = inputFilters;
+
+    var zonesSelected   = inputFilters.zones;
+    var regionsSelected = inputFilters.regions;
+    var depotsSelected  = inputFilters.depots;
+    var statusFilter    = inputFilters.status || '';
+    var period          = inputFilters.period || 'latest';
+    var customFrom      = inputFilters.customFrom || '';
+    var customTo        = inputFilters.customTo || '';
+    data.selectedPeriod = period;
+
+    // =========================================================
+    // Load the ENTIRE customer master ONCE into memory. Every dropdown
+    // option and every filter/scoping decision below is derived from this
+    // in-memory array using trimmed, case-insensitive comparisons — this
+    // is what fixes the empty-dropdown issue: it no longer depends on
+    // GlideAggregate group-by behavior or on exact-case DB matches between
+    // x_birl3_clm_approval_matrix.segment and x_birl3_clm_customer.company_code.
+    // =========================================================
+    var allCustomers = [];
+    var custByCode = {};
+    var custBySysId = {};
+    (function loadCustomers() {
+        var gr = new GlideRecord(CUSTOMER_TABLE);
+        gr.query();
+        while (gr.next()) {
+            var rec = {
+                sysId:   gr.getUniqueValue(),
+                code:    clean(gr.getValue(F_CUST_CODE)),
+                name:    gr.getValue(F_CUST_NAME),
+                pan:     gr.getValue(F_CUST_PAN),
+                segment: clean(gr.getValue(F_CUST_SEGMENT)),
+                zone:    clean(gr.getValue(F_CUST_ZONE)),
+                region:  clean(gr.getValue(F_CUST_REGION)),
+                depot:   clean(gr.getValue(F_CUST_DEPOT)),
+                creditLimit: parseFloat(gr.getValue(F_CUST_CREDIT_LIMIT)) || 0,
+                nextReviewDate: gr.getValue(F_CUST_NEXT_REVIEW)
+            };
+            allCustomers.push(rec);
+            if (rec.code) custByCode[rec.code] = rec;
+            custBySysId[rec.sysId] = rec;
+        }
+    })();
+
+    // Distinct, sorted, non-blank values for a given key on allCustomers,
+    // scoped to whichever upstream filters are already chosen. Returns the
+    // values exactly as they appear in the master (no reformatting).
+    function distinctValues(key, scope) {
+        var seenNorm = {};
+        var out = [];
+        allCustomers.forEach(function(rec) {
+            if (!rec[key]) return;
+            if (scope.segment &amp;&amp; norm(rec.segment) !== norm(scope.segment)) return;
+            if (scope.zones &amp;&amp; scope.zones.length &amp;&amp; zoneNotIn(rec.zone, scope.zones)) return;
+            if (scope.regions &amp;&amp; scope.regions.length &amp;&amp; zoneNotIn(rec.region, scope.regions)) return;
+            var nk = norm(rec[key]);
+            if (!seenNorm[nk]) {
+                seenNorm[nk] = true;
+                out.push(rec[key]);
+            }
+        });
+        return out.sort();
+    }
+    function zoneNotIn(val, arr) {
+        var nv = norm(val);
+        return !arr.some(function(a) { return norm(a) === nv; });
+    }
+
+    // =========================================================
+    // Company Code (Segment) options = distinct company_code values present
+    // in the customer master, intersected with what this user's role allows.
+    // =========================================================
+    var allSegmentsInMaster = distinctValues('segment', {});
+    var allowedSegmentsInMaster = allSegmentsInMaster.filter(function(s) {
+        return !!allowedSegmentsNorm[norm(s)];
+    });
+
+    // Safety net: if the role-mapping segment values don't line up with any
+    // company_code actually present in the master (e.g. mismatched casing/
+    // spacing/format between the two tables), fall back to showing every
+    // company code in the master rather than presenting an empty dropdown.
+    // Remove this fallback once you've confirmed the two tables agree.
+    var segmentsForDropdown = allowedSegmentsInMaster.length ? allowedSegmentsInMaster : allSegmentsInMaster;
+    if (!allowedSegmentsInMaster.length) {
+        gs.warn('[Non-Trade NSH widget] No x_birl3_clm_customer.company_code value matched this user\'s ' +
+                'x_birl3_clm_approval_matrix.segment value(s). Falling back to showing all company codes. ' +
+                'Please verify the segment values line up between the two tables.');
+    }
+
+    var segmentFilter = clean(inputFilters.segment);
+    var segmentIsValid = segmentsForDropdown.some(function(s) { return norm(s) === norm(segmentFilter); });
+    if (!segmentIsValid) {
+        segmentFilter = segmentsForDropdown[0] || '';
+    }
+    data.selectedSegment = segmentFilter;
+
+    // =========================================================
+    // Cascading Zone (Customer Group) / Region (CG4) / Depot (Sales Office)
+    // options — all pulled live from the in-memory customer master.
+    // =========================================================
+    data.filterOpts = {
+        segments: segmentsForDropdown,
+        zones:    distinctValues('zone',   { segment: segmentFilter }),
+        regions:  distinctValues('region', { segment: segmentFilter, zones: zonesSelected }),
+        depots:   distinctValues('depot',  { segment: segmentFilter, zones: zonesSelected, regions: regionsSelected }),
+        periods: [
+            { label: 'All Time (Latest)', value: 'latest' },
+            { label: 'This Month', value: 'current_month' },
+            { label: 'Last Month', value: 'previous_month' },
+            { label: 'This Year', value: 'current_year' },
+            { label: 'Last Year', value: 'last_year' },
+            { label: 'Custom Range…', value: 'custom' }
+        ]
+    };
+
+    // =========================================================
+    // Resolve the list of customer_codes matching the full current filter
+    // scope (segment + zones + regions + depots).
+    // Now expanded to include ALL customer records sharing the same PAN.
+    // =========================================================
+    var scopedCodes = [];
+    var scopedSysIds = []; // Added for safety if field is a reference
+    var validPans = {};
+
+    // First pass: identify valid sites and PANs based on the user's filters
+    allCustomers.forEach(function(rec) {
+        if (segmentFilter &amp;&amp; norm(rec.segment) !== norm(segmentFilter)) return;
+        if (zonesSelected.length &amp;&amp; zoneNotIn(rec.zone, zonesSelected)) return;
+        if (regionsSelected.length &amp;&amp; zoneNotIn(rec.region, regionsSelected)) return;
+        if (depotsSelected.length &amp;&amp; zoneNotIn(rec.depot, depotsSelected)) return;
+
+        if (rec.code) scopedCodes.push(rec.code);
+        if (rec.sysId) scopedSysIds.push(rec.sysId);
+        if (rec.pan) validPans[norm(rec.pan)] = true;
+    });
+
+    // Second pass: include ANY customer record (like Parent records) that shares a valid PAN
+    allCustomers.forEach(function(rec) {
+        if (rec.pan &amp;&amp; validPans[norm(rec.pan)]) {
+            if (rec.code &amp;&amp; scopedCodes.indexOf(rec.code) === -1) {
+                scopedCodes.push(rec.code);
+            }
+            if (rec.sysId &amp;&amp; scopedSysIds.indexOf(rec.sysId) === -1) {
+                scopedSysIds.push(rec.sysId);
+            }
+        }
+    });
+
+    function applyAppFilters(gr) {
+        if (scopedCodes.length) {
+            var qc = gr.addQuery(F_CUSTOMER_CODE, 'IN', scopedCodes);
+            // Also check sys_ids in case F_CUSTOMER_CODE is a reference or GlideList
+            qc.addOrCondition(F_CUSTOMER_CODE, 'IN', scopedSysIds);
+        } else {
+            gr.addQuery(F_CUSTOMER_CODE, '__none__');
+        }
+    }
+
+    // =========================================================
+    // Approval chain — placeholders, not covered by your mapping. Confirm
+    // and replace with the real approver fields on x_birl3_clm_non_trade_clr.
+    // =========================================================
+    var NON_TRADE_CHAIN = [
+      { label: 'Step 1', field: 'u_approver_step1' },  // &lt;-- CONFIRM
+      { label: 'Step 2', field: 'u_approver_step2' },  // &lt;-- CONFIRM
+      { label: 'Step 3', field: 'u_approver_step3' },  // &lt;-- CONFIRM
+      { label: 'Final',  field: 'u_approver_final' }   // &lt;-- CONFIRM
+    ];
+
+    function getPendingAtStep(gr) {
+      var mapBySysId = {};
+      var lastSubmitted = gr.getValue('u_last_submitted_on'); // &lt;-- CONFIRM field exists
+
+      var saGR = new GlideRecord('sysapproval_approver');
+      var saQuery = saGR.addQuery('sysapproval', gr.sys_id);
+      saQuery.addOrCondition('document_id', gr.sys_id);
+      if (lastSubmitted) saGR.addQuery('sys_created_on', '&gt;=', lastSubmitted);
+      saGR.orderByDesc('sys_updated_on');
+      saGR.query();
+
+      while (saGR.next()) {
+        var aSysId = saGR.getValue('approver') + '';
+        var aRaw   = (saGR.getValue('state') + '').toLowerCase().trim();
+        var aSt    = (aRaw === 'approved') ? 'approved' : (aRaw === 'rejected') ? 'rejected' : (aRaw === 'cancelled') ? 'returned' : 'pending';
+        if (typeof mapBySysId[aSysId] === 'undefined') mapBySysId[aSysId] = aSt;
+      }
+
+      for (var i = 0; i &lt; NON_TRADE_CHAIN.length; i++) {
+        var entry = NON_TRADE_CHAIN[i];
+        var rawVal = (gr.getValue(entry.field) || '').trim();
+        if (!rawVal || rawVal === '' || rawVal === 'null' || rawVal === 'undefined') continue;
+
+        var stepState = mapBySysId[rawVal] || 'pending';
+        if (stepState === 'pending') {
+          var approverName = '';
+          try { approverName = gr[entry.field].getDisplayValue() + ''; } catch(e) { approverName = entry.label; }
+          return approverName || entry.label;
+        }
+      }
+      return '';
+    }
+
+    function monthRangeQuery(gr, dateField, year, month) {
+      var startGdt = new GlideDateTime();
+      startGdt.setValue(year + '-' + pad(month) + '-01 00:00:00');
+      var endMonth = month + 1, endYear = year;
+      if (endMonth &gt; 12) { endMonth = 1; endYear = year + 1; }
+      var endGdt = new GlideDateTime();
+      endGdt.setValue(endYear + '-' + pad(endMonth) + '-01 00:00:00');
+      gr.addQuery(dateField, '&gt;=', startGdt);
+      gr.addQuery(dateField, '&lt;', endGdt);
+    }
+
+    function getFilteredStatusOptions(table, field) {
+      var arr = [], seen = {};
+      var gr = new GlideRecord('sys_choice');
+      gr.addQuery('name', table);
+      gr.addQuery('element', field);
+      gr.addQuery('inactive', false);
+      gr.orderBy('sequence');
+      gr.query();
+      while (gr.next()) {
+        var v = gr.getValue('value');
+        var lbl = gr.getValue('label') || '';
+        if (!v || seen[v]) continue;
+        var lower = lbl.toLowerCase();
+        if (!ALLOWED_STATUS_KEYWORDS.some(function(kw) { return lower.indexOf(kw) &gt; -1; })) continue;
+        seen[v] = true;
+        arr.push({ value: v, label: lbl });
+      }
+      return arr;
+    }
+
+    function resolveCustomer(reqGr) {
+        var rawVal  = clean(reqGr.getValue(F_CUSTOMER_CODE));
+        var dispVal = clean(reqGr.getDisplayValue(F_CUSTOMER_CODE));
+
+        // Handle comma-separated values if multiple sites are selected on one request
+        var firstRaw = rawVal.split(',')[0].trim();
+        var firstDisp = dispVal.split(',')[0].trim();
+
+        if (firstRaw &amp;&amp; custByCode[firstRaw]) return custByCode[firstRaw];
+        if (firstRaw &amp;&amp; custBySysId[firstRaw]) return custBySysId[firstRaw];
+        if (firstDisp &amp;&amp; custByCode[firstDisp]) return custByCode[firstDisp];
+
+        var key = norm(firstDisp);
+        if (key) {
+            for (var i = 0; i &lt; allCustomers.length; i++) {
+                if (norm(allCustomers[i].name) === key || norm(allCustomers[i].code) === key) return allCustomers[i];
+            }
+        }
+        return null;
+    }
+
+    // =========================================================
+    // Outstanding / ageing snapshot helpers
+    // =========================================================
+    function readAgeingRecord(gr) {
+      return {
+        total:  parseFloat(gr.getValue(F_OUT_TOTAL)) || 0,
+        a0_3:   parseFloat(gr.getValue(F_AGE_0_3))   || 0,
+        a4_7:   parseFloat(gr.getValue(F_AGE_4_7))   || 0,
+        a8_21:  parseFloat(gr.getValue(F_AGE_8_21))  || 0,
+        a22_30: parseFloat(gr.getValue(F_AGE_22_30)) || 0,
+        a31_45: parseFloat(gr.getValue(F_AGE_31_45)) || 0,
+        a46_60: parseFloat(gr.getValue(F_AGE_46_60)) || 0,
+        a61_75: parseFloat(gr.getValue(F_AGE_61_75)) || 0,
+        a76_90: parseFloat(gr.getValue(F_AGE_76_90)) || 0,
+        gt90:   parseFloat(gr.getValue(F_AGE_GT90))  || 0,
+        snapshotDate: gr.getValue(F_OUT_CREATED)
+      };
+    }
+
+    function buildLatestSnapshotMap(codesScope) {
+      var map = {};
+      var gr = new GlideRecord(OUTSTANDING_TABLE);
+      if (codesScope &amp;&amp; codesScope.length) gr.addQuery(F_OUT_CUSTOMER, 'IN', codesScope);
+      gr.orderByDesc(F_OUT_CREATED);
+      gr.query();
+      while (gr.next()) {
+        var code = clean(gr.getValue(F_OUT_CUSTOMER));
+        if (code &amp;&amp; typeof map[code] === 'undefined') map[code] = readAgeingRecord(gr);
+      }
+      return map;
+    }
+
+    function buildSnapshotMapForMonth(codesScope, year, month) {
+      var start = new GlideDateTime();
+      start.setValue(year + '-' + pad(month) + '-01 00:00:00');
+      var endMonth = month + 1, endYear = year;
+      if (endMonth &gt; 12) { endMonth = 1; endYear += 1; }
+      var end = new GlideDateTime();
+      end.setValue(endYear + '-' + pad(endMonth) + '-01 00:00:00');
+
+      var map = {};
+      var gr = new GlideRecord(OUTSTANDING_TABLE);
+      if (codesScope &amp;&amp; codesScope.length) gr.addQuery(F_OUT_CUSTOMER, 'IN', codesScope);
+      gr.addQuery(F_OUT_CREATED, '&gt;=', start);
+      gr.addQuery(F_OUT_CREATED, '&lt;', end);
+      gr.orderByDesc(F_OUT_CREATED);
+      gr.query();
+      while (gr.next()) {
+        var code = clean(gr.getValue(F_OUT_CUSTOMER));
+        if (code &amp;&amp; typeof map[code] === 'undefined') map[code] = readAgeingRecord(gr);
+      }
+      return map;
+    }
+
+    function getLastNMonthKeys(n) {
+      var arr = [];
+      var nowStr = new GlideDateTime().getValue();
+      var y = parseInt(nowStr.substr(0, 4), 10);
+      var m = parseInt(nowStr.substr(5, 2), 10);
+      for (var i = n - 1; i &gt;= 0; i--) {
+        var mm = m - i, yy = y;
+        while (mm &lt;= 0) { mm += 12; yy -= 1; }
+        arr.push({ year: yy, month: mm, label: monthNames[mm - 1] + ' ' + yy });
+      }
+      return arr;
+    }
+
+    function buildPeriodRange(period, customFrom, customTo) {
+      var nowStr = new GlideDateTime().getValue();
+      var curYear  = parseInt(nowStr.substr(0, 4), 10);
+      var curMonth = parseInt(nowStr.substr(5, 2), 10);
+      var curDay   = parseInt(nowStr.substr(8, 2), 10);
+      data.lastYear = curYear - 1;
+      var startGdt = new GlideDateTime();
+      var endGdt   = new GlideDateTime();
+      var label = '';
+
+      if (period === 'latest') {
+        startGdt.setValue('1990-01-01 00:00:00');
+        endGdt.setValue(nowStr);
+        label = 'All Time (Latest)';
+      } else if (period === 'previous_month') {
+        var prevMonth = curMonth - 1, prevYear = curYear;
+        if (prevMonth &lt; 1) { prevMonth = 12; prevYear -= 1; }
+        var dim = daysInMonth(prevYear, prevMonth);
+        startGdt.setValue(prevYear + '-' + pad(prevMonth) + '-01 00:00:00');
+        endGdt.setValue(prevYear + '-' + pad(prevMonth) + '-' + pad(dim) + ' 23:59:59');
+        label = monthNames[prevMonth - 1] + ' ' + prevYear;
+      } else if (period === 'current_year') {
+        startGdt.setValue(curYear + '-01-01 00:00:00');
+        endGdt.setValue(nowStr);
+        label = 'Jan 1 – ' + monthNames[curMonth - 1] + ' ' + curDay + ', ' + curYear;
+      } else if (period === 'last_year') {
+        var lastYear = curYear - 1;
+        startGdt.setValue(lastYear + '-01-01 00:00:00');
+        endGdt.setValue(lastYear + '-12-31 23:59:59');
+        label = 'Jan 1 – Dec 31, ' + lastYear;
+      } else if (period === 'custom' &amp;&amp; customFrom &amp;&amp; customTo) {
+        startGdt.setValue(customFrom + ' 00:00:00');
+        endGdt.setValue(customTo + ' 23:59:59');
+        label = customFrom + ' to ' + customTo;
+      } else {
+        startGdt.setValue(curYear + '-' + pad(curMonth) + '-01 00:00:00');
+        endGdt.setValue(nowStr);
+        label = monthNames[curMonth - 1] + ' ' + curYear;
+      }
+      return { start: startGdt, end: endGdt, label: label };
+    }
+
+    var range = buildPeriodRange(period, customFrom, customTo);
+    data.periodLabel = range.label;
+    data.statusOptions = getFilteredStatusOptions(REQUEST_TABLE, F_STATE);
+    data.scorecards = { submitted: 0, approved: 0, sendback: 0, rejected: 0, deviated: 0 };
+
+    // --- Scorecards Aggregate ---
+    var agg = new GlideAggregate(REQUEST_TABLE);
+    agg.addAggregate('COUNT', F_STATE);
+    agg.groupBy(F_STATE);
+    agg.addQuery(F_SUBMITTED_ON, '&gt;=', range.start);
+    agg.addQuery(F_SUBMITTED_ON, '&lt;=', range.end);
+    applyAppFilters(agg);
+    agg.query();
+
+    while (agg.next()) {
+      var st = (agg.getValue(F_STATE) || '').toLowerCase();
+      var cnt = parseInt(agg.getAggregate('COUNT', F_STATE), 10) || 0;
+      if (st.indexOf('submit') &gt; -1) data.scorecards.submitted += cnt;
+      else if (st.indexOf('approv') &gt; -1) data.scorecards.approved += cnt;
+      else if (st.indexOf('reject') &gt; -1) data.scorecards.rejected += cnt;
+    }
+
+    var aggSB = new GlideAggregate(REQUEST_TABLE);
+    aggSB.addAggregate('COUNT', F_STATE);
+    aggSB.groupBy(F_STATE);
+    applyAppFilters(aggSB);
+    aggSB.query();
+
+    while (aggSB.next()) {
+      var st2 = (aggSB.getValue(F_STATE) || '').toLowerCase();
+      if (st2.indexOf('send') &gt; -1 || st2.indexOf('return') &gt; -1) {
+        data.scorecards.sendback += parseInt(aggSB.getAggregate('COUNT', F_STATE), 10) || 0;
+      }
+    }
+
+    var devGr = new GlideAggregate(REQUEST_TABLE);
+    devGr.addQuery(F_DEVIATION, true);
+    devGr.addQuery(F_SUBMITTED_ON, '&gt;=', range.start);
+    devGr.addQuery(F_SUBMITTED_ON, '&lt;=', range.end);
+    devGr.addAggregate('COUNT');
+    applyAppFilters(devGr);
+    devGr.query();
+
+    if (devGr.next()) {
+      data.scorecards.deviated = parseInt(devGr.getAggregate('COUNT'), 10) || 0;
+    }
+
+    // --- Approval Pipeline Chart (12 months, current year) ---
+    var nowStr2 = new GlideDateTime().getValue();
+    var chartYear = parseInt(nowStr2.substr(0, 4), 10);
+    var monthKeys = [];
+    for (var mm = 1; mm &lt;= 12; mm++) monthKeys.push(chartYear + '-' + pad(mm));
+
+    var series = { submitted: [], approved: [], pending: [], sendback: [], rejected: [] };
+    var maxVal = 1;
+
+    monthKeys.forEach(function(mKey) {
+      var parts = mKey.split('-');
+      var y = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+      var counts = { submitted: 0, approved: 0, pending: 0, sendback: 0, rejected: 0 };
+
+      var ga = new GlideAggregate(REQUEST_TABLE);
+      ga.addAggregate('COUNT', F_STATE);
+      ga.groupBy(F_STATE);
+      monthRangeQuery(ga, F_SUBMITTED_ON, y, m);
+      applyAppFilters(ga);
+      ga.query();
+
+      while (ga.next()) {
+        var s3 = (ga.getValue(F_STATE) || '').toLowerCase();
+        var c3 = parseInt(ga.getAggregate('COUNT', F_STATE), 10) || 0;
+        if (s3.indexOf('submit') &gt; -1) counts.submitted += c3;
+        else if (s3.indexOf('approv') &gt; -1) counts.approved += c3;
+        else if (s3.indexOf('pend') &gt; -1) counts.pending += c3;
+        else if (s3.indexOf('send') &gt; -1 || s3.indexOf('return') &gt; -1) counts.sendback += c3;
+        else if (s3.indexOf('reject') &gt; -1) counts.rejected += c3;
+      }
+      Object.keys(counts).forEach(function(k) {
+        series[k].push(counts[k]);
+        if (counts[k] &gt; maxVal) maxVal = counts[k];
+      });
+    });
+
+    data.chart = {
+      year: chartYear,
+      months: monthKeys.map(function(mKey) { return monthNames[parseInt(mKey.split('-')[1], 10) - 1]; }),
+      series: series,
+      max: maxVal
+    };
+
+    // =========================================================
+    // Latest outstanding snapshot (shared by table + portfolio KPIs)
+    // =========================================================
+    var latestSnapMap = buildLatestSnapshotMap(scopedCodes);
+
+    // --- Portfolio KPIs ---
+    var portfolio = { totalOutstanding: 0, totalCreditLimit: 0, overdue90: 0, riskHigh: 0, riskMedium: 0, riskLow: 0 };
+    scopedCodes.forEach(function(code) {
+      var cust = custByCode[code];
+      var snap = latestSnapMap[code];
+      portfolio.totalCreditLimit += (cust ? cust.creditLimit : 0);
+      if (snap) {
+        portfolio.totalOutstanding += snap.total;
+        portfolio.overdue90 += snap.gt90;
+        var ratio = snap.total &gt; 0 ? (snap.gt90 / snap.total) : 0;
+        if (ratio &gt;= 0.20) portfolio.riskHigh++;
+        else if (ratio &gt;= 0.05) portfolio.riskMedium++;
+        else portfolio.riskLow++;
+      }
+    });
+
+    var available = portfolio.totalCreditLimit - portfolio.totalOutstanding;
+    var utilPct = portfolio.totalCreditLimit &gt; 0 ? (portfolio.totalOutstanding / portfolio.totalCreditLimit * 100) : 0;
+
+    data.portfolio = {
+      totalOutstanding: formatAmt(portfolio.totalOutstanding),
+      availableLimit: formatAmt(available),
+      utilizationPct: utilPct.toFixed(1),
+      overdue90: formatAmt(portfolio.overdue90),
+      riskHigh: portfolio.riskHigh,
+      riskMedium: portfolio.riskMedium,
+      riskLow: portfolio.riskLow
+    };
+
+    // --- Region Risk Matrix (by CG4) ---
+    var regionAgg = {};
+    scopedCodes.forEach(function(code) {
+      var cust = custByCode[code];
+      if (!cust || !cust.region) return;
+      if (!regionAgg[cust.region]) regionAgg[cust.region] = { region: cust.region, total: 0, gt90: 0 };
+      var snap = latestSnapMap[code];
+      if (snap) {
+        regionAgg[cust.region].total += snap.total;
+        regionAgg[cust.region].gt90  += snap.gt90;
+      }
+    });
+
+    var regionRisk = Object.keys(regionAgg).map(function(r) {
+      var row = regionAgg[r];
+      var pct = row.total &gt; 0 ? (row.gt90 / row.total * 100) : 0;
+      var level = pct &gt;= 20 ? 'Critical' : (pct &gt;= 5 ? 'Elevated' : 'Normal');
+      return {
+        region: row.region,
+        totalOutstanding: formatAmt(row.total),
+        overdue90: formatAmt(row.gt90),
+        pct: pct.toFixed(1),
+        level: level
+      };
+    });
+    regionRisk.sort(function(a, b) { return parseFloat(b.pct) - parseFloat(a.pct); });
+    data.regionRisk = regionRisk;
+
+    // --- Total Outstanding MoM Trend + Ageing Breakdown (6 months) ---
+    var months6 = getLastNMonthKeys(6);
+    var momSeries = [];
+    var ageingSeries = { current: [], b31_60: [], b61_90: [], gt90: [] };
+
+    months6.forEach(function(mk) {
+      var monthMap = buildSnapshotMapForMonth(scopedCodes, mk.year, mk.month);
+      var totalM = 0, cur = 0, b3160 = 0, b6190 = 0, gt90m = 0;
+      scopedCodes.forEach(function(code) {
+        var snap = monthMap[code];
+        if (!snap) return;
+        totalM += snap.total;
+        cur    += (snap.a0_3 + snap.a4_7 + snap.a8_21 + snap.a22_30);
+        b3160  += (snap.a31_45 + snap.a46_60);
+        b6190  += (snap.a61_75 + snap.a76_90);
+        gt90m  += snap.gt90;
+      });
+      momSeries.push(totalM);
+      ageingSeries.current.push(cur);
+      ageingSeries.b31_60.push(b3160);
+      ageingSeries.b61_90.push(b6190);
+      ageingSeries.gt90.push(gt90m);
+    });
+
+    data.momTrend = {
+      months: months6.map(function(m) { return m.label; }),
+      series: momSeries,
+      max: Math.max.apply(null, momSeries.concat([1]))
+    };
+
+    var stackedMax = 1;
+    months6.forEach(function(m, i) {
+      var stackTotal = ageingSeries.current[i] + ageingSeries.b31_60[i] + ageingSeries.b61_90[i] + ageingSeries.gt90[i];
+      if (stackTotal &gt; stackedMax) stackedMax = stackTotal;
+    });
+
+    data.ageingBreakdown = {
+      months: months6.map(function(m) { return m.label; }),
+      series: ageingSeries,
+      max: stackedMax
+    };
+
+    // =========================================================
+    // Main List Data (Approval Requests table)
+    // =========================================================
+    data.requests = [];
+
+    var reqGr = new GlideRecord(REQUEST_TABLE);
+    if (statusFilter) reqGr.addQuery(F_STATE, statusFilter);
+    reqGr.addQuery(F_SUBMITTED_ON, '&gt;=', range.start);
+    reqGr.addQuery(F_SUBMITTED_ON, '&lt;=', range.end);
+    applyAppFilters(reqGr);
+    reqGr.orderByDesc(F_SUBMITTED_ON);
+    reqGr.setLimit(500);
+    reqGr.query();
+
+    while (reqGr.next()) {
+      var cust = resolveCustomer(reqGr);
+
+      var custCode = '', custName = reqGr.getDisplayValue(F_CUSTOMER_CODE), segment = '', pan = '', zone = '', region = '', depot = '';
+      var prevLimitVal = 0;
+      if (cust) {
+        custCode = cust.code;
+        custName = cust.name || custName;
+        segment  = cust.segment;
+        pan      = cust.pan;
+        zone     = cust.zone;
+        region   = cust.region;
+        depot    = cust.depot;
+        prevLimitVal = cust.creditLimit;
+      }
+
+      var reqNumber = reqGr.getDisplayValue(F_REQ_NUMBER);
+      var pendingAtStep = getPendingAtStep(reqGr);
+      var isDev = (reqGr.getValue(F_DEVIATION) == '1' || reqGr.getValue(F_DEVIATION) == 'true');
+
+      var statVal = reqGr.getValue(F_STATE);
+      var statLabel = reqGr.getDisplayValue(F_STATE);
+      if ((statVal || '').toLowerCase().indexOf('submit') &gt; -1) {
+          statLabel = 'Pending';
+      }
+
+      var outstanding = (cust &amp;&amp; latestSnapMap[cust.code]) ? latestSnapMap[cust.code].total : 0;
+
+      data.requests.push({
+        requestCode:  reqNumber || reqGr.getUniqueValue(),
+        customerCode: custCode,
+        customerName: custName,
+        pan:          pan,
+        segment:      segment,
+        zone:         zone,
+        region:       region,
+        depot:        depot,
+        status:       statVal,
+        statusLabel:  statLabel,
+        isDeviation:  isDev,
+        stage:        pendingAtStep,
+        submittedBy:  reqGr.getDisplayValue(F_SUBMITTED_BY),
+        submittedOn:  reqGr.getDisplayValue(F_SUBMITTED_ON),
+        prevLimit:    formatAmt(prevLimitVal),
+        requested:    formatAmt(reqGr.getValue(F_REQUESTED_AMT)),
+        approved:     formatAmt(reqGr.getValue(F_APPROVED_AMT)),
+        outstanding:  formatAmt(outstanding)
+      });
+    }
+
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-07-24 08:51:20&lt;/sys_created_on&gt;&lt;sys_id&gt;14bc58192b1a07904572f3745e91bf5b&lt;/sys_id&gt;&lt;sys_mod_count&gt;9&lt;/sys_mod_count&gt;&lt;sys_name&gt;clm_nt_nsh_approval_requests&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_14bc58192b1a07904572f3745e91bf5b&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-07-30 07:45:15&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="clm-dash" ng-cloak ng-click="c.closeAllDropdowns()"&gt;
+
+  &lt;!-- ===================== Filters ===================== --&gt;
+  &lt;div class="clm-filter-card"&gt;
+    &lt;div class="clm-filter-row"&gt;
+
+      &lt;!-- SEGMENT = Company Code (role-scoped; no "All" option) --&gt;
+      &lt;label class="clm-filter-field"&gt;
+        &lt;span&gt;Company Code&lt;/span&gt;
+        &lt;select class="form-control" ng-model="c.filters.segment" ng-change="c.onSegmentChange()"&gt;
+          &lt;option ng-repeat="s in c.data.filterOpts.segments track by s" value="{{s}}"&gt;{{s}}&lt;/option&gt;
+        &lt;/select&gt;
+      &lt;/label&gt;
+
+      &lt;!-- ZONE = Customer Group (MULTISELECT) --&gt;
+      &lt;label class="clm-filter-field clm-multiselect-field"&gt;
+        &lt;span&gt;Zone&lt;/span&gt;
+        &lt;div class="clm-multiselect-container" ng-class="{open: c.zoneDropdownOpen}"&gt;
+          &lt;div class="clm-multiselect-trigger"
+               ng-click="$event.stopPropagation(); c.zoneDropdownOpen ? c.closeZoneDropdown() : c.openZoneDropdown()"&gt;
+            &lt;span class="clm-multiselect-text"&gt;{{c.getZoneDisplayText()}}&lt;/span&gt;
+            &lt;i class="fa fa-chevron-down clm-multiselect-arrow"&gt;&lt;/i&gt;
+          &lt;/div&gt;
+          &lt;div class="clm-multiselect-dropdown" ng-show="c.zoneDropdownOpen" ng-click="$event.stopPropagation()"&gt;
+            &lt;div class="clm-multiselect-actions"&gt;
+              &lt;a ng-click="c.selectAllZones()"&gt;Select All&lt;/a&gt;
+              &lt;a ng-click="c.clearAllZones()"&gt;Clear&lt;/a&gt;
+            &lt;/div&gt;
+            &lt;input type="text" class="clm-multiselect-search" ng-model="c.zoneSearch"
+                   ng-click="$event.stopPropagation()" placeholder="Search customer groups..."&gt;
+            &lt;ul class="clm-multiselect-list"&gt;
+              &lt;li ng-repeat="z in c.getFilteredZones() track by z"
+                  ng-click="$event.stopPropagation(); c.toggleZone(z)"
+                  ng-class="{selected: c.isZoneSelected(z)}"&gt;
+                &lt;span class="clm-checkbox" ng-class="{checked: c.isZoneSelected(z)}"&gt;&lt;/span&gt;
+                {{z}}
+              &lt;/li&gt;
+              &lt;li class="clm-dropdown-empty" ng-if="c.getFilteredZones().length === 0"&gt;No matches&lt;/li&gt;
+            &lt;/ul&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/label&gt;
+
+      &lt;!-- REGION = CG4 (MULTISELECT) --&gt;
+      &lt;label class="clm-filter-field clm-multiselect-field"&gt;
+        &lt;span&gt;Region&lt;/span&gt;
+        &lt;div class="clm-multiselect-container" ng-class="{open: c.regionDropdownOpen}"&gt;
+          &lt;div class="clm-multiselect-trigger"
+               ng-click="$event.stopPropagation(); c.regionDropdownOpen ? c.closeRegionDropdown() : c.openRegionDropdown()"&gt;
+            &lt;span class="clm-multiselect-text"&gt;{{c.getRegionDisplayText()}}&lt;/span&gt;
+            &lt;i class="fa fa-chevron-down clm-multiselect-arrow"&gt;&lt;/i&gt;
+          &lt;/div&gt;
+          &lt;div class="clm-multiselect-dropdown" ng-show="c.regionDropdownOpen" ng-click="$event.stopPropagation()"&gt;
+            &lt;div class="clm-multiselect-actions"&gt;
+              &lt;a ng-click="c.selectAllRegions()"&gt;Select All&lt;/a&gt;
+              &lt;a ng-click="c.clearAllRegions()"&gt;Clear&lt;/a&gt;
+            &lt;/div&gt;
+            &lt;input type="text" class="clm-multiselect-search" ng-model="c.regionSearch"
+                   ng-click="$event.stopPropagation()" placeholder="Search CG4..."&gt;
+            &lt;ul class="clm-multiselect-list"&gt;
+              &lt;li ng-repeat="r in c.getFilteredRegions() track by r"
+                  ng-click="$event.stopPropagation(); c.toggleRegion(r)"
+                  ng-class="{selected: c.isRegionSelected(r)}"&gt;
+                &lt;span class="clm-checkbox" ng-class="{checked: c.isRegionSelected(r)}"&gt;&lt;/span&gt;
+                {{r}}
+              &lt;/li&gt;
+              &lt;li class="clm-dropdown-empty" ng-if="c.getFilteredRegions().length === 0"&gt;No matches&lt;/li&gt;
+            &lt;/ul&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/label&gt;
+
+      &lt;!-- DEPOT = Sales Office (MULTISELECT) --&gt;
+      &lt;label class="clm-filter-field clm-multiselect-field"&gt;
+        &lt;span&gt;Depot&lt;/span&gt;
+        &lt;div class="clm-multiselect-container" ng-class="{open: c.depotDropdownOpen}"&gt;
+          &lt;div class="clm-multiselect-trigger"
+               ng-click="$event.stopPropagation(); c.depotDropdownOpen ? c.closeDepotDropdown() : c.openDepotDropdown()"&gt;
+            &lt;span class="clm-multiselect-text"&gt;{{c.getDepotDisplayText()}}&lt;/span&gt;
+            &lt;i class="fa fa-chevron-down clm-multiselect-arrow"&gt;&lt;/i&gt;
+          &lt;/div&gt;
+          &lt;div class="clm-multiselect-dropdown" ng-show="c.depotDropdownOpen" ng-click="$event.stopPropagation()"&gt;
+            &lt;div class="clm-multiselect-actions"&gt;
+              &lt;a ng-click="c.selectAllDepots()"&gt;Select All&lt;/a&gt;
+              &lt;a ng-click="c.clearAllDepots()"&gt;Clear&lt;/a&gt;
+            &lt;/div&gt;
+            &lt;input type="text" class="clm-multiselect-search" ng-model="c.depotSearch"
+                   ng-click="$event.stopPropagation()" placeholder="Search sales offices..."&gt;
+            &lt;ul class="clm-multiselect-list"&gt;
+              &lt;li ng-repeat="d in c.getFilteredDepots() track by d"
+                  ng-click="$event.stopPropagation(); c.toggleDepot(d)"
+                  ng-class="{selected: c.isDepotSelected(d)}"&gt;
+                &lt;span class="clm-checkbox" ng-class="{checked: c.isDepotSelected(d)}"&gt;&lt;/span&gt;
+                {{d}}
+              &lt;/li&gt;
+              &lt;li class="clm-dropdown-empty" ng-if="c.getFilteredDepots().length === 0"&gt;No matches&lt;/li&gt;
+            &lt;/ul&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/label&gt;
+
+      &lt;!-- STATUS --&gt;
+      &lt;label class="clm-filter-field"&gt;
+        &lt;span&gt;Status&lt;/span&gt;
+        &lt;select class="form-control" ng-model="c.filters.status" ng-change="c.applyFilters()"&gt;
+          &lt;option value=""&gt;All Statuses&lt;/option&gt;
+          &lt;option ng-repeat="s in data.statusOptions track by s.value" value="{{s.value}}"&gt;{{s.label === 'Submitted' ? 'Pending' : s.label}}&lt;/option&gt;
+        &lt;/select&gt;
+      &lt;/label&gt;
+
+      &lt;!-- PERIOD --&gt;
+      &lt;label class="clm-filter-field"&gt;
+        &lt;span&gt;Period&lt;/span&gt;
+        &lt;select class="form-control" ng-model="c.filters.period" ng-change="c.onPeriodChange()"&gt;
+          &lt;option ng-repeat="p in c.data.filterOpts.periods track by p.value" value="{{p.value}}"&gt;{{p.label}}&lt;/option&gt;
+        &lt;/select&gt;
+      &lt;/label&gt;
+    &lt;/div&gt;
+
+    &lt;!-- CUSTOM DATE RANGE --&gt;
+    &lt;div class="clm-custom-range" ng-if="c.filters.period === 'custom'"&gt;
+      &lt;input type="date" ng-model="c.filters.customFrom"&gt;
+      &lt;span&gt;to&lt;/span&gt;
+      &lt;input type="date" ng-model="c.filters.customTo"&gt;
+      &lt;button type="button" class="clm-apply-btn" ng-click="c.applyFilters()"&gt;Apply Range&lt;/button&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;!-- ===================== Access Denied ===================== --&gt;
+  &lt;div ng-if="data.accessDenied" class="clm-no-data" style="padding: 40px 0; background:#fff; border:1px solid #e3e6eb; border-radius:8px;"&gt;
+    You do not have a role mapped to any Company Code to view this dashboard.
+  &lt;/div&gt;
+
+  &lt;div ng-if="!data.accessDenied"&gt;
+
+  &lt;!-- ===================== Approval Request Scorecards ===================== --&gt;
+  &lt;div class="clm-scorecards"&gt;
+    &lt;div class="clm-card clm-card-blue" style="cursor: pointer;" ng-click="c.setKpiFilter('pending')" ng-style="c.kpiFilter === 'pending' ? {'box-shadow': '0 0 0 2px #1c4e9c', 'background-color': '#ebf8ff'} : {}"&gt;
+      &lt;i class="fa fa-info-circle clm-kpi-info" title="Filter by Pending" ng-click="c.setKpiFilter('pending'); $event.stopPropagation();"&gt;&lt;/i&gt;
+      &lt;div class="clm-card-id"&gt;REQUESTS PENDING&lt;/div&gt;
+      &lt;div class="clm-card-value"&gt;{{data.scorecards.submitted}}&lt;/div&gt;
+      &lt;div class="clm-card-sub"&gt;New in {{data.periodLabel}}&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="clm-card clm-card-green" style="cursor: pointer;" ng-click="c.setKpiFilter('approved')" ng-style="c.kpiFilter === 'approved' ? {'box-shadow': '0 0 0 2px #38a169', 'background-color': '#e3f4ea'} : {}"&gt;
+      &lt;i class="fa fa-info-circle clm-kpi-info" title="Filter by Approved" ng-click="c.setKpiFilter('approved'); $event.stopPropagation();"&gt;&lt;/i&gt;
+      &lt;div class="clm-card-id"&gt;APPROVED&lt;/div&gt;
+      &lt;div class="clm-card-value"&gt;{{data.scorecards.approved}}&lt;/div&gt;
+      &lt;div class="clm-card-sub"&gt;Final approval received&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="clm-card clm-card-purple" style="cursor: pointer;" ng-click="c.setKpiFilter('sendback')" ng-style="c.kpiFilter === 'sendback' ? {'box-shadow': '0 0 0 2px #7c5cf0', 'background-color': '#f0e6ff'} : {}"&gt;
+      &lt;i class="fa fa-info-circle clm-kpi-info" title="Filter by Send-Back" ng-click="c.setKpiFilter('sendback'); $event.stopPropagation();"&gt;&lt;/i&gt;
+      &lt;div class="clm-card-id"&gt;SEND-BACK&lt;/div&gt;
+      &lt;div class="clm-card-value"&gt;{{data.scorecards.sendback}}&lt;/div&gt;
+      &lt;div class="clm-card-sub"&gt;Awaiting resubmission&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="clm-card clm-card-red" style="cursor: pointer;" ng-click="c.setKpiFilter('rejected')" ng-style="c.kpiFilter === 'rejected' ? {'box-shadow': '0 0 0 2px #e53e3e', 'background-color': '#fdeaea'} : {}"&gt;
+      &lt;i class="fa fa-info-circle clm-kpi-info" title="Filter by Rejected" ng-click="c.setKpiFilter('rejected'); $event.stopPropagation();"&gt;&lt;/i&gt;
+      &lt;div class="clm-card-id"&gt;REJECTED&lt;/div&gt;
+      &lt;div class="clm-card-value"&gt;{{data.scorecards.rejected}}&lt;/div&gt;
+      &lt;div class="clm-card-sub"&gt;Declined in {{data.periodLabel}}&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="clm-card clm-card-orange" style="cursor: pointer;" ng-click="c.setKpiFilter('deviated')" ng-style="c.kpiFilter === 'deviated' ? {'box-shadow': '0 0 0 2px #dd6b20', 'background-color': '#fffdf0'} : {}"&gt;
+      &lt;i class="fa fa-info-circle clm-kpi-info" title="Filter by Deviated" ng-click="c.setKpiFilter('deviated'); $event.stopPropagation();"&gt;&lt;/i&gt;
+      &lt;div class="clm-card-id"&gt;DEVIATED REQUESTS&lt;/div&gt;
+      &lt;div class="clm-card-value"&gt;{{data.scorecards.deviated}}&lt;/div&gt;
+      &lt;div class="clm-card-sub"&gt;Flagged in {{data.periodLabel}}&lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+
+  &lt;!-- ===================== Approval Pipeline Chart ===================== --&gt;
+    &lt;div class="clm-chart-panel"&gt;
+    &lt;div class="clm-chart-header"&gt;
+      &lt;span class="clm-chart-title"&gt;Approval Pipeline — State-wise ({{data.chart.year}})&lt;/span&gt;
+      &lt;span class="clm-chart-badge"&gt;Multi-Line&lt;/span&gt;
+      &lt;div class="clm-legend"&gt;
+        &lt;span class="legend-item"&gt;&lt;i class="dot blue"&gt;&lt;/i&gt;Pending&lt;/span&gt;
+        &lt;span class="legend-item"&gt;&lt;i class="dot green"&gt;&lt;/i&gt;Approved&lt;/span&gt;
+        &lt;span class="legend-item"&gt;&lt;i class="dot orange"&gt;&lt;/i&gt;Stage Pending&lt;/span&gt;
+        &lt;span class="legend-item"&gt;&lt;i class="dot purple"&gt;&lt;/i&gt;Send-Back&lt;/span&gt;
+        &lt;span class="legend-item"&gt;&lt;i class="dot red"&gt;&lt;/i&gt;Rejected&lt;/span&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="clm-chart-body" ng-mouseleave="c.onMouseLeaveChart()"&gt;
+      &lt;svg viewBox="0 0 900 260" preserveAspectRatio="none" class="clm-svg" ng-if="data.chart.months.length"&gt;
+        &lt;line ng-repeat="m in data.chart.months track by $index"
+              x1="{{c.chartX($index)}}" y1="0" x2="{{c.chartX($index)}}" y2="220"
+              class="grid-line"&gt;&lt;/line&gt;
+
+        &lt;g class="y-axis-labels"&gt;
+          &lt;text ng-repeat="tick in c.yAxisTicks"
+                ng-attr-x="25"
+                ng-attr-y="{{tick.y + 4}}"
+                text-anchor="end"
+                fill="#718096"
+                style="font-size: 11px;"&gt;
+            {{tick.label}}
+          &lt;/text&gt;
+        &lt;/g&gt;
+
+        &lt;polyline class="line-blue"    points="{{c.linePoints('submitted')}}"&gt;&lt;/polyline&gt;
+        &lt;polyline class="line-green"   points="{{c.linePoints('approved')}}"&gt;&lt;/polyline&gt;
+        &lt;polyline class="line-orange"  points="{{c.linePoints('pending')}}"&gt;&lt;/polyline&gt;
+        &lt;polyline class="line-purple"  points="{{c.linePoints('sendback')}}"&gt;&lt;/polyline&gt;
+        &lt;polyline class="line-red"     points="{{c.linePoints('rejected')}}"&gt;&lt;/polyline&gt;
+
+        &lt;rect ng-repeat="m in data.chart.months track by $index"
+              ng-attr-x="{{c.chartX($index) - (860 / (data.chart.months.length - 1 || 1)) / 2}}"
+              y="0"
+              ng-attr-width="{{860 / (data.chart.months.length - 1 || 1)}}"
+              height="220"
+              fill="transparent"
+              style="cursor: pointer;"
+              ng-mouseover="c.onMouseOverMonth($event, $index)"&gt;
+        &lt;/rect&gt;
+
+        &lt;g ng-repeat="m in data.chart.months track by $index"&gt;
+          &lt;text x="{{c.chartX($index)}}" y="245" class="axis-label" text-anchor="middle"&gt;{{m}}&lt;/text&gt;
+        &lt;/g&gt;
+      &lt;/svg&gt;
+
+      &lt;div class="clm-chart-tooltip" ng-if="c.showTooltip" ng-style="{'left': c.tooltipLeft + 'px', 'top': c.tooltipTop + 'px'}"&gt;
+        &lt;div class="tooltip-title"&gt;{{data.chart.months[c.hoverIndex]}}&lt;/div&gt;
+        &lt;div class="tooltip-row"&gt;&lt;span class="tooltip-color blue"&gt;&lt;/span&gt;Pending: {{data.chart.series.submitted[c.hoverIndex]}}&lt;/div&gt;
+        &lt;div class="tooltip-row"&gt;&lt;span class="tooltip-color green"&gt;&lt;/span&gt;Approved: {{data.chart.series.approved[c.hoverIndex]}}&lt;/div&gt;
+        &lt;div class="tooltip-row"&gt;&lt;span class="tooltip-color orange"&gt;&lt;/span&gt;Stage Pending: {{data.chart.series.pending[c.hoverIndex]}}&lt;/div&gt;
+        &lt;div class="tooltip-row"&gt;&lt;span class="tooltip-color purple"&gt;&lt;/span&gt;Send-Back: {{data.chart.series.sendback[c.hoverIndex]}}&lt;/div&gt;
+        &lt;div class="tooltip-row"&gt;&lt;span class="tooltip-color red"&gt;&lt;/span&gt;Rejected: {{data.chart.series.rejected[c.hoverIndex]}}&lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div ng-if="!data.chart.months.length" class="clm-no-data"&gt;No data available.&lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;!-- ===================== Data Table ===================== --&gt;
+  &lt;div class="clm-table-panel" id="clmRequestsTableContainer"&gt;
+    &lt;div class="clm-table-header"&gt;
+      &lt;span class="clm-table-title"&gt;Approval Requests &lt;span ng-if="c.kpiFilter" style="font-size: 13px; font-weight: normal; color: #718096; margin-left: 8px;"&gt;(Filtered by {{c.kpiFilter}})&lt;/span&gt;&lt;/span&gt;
+    &lt;/div&gt;
+
+    &lt;div class="clm-table-wrapper"&gt;
+      &lt;div class="clm-search-section"&gt;
+        &lt;div class="clm-search-box"&gt;
+          &lt;i class="fa fa-search"&gt;&lt;/i&gt;
+          &lt;input type="text" ng-model="c.filters.search" ng-change="c.runSearch()" placeholder="Search by Req ID, Name, PAN..."&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div class="clm-table-top-controls"&gt;
+        &lt;span class="clm-records-label"&gt;Records: &lt;strong&gt;{{c.getVisibleRecordsCount()}}&lt;/strong&gt;&lt;/span&gt;
+        &lt;span class="clm-rows-label"&gt;Rows:
+          &lt;select class="clm-rows-select"
+                  ng-model="c.pagination.rowsPerPage"
+                  ng-change="c.onRowsPerPageChange()"
+                  ng-options="opt for opt in c.rowsPerPageOptions track by opt"&gt;
+          &lt;/select&gt;
+        &lt;/span&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="clm-table-scroll"&gt;
+      &lt;table class="clm-table"&gt;
+        &lt;thead&gt;
+          &lt;tr&gt;
+            &lt;th&gt;Request ID&lt;/th&gt;
+            &lt;th class="col-customer"&gt;Customer&lt;/th&gt;
+            &lt;th&gt;PAN&lt;/th&gt;
+            &lt;th&gt;Segment&lt;/th&gt;
+            &lt;th class="col-zone"&gt;Zone&lt;/th&gt;
+            &lt;th class="col-region"&gt;Region&lt;/th&gt;
+            &lt;th class="col-depot"&gt;Sales Office&lt;/th&gt;
+            &lt;th&gt;Status&lt;/th&gt;
+            &lt;th&gt;Prev Limit&lt;/th&gt;
+            &lt;th&gt;Requested&lt;/th&gt;
+            &lt;th&gt;Approved&lt;/th&gt;
+            &lt;th&gt;Outstanding&lt;/th&gt;
+            &lt;th&gt;Pending At&lt;/th&gt;
+            &lt;th class="col-submitted-by"&gt;Submitted By&lt;/th&gt;
+          &lt;/tr&gt;
+        &lt;/thead&gt;
+        &lt;tbody&gt;
+          &lt;tr ng-repeat="r in c.paginatedRequests"&gt;
+            &lt;td&gt;&lt;a href="javascript:void(0)" class="clm-link" ng-click="c.openRequestDetail(r)"&gt;{{r.requestCode}}&lt;/a&gt;&lt;/td&gt;
+            &lt;td class="col-customer"&gt;
+              &lt;div class="clm-cust-name" ng-click="c.openRequestDetail(r)" style="cursor: pointer;"&gt;{{r.customerName}}&lt;/div&gt;
+              &lt;div class="clm-cust-code clm-link" ng-click="c.openRequestDetail(r)" style="cursor: pointer;"&gt;{{r.customerCode}}&lt;/div&gt;
+            &lt;/td&gt;
+            &lt;td&gt;{{r.pan}}&lt;/td&gt;
+            &lt;td&gt;&lt;span class="badge seg-badge" ng-class="c.segClass(r.segment)"&gt;{{r.segment}}&lt;/span&gt;&lt;/td&gt;
+             &lt;td class="col-zone"&gt;{{r.zone}}&lt;/td&gt;
+            &lt;td class="col-region"&gt;{{r.region}}&lt;/td&gt;
+            &lt;td class="col-depot"&gt;{{r.depot}}&lt;/td&gt;
+            &lt;td&gt;&lt;span class="badge status-badge" ng-class="c.statusClass(r.status)"&gt;{{r.statusLabel}}&lt;/span&gt;&lt;/td&gt;
+            &lt;td&gt;{{r.prevLimit}}&lt;/td&gt;
+            &lt;td&gt;{{r.requested}}&lt;/td&gt;
+            &lt;td&gt;{{r.approved || '—'}}&lt;/td&gt;
+            &lt;td&gt;{{r.outstanding}}&lt;/td&gt;
+            &lt;td&gt;
+              &lt;span class="badge stage-badge" ng-if="r.stage"&gt;{{r.stage}}&lt;/span&gt;
+              &lt;span ng-if="!r.stage"&gt;—&lt;/span&gt;
+            &lt;/td&gt;
+            &lt;td class="col-submitted-by"&gt;{{r.submittedBy}}&lt;/td&gt;
+          &lt;/tr&gt;
+          &lt;tr ng-if="!c.paginatedRequests.length &amp;&amp; c.getVisibleRecordsCount()"&gt;
+            &lt;td colspan="13" class="clm-no-data"&gt;No records to display on this page.&lt;/td&gt;
+          &lt;/tr&gt;
+          &lt;tr ng-if="c.getVisibleRecordsCount() === 0"&gt;
+            &lt;td colspan="13" class="clm-no-data"&gt;No approval requests found for the selected filters.&lt;/td&gt;
+          &lt;/tr&gt;
+        &lt;/tbody&gt;
+      &lt;/table&gt;
+    &lt;/div&gt;
+
+    &lt;div class="clm-pagination-bottom" ng-if="c.getVisibleRecordsCount() &gt; 0"&gt;
+      &lt;div class="clm-pagination-controls"&gt;
+        &lt;button class="clm-page-btn" ng-click="c.previousPage()" ng-disabled="c.pagination.currentPage === 1"&gt;‹&lt;/button&gt;
+        &lt;button ng-repeat="page in c.getPageNumbers()"
+                class="clm-page-btn"
+                ng-class="{active: page === c.pagination.currentPage}"
+                ng-click="c.goToPage(page)"&gt;{{page}}&lt;/button&gt;
+        &lt;button class="clm-page-btn" ng-click="c.nextPage()" ng-disabled="c.pagination.currentPage &gt;= c.getTotalPages()"&gt;›&lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;/div&gt;&lt;!-- /ng-if !data.accessDenied --&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;14bc58192b1a07904572f3745e91bf5b&lt;/id&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-07-24 08:51:20&lt;/sys_created_on&gt;&lt;sys_id&gt;5cbc58192b1a07904572f3745e91bf60&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-07-24 08:51:20&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>-1401435815</payload_hash>
+        <record_name>clm_nt_nsh_approval_requests</record_name>
+        <reverted_from/>
+        <source>0d1e00262bb27e104572f3745e91bf51</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-30 07:45:15</sys_created_on>
+        <sys_id>72178bc797164fd0be31fa17f053af94</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>19fb1fc155b0000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-30 07:45:15</sys_updated_on>
+        <type>Widget</type>
+        <update_guid>72178bc756164fd06bc45ac4d164a293</update_guid>
+        <update_guid_history>72178bc756164fd06bc45ac4d164a293:-1401435815,bd958b0708164fd0650c2154fd838483:73026738,4f65430768164fd05a254151e9838a5f:-1119042724,fddf6afab0de8f10e1f8a8f85ee2a626:1055795748,d97d11b250de4f108ace8670317f6a50:-1600817504,64b57459955e0790648ee158a4a77f1d:1055795748,6372bc9de91e0790764e134da5bbf4e5:619461712,8ef8a41d7a9a07906f9b449a47b38fae:-534486179,6cd8e01dfd9a0790e2c62197b22c0dae:-226746935,ac9828d9ff9a079005c62bf5d01f9b48:-534486179,93e72c19209a079093c2f2524e09449c:-476417269,10bc5819f91a0790b1b1ea52d4ad735f:65846436</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="">0b19041f2bcf03104572f3745e91bfad</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-05 19:20:43</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>cf941e3a541a46dca8872777fcdd0169</sys_id>
+        <sys_metadata>14bc58192b1a07904572f3745e91bf5b</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_nt_nsh_approval_requests</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_14bc58192b1a07904572f3745e91bf5b</sys_update_name>
+        <sys_update_version display_value="sp_widget_14bc58192b1a07904572f3745e91bf5b">72178bc797164fd0be31fa17f053af94</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-05 19:20:43</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

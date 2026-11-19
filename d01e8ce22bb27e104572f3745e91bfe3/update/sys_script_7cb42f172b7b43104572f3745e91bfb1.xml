@@ -1,0 +1,249 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="cacbc7742bb676104572f3745e91bf5a" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>true</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_birl3_clm_nt_limit_swap_request</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition table="x_birl3_clm_nt_limit_swap_request">donorISNOTEMPTY^swap_typeISNOTEMPTY^EQ<item endquery="false" field="donor" goto="false" newquery="false" operator="ISNOTEMPTY" or="false" value=""/>
+            <item endquery="false" field="swap_type" goto="false" newquery="false" operator="ISNOTEMPTY" or="false" value=""/>
+            <item endquery="true" field="" goto="false" newquery="false" operator="=" or="false" value=""/>
+        </filter_condition>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>CLM: LS Matrix Mapping</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous /*null when async*/) {
+
+    // -------------------------------------------------------------
+    // 1. Initialize Approver Fields (All 12 Reference Fields)
+    // -------------------------------------------------------------
+    var fields = {
+        // Cement Hierarchy
+        ls_cement_tsh: '',
+        ls_cement_rhm: '',
+        ls_cement_zhm: '',
+        ls_cement_nsh: '',
+
+        // RMC Hierarchy
+        ls_rmc_tsm: '',
+        ls_rmc_rh_ch: '',
+        ls_rmc_zh: '',
+        ls_rmc_head_rmc: '',
+
+        // BPD Hierarchy
+        ls_bpd_tsh: '',
+        ls_bpd_hs_bpd: '',
+        ls_bpd_zh_bpd: '',
+        ls_bpd_hbpd: ''
+    };
+
+    var swapType = (current.getValue('swap_type') || '').toString().trim().toUpperCase();
+
+    // SCENARIO A: Same TSH (Intra-Territory) -> Auto-Approved (Clear fields & exit)
+    if (!swapType || swapType === 'A') {
+        for (var f in fields) {
+            if (current.isValidField(f)) {
+                current.setValue(f, '');
+            }
+        }
+        return;
+    }
+
+    // -------------------------------------------------------------
+    // 2. Direct Role Assignment (Gated by Swap Type Scenario Depth)
+    // -------------------------------------------------------------
+    function assignRole(role, approver) {
+        if (!approver) return;
+
+        var r = (role || '').toString().trim().toUpperCase();
+        var uid = approver.toString().trim();
+
+        switch (r) {
+            // ==================== CEMENT ====================
+            case 'NT CEMENT TSH':
+            case 'CEMENT TSH':
+                // Level 1: Allowed in B, C, D, E
+                fields.ls_cement_tsh = uid;
+                break;
+
+            case 'NT CEMENT RHM':
+            case 'CEMENT RHM':
+                // Level 2: Allowed in B, C, D, E
+                fields.ls_cement_rhm = uid;
+                break;
+
+            case 'NT CEMENT ZHM':
+            case 'CEMENT ZHM':
+                // Level 3: Allowed in C, D, E only
+                if (swapType === 'C' || swapType === 'D' || swapType === 'E') {
+                    fields.ls_cement_zhm = uid;
+                }
+                break;
+
+            case 'NT CEMENT NSH':
+            case 'CEMENT NSH':
+                // Level 4: Allowed in D, E only
+                if (swapType === 'D' || swapType === 'E') {
+                    fields.ls_cement_nsh = uid;
+                }
+                break;
+
+            // ===================== RMC =====================
+            case 'NT RMC TSM':
+            case 'RMC TSM':
+                // Level 1: Allowed in B, C, D, E
+                fields.ls_rmc_tsm = uid;
+                break;
+
+            case 'NT RMC RH CH':
+            case 'RMC RH CH':
+                // Level 2: Allowed in B, C, D, E
+                fields.ls_rmc_rh_ch = uid;
+                break;
+
+            case 'NT RMC ZH':
+            case 'RMC ZH':
+                // Level 3: Allowed in C, D, E only
+                if (swapType === 'C' || swapType === 'D' || swapType === 'E') {
+                    fields.ls_rmc_zh = uid;
+                }
+                break;
+
+            case 'NT RMC HEAD RMC':
+            case 'RMC HEAD RMC':
+            case 'HEAD RMC':
+                // Level 4: Allowed in D, E only
+                if (swapType === 'D' || swapType === 'E') {
+                    fields.ls_rmc_head_rmc = uid;
+                }
+                break;
+
+            // ===================== BPD =====================
+            case 'NT BPD TSH':
+            case 'BPD TSH':
+                // Level 1: Allowed in B, C, D, E
+                fields.ls_bpd_tsh = uid;
+                break;
+
+            case 'NT BPD HS BPD':
+            case 'BPD HS BPD':
+                // Level 2: Allowed in B, C, D, E
+                fields.ls_bpd_hs_bpd = uid;
+                break;
+
+            case 'NT BPD ZH BPD':
+            case 'BPD ZH BPD':
+                // Level 3: Allowed in C, D, E only
+                if (swapType === 'C' || swapType === 'D' || swapType === 'E') {
+                    fields.ls_bpd_zh_bpd = uid;
+                }
+                break;
+
+            case 'NT BPD HBPD':
+            case 'HBPD':
+                // Level 4: Allowed in D, E only
+                if (swapType === 'D' || swapType === 'E') {
+                    fields.ls_bpd_hbpd = uid;
+                }
+                break;
+        }
+    }
+
+    // -------------------------------------------------------------
+    // 3. Resolve Donor Hierarchy
+    // -------------------------------------------------------------
+    var donorGr = current.donor.getRefRecord();
+    if (!donorGr || !donorGr.isValidRecord()) {
+        return;
+    }
+
+    var donorDepot  = donorGr.getValue('depot') || '';
+    var donorRegion = donorGr.getValue('region') || '';
+    var donorZone   = donorGr.getValue('zone') || '';
+    var rawSeg      = (current.getValue('donor_segment') || donorGr.getValue('segment') || '').toString().toLowerCase().trim();
+
+    // Normalize segment value ('cement', 'rmc', or 'bpd')
+    var segment = '';
+    if (rawSeg.indexOf('cement') > -1) {
+        segment = 'cement';
+    } else if (rawSeg.indexOf('rmc') > -1) {
+        segment = 'rmc';
+    } else if (rawSeg.indexOf('bpd') > -1) {
+        segment = 'bpd';
+    } else {
+        segment = rawSeg;
+    }
+
+    // -------------------------------------------------------------
+    // 4. Query Approval Matrix with Hierarchical Rollup Logic
+    // -------------------------------------------------------------
+    var mxGr = new GlideRecord('x_birl3_clm_approval_matrix');
+    mxGr.addQuery('customer_type', 'non_trade');
+
+    // Hierarchical filter: matches depot, region, zone, or segment-wide fallback
+    var encodedQuery = 'segment=' + segment + '^ORsegmentISEMPTY';
+    encodedQuery += '^zone=' + donorZone + '^ORzoneISEMPTY';
+    encodedQuery += '^region=' + donorRegion + '^ORregionISEMPTY';
+    encodedQuery += '^depot=' + donorDepot + '^ORdepotISEMPTY';
+
+    mxGr.addEncodedQuery(encodedQuery);
+    mxGr.addNotNullQuery('approver_user');
+    mxGr.orderBy('sequence_order'); // Evaluates lowest tier to highest tier (TSH -> RHM -> ZHM -> SH)
+    mxGr.query();
+
+    while (mxGr.next()) {
+        var role = mxGr.getValue('role_name');
+        var approver = mxGr.getValue('approver_user');
+
+        assignRole(role, approver);
+    }
+
+    // -------------------------------------------------------------
+    // 5. Write Data Back to Limit Swap Reference Fields
+    // -------------------------------------------------------------
+    // Direct 1-to-1 reference assignment (sys_id or empty string)
+    for (var key in fields) {
+        if (current.isValidField(key)) {
+            current.setValue(key, fields[key]);
+        }
+    }
+
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-10-13 18:41:56</sys_created_on>
+        <sys_domain>cacbc7742bb676104572f3745e91bf5a</sys_domain>
+        <sys_domain_path>!!!/!!(/</sys_domain_path>
+        <sys_id>7cb42f172b7b43104572f3745e91bfb1</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>CLM: LS Matrix Mapping</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_7cb42f172b7b43104572f3745e91bfb1</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-13 18:41:56</sys_updated_on>
+        <template/>
+        <when>before</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=7cb42f172b7b43104572f3745e91bfb1"/>
+</record_update>

@@ -1,0 +1,721 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $interval, $timeout) {
+  var c = this;
+
+  // ── Initialize all state ──────────────────────────────────
+  c.data.fileReady  = false;
+  c.data.fileName   = '';
+  c.data.processing = false;
+  c.data.result     = null;
+  c.data.error      = null;
+  c.data.sysId      = null;
+  c.data.statusMsg  = '';
+  c.data.action     = null;
+  c.dragging        = false;
+  c.rawFile         = null;
+
+  var pollTimer = null;
+  var pollCount = 0;
+  var MAX_POLLS = 36;
+
+  // ── File selection via click ──────────────────────────────
+  c.triggerUpload = function() {
+    document.getElementById('ocrFileInput').click();
+  };
+
+  c.onFileSelect = function(event) {
+    var file = event.target.files[0];
+    if (!file) return;
+    if (file.type !== 'application/pdf') {
+      $timeout(function() {
+        c.data.error = 'Please select a valid PDF file.';
+      });
+      return;
+    }
+    c.readFile(file);
+  };
+
+  // ── Drag and drop ─────────────────────────────────────────
+  c.onDragOver = function(event) {
+    event.preventDefault();
+    c.dragging = true;
+  };
+
+  c.onDrop = function(event) {
+    event.preventDefault();
+    c.dragging = false;
+    var file = event.dataTransfer && event.dataTransfer.files[0];
+    if (!file) return;
+    if (file.type !== 'application/pdf') {
+      $timeout(function() {
+        c.data.error = 'Please drop a valid PDF file.';
+      });
+      return;
+    }
+    c.readFile(file);
+  };
+
+  // ── Store raw file — use $timeout to safely update scope ──
+  c.readFile = function(file) {
+    c.rawFile = file;
+    $timeout(function() {
+      c.data.error     = null;
+      c.data.fileName  = file.name;
+      c.data.fileReady = true;  // this now safely triggers Angular digest
+    });
+  };
+
+  // ── Phase 1: Create empty record via server script ────────
+  c.processDocument = function() {
+    if (!c.rawFile) return;
+    c.data.processing = true;
+    c.data.error      = null;
+    c.data.statusMsg  = 'Creating record...';
+    c.data.action     = 'create_record';
+
+    c.server.update().then(function() {
+      if (c.data.serverError) {
+        c.data.processing  = false;
+        c.data.error       = c.data.serverError;
+        c.data.serverError = null;
+        return;
+      }
+      c.data.statusMsg = 'Uploading PDF...';
+      c.uploadViaApi(c.rawFile, c.data.sysId);
+    });
+  };
+
+  // ── Phase 2: Upload PDF via ServiceNow REST API ───────────
+c.uploadViaApi = function(file, sysId) {
+    var url = '/api/now/attachment/file'
+      + '?table_name=x_birl3_clm_ocr_test'
+      + '&table_sys_id=' + sysId
+      + '&file_name=' + encodeURIComponent(file.name);
+
+    // Get the ServiceNow user token for CSRF protection
+    var userToken = window.g_ck || '';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/pdf');
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.setRequestHeader('X-UserToken', userToken);  // ← this was missing
+
+    xhr.onload = function() {
+      if (xhr.status === 200 || xhr.status === 201) {
+        // Log response to verify attachment was created
+        try {
+          var resp = JSON.parse(xhr.responseText);
+          gs && gs.log && gs.log('Attachment sys_id: ' + resp.result.sys_id);
+        } catch(e) {}
+
+        $timeout(function() {
+          c.data.statusMsg = 'Document uploaded! OCR is now extracting data (2-3 min)...';
+          c.startPolling();
+        });
+      } else {
+        $timeout(function() {
+          c.data.processing = false;
+          c.data.error = 'File upload failed (HTTP ' + xhr.status + '): ' + xhr.responseText;
+        });
+      }
+    };
+
+    xhr.onerror = function() {
+      $timeout(function() {
+        c.data.processing = false;
+        c.data.error = 'Network error during file upload. Please try again.';
+      });
+    };
+
+    xhr.send(file);
+};
+  // ── Phase 3: Poll every 10 seconds until OCR completes ───
+  c.startPolling = function() {
+    pollCount = 0;
+    pollTimer = $interval(function() {
+      pollCount++;
+      c.server.get({ action: 'poll', sysId: c.data.sysId })
+        .then(function(response) {
+          if (response.data.result) {
+            $interval.cancel(pollTimer);
+            c.data.processing = false;
+            c.data.result     = response.data.result;
+          } else if (pollCount >= MAX_POLLS) {
+            $interval.cancel(pollTimer);
+            c.data.processing = false;
+            c.data.error = 'OCR timed out after 6 minutes. sys_id: ' + c.data.sysId;
+          } else {
+            c.data.statusMsg = 'OCR is processing... (' + (pollCount * 10) + 's elapsed)';
+          }
+        });
+    }, 10000);
+  };
+
+  // ── Risk badge CSS class ──────────────────────────────────
+  c.getRiskClass = function(risk) {
+    if (!risk) return '';
+    var r = risk.toLowerCase();
+    if (r.indexOf('low')    >= 0) return 'risk-low';
+    if (r.indexOf('high')   >= 0) return 'risk-high';
+    if (r.indexOf('medium') >= 0) return 'risk-medium';
+    return 'risk-medium';
+  };
+	
+	// ── Format AI summary into bullet points ──────────────────
+c.getSummaryPoints = function(summary) {
+  if (!summary) return [];
+
+  var points = summary.split(/\s+-\s+/);
+
+  return points.map(function(p) {
+    return p.trim();
+  }).filter(function(p) {
+    return p.length > 3;
+  });
+};
+
+  // ── Reset everything ──────────────────────────────────────
+  c.reset = function() {
+    if (pollTimer) $interval.cancel(pollTimer);
+    c.rawFile          = null;
+    c.data.fileReady   = false;
+    c.data.fileName    = '';
+    c.data.processing  = false;
+    c.data.result      = null;
+    c.data.error       = null;
+    c.data.sysId       = null;
+    c.data.statusMsg   = '';
+    c.data.serverError = null;
+    c.data.action      = null;
+    pollCount          = 0;
+    var inp = document.getElementById('ocrFileInput');
+    if (inp) inp.value = '';
+  };
+
+  // ── Cleanup on widget destroy ─────────────────────────────
+  $scope.$on('$destroy', function() {
+    if (pollTimer) $interval.cancel(pollTimer);
+  });
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>.ocr-widget .panel {
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  border: 1px solid #e0e0e0;
+}
+
+.ocr-widget .panel-heading {
+  background: #1782c5;
+  color: #fff;
+  border-radius: 8px 8px 0 0;
+  padding: 16px 20px;
+}
+
+.ocr-widget .panel-title {
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.ocr-widget .panel-body {
+  padding: 24px;
+}
+
+/* Upload Zone */
+.upload-zone {
+  border: 2px dashed #c0cdd6;
+  border-radius: 8px;
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+  margin-bottom: 20px;
+  background: #f8fbfd;
+}
+
+.upload-zone:hover,
+.upload-zone.drag-over {
+  border-color: #1782c5;
+  background-color: #eef6fb;
+}
+
+.upload-icon {
+  font-size: 40px;
+  color: #9eb5c5;
+  display: block;
+  margin-bottom: 12px;
+}
+
+.upload-text {
+  font-size: 15px;
+  color: #4a5568;
+  margin: 0 0 6px;
+  font-weight: 500;
+}
+
+/* Processing State */
+.processing-state {
+  padding: 40px 20px;
+}
+
+.processing-state h4 {
+  color: #1782c5;
+  margin: 16px 0 8px;
+  font-weight: 600;
+}
+
+.ocr-spinner {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+
+.spinner-ring {
+  width: 52px;
+  height: 52px;
+  border: 5px solid #dde8f0;
+  border-top-color: #1782c5;
+  border-radius: 50%;
+  animation: ocr-spin 0.85s linear infinite;
+}
+
+@keyframes ocr-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Results Grid */
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 16px 0 20px;
+}
+
+.result-card {
+  background: #f7f9fb;
+  border: 1px solid #e4eaf0;
+  border-radius: 8px;
+  padding: 14px 16px;
+  transition: box-shadow 0.15s;
+}
+
+.result-card:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+
+.result-card.highlight {
+  border-color: #1782c5;
+  background: #eef6fb;
+  grid-column: 1 / -1;
+}
+
+.result-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #7a8fa0;
+  margin-bottom: 6px;
+}
+
+.result-value {
+  font-size: 17px;
+  font-weight: 600;
+  color: #1a2b3c;
+  word-break: break-word;
+}
+
+.result-card.highlight .result-value {
+  font-size: 20px;
+  color: #1782c5;
+}
+
+/* Risk Badge */
+.risk-badge {
+  display: inline-block;
+  padding: 3px 12px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.risk-low    { background: #d4edda; color: #1a5c2e; }
+.risk-medium { background: #fff3cd; color: #7d5c00; }
+.risk-high   { background: #f8d7da; color: #7c1d23; }
+
+/* AI Summary */
+.summary-box {
+  background: #f4f8fc;
+  border-left: 4px solid #1782c5;
+  border-radius: 0 8px 8px 0;
+  padding: 16px 20px;
+  margin-top: 4px;
+}
+
+.summary-label {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #1782c5;
+  margin-bottom: 10px;
+}
+
+.summary-text {
+  font-size: 14px;
+  color: #3a4a5a;
+  line-height: 1.7;
+  margin: 0;
+}
+/* AI Summary Points */
+.summary-points {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.summary-point {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: #ffffff;
+  border: 1px solid #ddeaf5;
+  border-radius: 8px;
+  padding: 10px 14px;
+  transition: box-shadow 0.15s;
+}
+
+.summary-point:hover {
+  box-shadow: 0 2px 8px rgba(23, 130, 197, 0.1);
+  border-color: #1782c5;
+}
+
+.point-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  background: #1782c5;
+  color: #ffffff;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+
+.point-text {
+  font-size: 14px;
+  color: #2d3f50;
+  line-height: 1.6;
+}
+
+/* Color first point differently as company header */
+.summary-point:first-child {
+  background: #eef6fb;
+  border-color: #1782c5;
+}
+
+.summary-point:first-child .point-text {
+  font-weight: 600;
+  color: #1782c5;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>newocr</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>newocr</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+  // ACTION: POLL
+  if (input && input.action === 'poll') {
+    if (!input.sysId) {
+      data.pollError = 'No sysId provided.';
+      return;
+    }
+    var rec = new GlideRecord('x_birl3_clm_ocr_test');
+    if (rec.get(input.sysId)) {
+      var nameVal = rec.getValue('name_of_company');
+      if (nameVal && nameVal.trim() !== '') {
+        data.result = {
+          number:                        rec.getValue('number'),
+          name_of_company:               rec.getValue('name_of_company'),
+          rating:                        rec.getValue('rating'),
+          risk_index:                    rec.getValue('risk_index'),
+          credit_limit:                  rec.getValue('credit_limit'),
+          total_current_liabilities:     rec.getValue('total_current_liabilities'),
+          total_non_current_liabilities: rec.getValue('total_non_current_liabilites'),
+          total_equity:                  rec.getValue('total_equity'),
+					net_revenue: rec.getValue('net_revenue'),
+					sales_growth: rec.getValue('sales_growth'),
+					gross_profit: rec.getValue('gross_profit'),
+					ebitda: rec.getValue('ebitda'),
+					debt_equity: rec.getValue('debt_equity'),
+					int_coverage: rec.getValue('int_coverage'),
+					net_wcc_days: rec.getValue('net_wcc_days'),
+					ar_days: rec.getValue('ar_days'),
+					inventory_days: rec.getValue('inventory_days'),
+					ap_days: rec.getValue('ap_days'),
+					interest: rec.getValue('interest'),
+          total_equity_liabilities:      rec.getValue('total_equity_liabilities'),
+          ai_summary:                    rec.getValue('ai_summary')
+        };
+      }
+    } else {
+      data.pollError = 'Record not found: ' + input.sysId;
+    }
+    return;
+  }
+
+  // ACTION: CREATE_RECORD
+  if (input && input.action === 'create_record') {
+    try {
+      var ocr = new GlideRecord('x_birl3_clm_ocr_test');
+      ocr.initialize();
+      var sysId = ocr.insert();
+      if (!sysId) {
+        data.serverError = 'Failed to create OCR record.';
+        return;
+      }
+      data.sysId = sysId;
+    } catch (e) {
+      data.serverError = 'Error creating record: ' + e.message;
+    }
+    return;
+  }
+
+  // Initial page load — no action, do nothing
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>vedant.salunke@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-05-22 12:42:55</sys_created_on>
+        <sys_id>5e8538892b8dcb504572f3745e91bfef</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>newocr</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_5e8538892b8dcb504572f3745e91bfef</sys_update_name>
+        <sys_updated_by>vedant.salunke@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-05-22 12:54:04</sys_updated_on>
+        <template><![CDATA[<div class="ocr-widget">
+  <div class="panel panel-default">
+    <div class="panel-heading">
+      <h3 class="panel-title">
+        <span class="glyphicon glyphicon-file" style="margin-right:8px"></span>
+        Document OCR Extractor
+      </h3>
+    </div>
+    <div class="panel-body">
+
+      <!-- UPLOAD SECTION -->
+      <div ng-hide="c.data.processing || c.data.result">
+
+        <div class="form-group">
+          <label class="control-label">Upload PDF Document</label>
+          <div class="upload-zone"
+               ng-class="{'drag-over': c.dragging}"
+               ng-click="c.triggerUpload()"
+               ng-dragover="c.onDragOver($event)"
+               ng-dragleave="c.dragging=false"
+               ng-drop="c.onDrop($event)">
+            <div ng-hide="c.data.fileName">
+              <span class="glyphicon glyphicon-upload upload-icon"></span>
+              <p class="upload-text">Drag &amp; drop a PDF here, or click to browse</p>
+              <small class="text-muted">PDF files only • Max 10MB</small>
+            </div>
+            <div ng-show="c.data.fileName">
+              <span class="glyphicon glyphicon-file upload-icon text-success"></span>
+              <p class="upload-text text-success">{{c.data.fileName}}</p>
+              <small class="text-muted">Ready to process</small>
+            </div>
+          </div>
+          <input type="file"
+                 id="ocrFileInput"
+                 accept=".pdf"
+                 style="display:none"
+                 onchange="angular.element(this).scope().c.onFileSelect(event)"/>
+        </div>
+
+        <div class="alert alert-danger" ng-show="c.data.error">
+          <span class="glyphicon glyphicon-exclamation-sign"></span>
+          {{c.data.error}}
+        </div>
+
+        <button class="btn btn-primary btn-block btn-lg"
+                ng-click="c.processDocument()"
+                ng-disabled="!c.data.fileName">
+          <span class="glyphicon glyphicon-cog"></span>
+          Process Document
+        </button>
+
+      </div>
+
+      <!-- PROCESSING SECTION -->
+      <div ng-show="c.data.processing" class="processing-state text-center">
+        <div class="ocr-spinner">
+          <div class="spinner-ring"></div>
+        </div>
+        <h4>Processing your document...</h4>
+        <p class="text-muted">{{c.data.statusMsg}}</p>
+        <div class="progress" style="margin-top:16px">
+          <div class="progress-bar progress-bar-striped active"
+               style="width:100%">
+          </div>
+        </div>
+        <small class="text-muted">OCR extraction typically takes 2–3 minutes. Please keep this page open.</small>
+      </div>
+
+      <!-- RESULTS SECTION -->
+      <div ng-show="c.data.result">
+
+        <div class="alert alert-success">
+          <span class="glyphicon glyphicon-ok-circle"></span>
+          <strong> Extraction complete!</strong>
+          Record <strong>{{c.data.result.number}}</strong> has been saved.
+        </div>
+
+        <div class="result-grid">
+
+          <div class="result-card highlight">
+            <div class="result-label">Company Name</div>
+            <div class="result-value">{{c.data.result.name_of_company || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Rating</div>
+            <div class="result-value">{{c.data.result.rating || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Risk Index</div>
+            <div class="result-value">
+              <span class="risk-badge"
+                    ng-class="c.getRiskClass(c.data.result.risk_index)">
+                {{c.data.result.risk_index || '—'}}
+              </span>
+            </div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Credit Limit (INR Cr)</div>
+            <div class="result-value">{{c.data.result.credit_limit || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Total Current Liabilities</div>
+            <div class="result-value">{{c.data.result.total_current_liabilities || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Total Non-Current Liabilities</div>
+            <div class="result-value">{{c.data.result.total_non_current_liabilities || '—'}}</div>
+          </div>
+
+          <div class="result-card">
+            <div class="result-label">Total Equity</div>
+            <div class="result-value">{{c.data.result.total_equity || '—'}}</div>
+          </div>
+          
+          
+          
+          
+          
+          
+          
+           <div class="result-card">
+            <div class="result-label">Net Revenue</div>
+            <div class="result-value">{{c.data.result.net_revenue || '—'}}</div>
+          </div>
+           <div class="result-card">
+            <div class="result-label">Sales Growth %</div>
+            <div class="result-value">{{c.data.result.sales_growth || '—'}}</div>
+          </div>
+           <div class="result-card">
+            <div class="result-label">Gross Profit %</div>
+            <div class="result-value">{{c.data.result.gross_profit || '—'}}</div>
+          </div>
+           <div class="result-card">
+            <div class="result-label">EBITDA %</div>
+            <div class="result-value">{{c.data.result.ebitda || '—'}}</div>
+          </div>
+           <div class="result-card">
+            <div class="result-label">Debt Equity</div>
+            <div class="result-value">{{c.data.result.debt_equity || '—'}}</div>
+          </div>
+           <div class="result-card">
+            <div class="result-label">Int. Coverage</div>
+            <div class="result-value">{{c.data.result.int_coverage || '—'}}</div>
+          </div>
+           <div class="result-card">
+            <div class="result-label">Net WCC Days</div>
+            <div class="result-value">{{c.data.result.net_wcc_days || '—'}}</div>
+          </div>
+           <div class="result-card">
+            <div class="result-label">A/R Days</div>
+            <div class="result-value">{{c.data.result.ar_days || '—'}}</div>
+          </div>
+           <div class="result-card">
+            <div class="result-label">Inventory Days</div>
+            <div class="result-value">{{c.data.result.inventory_days || '—'}}</div>
+          </div>
+           <div class="result-card">
+            <div class="result-label">A/P Days</div>
+            <div class="result-value">{{c.data.result.ap_days || '—'}}</div>
+          </div>
+           <div class="result-card">
+            <div class="result-label">Interest</div>
+            <div class="result-value">{{c.data.result.interest || '—'}}</div>
+          </div>
+          
+          
+          
+
+          <div class="result-card">
+            <div class="result-label">Total Equity &amp; Liabilities</div>
+            <div class="result-value">{{c.data.result.total_equity_liabilities || '—'}}</div>
+          </div>
+
+        </div>
+
+        <div class="summary-box" ng-show="c.data.result.ai_summary">
+  <div class="summary-label">
+    <span class="glyphicon glyphicon-star"></span> AI Summary
+  </div>
+  <div class="summary-points">
+    <div class="summary-point" ng-repeat="point in c.getSummaryPoints(c.data.result.ai_summary)">
+      <span class="point-icon">&#10003;</span>
+      <span class="point-text">{{point}}</span>
+    </div>
+  </div>
+</div>
+
+        <button class="btn btn-default btn-block"
+                ng-click="c.reset()"
+                style="margin-top:20px">
+          <span class="glyphicon glyphicon-refresh"></span>
+          Process Another Document
+        </button>
+
+      </div>
+
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+</record_update>

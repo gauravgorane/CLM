@@ -1,0 +1,1997 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, spUtil, $q, $sce, $timeout) {
+    var c = this;
+
+    // ==========================================
+    // 1. STATE CONFIGURATION
+    // ==========================================
+    c.selectedFiles  = [];
+    c.submitting     = false;
+    c.submitted      = false;
+    c.appSysId       = null;
+    c.dragOver       = false;
+
+    // OTP State
+    c.showOTPModal   = false;
+    c.otpInput       = '';
+    c.otpError       = '';
+    c.verifying      = false;
+
+    // ==========================================
+    // 2. FORM DATA INITIALIZATION
+    // ==========================================
+    var rec = c.data.existingRecord || {};
+
+    c.formData = {
+        customer             : rec.customer      || '',
+        customer_code        : rec.customer_code || '',
+        proprietor_name      : '',
+        
+        pan_total_potential  : '',
+        pan_ut_sob           : '',
+        pan_ut_sob_pct       : '0.00',
+        pan_expected_sob     : '',
+        pan_expected_sob_pct : '0.00',
+
+        site_total_potential : '',
+        site_ut_sob          : '',
+        site_ut_sob_pct      : '0.00',
+        site_expected_sob    : '',
+        site_expected_sob_pct: '0.00',
+        
+        turnover_year1       : '',
+        turnover_year2       : '',
+        turnover_year3       : '',
+        additional_sd_offer  : '',
+        declaration          : false
+    };
+
+    // ==========================================
+    // 3. WATCHERS & CALCULATIONS
+    // ==========================================
+    function calcPercentage(sob, total) {
+        var s = parseFloat(sob) || 0;
+        var t = parseFloat(total) || 0;
+        if (t > 0) {
+            var pct = (s / t * 100);
+            if (pct > 100) pct = 100.00;
+            return pct.toFixed(2);
+        }
+        return '0.00';
+    }
+
+    $scope.$watchGroup(['c.formData.pan_total_potential', 'c.formData.pan_ut_sob', 'c.formData.pan_expected_sob'], function() {
+        var tot = parseFloat(c.formData.pan_total_potential) || 0;
+        var sob = parseFloat(c.formData.pan_ut_sob) || 0;
+        var exp = parseFloat(c.formData.pan_expected_sob) || 0;
+
+        if (sob > tot && tot > 0) c.formData.pan_ut_sob = tot;
+        if (exp > tot && tot > 0) c.formData.pan_expected_sob = tot;
+
+        c.formData.pan_ut_sob_pct = calcPercentage(c.formData.pan_ut_sob, c.formData.pan_total_potential);
+        c.formData.pan_expected_sob_pct = calcPercentage(c.formData.pan_expected_sob, c.formData.pan_total_potential);
+    });
+
+    $scope.$watchGroup(['c.formData.site_total_potential', 'c.formData.site_ut_sob', 'c.formData.site_expected_sob'], function() {
+        var tot = parseFloat(c.formData.site_total_potential) || 0;
+        var sob = parseFloat(c.formData.site_ut_sob) || 0;
+        var exp = parseFloat(c.formData.site_expected_sob) || 0;
+
+        if (sob > tot && tot > 0) c.formData.site_ut_sob = tot;
+        if (exp > tot && tot > 0) c.formData.site_expected_sob = tot;
+
+        c.formData.site_ut_sob_pct = calcPercentage(c.formData.site_ut_sob, c.formData.site_total_potential);
+        c.formData.site_expected_sob_pct = calcPercentage(c.formData.site_expected_sob, c.formData.site_total_potential);
+    });
+
+    // ==========================================
+    // 4. DRAG, DROP & FILE HELPERS
+    // ==========================================
+    c.onDragOver = function($event) { $event.preventDefault(); $event.stopPropagation(); c.dragOver = true; };
+    c.onDrop = function($event) { $event.preventDefault(); $event.stopPropagation(); c.dragOver = false; if ($event.dataTransfer && $event.dataTransfer.files) c.onFileSelect($event.dataTransfer.files); };
+    c.triggerFileInput = function() { var el = document.getElementById('clm-file-input'); if (el) el.click(); };
+
+    c.getExt = function(name) { return (name || '').split('.').pop().toLowerCase(); };
+    c.getFileIconClass = function(name) {
+        var ext = c.getExt(name);
+        if (ext === 'pdf') return 'clm-icon-pdf';
+        if (['jpg','jpeg','png'].indexOf(ext) > -1) return 'clm-icon-img';
+        if (['doc','docx'].indexOf(ext) > -1) return 'clm-icon-word';
+        if (['xls','xlsx'].indexOf(ext) > -1) return 'clm-icon-excel';
+        return 'clm-icon-other';
+    };
+    
+    c.getFileIcon = function(name) {
+        var ext = c.getExt(name);
+        var icons = { pdf: 'PDF', jpg: 'IMG', jpeg: 'IMG', png: 'IMG', doc: 'DOC', docx: 'DOC', xls: 'XLS', xlsx: 'XLS' };
+        return $sce.trustAsHtml(icons[ext] || 'FILE');
+    };
+    
+    c.formatSize = function(bytes) {
+        if (!bytes) return '0 B';
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / 1048576).toFixed(1) + ' MB';
+    };
+    
+    c.generatePreview = function(file) {
+        if (['jpg', 'jpeg', 'png'].indexOf(c.getExt(file.name)) === -1) return;
+        var reader = new FileReader();
+        reader.onload = function(e) { $timeout(function() { file.previewUrl = e.target.result; }); };
+        reader.readAsDataURL(file);
+    };
+
+    c.onFileSelect = function(fileList) {
+        var allowed = ['pdf','jpg','jpeg','png','doc','docx','xls','xlsx'];
+        var MAX_SIZE = 5 * 1024 * 1024; // 5 MB
+
+        for (var i = 0; i < fileList.length; i++) {
+            var file = fileList[i];
+            if (c.selectedFiles.some(function(f) { return f.name === file.name && f.size === file.size; })) continue;
+            if (allowed.indexOf(c.getExt(file.name)) === -1) { spUtil.addErrorMessage('Unsupported type: ' + file.name); continue; }
+            if (file.size > MAX_SIZE) { spUtil.addErrorMessage('File exceeds 5 MB limit: ' + file.name); continue; }
+
+            file.status = null;
+            c.selectedFiles.push(file);
+            c.generatePreview(file);
+        }
+        $timeout(angular.noop);
+    };
+    
+    c.removeFile = function(idx) { c.selectedFiles.splice(idx, 1); };
+
+    // ==========================================
+    // 5. UPLOAD LOGIC
+    // ==========================================
+    c.toBase64 = function(file) {
+        var d = $q.defer();
+        var r = new FileReader();
+        r.onload = function(e) { d.resolve(e.target.result.split(',')[1]); };
+        r.onerror = function() { d.reject('Read failed'); };
+        r.readAsDataURL(file);
+        return d.promise;
+    };
+
+    c.uploadSingleFile = function(file) {
+        var d = $q.defer();
+        file.status = 'uploading';
+        c.toBase64(file).then(function(base64) {
+            c.server.get({
+                action: 'attachFile', token: c.data.token, appSysId: c.appSysId,
+                file_name: file.name, content_type: file.type || 'application/octet-stream', file_data: base64
+            }).then(function(resp) {
+                $timeout(function() {
+                    file.status = (resp.data && resp.data.success) ? 'done' : 'error';
+                    d.resolve();
+                });
+            }, function() { $timeout(function() { file.status = 'error'; d.resolve(); }); });
+        }, function() { $timeout(function() { file.status = 'error'; d.resolve(); }); });
+        return d.promise;
+    };
+
+    c.retryFile = function(file) { file.status = null; c.uploadSingleFile(file); };
+
+    // ==========================================
+    // 6. OTP & SUBMISSION FLOW
+    // ==========================================
+    c.triggerOTP = function() {
+        if (!c.formData.declaration) return;
+        c.submitting = true;
+        
+        c.server.get({
+            action: 'generateOTP',
+            token: c.data.token,
+            formData: c.formData
+        }).then(function(resp) {
+            c.submitting = false;
+            if (resp.data.success) {
+                c.appSysId = resp.data.appSysId; 
+                c.otpInput = '';
+                c.otpError = '';
+                c.showOTPModal = true;
+            } else {
+                spUtil.addErrorMessage('Failed to generate OTP. Please try again.');
+            }
+        });
+    };
+
+    c.cancelOTP = function() { c.showOTPModal = false; };
+
+    c.submitRequest = function() {
+        if (!c.otpInput || c.otpInput.length < 6) {
+            c.otpError = 'Please enter a valid 6-digit OTP.';
+            return;
+        }
+
+        c.verifying = true;
+        c.otpError = '';
+
+        c.server.get({
+            action: 'verifyOTPAndSubmit',
+            token: c.data.token,
+            appSysId: c.appSysId,
+            otp: c.otpInput,
+            formData: c.formData
+        }).then(function(resp) {
+            if (resp.data.success) {
+                c.showOTPModal = false;
+                
+                var pending = c.selectedFiles.filter(function(f) { return f.status !== 'done'; });
+                if (pending.length > 0) {
+                    var chain = $q.when();
+                    pending.forEach(function(file) {
+                        chain = chain.then(function() { return c.uploadSingleFile(file); });
+                    });
+                    
+                    chain.then(function() {
+                        var failed = c.selectedFiles.filter(function(f) { return f.status === 'error'; }).length;
+                        if (failed) {
+                            c.verifying = false;
+                            spUtil.addErrorMessage(failed + ' file(s) failed to upload. The rest of the form was saved.');
+                        } else {
+                            $timeout(function() { c.verifying = false; c.submitted = true; });
+                        }
+                    });
+                } else {
+                    $timeout(function() { c.verifying = false; c.submitted = true; });
+                }
+
+            } else {
+                c.verifying = false;
+                c.otpError = resp.data.message || 'Invalid OTP. Please try again.';
+            }
+        });
+    };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/*
+  CLM Customer Data Upload — CSS  v2.1
+  Theme: Red/Crimson Gradient &amp; CLM Design System
+  - Base canvas sits on #eff3f7; floating card container with soft shadow and 8px radius
+  - Crimson banner (.clm-hero): gradient (#9b1111 -&gt; #b81e1e -&gt; #e0301e), yellow accent (#fff200),
+    decorative orange/crimson circular arcs, and crisp stat divider
+  - Primary button &amp; action highlights in orange (#E87722), primary hover in (#d35400)
+  - Focus rings styled with subtle orange glow (rgba(232, 119, 34, 0.12))
+  - Red-accented link highlights (#AF272F)
+*/
+@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+.clm-wrap *, .clm-wrap *::before, .clm-wrap *::after,
+.clm-overlay *, .clm-overlay *::before, .clm-overlay *::after {
+  box-sizing: border-box !important;
+}
+
+/* ===== Page Layout ===== */
+.clm-wrap {
+  background: #eff3f7 !important;
+  min-height: 100vh;
+  padding: 24px 16px 48px;
+  display: flex !important;
+  justify-content: center;
+  align-items: flex-start;
+  color: #1a1a1a;
+}
+.clm-shell {
+  width: 100%;
+  max-width: 1040px;
+}
+.clm-hidden-input {
+  display: none !important;
+}
+.clm-mt-16 {
+  margin-top: 16px !important;
+}
+.clm-mt-20 {
+  margin-top: 20px !important;
+}
+
+/* ===== State Cards ===== */
+.clm-state-card {
+  background: #fff !important;
+  border: 1px solid #dde3ea;
+  border-radius: 12px !important;
+  padding: 48px 40px !important;
+  text-align: center;
+  max-width: 460px;
+  width: 100%;
+  box-shadow: 0 10px 28px rgba(120, 20, 15, 0.12);
+  margin-top: 60px;
+}
+.clm-state-icon {
+  font-size: 30px;
+  margin-bottom: 16px;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.clm-state-card h3 {
+  font-size: 20px !important;
+  font-weight: 700 !important;
+  margin: 0 0 8px !important;
+  color: #1a1a1a !important;
+}
+.clm-state-card p {
+  font-size: 14px !important;
+  color: #5a6a7a !important;
+  margin: 0 !important;
+  line-height: 1.5;
+}
+.clm-state-danger .clm-state-icon {
+  background: #fef5f4;
+  color: #c0392b;
+}
+.clm-state-warn .clm-state-icon {
+  background: #fff4e0;
+  color: #E87722;
+}
+.clm-state-success .clm-state-icon {
+  background: #f4fbf6;
+  color: #1e8449;
+}
+
+/* ============================================================
+   PAGE HEADER BANNER (Crimson/Red Gradient with Arcs)
+   ============================================================ */
+.clm-hero {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px 24px;
+  flex-wrap: wrap;
+  padding: 26px 32px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #9b1111 0%, #b81e1e 45%, #e0301e 100%);
+  box-shadow: 0 10px 28px rgba(120, 20, 15, 0.28);
+}
+.clm-hero::before, .clm-hero::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.clm-hero::before {
+  width: 360px;
+  height: 360px;
+  right: -110px;
+  top: -190px;
+  background: rgba(244, 123, 48, 0.55);
+}
+.clm-hero::after {
+  width: 260px;
+  height: 260px;
+  right: 160px;
+  bottom: -200px;
+  background: rgba(120, 15, 15, 0.45);
+}
+.clm-hero-text {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 380px;
+  min-width: 0;
+}
+.clm-hero-bar {
+  width: 44px;
+  height: 6px;
+  border-radius: 3px;
+  background: #fff200;
+  margin-bottom: 12px;
+}
+.clm-hero-title {
+  font-size: 26px;
+  font-weight: 700;
+  color: #ffffff;
+  line-height: 1.25;
+  margin: 0;
+}
+.clm-hero-accent {
+  color: #fff200;
+}
+.clm-hero-sub {
+  margin-top: 6px;
+  font-size: 15px;
+  color: #ffeae4;
+  line-height: 1.5;
+}
+.clm-hero-stat {
+  position: relative;
+  z-index: 1;
+  padding-left: 24px;
+  border-left: 1px solid rgba(255, 255, 255, 0.3);
+  text-align: right;
+}
+.clm-hero-stat-v {
+  font-size: 32px;
+  font-weight: 700;
+  color: #fff200;
+  letter-spacing: 1px;
+  line-height: 1.1;
+  text-shadow: 0 1px 3px rgba(80, 10, 10, 0.35);
+}
+.clm-hero-stat-k {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #ffd9cf;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+}
+
+/* ===== Content Panel ===== */
+.clm-panel {
+  margin-top: 18px;
+  padding: 8px 24px 24px;
+  background: #fff;
+  border: 1px solid #e0e6ed;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+}
+
+/* ===== Card (Block) ===== */
+.clm-block {
+  margin-top: 16px;
+  background: #fff;
+  border: 1px solid #dde3ea;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.clm-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  flex-wrap: wrap;
+  padding: 14px 20px;
+  background: #fafbfc;
+  border-bottom: 1px solid #dde3ea;
+}
+.clm-block-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a1a1a;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+}
+.clm-block-title::before {
+  content: "";
+  width: 4px;
+  height: 16px;
+  border-radius: 2px;
+  background: #F3D54E;
+  flex-shrink: 0;
+}
+.clm-block-sub {
+  margin: 4px 0 0 14px;
+  font-size: 12px;
+  color: #5a6a7a;
+}
+.clm-block-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.clm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #fff;
+  border: 1px solid #dde3ea;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1a1a1a;
+  white-space: nowrap;
+}
+.clm-chip-k {
+  font-weight: 400;
+  color: #5a6a7a;
+}
+.clm-du-body {
+  padding: 18px 20px;
+}
+.clm-du-subhead {
+  font-size: 12px;
+  font-weight: 700;
+  color: #3a4451;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  margin-bottom: 10px;
+}
+.clm-du-note {
+  padding: 10px 20px;
+  font-size: 12px;
+  color: #7f8c9a;
+  background: #fafbfc;
+  border-top: 1px solid #e6eaef;
+}
+
+/* ===== Grids &amp; Fields ===== */
+.clm-grid-2 {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.clm-grid-3 {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+.clm-field {
+  display: flex !important;
+  flex-direction: column;
+  gap: 6px;
+}
+.clm-field &gt; label {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: #1a1a1a !important;
+  margin: 0 !important;
+}
+.clm-input {
+  width: 100% !important;
+  height: 38px !important;
+  border: 1px solid #cdd4dc !important;
+  border-radius: 6px !important;
+  font-size: 13px !important;
+  color: #1a1a1a !important;
+  background: #fff !important;
+  padding: 0 12px !important;
+  outline: none !important;
+  transition: border-color .2s, box-shadow .2s;
+  -webkit-appearance: none;
+  appearance: none;
+  box-shadow: none !important;
+}
+.clm-input:focus {
+  border-color: #E87722 !important;
+  box-shadow: 0 0 0 3px rgba(232, 119, 34, 0.12) !important;
+}
+.clm-input.clm-readonly, .clm-input[readonly] {
+  background: #f4f6f9 !important;
+  color: #3a4451 !important;
+  border-color: #dde3ea !important;
+  pointer-events: none;
+}
+.clm-input-wrap {
+  position: relative;
+  display: flex !important;
+  align-items: center;
+}
+.clm-prefix, .clm-suffix {
+  position: absolute;
+  font-size: 12px !important;
+  color: #7f8c9a !important;
+  font-weight: 700;
+  pointer-events: none;
+  z-index: 1;
+}
+.clm-prefix {
+  left: 11px;
+}
+.clm-suffix {
+  right: 11px;
+}
+.clm-has-prefix {
+  padding-left: 26px !important;
+}
+.clm-has-suffix {
+  padding-right: 42px !important;
+}
+.clm-input[type=number]::-webkit-inner-spin-button {
+  margin-right: 30px;
+}
+
+/* ===== Trade Details Table ===== */
+.clm-table-wrap {
+  overflow-x: auto;
+  background: #fff;
+}
+.clm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  table-layout: fixed;
+}
+.clm-table th {
+  background: #eef1f5;
+  color: #2b3440;
+  padding: 11px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .6px;
+  text-align: center;
+  white-space: nowrap;
+  border: 1px solid #dde3ea;
+}
+.clm-table td {
+  padding: 12px;
+  color: #1a1a1a;
+  text-align: center;
+  border: 1px solid #e6eaef;
+  vertical-align: middle;
+}
+.clm-table tr &gt; :first-child {
+  border-left: 0;
+  text-align: left;
+}
+.clm-table tr &gt; :last-child {
+  border-right: 0;
+}
+.clm-table thead tr:first-child th {
+  border-top: 0;
+}
+.clm-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.clm-table .grp {
+  border-left: 2px solid #c9d1db !important;
+}
+.clm-table tr.super th {
+  letter-spacing: 1px;
+  white-space: normal;
+  line-height: 1.3;
+}
+.clm-table th.bg-blank {
+  background: #f7f8fa;
+  vertical-align: middle;
+  text-align: left;
+}
+.clm-table th.bg-seg {
+  background: #f1f3f7;
+  color: #3a4451;
+}
+.clm-table th.bg-req {
+  background: #e6f4ea;
+  color: #2e7d32;
+}
+.clm-table th.bg-assess {
+  background: #efe9f9;
+  color: #6a3fb5;
+}
+
+.clm-du-trade th:first-child, .clm-du-trade td:first-child {
+  width: 16%;
+}
+.clm-du-trade tr.super th:nth-child(2) {
+  width: 18%;
+}
+.clm-du-trade tr:not(.super) th:nth-child(2), .clm-du-trade tr:not(.super) th:nth-child(4) {
+  width: 11%;
+}
+.clm-du-trade td:nth-child(4), .clm-du-trade td:nth-child(6) {
+  width: 11%;
+}
+.clm-du-level-name {
+  font-weight: 700;
+  color: #1a1a1a;
+}
+.clm-du-level-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #5a6a7a;
+}
+.clm-du-pct {
+  display: inline-block;
+  min-width: 64px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #f4f6f9;
+  border: 1px solid #e6eaef;
+  font-size: 14px;
+  font-weight: 700;
+  color: #6a3fb5;
+}
+.clm-du-pct.is-exp {
+  color: #2e7d32;
+}
+.clm-du-pct small {
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 2px;
+  opacity: .8;
+}
+
+/* ===== Suggested Documents ===== */
+.clm-du-docs {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #dde3ea;
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.clm-du-doc {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #fff;
+}
+.clm-du-doc + .clm-du-doc {
+  border-top: 1px solid #eef1f5;
+}
+.clm-du-doc-num {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #F3D54E;
+  color: #1a1a1a;
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.clm-du-doc-info {
+  flex: 1;
+  min-width: 0;
+}
+.clm-du-doc-t {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a1a1a;
+}
+.clm-du-doc-s {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #5a6a7a;
+}
+.clm-du-pill-pdf {
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid #f5c2bc;
+  background: #fef5f4;
+  color: #c0392b;
+  font-size: 10.5px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.clm-du-pill-opt {
+  padding: 3px 10px;
+  border-radius: 12px;
+  border: 1px solid #dde3ea;
+  background: #f7f8fa;
+  color: #5a6a7a;
+  font-size: 11.5px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* ===== Dropzone ===== */
+.clm-dropzone {
+  border: 2px dashed #c9d1db !important;
+  border-radius: 8px !important;
+  padding: 24px 20px !important;
+  text-align: center;
+  cursor: pointer;
+  background: #fafbfc !important;
+  transition: border-color .2s, background .2s;
+  user-select: none;
+}
+.clm-dropzone:hover, .clm-dropzone-active {
+  border-color: #E87722 !important;
+  background: #fffcf8 !important;
+}
+.clm-dz-icon {
+  margin-bottom: 8px;
+}
+.clm-dz-text {
+  font-size: 14px !important;
+  font-weight: 700 !important;
+  color: #1a1a1a !important;
+}
+.clm-dz-hint {
+  margin: 4px 0 12px;
+  font-size: 12px;
+  color: #5a6a7a;
+}
+.clm-dz-limits {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.clm-limit-pill {
+  background: #eef1f5 !important;
+  color: #3a4451 !important;
+  border-radius: 4px !important;
+  padding: 2px 8px !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+}
+.clm-limit-sep {
+  color: #c9d1db !important;
+}
+.clm-limit-size {
+  color: #5a6a7a !important;
+  font-size: 12px !important;
+}
+
+/* ===== Uploaded Files ===== */
+.clm-file-grid {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+.clm-file-card {
+  position: relative;
+  border: 1px solid #dde3ea !important;
+  border-radius: 8px !important;
+  padding: 12px 14px !important;
+  background: #fff !important;
+  display: flex !important;
+  align-items: center;
+  gap: 12px;
+  overflow: hidden;
+}
+.clm-file-card.clm-file-done {
+  border-color: #b9e3c6 !important;
+  background: #f4fbf6 !important;
+}
+.clm-file-card.clm-file-uploading {
+  border-color: #E87722 !important;
+}
+.clm-file-card.clm-file-error {
+  border-color: #f5c2bc !important;
+  background: #fef5f4 !important;
+}
+.clm-file-icon, .clm-file-thumb {
+  width: 38px;
+  height: 38px;
+  border-radius: 6px !important;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  flex-shrink: 0;
+}
+.clm-file-thumb {
+  overflow: hidden;
+}
+.clm-file-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.clm-icon-pdf   { background: #fef5f4 !important; color: #c0392b !important; }
+.clm-icon-img   { background: #eef6fb !important; color: #1782c5 !important; }
+.clm-icon-word  { background: #e3eefa !important; color: #0b5394 !important; }
+.clm-icon-excel { background: #f4fbf6 !important; color: #1e8449 !important; }
+.clm-icon-other { background: #eef1f5 !important; color: #5a6a7a !important; }
+
+.clm-file-info {
+  flex: 1;
+  min-width: 0;
+}
+.clm-file-name {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: #1a1a1a !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.clm-file-meta {
+  display: flex !important;
+  gap: 8px;
+  margin-top: 3px;
+  align-items: center;
+}
+.clm-file-size {
+  font-size: 11px !important;
+  color: #7f8c9a !important;
+}
+.clm-file-status {
+  font-size: 12px !important;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.clm-status-pending {
+  color: #7f8c9a !important;
+}
+.clm-status-uploading {
+  color: #E87722 !important;
+  display: flex !important;
+  align-items: center;
+  gap: 5px;
+}
+.clm-status-done {
+  color: #1e8449 !important;
+  font-weight: 700 !important;
+}
+.clm-status-error {
+  color: #c0392b !important;
+}
+.clm-retry-link {
+  color: #AF272F !important;
+  font-weight: 700;
+  margin-left: 4px;
+  text-decoration: underline;
+}
+.clm-file-remove {
+  background: none !important;
+  border: none !important;
+  color: #7f8c9a !important;
+  cursor: pointer;
+  font-size: 13px !important;
+  padding: 2px 4px !important;
+  flex-shrink: 0;
+  transition: color .15s;
+}
+.clm-file-remove:hover {
+  color: #E23D28 !important;
+}
+.clm-file-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: rgba(0, 0, 0, .06);
+}
+.clm-file-progress-bar {
+  height: 100%;
+  background: #E87722;
+  animation: clm-indeterminate 1.4s infinite linear;
+  width: 40%;
+}
+@keyframes clm-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+/* ===== Spinner ===== */
+.clm-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50% !important;
+  animation: clm-spin .7s infinite linear;
+  vertical-align: middle;
+}
+.clm-spinner-light {
+  color: #ffffff !important;
+}
+@keyframes clm-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ===== Declaration &amp; Submit ===== */
+.clm-du-decl-block.is-checked {
+  border-color: #F3D54E;
+}
+.clm-declaration {
+  display: flex !important;
+  align-items: flex-start;
+  gap: 12px;
+  cursor: pointer;
+  margin: 0 !important;
+  padding: 14px 16px;
+  background: #fffcf0;
+  border: 1px solid #f1e2a0;
+  border-radius: 8px;
+  font-weight: 400 !important;
+}
+.clm-checkbox {
+  display: none !important;
+}
+.clm-checkbox-box {
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  border: 2px solid #8a96a3 !important;
+  border-radius: 4px !important;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  background: #fff !important;
+}
+.clm-checkbox:checked + .clm-checkbox-box {
+  background: #E87722 !important;
+  border-color: #E87722 !important;
+}
+.clm-checkbox:checked + .clm-checkbox-box::after {
+  content: '✓';
+  color: #ffffff !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+}
+.clm-checkbox-text {
+  font-size: 13px !important;
+  color: #1a1a1a !important;
+  line-height: 1.55;
+}
+.clm-du-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  flex-wrap: wrap;
+  padding: 14px 20px;
+  background: #fafbfc;
+  border-top: 1px solid #dde3ea;
+}
+.clm-du-foot-hint {
+  font-size: 12.5px;
+  color: #5a6a7a;
+  flex: 1;
+  min-width: 220px;
+}
+.clm-du-foot-hint strong {
+  color: #1a1a1a;
+}
+
+/* ===== Buttons ===== */
+.clm-btn {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 20px !important;
+  height: 40px !important;
+  border-radius: 6px !important;
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  border: 1px solid transparent !important;
+  cursor: pointer;
+  transition: all .2s;
+  white-space: nowrap;
+}
+.clm-btn-primary {
+  background: #E87722 !important;
+  color: #ffffff !important;
+}
+.clm-btn-primary:hover:not([disabled]) {
+  background: #d35400 !important;
+}
+.clm-btn-primary[disabled] {
+  opacity: .5;
+  background: #eef1f5 !important;
+  border-color: #e0e6ed !important;
+  color: #9aa5b1 !important;
+  cursor: not-allowed !important;
+}
+.clm-btn-submit {
+  height: 44px !important;
+  padding: 0 32px !important;
+  min-width: 200px;
+}
+.clm-btn-ghost {
+  background: #fff !important;
+  color: #1a1a1a !important;
+  border: 1px solid #cdd4dc !important;
+}
+.clm-btn-ghost:hover:not([disabled]) {
+  background: #1a1a1a !important;
+  border-color: #1a1a1a !important;
+  color: #F3D54E !important;
+}
+
+/* ===== OTP Modal ===== */
+.clm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(26, 26, 26, 0.55);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(3px);
+  padding: 16px;
+}
+.clm-otp-modal {
+  background: #fff;
+  width: 420px;
+  max-width: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .25);
+  border-top: 4px solid #E87722;
+}
+.clm-otp-head {
+  padding: 22px 28px 18px;
+  background: linear-gradient(135deg, #9b1111 0%, #b81e1e 45%, #e0301e 100%);
+}
+.clm-otp-head .clm-hero-bar {
+  margin-bottom: 10px;
+}
+.clm-otp-head h3 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #ffffff;
+}
+.clm-otp-body {
+  padding: 22px 28px 26px;
+  text-align: center;
+}
+.clm-otp-body p {
+  font-size: 13px;
+  color: #3a4451;
+  margin: 0 0 20px;
+  line-height: 1.55;
+  text-align: left;
+}
+.clm-otp-input {
+  text-align: center;
+  font-size: 22px !important;
+  letter-spacing: 6px;
+  font-weight: 700;
+  height: 52px !important;
+  margin-bottom: 8px;
+}
+.clm-otp-input::placeholder {
+  font-size: 14px;
+  letter-spacing: 0;
+  font-weight: 400;
+  color: #8a96a3;
+}
+.clm-otp-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 20px;
+}
+.clm-otp-actions .clm-btn {
+  flex: 1;
+}
+.clm-err-msg {
+  color: #c0392b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* ===== Responsive ===== */
+@media (max-width: 900px) {
+  .clm-grid-3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .clm-hero-title {
+    font-size: 22px;
+  }
+}
+@media (max-width: 768px) {
+  .clm-wrap {
+    padding: 12px 10px 32px !important;
+  }
+  .clm-hero {
+    padding: 22px 20px;
+    margin-bottom: 16px;
+  }
+  .clm-hero::before {
+    width: 260px;
+    height: 260px;
+    right: -110px;
+    top: -150px;
+  }
+  .clm-hero::after {
+    display: none;
+  }
+  .clm-hero-title {
+    font-size: 22px;
+  }
+  .clm-hero-sub {
+    font-size: 14px;
+  }
+  .clm-hero-stat-v {
+    font-size: 28px;
+  }
+  .clm-panel {
+    padding: 4px 12px 16px;
+  }
+
+  /* Trade table mobile cards */
+  .clm-du-trade, .clm-du-trade tbody, .clm-du-trade tr, .clm-du-trade td {
+    display: block;
+    width: 100% !important;
+  }
+  .clm-du-trade thead {
+    display: none;
+  }
+  .clm-du-trade tbody tr {
+    padding: 4px 0 8px;
+    border-bottom: 1px solid #dde3ea;
+  }
+  .clm-du-trade tbody tr:last-child {
+    border-bottom: 0;
+  }
+  .clm-du-trade td {
+    border: 0 !important;
+    text-align: left;
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .clm-table.clm-du-trade td.grp {
+    border-left: 0 !important;
+  }
+  .clm-du-trade td.clm-du-level {
+    display: block;
+    background: #f6f7f9;
+    padding: 10px 14px;
+  }
+  .clm-du-trade td[data-label]::before {
+    content: attr(data-label);
+    font-size: 12px;
+    color: #5a6a7a;
+    flex: 1;
+  }
+  .clm-du-trade td .clm-input-wrap {
+    flex: 0 0 52%;
+  }
+}
+
+@media (max-width: 640px) {
+  .clm-hero {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+    padding: 20px;
+  }
+  .clm-hero-text {
+    flex-basis: auto;
+    width: 100%;
+  }
+  .clm-hero-title {
+    font-size: 20px;
+  }
+  .clm-hero-sub {
+    font-size: 13px;
+  }
+  .clm-hero-stat {
+    border-left: 0;
+    padding-left: 0;
+    padding-top: 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.22);
+    text-align: left;
+    width: 100%;
+  }
+  .clm-hero-stat-v {
+    font-size: 26px;
+  }
+  .clm-grid-2, .clm-grid-3, .clm-file-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .clm-block-head, .clm-du-body, .clm-du-foot {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+  .clm-du-doc {
+    flex-wrap: wrap;
+  }
+  .clm-du-pill-opt {
+    display: none;
+  }
+  .clm-btn-submit {
+    width: 100%;
+  }
+}
+
+/* ===== Global Font Family (Keep Last) ===== */
+.clm-wrap, .clm-wrap *, .clm-wrap input, .clm-wrap select, .clm-wrap textarea, .clm-wrap button, .clm-wrap table,
+.clm-overlay, .clm-overlay *, .clm-overlay input, .clm-overlay button {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>uclm_trade_document_submission_form</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Trade Document Submission Form</name>
+        <option_schema/>
+        <public>true</public>
+        <roles/>
+        <script><![CDATA[(function () {
+
+	// =========================================================================
+	// 1. CONFIGURATION & SCHEMA CONSTANTS
+	// =========================================================================
+	var CONFIG = {
+		TABLES: {
+			MASTER: 'x_birl3_clm_clm_customer_master1',
+			APP: 'x_birl3_clm_clm_credit_application',
+			USER: 'sys_user'
+		},
+		EVENTS: {
+			OTP: 'x_birl3_clm.trade_document.otp',
+			SUBMITTED: 'x_birl3_clm.trade_document.submitted'
+		},
+		URLS: {
+			BASE: gs.getProperty('glide.servlet.uri') || 'https://abgdev.service-now.com/'
+		}
+	};
+
+	// Safe Token Resolution (Works on first load AND during server action calls)
+	var currentToken = (input && input.token) ? input.token : ($sp.getParameter('token') || data.token || '');
+	data.token = currentToken;
+
+	// =========================================================================
+	// 2. INITIALIZATION: LOAD MASTER & DRAFT RECORDS
+	// =========================================================================
+	if (currentToken && !input) {
+		var gr = new GlideRecord(CONFIG.TABLES.MASTER);
+		gr.addQuery('token', currentToken);
+		gr.setLimit(1);
+		gr.query();
+
+		if (gr.next()) {
+			data.sys_id = gr.getUniqueValue();
+			var uVal = gr.getValue('update_allowed');
+			data.updateAllowed = (uVal === 'true' || uVal === '1' || uVal === true || uVal === 1);
+
+			data.existingRecord = {
+				customer         : gr.getValue('customer_name')     || '',
+				customer_code    : gr.getValue('customer_code_sap') || '',
+				segment          : gr.getValue('segment')           || '',
+				last_sent_email  : gr.getValue('last_sent_email')   || gr.getValue('u_last_sent_email') || 'your registered email'
+			};
+
+			var appGr = new GlideRecord(CONFIG.TABLES.APP);
+			appGr.addQuery('customer_master', gr.getUniqueValue());
+			appGr.addQuery('application_status', 'draft');
+			appGr.setLimit(1);
+			appGr.query();
+
+			if (appGr.next()) {
+				data.appSysId = appGr.getUniqueValue();
+				data.savedDraft = {
+					gstin                : appGr.getValue('gstin')                 || '',
+					proprietor_name      : appGr.getValue('proprietor_name')       || '',
+					pan_total_potential  : appGr.getValue('pan_total_potential')   || '',
+					pan_ut_sob           : appGr.getValue('pan_ut_sob')            || '',
+					pan_expected_sob     : appGr.getValue('pan_expected_sob')     || '',
+					site_total_potential : appGr.getValue('site_total_potential') || '',
+					site_ut_sob          : appGr.getValue('site_ut_sob')           || '',
+					site_expected_sob    : appGr.getValue('site_expected_sob')     || '',
+					turnover_year1       : appGr.getValue('turnover_year_1')       || '',
+					turnover_year2       : appGr.getValue('turnover_year_2')       || '',
+					turnover_year3       : appGr.getValue('turnover_year_3')       || '',
+					additional_sd_offer  : appGr.getValue('additional_sd_offer')   || ''
+				};
+			}
+		}
+	}
+
+	// =========================================================================
+	// 3. ACTION: GENERATE OTP & TRIGGER NOTIFICATION ON CUSTOMER MASTER
+	// =========================================================================
+	if (input && input.action === 'generateOTP') {
+		var tokenToUse = input.token || currentToken;
+		var mGr = new GlideRecord(CONFIG.TABLES.MASTER);
+		mGr.addQuery('token', tokenToUse);
+		mGr.setLimit(1);
+		mGr.query();
+
+		if (mGr.next()) {
+			var fd = input.formData || {};
+			var aRec = new GlideRecord(CONFIG.TABLES.APP);
+
+			var existingDraft = new GlideRecord(CONFIG.TABLES.APP);
+			existingDraft.addQuery('customer_master', mGr.getUniqueValue());
+			existingDraft.addQuery('application_status', 'draft');
+			existingDraft.setLimit(1);
+			existingDraft.query();
+
+			if (existingDraft.next()) {
+				aRec = existingDraft;
+			} else {
+				aRec.initialize();
+				aRec.setValue('customer_master', mGr.getUniqueValue());
+				aRec.setValue('application_status', 'draft');
+			}
+
+			if (fd.gstin) {
+				aRec.setValue('gstin', fd.gstin);
+			}
+
+			aRec.setValue('proprietor_name',       fd.proprietor_name       || '');
+			aRec.setValue('pan_total_potential',   fd.pan_total_potential   || '');
+			aRec.setValue('pan_ut_sob',            fd.pan_ut_sob            || '');
+			aRec.setValue('pan_ut_sob_per',        fd.pan_ut_sob_pct        || '');
+			aRec.setValue('pan_expected_sob',      fd.pan_expected_sob      || '');
+			aRec.setValue('pan_expected_sob_per',  fd.pan_expected_sob_pct  || '');
+
+			aRec.setValue('site_total_potential',  fd.site_total_potential  || '');
+			aRec.setValue('site_ut_sob',           fd.site_ut_sob           || '');
+			aRec.setValue('site_ut_sob_per',       fd.site_ut_sob_pct       || '');
+			aRec.setValue('site_expected_sob',     fd.site_expected_sob     || '');
+			aRec.setValue('site_expected_sob_per', fd.site_expected_sob_pct || '');
+
+			aRec.setValue('turnover_year_1',       fd.turnover_year1        || '');
+			aRec.setValue('turnover_year_2',       fd.turnover_year2        || '');
+			aRec.setValue('turnover_year_3',       fd.turnover_year3        || '');
+			aRec.setValue('additional_sd_offer',   fd.additional_sd_offer   || '');
+
+			var generatedOTP = Math.floor(100000 + Math.random() * 900000).toString();
+			aRec.setValue('otp_code', generatedOTP); 
+
+			var savedAppId = aRec.sys_id ? (aRec.update() ? aRec.getUniqueValue() : null) : aRec.insert();
+
+			// Resolve email from Customer Master
+			var toEmail = mGr.getValue('last_sent_email') || mGr.getValue('u_last_sent_email') || mGr.getValue('email_id') || '';
+			toEmail = (toEmail + '').trim();
+
+			if (toEmail) {
+				// PASS mGr (Customer Master) TO MATCH THE NOTIFICATION TABLE
+				// parm1: Recipient Customer Email
+				// parm2: 6-digit OTP Code
+				gs.eventQueue(CONFIG.EVENTS.OTP, mGr, toEmail, generatedOTP);
+			} else {
+				gs.error('[Trade Doc Form] OTP Event Skipped: No email on Customer Master ' + mGr.getUniqueValue());
+			}
+
+			data.success = true;
+			data.appSysId = savedAppId || aRec.getUniqueValue();
+		} else {
+			data.success = false;
+			data.message = 'Invalid session or token.';
+		}
+	}
+
+	// =========================================================================
+	// 4. ACTION: VERIFY OTP & COMPLETE SUBMISSION (FIRES NOTIFICATION TO TSH)
+	// =========================================================================
+	if (input && input.action === 'verifyOTPAndSubmit') {
+		var appRecSub = new GlideRecord(CONFIG.TABLES.APP);
+
+		if (appRecSub.get(input.appSysId)) {
+			var storedOTP = appRecSub.getValue('otp_code');
+
+			if (storedOTP && storedOTP === input.otp) {
+				var fdSub = input.formData || {};
+				var tokenToFinish = input.token || currentToken;
+				var mGrSub = new GlideRecord(CONFIG.TABLES.MASTER);
+				var customerPAN = '';
+
+				if (mGrSub.get('token', tokenToFinish)) {
+					mGrSub.setValue('update_allowed', false); 
+					mGrSub.setValue('link_status', 'Submitted'); 
+					customerPAN = mGrSub.getValue('pan') || '';
+					mGrSub.update();
+				}
+
+				if (fdSub.gstin) {
+					appRecSub.setValue('gstin', fdSub.gstin);
+				}
+
+				appRecSub.setValue('proprietor_name',       fdSub.proprietor_name       || '');
+				appRecSub.setValue('pan_total_potential',   fdSub.pan_total_potential   || '');
+				appRecSub.setValue('pan_ut_sob',            fdSub.pan_ut_sob            || '');
+				appRecSub.setValue('pan_ut_sob_per',        fdSub.pan_ut_sob_pct        || '');
+				appRecSub.setValue('pan_expected_sob',      fdSub.pan_expected_sob      || '');
+				appRecSub.setValue('pan_expected_sob_per',  fdSub.pan_expected_sob_pct  || '');
+
+				appRecSub.setValue('site_total_potential',  fdSub.site_total_potential  || '');
+				appRecSub.setValue('site_ut_sob',           fdSub.site_ut_sob           || '');
+				appRecSub.setValue('site_ut_sob_per',       fdSub.site_ut_sob_pct       || '');
+				appRecSub.setValue('site_expected_sob',     fdSub.site_expected_sob     || '');
+				appRecSub.setValue('site_expected_sob_per', fdSub.site_expected_sob_pct || '');
+
+				appRecSub.setValue('turnover_year_1',       fdSub.turnover_year1        || '');
+				appRecSub.setValue('turnover_year_2',       fdSub.turnover_year2        || '');
+				appRecSub.setValue('turnover_year_3',       fdSub.turnover_year3        || '');
+				appRecSub.setValue('additional_sd_offer',   fdSub.additional_sd_offer   || '');
+
+				appRecSub.setValue('otp_code', ''); 
+				appRecSub.setValue('application_status', 'submitted');
+				appRecSub.setValue('declaration_accepted', true);
+				appRecSub.update();
+
+				// ── RESOLVE TSH RECIPIENT EMAIL DIRECTLY FROM TSH MAPPING ──
+				var tshEmail = '';
+				var tshName = 'Territory Sales Head';
+
+				// 1. Check assigned TSH reference on Customer Master
+				if (mGrSub.isValidRecord() && mGrSub.isValidField('tsh') && mGrSub.getValue('tsh')) {
+					var tshGr = mGrSub.tsh.getRefRecord();
+					if (tshGr && tshGr.isValidRecord()) {
+						if (tshGr.getTableName() === 'x_birl3_clm_tsh') {
+							var uGr = tshGr.name ? tshGr.name.getRefRecord() : null;
+							if (uGr && uGr.isValidRecord() && uGr.getValue('email')) {
+								tshEmail = uGr.getValue('email');
+								tshName = uGr.getValue('name') || tshName;
+							}
+						} else if (tshGr.getValue('email')) {
+							tshEmail = tshGr.getValue('email');
+							tshName = tshGr.getValue('name') || tshName;
+						}
+					}
+				}
+
+				// 2. Fallback: Check who sent the link if TSH lookup failed
+				if (!tshEmail) {
+					var lastUpdatedBy = mGrSub.getValue('sys_updated_by');
+					if (lastUpdatedBy && lastUpdatedBy !== 'guest') {
+						var fallbackUser = new GlideRecord(CONFIG.TABLES.USER);
+						if (fallbackUser.get('user_name', lastUpdatedBy) && fallbackUser.getValue('email')) {
+							tshEmail = fallbackUser.getValue('email');
+							tshName = fallbackUser.getValue('name') || tshName;
+						}
+					}
+				}
+
+				// Trigger Notification Event on Customer Master (mGrSub)
+				if (tshEmail) {
+					var dashboardLink = CONFIG.URLS.BASE.replace(/\/$/, "") + '/uclm?id=uclm_trade_document_submission_dashboard&pan=' + encodeURIComponent(customerPAN);
+
+					// PASS mGrSub (Customer Master) to match notification table
+					// parm1: TSH Email
+					// parm2: Dashboard link
+					gs.eventQueue(CONFIG.EVENTS.SUBMITTED, mGrSub, tshEmail.trim(), dashboardLink);
+				} else {
+					gs.error('[Trade Doc Form] TSH Notification Skipped: No TSH email found for customer: ' + mGrSub.getUniqueValue());
+				}
+
+				data.success = true;
+			} else {
+				data.success = false;
+				data.message = 'Invalid OTP. Please try again.';
+			}
+		} else {
+			data.success = false;
+			data.message = 'Application record not found.';
+		}
+	}
+
+	// =========================================================================
+	// 5. ACTION: ATTACH FILES
+	// =========================================================================
+	if (input && input.action === 'attachFile') {
+		try {
+			var tGr = new GlideRecord(CONFIG.TABLES.APP);
+			if (tGr.get(input.appSysId)) {
+				var attachSysId = new GlideSysAttachment().writeBase64(
+					tGr,
+					input.file_name,
+					input.content_type || 'application/octet-stream',
+					input.file_data
+				);
+				data.success = !!attachSysId;
+			} else {
+				data.success = false;
+			}
+		} catch (e) {
+			data.success = false;
+		}
+	}
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-26 11:49:50</sys_created_on>
+        <sys_id>184afe2597177214be31fa17f053afa9</sys_id>
+        <sys_mod_count>146</sys_mod_count>
+        <sys_name>UCLM Trade Document Submission Form</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_184afe2597177214be31fa17f053afa9</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-10-23 12:34:06</sys_updated_on>
+        <template><![CDATA[<!--
+  CLM Customer Data Upload — HTML template  v2.1
+  Theme: Red/Crimson Gradient & CLM Design System
+  - Navy banner replaced with the red/crimson gradient hero banner (.clm-hero) featuring
+    curved decorative arcs, yellow bar/accents (#fff200), and customer code stat block
+  - Primary actions, focus rings, and dropzone highlights aligned to CLM orange (#E87722)
+  - Dropzone SVG icon stroke updated to theme accent
+  - OTP Modal header aligned with crimson gradient and yellow accent bar
+  - All ng-model, ng-click, ng-if, and controller bindings preserved exactly
+-->
+<div class="clm-wrap">
+
+  <!-- ===== State cards ===== -->
+  <div ng-if="!c.data.sys_id" class="clm-state-card clm-state-danger">
+    <div class="clm-state-icon">⚠</div>
+    <h3>Invalid or Expired Link</h3>
+    <p>Please contact your sales representative.</p>
+  </div>
+
+  <div ng-if="c.data.sys_id && !c.data.updateAllowed && !c.submitted" class="clm-state-card clm-state-warn">
+    <div class="clm-state-icon">]]>🔒<![CDATA[</div>
+    <h3>Already Submitted</h3>
+    <p>Documents for this link have already been uploaded.<br>
+       Contact your sales representative to resubmit.</p>
+  </div>
+
+  <div ng-if="c.submitted" class="clm-state-card clm-state-success">
+    <div class="clm-state-icon">✓</div>
+    <h3>Application Submitted!</h3>
+    <p>Your credit limit application and documents have been received successfully. Thank you!</p>
+  </div>
+
+  <!-- ===== Main form ===== -->
+  <div ng-if="c.data.sys_id && c.data.updateAllowed && !c.submitted" class="clm-shell"
+       ng-init="unit = (c.data.existingRecord.segment === 'RMC' ? 'CuM' : 'MT')">
+
+    <!-- Page header banner -->
+    <div class="clm-hero">
+      <div class="clm-hero-text">
+        <div class="clm-hero-bar"></div>
+        <div class="clm-hero-title">Data Upload <span class="clm-hero-accent">Application</span></div>
+        <div class="clm-hero-sub">Submit your trade details and supporting documents for the credit limit review</div>
+      </div>
+      <div class="clm-hero-stat" ng-if="c.formData.customer_code">
+        <div class="clm-hero-stat-v">{{c.formData.customer_code}}</div>
+        <div class="clm-hero-stat-k">Customer Code</div>
+      </div>
+    </div>
+
+    <div class="clm-panel">
+
+      <!-- 1. Customer Details -->
+      <div class="clm-block">
+        <div class="clm-block-head">
+          <div class="clm-block-heading">
+            <div class="clm-block-title">Customer Details</div>
+            <div class="clm-block-sub">Name and code are pre-filled from our records</div>
+          </div>
+          <div class="clm-block-meta">
+            <span class="clm-chip"><span class="clm-chip-k">Source</span> Auto Populated</span>
+          </div>
+        </div>
+        <div class="clm-du-body">
+          <div class="clm-grid-2">
+            <div class="clm-field">
+              <label>Firm Name / Customer Name</label>
+              <input type="text" class="clm-input clm-readonly" ng-model="c.formData.customer" readonly>
+            </div>
+            <div class="clm-field">
+              <label>Customer Code (SAP)</label>
+              <input type="text" class="clm-input clm-readonly" ng-model="c.formData.customer_code" readonly>
+            </div>
+          </div>
+          <div class="clm-field clm-mt-16">
+            <label>Proprietor / Partner / Owner Name</label>
+            <input type="text" class="clm-input" ng-model="c.formData.proprietor_name" placeholder="Full legal name">
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Trade Details (PAN level + Code level) -->
+      <div class="clm-block">
+        <div class="clm-block-head">
+          <div class="clm-block-heading">
+            <div class="clm-block-title">Trade Details</div>
+            <div class="clm-block-sub">Monthly quantities in {{unit}}. SOB % is calculated automatically.</div>
+          </div>
+          <div class="clm-block-meta">
+            <span class="clm-chip"><span class="clm-chip-k">Segment</span> {{c.data.existingRecord.segment || 'Trade'}}</span>
+            <span class="clm-chip"><span class="clm-chip-k">Unit</span> {{unit}} / Month</span>
+          </div>
+        </div>
+
+        <div class="clm-table-wrap">
+          <table class="clm-table clm-du-trade">
+            <thead>
+              <tr class="super">
+                <th class="bg-blank" rowspan="2">Level</th>
+                <th class="bg-seg grp">Expected Monthly Sales</th>
+                <th class="bg-assess grp" colspan="2">Current SOB</th>
+                <th class="bg-req grp" colspan="2">Expected SOB</th>
+              </tr>
+              <tr>
+                <th class="grp">Qty ({{unit}}/M)</th>
+                <th class="grp">Qty ({{unit}}/M)</th>
+                <th>%</th>
+                <th class="grp">Qty ({{unit}}/M)</th>
+                <th>%</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- PAN level -->
+              <tr>
+                <td class="clm-du-level">
+                  <div class="clm-du-level-name">PAN Level</div>
+                  <div class="clm-du-level-sub">All codes under your PAN</div>
+                </td>
+                <td class="grp" data-label="Expected Monthly Sales ({{unit}}/M)">
+                  <div class="clm-input-wrap">
+                    <input type="number" min="0" oninput="validity.valid||(value='');" class="clm-input clm-has-suffix" ng-model="c.formData.pan_total_potential" placeholder="0">
+                    <span class="clm-suffix">{{unit}}</span>
+                  </div>
+                </td>
+                <td class="grp" data-label="Current SOB ({{unit}}/M)">
+                  <div class="clm-input-wrap">
+                    <input type="number" min="0" oninput="validity.valid||(value='');" class="clm-input clm-has-suffix" ng-model="c.formData.pan_ut_sob" placeholder="0">
+                    <span class="clm-suffix">{{unit}}</span>
+                  </div>
+                </td>
+                <td data-label="Current SOB %">
+                  <span class="clm-du-pct">{{c.formData.pan_ut_sob_pct}}<small>%</small></span>
+                </td>
+                <td class="grp" data-label="Expected SOB ({{unit}}/M)">
+                  <div class="clm-input-wrap">
+                    <input type="number" min="0" oninput="validity.valid||(value='');" class="clm-input clm-has-suffix" ng-model="c.formData.pan_expected_sob" placeholder="0">
+                    <span class="clm-suffix">{{unit}}</span>
+                  </div>
+                </td>
+                <td data-label="Expected SOB %">
+                  <span class="clm-du-pct is-exp">{{c.formData.pan_expected_sob_pct}}<small>%</small></span>
+                </td>
+              </tr>
+
+              <!-- Code level -->
+              <tr>
+                <td class="clm-du-level">
+                  <div class="clm-du-level-name">Code Level</div>
+                  <div class="clm-du-level-sub">This customer code<span ng-if="c.data.existingRecord.segment"> · {{c.data.existingRecord.segment}}</span></div>
+                </td>
+                <td class="grp" data-label="Expected Monthly Sales ({{unit}}/M)">
+                  <div class="clm-input-wrap">
+                    <input type="number" min="0" oninput="validity.valid||(value='');" class="clm-input clm-has-suffix" ng-model="c.formData.site_total_potential" placeholder="0">
+                    <span class="clm-suffix">{{unit}}</span>
+                  </div>
+                </td>
+                <td class="grp" data-label="Current SOB ({{unit}}/M)">
+                  <div class="clm-input-wrap">
+                    <input type="number" min="0" oninput="validity.valid||(value='');" class="clm-input clm-has-suffix" ng-model="c.formData.site_ut_sob" placeholder="0">
+                    <span class="clm-suffix">{{unit}}</span>
+                  </div>
+                </td>
+                <td data-label="Current SOB %">
+                  <span class="clm-du-pct">{{c.formData.site_ut_sob_pct}}<small>%</small></span>
+                </td>
+                <td class="grp" data-label="Expected SOB ({{unit}}/M)">
+                  <div class="clm-input-wrap">
+                    <input type="number" min="0" oninput="validity.valid||(value='');" class="clm-input clm-has-suffix" ng-model="c.formData.site_expected_sob" placeholder="0">
+                    <span class="clm-suffix">{{unit}}</span>
+                  </div>
+                </td>
+                <td data-label="Expected SOB %">
+                  <span class="clm-du-pct is-exp">{{c.formData.site_expected_sob_pct}}<small>%</small></span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="clm-du-note">Current SOB and Expected SOB cannot exceed Expected Monthly Sales.</div>
+      </div>
+
+      <!-- 3. Financial Details -->
+      <div class="clm-block">
+        <div class="clm-block-head">
+          <div class="clm-block-heading">
+            <div class="clm-block-title">Financial Details</div>
+            <div class="clm-block-sub">Turnover for the last 3 financial years and any additional security deposit offered</div>
+          </div>
+        </div>
+        <div class="clm-du-body">
+          <div class="clm-du-subhead">Turnover (₹ Lakhs)</div>
+          <div class="clm-grid-3">
+            <div class="clm-field">
+              <label>Year 1 Turnover</label>
+              <div class="clm-input-wrap">
+                <span class="clm-prefix">₹</span>
+                <input type="number" min="0" oninput="validity.valid||(value='');" class="clm-input clm-has-prefix clm-has-suffix" ng-model="c.formData.turnover_year1" placeholder="0.00">
+                <span class="clm-suffix">L</span>
+              </div>
+            </div>
+            <div class="clm-field">
+              <label>Year 2 Turnover</label>
+              <div class="clm-input-wrap">
+                <span class="clm-prefix">₹</span>
+                <input type="number" min="0" oninput="validity.valid||(value='');" class="clm-input clm-has-prefix clm-has-suffix" ng-model="c.formData.turnover_year2" placeholder="0.00">
+                <span class="clm-suffix">L</span>
+              </div>
+            </div>
+            <div class="clm-field">
+              <label>Year 3 Turnover</label>
+              <div class="clm-input-wrap">
+                <span class="clm-prefix">₹</span>
+                <input type="number" min="0" oninput="validity.valid||(value='');" class="clm-input clm-has-prefix clm-has-suffix" ng-model="c.formData.turnover_year3" placeholder="0.00">
+                <span class="clm-suffix">L</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="clm-du-subhead clm-mt-20">Security Deposit</div>
+          <div class="clm-grid-3">
+            <div class="clm-field">
+              <label>Additional Security Deposit Offer</label>
+              <div class="clm-input-wrap">
+                <span class="clm-prefix">₹</span>
+                <input type="number" min="0" oninput="validity.valid||(value='');" class="clm-input clm-has-prefix" ng-model="c.formData.additional_sd_offer" placeholder="0.00">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4. Supporting Documents -->
+      <div class="clm-block"
+           ng-init="suggestedDocs = [
+             {t:'Income Tax Return', s:'Last 3 years'},
+             {t:'Profit & Loss and Balance Sheet', s:'Audited / Unaudited — last 3 years'},
+             {t:'GST Returns (GSTR)', s:'Last 1 year'}
+           ]">
+        <div class="clm-block-head">
+          <div class="clm-block-heading">
+            <div class="clm-block-title">Supporting Documents</div>
+            <div class="clm-block-sub">Uploading these helps us review your credit limit faster</div>
+          </div>
+          <div class="clm-block-meta">
+            <span class="clm-chip">Optional</span>
+          </div>
+        </div>
+        <div class="clm-du-body">
+
+          <div class="clm-du-subhead">Suggested documents</div>
+          <div class="clm-du-docs">
+            <div class="clm-du-doc" ng-repeat="d in suggestedDocs">
+              <div class="clm-du-doc-num">{{$index + 1}}</div>
+              <div class="clm-du-doc-info">
+                <div class="clm-du-doc-t">{{d.t}}</div>
+                <div class="clm-du-doc-s">{{d.s}}</div>
+              </div>
+              <span class="clm-du-pill-pdf">PDF</span>
+              <span class="clm-du-pill-opt">Optional</span>
+            </div>
+          </div>
+
+          <div class="clm-dropzone"
+               ng-class="{'clm-dropzone-active': c.dragOver}"
+               ng-dragover="c.onDragOver($event)"
+               ng-dragleave="c.dragOver=false"
+               ng-drop="c.onDrop($event)"
+               ng-click="c.triggerFileInput()">
+            <div class="clm-dz-icon">
+              <svg width="36" height="36" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M20 8V26M20 8L13 15M20 8L27 15" stroke="#E87722" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M8 30H32" stroke="#E87722" stroke-width="2.5" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <div class="clm-dz-text">Click or drag files here to upload</div>
+            <div class="clm-dz-hint">Any of the documents above, or other supporting files</div>
+            <div class="clm-dz-limits">
+              <span class="clm-limit-pill">PDF</span>
+              <span class="clm-limit-pill">JPG/PNG</span>
+              <span class="clm-limit-pill">Word</span>
+              <span class="clm-limit-pill">Excel</span>
+              <span class="clm-limit-sep">•</span>
+              <span class="clm-limit-size">Max <strong>5 MB</strong> per file</span>
+            </div>
+            <input type="file" id="clm-file-input" class="clm-hidden-input" multiple
+                   accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx"
+                   onchange="angular.element(this).scope().c.onFileSelect(this.files); this.value='';">
+          </div>
+
+          <div class="clm-file-grid" ng-if="c.selectedFiles.length">
+            <div class="clm-file-card"
+                 ng-repeat="file in c.selectedFiles track by $index"
+                 ng-class="{'clm-file-done': file.status==='done', 'clm-file-uploading': file.status==='uploading', 'clm-file-error': file.status==='error'}">
+
+              <div class="clm-file-thumb" ng-if="file.previewUrl">
+                <img ng-src="{{file.previewUrl}}" alt="preview">
+              </div>
+              <div class="clm-file-icon" ng-if="!file.previewUrl" ng-class="c.getFileIconClass(file.name)">
+                <span ng-bind-html="c.getFileIcon(file.name)"></span>
+              </div>
+
+              <div class="clm-file-info">
+                <div class="clm-file-name" title="{{file.name}}">{{file.name}}</div>
+                <div class="clm-file-meta">
+                  <span class="clm-file-size">{{c.formatSize(file.size)}}</span>
+                </div>
+              </div>
+
+              <div class="clm-file-status">
+                <span ng-if="!file.status" class="clm-status-pending">Pending</span>
+                <span ng-if="file.status==='uploading'" class="clm-status-uploading">
+                  <span class="clm-spinner"></span> Uploading...
+                </span>
+                <span ng-if="file.status==='done'" class="clm-status-done">✓ Done</span>
+                <span ng-if="file.status==='error'" class="clm-status-error">
+                  ✗ Failed <a ng-click="c.retryFile(file); $event.stopPropagation()" href="" class="clm-retry-link">Retry</a>
+                </span>
+              </div>
+
+              <button class="clm-file-remove"
+                      ng-if="file.status !== 'uploading' && file.status !== 'done'"
+                      ng-click="c.removeFile($index); $event.stopPropagation()"
+                      ng-disabled="c.submitting" title="Remove">✕</button>
+
+              <div class="clm-file-progress" ng-if="file.status==='uploading'">
+                <div class="clm-file-progress-bar"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5. Declaration & Submit -->
+      <div class="clm-block clm-du-decl-block" ng-class="{'is-checked': c.formData.declaration}">
+        <div class="clm-block-head">
+          <div class="clm-block-heading">
+            <div class="clm-block-title">Declaration &amp; Submit</div>
+            <div class="clm-block-sub">Confirm the details and verify with OTP to submit</div>
+          </div>
+        </div>
+        <div class="clm-du-body">
+          <label class="clm-declaration">
+            <input type="checkbox" class="clm-checkbox" ng-model="c.formData.declaration">
+            <span class="clm-checkbox-box"></span>
+            <span class="clm-checkbox-text">
+              I/We declare that to the best of my/our knowledge and belief, the above information is complete and true.
+            </span>
+          </label>
+        </div>
+        <div class="clm-du-foot">
+          <div class="clm-du-foot-hint">
+            <span ng-if="!c.formData.declaration">Tick the declaration above to enable submission.</span>
+            <span ng-if="c.formData.declaration">A 6-digit OTP will be sent to <strong>{{c.data.existingRecord.last_sent_email}}</strong> to confirm.</span>
+          </div>
+          <button class="clm-btn clm-btn-primary clm-btn-submit"
+                  ng-click="c.triggerOTP()"
+                  ng-disabled="c.submitting || !c.formData.declaration">
+            <span ng-if="!c.submitting">Verify &amp; Submit</span>
+            <span ng-if="c.submitting"><span class="clm-spinner clm-spinner-light"></span> Processing...</span>
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ===== OTP Modal ===== -->
+<div class="clm-overlay" ng-if="c.showOTPModal">
+  <div class="clm-otp-modal">
+    <div class="clm-otp-head">
+      <div class="clm-hero-bar"></div>
+      <h3>OTP Verification</h3>
+    </div>
+    <div class="clm-otp-body">
+      <p>We've sent a 6-digit OTP to your registered email address (<strong>{{c.data.existingRecord.last_sent_email}}</strong>). Please enter it below to securely submit your data.</p>
+
+      <input type="text" class="clm-input clm-otp-input" ng-model="c.otpInput" placeholder="Enter 6-digit OTP" maxlength="6">
+      <div class="clm-err-msg" ng-show="c.otpError">{{c.otpError}}</div>
+
+      <div class="clm-otp-actions">
+        <button class="clm-btn clm-btn-ghost" ng-click="c.cancelOTP()" ng-disabled="c.verifying">Cancel</button>
+        <button class="clm-btn clm-btn-primary" ng-click="c.submitRequest()" ng-disabled="c.verifying || !c.otpInput">
+          <span ng-if="!c.verifying">Submit Data</span>
+          <span ng-if="c.verifying"><span class="clm-spinner clm-spinner-light"></span> Verifying...</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="INSERT_OR_UPDATE">
+        <id>184afe2597177214be31fa17f053afa9</id>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-02-26 11:49:50</sys_created_on>
+        <sys_id>d44a7a6597177214be31fa17f053afca</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-02-26 11:49:50</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+</record_update>

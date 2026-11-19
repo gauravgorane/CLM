@@ -1,0 +1,744 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="DELETE">
+        <name>clm_limit_swap_email_template</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[(function runMailScript(current, template, email, email_action, event) {
+    
+    // ==========================================
+    // 1. IDENTIFY THE TARGET RECORD
+    // ==========================================
+    var targetGr = null;
+    var isApprovalAlert = false;
+    
+    // Check if triggered from the Approval table or directly from the Swap Request table
+    if (current.getTableName() == 'sysapproval_approver') {
+        targetGr = current.sysapproval.getRefRecord();
+        isApprovalAlert = true; 
+    } else {
+        targetGr = current; 
+    }
+    if (!targetGr) return;
+
+    var tableName = targetGr.getTableName();
+    
+    // Safety check to ensure we are only processing Limit Swaps
+    if (tableName !== 'x_birl3_clm_nt_limit_swap_request') return;
+
+    var reqNum = targetGr.getValue('number') || 'N/A';
+    var urlReqNum = reqNum; // Used for Portal URL Deep Linking
+    
+    // Clean up ServiceNow carriage returns to prevent extra <br> tags in the justification
+    var rawJustification = targetGr.getValue('justification') || 'No business rationale provided.';
+    var cleanJustification = rawJustification.toString().trim().replace(/\r\n/g, '\n').replace(/\n{2,}/g, '<br><br>').replace(/\n/g, '<br>');
+    
+    // ==========================================
+    // 2. EXTRACT LIMIT SWAP CONTEXT & GEOGRAPHY
+    // ==========================================
+    var rowData = [];
+    var sysIdToView = targetGr.getUniqueValue();
+
+    // HIGHLIGHT: GET VALUE - Reusable Helper to format Geography as "Name (Code)" safely
+    function formatGeo(nameStr, codeStr) {
+        var n = nameStr ? nameStr.toString() : '';
+        var c = codeStr ? codeStr.toString() : '';
+        if (n && c) return n + ' (' + c + ')';
+        if (n) return n;
+        if (c) return c;
+        return 'N/A';
+    }
+
+    // --- FETCH DONEE DETAILS ---
+    var doneeCode = targetGr.donee_site_code.customer_code || targetGr.getDisplayValue('donee_site_code') || 'N/A';
+    var doneeName = targetGr.donee_site_code.name || '';
+    var doneeDisplay = doneeCode + (doneeName ? ' - ' + doneeName : '');
+    var doneeSegment = targetGr.getValue('donee_segment') || 'N/A';
+    
+    // HIGHLIGHT: GET VALUE - Fetching Zone, Region, Depot for Donee
+    var doneeZone = formatGeo(targetGr.donee_site_code.zone_name, targetGr.donee_site_code.customer_group);
+    var doneeRegion = formatGeo(targetGr.donee_site_code.region_name, targetGr.donee_site_code.cg4);
+    var doneeDepot = formatGeo(targetGr.donee_site_code.depot_name, targetGr.donee_site_code.sales_office);
+
+    // --- FETCH DONOR DETAILS ---
+    var donorCode = targetGr.donor_site_code.customer_code || targetGr.getDisplayValue('donor_site_code') || 'N/A';
+    var donorName = targetGr.donor_site_code.name || '';
+    var donorDisplay = donorCode + (donorName ? ' - ' + donorName : '');
+    var donorSegment = targetGr.getValue('donor_segment') || 'N/A';
+
+    // HIGHLIGHT: GET VALUE - Fetching Zone, Region, Depot for Donor
+    var donorZone = formatGeo(targetGr.donor_site_code.zone_name, targetGr.donor_site_code.customer_group);
+    var donorRegion = formatGeo(targetGr.donor_site_code.region_name, targetGr.donor_site_code.cg4);
+    var donorDepot = formatGeo(targetGr.donor_site_code.depot_name, targetGr.donor_site_code.sales_office);
+
+    // Formatted Amount
+    var transferAmount = parseFloat(targetGr.getValue('requested_amount') || targetGr.getValue('donee_amount') || 0);
+    var formattedAmount = transferAmount.toLocaleString('en-IN', {minimumFractionDigits: 2});
+
+    // Extract PAN
+    var pan = targetGr.donee_site_code.pan || targetGr.donor_site_code.pan || 'N/A';
+    var identifier = pan; // Used in Email Subject
+
+    // HIGHLIGHT: BINDING - Mapping Data Grid Values for Limit Swap
+    var doneeHtml = '<strong style="color: #28a745;">' + doneeDisplay + '</strong> <span style="font-size:11px; color:#666;">(' + doneeSegment + ')</span>';
+    doneeHtml += '<br><span style="font-size:11px; color:#555;">]]>📍<![CDATA[ ' + doneeZone + ' | ' + doneeRegion + ' | ' + doneeDepot + '</span>';
+
+    var donorHtml = '<strong style="color: #C8102E;">' + donorDisplay + '</strong> <span style="font-size:11px; color:#666;">(' + donorSegment + ')</span>';
+    donorHtml += '<br><span style="font-size:11px; color:#555;">]]>📍<![CDATA[ ' + donorZone + ' | ' + donorRegion + ' | ' + donorDepot + '</span>';
+
+    rowData.push({label: 'Corporate PAN', value: '<strong>' + pan + '</strong>'});
+    rowData.push({label: 'Receiving Unit (Donee)', value: doneeHtml});
+    rowData.push({label: 'Deducting Unit (Donor)', value: donorHtml});
+    rowData.push({label: 'Transfer Amount', value: '<strong style="font-size: 16px; color:#111;">₹ ' + formattedAmount + '</strong>'});
+
+    // ==========================================
+    // 3. IDENTIFY EMAIL PURPOSE & SET ROUTING
+    // ==========================================
+    var notifName = email_action ? email_action.name.toString() : '';
+    
+    var subjectLine = "";
+    var headerTitle = "";
+    var introText = "";
+    var themeAccent = "#003A70"; // UltraTech Navy Blue
+    var showCommentBlock = false;
+    
+    // HIGHLIGHT: CONFIG - Using your updated portal page IDs
+    var portalPage = "uclm_limit_swap_view_request"; // The Dashboard Initiators use
+    var buttonText = "Track Swap Request Details";
+
+    if (isApprovalAlert) {
+        subjectLine = "Action Required: Limit Swap Approval for PAN " + identifier;
+        headerTitle = "Pending Swap Approval";
+        introText = "A Non-Trade Limit Swap request requires your commercial approval. Please review the reallocation details below.";
+        themeAccent = "#003A70"; 
+        portalPage = "uclm_limit_swap_approval"; // Route Approvers to the specific Approval Grid
+        buttonText = "Review & Approve in Portal";
+    }
+    // *** REQUEST CREATED / SUBMITTED NOTIFICATION ***
+    else if (notifName.indexOf('Create') > -1 || notifName.indexOf('Submit') > -1) {
+        subjectLine = "SWAP INITIATED: Limit Reallocation for PAN " + identifier;
+        headerTitle = "Swap Request Submitted";
+        introText = "Your limit swap request has been successfully submitted and is now routing through the approval matrix. You can track its progress using the link below.";
+        themeAccent = "#003A70"; 
+    }
+    else if (notifName.indexOf('Approved') > -1 || targetGr.getValue('approval') == 'approved') {
+        subjectLine = "APPROVED: Limit Swap for PAN " + identifier;
+        headerTitle = "Swap Approved";
+        introText = "Good news! The limit swap request has been fully authorized and the limits have been successfully reallocated.";
+        themeAccent = "#28a745"; 
+    } 
+    else if (notifName.indexOf('Rejected') > -1 || targetGr.getValue('approval') == 'rejected') {
+        subjectLine = "DECLINED: Limit Swap for PAN " + identifier;
+        headerTitle = "Swap Declined";
+        introText = "This limit swap request has been declined. Please review the dashboard for comments or reasons provided by the approver.";
+        themeAccent = "#C8102E"; 
+    } 
+    else if (notifName.indexOf('Comment') > -1 || notifName.indexOf('Activity') > -1) {
+        subjectLine = "New Activity: Limit Swap Request for PAN " + identifier;
+        headerTitle = "New Comment Posted";
+        introText = "A new comment or document has been added to this limit swap request.";
+        themeAccent = "#F2A900"; 
+        showCommentBlock = true;
+    } 
+    else {
+        subjectLine = "Update: Limit Swap Request for PAN " + identifier;
+        headerTitle = "Swap Request Update";
+        introText = "There has been an update to this credit limit swap request.";
+    }
+
+    email.setSubject(subjectLine);
+
+    var instanceUrl = gs.getProperty('glide.servlet.uri');
+    // Appending dynamic URL parameters
+    var portalLink = instanceUrl + 'uclm?id=' + portalPage + '&number=' + urlReqNum; 
+    
+    var logoUrl = "https://abgdev.service-now.com/x_birl3_clm.UltraTech.png"; 
+
+    // ==========================================
+    // 3.5 FETCH COMPLETE APPROVAL HISTORY ARRAY
+    // ==========================================
+    var historyList = [];
+    var grApp = new GlideRecord('sysapproval_approver');
+    
+    // Check both standard task matching formats for approvals
+    var qc = grApp.addQuery('sysapproval', targetGr.getUniqueValue());
+    qc.addOrCondition('document_id', targetGr.getUniqueValue()); 
+    grApp.addQuery('state', 'IN', 'approved,rejected');
+    grApp.orderBy('sys_updated_on'); // Ordered chronologically
+    grApp.query();
+
+    while (grApp.next()) {
+        historyList.push({
+            name: grApp.getDisplayValue('approver'),
+            role: grApp.getValue('approval_journal_column') || grApp.getValue('u_role') || 'Approver', // Custom Role Field
+            state: grApp.getValue('state') == 'approved' ? 'Approved' : 'Declined',
+            color: grApp.getValue('state') == 'approved' ? '#28a745' : '#C8102E',
+            date: grApp.getDisplayValue('sys_updated_on')
+        });
+    }
+
+    // ==========================================
+    // 4. GENERATE AESTHETIC HTML
+    // ==========================================
+    var html = '';
+
+    html += '<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #f0f3f5; padding: 40px 10px; font-family: \'Segoe UI\', Arial, sans-serif;">';
+    html += '<tr><td align="center" valign="top">';
+
+    // Main Email Card
+    html += '<table width="600" align="center" cellpadding="0" cellspacing="0" border="0" style="background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.08);">';
+
+    // Top Accent Border
+    html += '<tr><td style="height: 6px; background-color: ' + themeAccent + ';"></td></tr>';
+
+    // *** SPLIT HEADER: Logo Left / Text Right ***
+    html += '<tr>';
+    html += '<td style="padding: 30px 40px; background-color: #ffffff; border-bottom: 1px solid #f0f0f0;">';
+    html += '<table width="100%" border="0" cellspacing="0" cellpadding="0"><tr>';
+    
+    html += '<td align="left" valign="middle">';
+    html += '<img src="' + logoUrl + '" alt="UltraTech Cement" height="45" border="0" style="display: block; height: 45px; border: none; outline: none; text-decoration: none;" />';
+    html += '</td>';
+
+    // Right Align (Titles)
+    html += '<td align="right" valign="middle">';
+    html += '<h2 style="color: #003A70; margin: 0 0 4px 0; font-size: 20px; text-transform: uppercase; letter-spacing: 0.5px;">' + headerTitle + '</h2>';
+    html += '<strong style="color: #888888; font-size: 14px; display: block;">Request ' + reqNum + '</strong>';
+    html += '</td>';
+    
+    html += '</tr></table>';
+    html += '</td>';
+    html += '</tr>';
+
+    html += '<tr>';
+    html += '<td align="center" style="padding: 30px 40px;">';
+    
+    // Intro Text 
+    html += '<p style="margin-top: 0; margin-bottom: 25px; font-size: 15px; line-height: 1.6; color: #444444; text-align: left;">' + introText + '</p>';
+
+    // *** COMPLETE WORKFLOW HISTORY LIST TRAIL ***
+    if (historyList.length > 0) {
+        html += '<table width="100%" align="center" cellpadding="0" cellspacing="0" border="0" style="background-color: #fafafa; border: 1px solid #e2e8f0; border-radius: 6px; margin-bottom: 25px; padding: 16px 20px;">';
+        html += '<tr><td align="left" style="font-size: 12px; color: #003A70; text-transform: uppercase; font-weight: bold; letter-spacing: 0.8px; padding-bottom: 10px; border-bottom: 1px solid #edf2f7;">]]>📋<![CDATA[ Workflow History Trail</td></tr>';
+        html += '<tr><td style="padding-top: 12px;">';
+        
+        for (var h = 0; h < historyList.length; h++) {
+            html += '<div style="font-size: 13.5px; line-height: 1.5; color: #333333; padding: 4px 0; text-align: left;">';
+            html += '<span style="color: ' + historyList[h].color + '; font-weight: bold; margin-right: 6px;">✓ ' + historyList[h].state + ':</span>';
+            html += '<strong>' + historyList[h].name + '</strong> <span style="font-size: 11px; color: #666666; text-transform: uppercase; margin-left: 4px;">(' + historyList[h].role + ')</span>';
+            html += '<span style="color: #888888; font-size: 12px; float: right;">' + historyList[h].date + '</span>';
+            html += '</div>';
+        }
+        
+        html += '</td></tr></table>';
+    }
+
+    // ==========================================
+    // HIGHLIGHT: GET VALUE - SMART COMMENT EXTRACTION
+    // ==========================================
+    if (showCommentBlock) {
+        var latestCommentRaw = targetGr.comments.getJournalEntry(1);
+        var cleanComment = 'No comment text available.';
+        var commentHeader = 'Latest Activity';
+
+        if (latestCommentRaw) {
+            var parts = latestCommentRaw.split('\n');
+            if (parts.length > 1) {
+                // Extract author name from the standard ServiceNow journal header
+                // Looks like: "2026-05-14 10:15:32 - John Doe (Comments)"
+                var headerMatch = parts[0].match(/-\s(.*?)\s\(/); 
+                var author = headerMatch ? headerMatch[1] : 'User';
+                commentHeader = 'Comment from ' + author;
+                
+                // Join the rest of the message without the timestamp header
+                cleanComment = parts.slice(1).join('<br>').trim();
+            } else {
+                cleanComment = latestCommentRaw;
+            }
+        }
+        
+        html += '<table width="100%" align="center" cellpadding="15" cellspacing="0" border="0" style="background-color: #fffdf5; border: 1px solid #F2A900; border-radius: 6px; margin-bottom: 25px;">';
+        html += '<tr><td align="left" style="font-size: 14px; color: #333333; line-height: 1.5;">';
+        html += '<strong style="color: #E65100; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;"><i class="fa fa-commenting-o"></i> ' + commentHeader + '</strong><br><br>' + cleanComment;
+        html += '</td></tr>';
+        html += '</table>';
+    }
+
+    // Data Grid (Donee / Donor)
+    html += '<table width="100%" align="center" cellpadding="12" cellspacing="0" border="0" style="margin-bottom: 30px; font-size: 14px; border-top: 1px solid #eeeeee;">';
+    for (var i = 0; i < rowData.length; i++) {
+        html += '<tr><td width="35%" align="left" style="border-bottom: 1px solid #eeeeee; color: #777777; vertical-align:top;">' + rowData[i].label + '</td>';
+        html += '<td width="65%" align="right" style="border-bottom: 1px solid #eeeeee; color: #111111; font-weight: 500; vertical-align:top;">' + rowData[i].value + '</td></tr>';
+    }
+    html += '</table>';
+
+    // Justification Section 
+    if (cleanJustification && cleanJustification !== 'No business rationale provided.') {
+        html += '<div style="background-color: #f9f9f9; padding: 20px; border-radius: 6px; margin-bottom: 30px; text-align: left; border: 1px solid #eeeeee;">';
+        html += '<span style="display: block; font-size: 11px; color: #888888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px;">Initiator Business Rationale</span>';
+        html += '<span style="font-size: 14px; line-height: 1.6; color: #444444; font-style: italic;">"' + cleanJustification + '"</span>';
+        html += '</div>';
+    }
+
+    // ==========================================
+    // 5. ATTACHMENT EXTRACTION
+    // ==========================================
+    if (isApprovalAlert) {
+        var attGr = new GlideRecord('sys_attachment');
+        attGr.addQuery('table_name', 'x_birl3_clm_nt_limit_swap_request');
+        attGr.addQuery('table_sys_id', sysIdToView);
+        attGr.query();
+
+        if (attGr.hasNext()) {
+            html += '<div style="margin-bottom: 35px; text-align: left;">';
+            html += '<span style="display: block; font-size: 12px; color: #003A70; text-transform: uppercase; font-weight: bold; letter-spacing: 1px; margin-bottom: 10px; border-bottom: 2px solid #f0f0f0; padding-bottom: 5px;">Attached Documents</span>';
+            
+            while (attGr.next()) {
+                var fileName = attGr.getValue('file_name');
+                var fileSysId = attGr.getUniqueValue();
+                var downloadUrl = instanceUrl + 'sys_attachment.do?sys_id=' + fileSysId;
+                
+                html += '<a href="' + downloadUrl + '" style="color: #0056b3; text-decoration: none; font-size: 13px; font-weight: bold; display: block; padding: 6px 0; border-bottom: 1px dashed #e0e0e0;">]]>📄<![CDATA[ ' + fileName + '</a>';
+            }
+            html += '</div>';
+        }
+
+        // --- DIRECT MAILTO APPROVAL BUTTONS ---
+        var instanceEmailAddr = gs.getProperty('glide.email.user', 'abgdev@service-now.com');
+        if (instanceEmailAddr.indexOf('@') === -1) {
+            instanceEmailAddr += '@service-now.com';
+        }
+
+        // URL Encoded Subject and Body for mailto clients
+        var watermarkText = email.watermark ? email.watermark : '';
+        var mailToApprove = 'mailto:' + instanceEmailAddr + '?subject=Re: ' + encodeURIComponent(subjectLine) + ' - approve&body=' + encodeURIComponent('\n\n' + watermarkText);
+        var mailToReject = 'mailto:' + instanceEmailAddr + '?subject=Re: ' + encodeURIComponent(subjectLine) + ' - reject&body=' + encodeURIComponent('Please provide your rejection comments here:\n\n\n\n' + watermarkText);
+
+        html += '<table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 15px;"><tr>';
+        html += '<td align="center" style="padding-right: 8px; width: 50%;">';
+        html += '<a href="' + mailToApprove + '" target="_blank" style="background-color: #28a745; font-size: 14px; font-family: \'Segoe UI\', Arial, sans-serif; color: #ffffff; text-decoration: none; padding: 12px 0; border-radius: 4px; display: block; font-weight: bold; text-align: center;">APPROVE SWAP</a>';
+        html += '</td>';
+        html += '<td align="center" style="padding-left: 8px; width: 50%;">';
+        html += '<a href="' + mailToReject + '" target="_blank" style="background-color: #C8102E; font-size: 14px; font-family: \'Segoe UI\', Arial, sans-serif; color: #ffffff; text-decoration: none; padding: 12px 0; border-radius: 4px; display: block; font-weight: bold; text-align: center;">REJECT SWAP</a>';
+        html += '</td>';
+        html += '</tr></table>';
+    }
+
+    // Dynamic Call to Action Button (Fall-back to Portal)
+    html += '<table width="100%" border="0" cellspacing="0" cellpadding="0"><tr><td align="center">';
+    html += '<a href="' + portalLink + '" target="_blank" style="background-color: #003A70; font-size: 14px; font-family: \'Segoe UI\', Arial, sans-serif; color: #ffffff; text-decoration: none; padding: 12px 40px; border-radius: 4px; display: inline-block; font-weight: bold;">' + buttonText + '</a>';
+    html += '</td></tr></table>';
+
+    html += '</td>';
+    html += '</tr>';
+
+    // Footer
+    html += '<tr>';
+    html += '<td align="center" style="background-color: #f8f9fa; border-top: 1px solid #eeeeee; padding: 25px; font-size: 12px; color: #999999; line-height: 1.5;">';
+    html += 'This is an automated notification from the <strong>UltraTech CLM Portal</strong>.<br>Please do not reply directly to this email.';
+    html += '</td>';
+    html += '</tr>';
+
+    html += '</table>'; 
+    html += '</td></tr></table>';
+
+    template.print(html);
+
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-07-14 07:48:17</sys_created_on>
+        <sys_id>794ea0ca978e4710be31fa17f053afc4</sys_id>
+        <sys_mod_count>5</sys_mod_count>
+        <sys_name>clm_limit_swap_email_template</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_794ea0ca978e4710be31fa17f053afc4</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-07-28 08:55:48</sys_updated_on>
+    </sys_script_email>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sys_script_email_794ea0ca978e4710be31fa17f053afc4</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_script_email"&gt;&lt;sys_script_email action="INSERT_OR_UPDATE"&gt;&lt;name&gt;clm_limit_swap_email_template&lt;/name&gt;&lt;new_lines_to_html&gt;false&lt;/new_lines_to_html&gt;&lt;script&gt;&lt;![CDATA[(function runMailScript(current, template, email, email_action, event) {
+    
+    // ==========================================
+    // 1. IDENTIFY THE TARGET RECORD
+    // ==========================================
+    var targetGr = null;
+    var isApprovalAlert = false;
+    
+    // Check if triggered from the Approval table or directly from the Swap Request table
+    if (current.getTableName() == 'sysapproval_approver') {
+        targetGr = current.sysapproval.getRefRecord();
+        isApprovalAlert = true; 
+    } else {
+        targetGr = current; 
+    }
+    if (!targetGr) return;
+
+    var tableName = targetGr.getTableName();
+    
+    // Safety check to ensure we are only processing Limit Swaps
+    if (tableName !== 'x_birl3_clm_nt_limit_swap_request') return;
+
+    var reqNum = targetGr.getValue('number') || 'N/A';
+    var urlReqNum = reqNum; // Used for Portal URL Deep Linking
+    
+    // Clean up ServiceNow carriage returns to prevent extra &lt;br&gt; tags in the justification
+    var rawJustification = targetGr.getValue('justification') || 'No business rationale provided.';
+    var cleanJustification = rawJustification.toString().trim().replace(/\r\n/g, '\n').replace(/\n{2,}/g, '&lt;br&gt;&lt;br&gt;').replace(/\n/g, '&lt;br&gt;');
+    
+    // ==========================================
+    // 2. EXTRACT LIMIT SWAP CONTEXT &amp; GEOGRAPHY
+    // ==========================================
+    var rowData = [];
+    var sysIdToView = targetGr.getUniqueValue();
+
+    // HIGHLIGHT: GET VALUE - Reusable Helper to format Geography as "Name (Code)" safely
+    function formatGeo(nameStr, codeStr) {
+        var n = nameStr ? nameStr.toString() : '';
+        var c = codeStr ? codeStr.toString() : '';
+        if (n &amp;&amp; c) return n + ' (' + c + ')';
+        if (n) return n;
+        if (c) return c;
+        return 'N/A';
+    }
+
+    // --- FETCH DONEE DETAILS ---
+    var doneeCode = targetGr.donee_site_code.customer_code || targetGr.getDisplayValue('donee_site_code') || 'N/A';
+    var doneeName = targetGr.donee_site_code.name || '';
+    var doneeDisplay = doneeCode + (doneeName ? ' - ' + doneeName : '');
+    var doneeSegment = targetGr.getValue('donee_segment') || 'N/A';
+    
+    // HIGHLIGHT: GET VALUE - Fetching Zone, Region, Depot for Donee
+    var doneeZone = formatGeo(targetGr.donee_site_code.zone_name, targetGr.donee_site_code.customer_group);
+    var doneeRegion = formatGeo(targetGr.donee_site_code.region_name, targetGr.donee_site_code.cg4);
+    var doneeDepot = formatGeo(targetGr.donee_site_code.depot_name, targetGr.donee_site_code.sales_office);
+
+    // --- FETCH DONOR DETAILS ---
+    var donorCode = targetGr.donor_site_code.customer_code || targetGr.getDisplayValue('donor_site_code') || 'N/A';
+    var donorName = targetGr.donor_site_code.name || '';
+    var donorDisplay = donorCode + (donorName ? ' - ' + donorName : '');
+    var donorSegment = targetGr.getValue('donor_segment') || 'N/A';
+
+    // HIGHLIGHT: GET VALUE - Fetching Zone, Region, Depot for Donor
+    var donorZone = formatGeo(targetGr.donor_site_code.zone_name, targetGr.donor_site_code.customer_group);
+    var donorRegion = formatGeo(targetGr.donor_site_code.region_name, targetGr.donor_site_code.cg4);
+    var donorDepot = formatGeo(targetGr.donor_site_code.depot_name, targetGr.donor_site_code.sales_office);
+
+    // Formatted Amount
+    var transferAmount = parseFloat(targetGr.getValue('requested_amount') || targetGr.getValue('donee_amount') || 0);
+    var formattedAmount = transferAmount.toLocaleString('en-IN', {minimumFractionDigits: 2});
+
+    // Extract PAN
+    var pan = targetGr.donee_site_code.pan || targetGr.donor_site_code.pan || 'N/A';
+    var identifier = pan; // Used in Email Subject
+
+    // HIGHLIGHT: BINDING - Mapping Data Grid Values for Limit Swap
+    var doneeHtml = '&lt;strong style="color: #28a745;"&gt;' + doneeDisplay + '&lt;/strong&gt; &lt;span style="font-size:11px; color:#666;"&gt;(' + doneeSegment + ')&lt;/span&gt;';
+    doneeHtml += '&lt;br&gt;&lt;span style="font-size:11px; color:#555;"&gt;]]&gt;📍&lt;![CDATA[ ' + doneeZone + ' | ' + doneeRegion + ' | ' + doneeDepot + '&lt;/span&gt;';
+
+    var donorHtml = '&lt;strong style="color: #C8102E;"&gt;' + donorDisplay + '&lt;/strong&gt; &lt;span style="font-size:11px; color:#666;"&gt;(' + donorSegment + ')&lt;/span&gt;';
+    donorHtml += '&lt;br&gt;&lt;span style="font-size:11px; color:#555;"&gt;]]&gt;📍&lt;![CDATA[ ' + donorZone + ' | ' + donorRegion + ' | ' + donorDepot + '&lt;/span&gt;';
+
+    rowData.push({label: 'Corporate PAN', value: '&lt;strong&gt;' + pan + '&lt;/strong&gt;'});
+    rowData.push({label: 'Receiving Unit (Donee)', value: doneeHtml});
+    rowData.push({label: 'Deducting Unit (Donor)', value: donorHtml});
+    rowData.push({label: 'Transfer Amount', value: '&lt;strong style="font-size: 16px; color:#111;"&gt;₹ ' + formattedAmount + '&lt;/strong&gt;'});
+
+    // ==========================================
+    // 3. IDENTIFY EMAIL PURPOSE &amp; SET ROUTING
+    // ==========================================
+    var notifName = email_action ? email_action.name.toString() : '';
+    
+    var subjectLine = "";
+    var headerTitle = "";
+    var introText = "";
+    var themeAccent = "#003A70"; // UltraTech Navy Blue
+    var showCommentBlock = false;
+    
+    // HIGHLIGHT: CONFIG - Using your updated portal page IDs
+    var portalPage = "uclm_limit_swap_view_request"; // The Dashboard Initiators use
+    var buttonText = "Track Swap Request Details";
+
+    if (isApprovalAlert) {
+        subjectLine = "Action Required: Limit Swap Approval for PAN " + identifier;
+        headerTitle = "Pending Swap Approval";
+        introText = "A Non-Trade Limit Swap request requires your commercial approval. Please review the reallocation details below.";
+        themeAccent = "#003A70"; 
+        portalPage = "uclm_limit_swap_approval"; // Route Approvers to the specific Approval Grid
+        buttonText = "Review &amp; Approve in Portal";
+    }
+    // *** REQUEST CREATED / SUBMITTED NOTIFICATION ***
+    else if (notifName.indexOf('Create') &gt; -1 || notifName.indexOf('Submit') &gt; -1) {
+        subjectLine = "SWAP INITIATED: Limit Reallocation for PAN " + identifier;
+        headerTitle = "Swap Request Submitted";
+        introText = "Your limit swap request has been successfully submitted and is now routing through the approval matrix. You can track its progress using the link below.";
+        themeAccent = "#003A70"; 
+    }
+    else if (notifName.indexOf('Approved') &gt; -1 || targetGr.getValue('approval') == 'approved') {
+        subjectLine = "APPROVED: Limit Swap for PAN " + identifier;
+        headerTitle = "Swap Approved";
+        introText = "Good news! The limit swap request has been fully authorized and the limits have been successfully reallocated.";
+        themeAccent = "#28a745"; 
+    } 
+    else if (notifName.indexOf('Rejected') &gt; -1 || targetGr.getValue('approval') == 'rejected') {
+        subjectLine = "DECLINED: Limit Swap for PAN " + identifier;
+        headerTitle = "Swap Declined";
+        introText = "This limit swap request has been declined. Please review the dashboard for comments or reasons provided by the approver.";
+        themeAccent = "#C8102E"; 
+    } 
+    else if (notifName.indexOf('Comment') &gt; -1 || notifName.indexOf('Activity') &gt; -1) {
+        subjectLine = "New Activity: Limit Swap Request for PAN " + identifier;
+        headerTitle = "New Comment Posted";
+        introText = "A new comment or document has been added to this limit swap request.";
+        themeAccent = "#F2A900"; 
+        showCommentBlock = true;
+    } 
+    else {
+        subjectLine = "Update: Limit Swap Request for PAN " + identifier;
+        headerTitle = "Swap Request Update";
+        introText = "There has been an update to this credit limit swap request.";
+    }
+
+    email.setSubject(subjectLine);
+
+    var instanceUrl = gs.getProperty('glide.servlet.uri');
+    // Appending dynamic URL parameters
+    var portalLink = instanceUrl + 'uclm?id=' + portalPage + '&amp;number=' + urlReqNum; 
+    
+    var logoUrl = "https://abgdev.service-now.com/x_birl3_clm.UltraTech.png"; 
+
+    // ==========================================
+    // 3.5 FETCH COMPLETE APPROVAL HISTORY ARRAY
+    // ==========================================
+    var historyList = [];
+    var grApp = new GlideRecord('sysapproval_approver');
+    
+    // Check both standard task matching formats for approvals
+    var qc = grApp.addQuery('sysapproval', targetGr.getUniqueValue());
+    qc.addOrCondition('document_id', targetGr.getUniqueValue()); 
+    grApp.addQuery('state', 'IN', 'approved,rejected');
+    grApp.orderBy('sys_updated_on'); // Ordered chronologically
+    grApp.query();
+
+    while (grApp.next()) {
+        historyList.push({
+            name: grApp.getDisplayValue('approver'),
+            role: grApp.getValue('approval_journal_column') || grApp.getValue('u_role') || 'Approver', // Custom Role Field
+            state: grApp.getValue('state') == 'approved' ? 'Approved' : 'Declined',
+            color: grApp.getValue('state') == 'approved' ? '#28a745' : '#C8102E',
+            date: grApp.getDisplayValue('sys_updated_on')
+        });
+    }
+
+    // ==========================================
+    // 4. GENERATE AESTHETIC HTML
+    // ==========================================
+    var html = '';
+
+    html += '&lt;table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #f0f3f5; padding: 40px 10px; font-family: \'Segoe UI\', Arial, sans-serif;"&gt;';
+    html += '&lt;tr&gt;&lt;td align="center" valign="top"&gt;';
+
+    // Main Email Card
+    html += '&lt;table width="600" align="center" cellpadding="0" cellspacing="0" border="0" style="background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.08);"&gt;';
+
+    // Top Accent Border
+    html += '&lt;tr&gt;&lt;td style="height: 6px; background-color: ' + themeAccent + ';"&gt;&lt;/td&gt;&lt;/tr&gt;';
+
+    // *** SPLIT HEADER: Logo Left / Text Right ***
+    html += '&lt;tr&gt;';
+    html += '&lt;td style="padding: 30px 40px; background-color: #ffffff; border-bottom: 1px solid #f0f0f0;"&gt;';
+    html += '&lt;table width="100%" border="0" cellspacing="0" cellpadding="0"&gt;&lt;tr&gt;';
+    
+    html += '&lt;td align="left" valign="middle"&gt;';
+    html += '&lt;img src="' + logoUrl + '" alt="UltraTech Cement" height="45" border="0" style="display: block; height: 45px; border: none; outline: none; text-decoration: none;" /&gt;';
+    html += '&lt;/td&gt;';
+
+    // Right Align (Titles)
+    html += '&lt;td align="right" valign="middle"&gt;';
+    html += '&lt;h2 style="color: #003A70; margin: 0 0 4px 0; font-size: 20px; text-transform: uppercase; letter-spacing: 0.5px;"&gt;' + headerTitle + '&lt;/h2&gt;';
+    html += '&lt;strong style="color: #888888; font-size: 14px; display: block;"&gt;Request ' + reqNum + '&lt;/strong&gt;';
+    html += '&lt;/td&gt;';
+    
+    html += '&lt;/tr&gt;&lt;/table&gt;';
+    html += '&lt;/td&gt;';
+    html += '&lt;/tr&gt;';
+
+    html += '&lt;tr&gt;';
+    html += '&lt;td align="center" style="padding: 30px 40px;"&gt;';
+    
+    // Intro Text 
+    html += '&lt;p style="margin-top: 0; margin-bottom: 25px; font-size: 15px; line-height: 1.6; color: #444444; text-align: left;"&gt;' + introText + '&lt;/p&gt;';
+
+    // *** COMPLETE WORKFLOW HISTORY LIST TRAIL ***
+    if (historyList.length &gt; 0) {
+        html += '&lt;table width="100%" align="center" cellpadding="0" cellspacing="0" border="0" style="background-color: #fafafa; border: 1px solid #e2e8f0; border-radius: 6px; margin-bottom: 25px; padding: 16px 20px;"&gt;';
+        html += '&lt;tr&gt;&lt;td align="left" style="font-size: 12px; color: #003A70; text-transform: uppercase; font-weight: bold; letter-spacing: 0.8px; padding-bottom: 10px; border-bottom: 1px solid #edf2f7;"&gt;]]&gt;📋&lt;![CDATA[ Workflow History Trail&lt;/td&gt;&lt;/tr&gt;';
+        html += '&lt;tr&gt;&lt;td style="padding-top: 12px;"&gt;';
+        
+        for (var h = 0; h &lt; historyList.length; h++) {
+            html += '&lt;div style="font-size: 13.5px; line-height: 1.5; color: #333333; padding: 4px 0; text-align: left;"&gt;';
+            html += '&lt;span style="color: ' + historyList[h].color + '; font-weight: bold; margin-right: 6px;"&gt;✓ ' + historyList[h].state + ':&lt;/span&gt;';
+            html += '&lt;strong&gt;' + historyList[h].name + '&lt;/strong&gt; &lt;span style="font-size: 11px; color: #666666; text-transform: uppercase; margin-left: 4px;"&gt;(' + historyList[h].role + ')&lt;/span&gt;';
+            html += '&lt;span style="color: #888888; font-size: 12px; float: right;"&gt;' + historyList[h].date + '&lt;/span&gt;';
+            html += '&lt;/div&gt;';
+        }
+        
+        html += '&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;';
+    }
+
+    // ==========================================
+    // HIGHLIGHT: GET VALUE - SMART COMMENT EXTRACTION
+    // ==========================================
+    if (showCommentBlock) {
+        var latestCommentRaw = targetGr.comments.getJournalEntry(1);
+        var cleanComment = 'No comment text available.';
+        var commentHeader = 'Latest Activity';
+
+        if (latestCommentRaw) {
+            var parts = latestCommentRaw.split('\n');
+            if (parts.length &gt; 1) {
+                // Extract author name from the standard ServiceNow journal header
+                // Looks like: "2026-05-14 10:15:32 - John Doe (Comments)"
+                var headerMatch = parts[0].match(/-\s(.*?)\s\(/); 
+                var author = headerMatch ? headerMatch[1] : 'User';
+                commentHeader = 'Comment from ' + author;
+                
+                // Join the rest of the message without the timestamp header
+                cleanComment = parts.slice(1).join('&lt;br&gt;').trim();
+            } else {
+                cleanComment = latestCommentRaw;
+            }
+        }
+        
+        html += '&lt;table width="100%" align="center" cellpadding="15" cellspacing="0" border="0" style="background-color: #fffdf5; border: 1px solid #F2A900; border-radius: 6px; margin-bottom: 25px;"&gt;';
+        html += '&lt;tr&gt;&lt;td align="left" style="font-size: 14px; color: #333333; line-height: 1.5;"&gt;';
+        html += '&lt;strong style="color: #E65100; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;"&gt;&lt;i class="fa fa-commenting-o"&gt;&lt;/i&gt; ' + commentHeader + '&lt;/strong&gt;&lt;br&gt;&lt;br&gt;' + cleanComment;
+        html += '&lt;/td&gt;&lt;/tr&gt;';
+        html += '&lt;/table&gt;';
+    }
+
+    // Data Grid (Donee / Donor)
+    html += '&lt;table width="100%" align="center" cellpadding="12" cellspacing="0" border="0" style="margin-bottom: 30px; font-size: 14px; border-top: 1px solid #eeeeee;"&gt;';
+    for (var i = 0; i &lt; rowData.length; i++) {
+        html += '&lt;tr&gt;&lt;td width="35%" align="left" style="border-bottom: 1px solid #eeeeee; color: #777777; vertical-align:top;"&gt;' + rowData[i].label + '&lt;/td&gt;';
+        html += '&lt;td width="65%" align="right" style="border-bottom: 1px solid #eeeeee; color: #111111; font-weight: 500; vertical-align:top;"&gt;' + rowData[i].value + '&lt;/td&gt;&lt;/tr&gt;';
+    }
+    html += '&lt;/table&gt;';
+
+    // Justification Section 
+    if (cleanJustification &amp;&amp; cleanJustification !== 'No business rationale provided.') {
+        html += '&lt;div style="background-color: #f9f9f9; padding: 20px; border-radius: 6px; margin-bottom: 30px; text-align: left; border: 1px solid #eeeeee;"&gt;';
+        html += '&lt;span style="display: block; font-size: 11px; color: #888888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px;"&gt;Initiator Business Rationale&lt;/span&gt;';
+        html += '&lt;span style="font-size: 14px; line-height: 1.6; color: #444444; font-style: italic;"&gt;"' + cleanJustification + '"&lt;/span&gt;';
+        html += '&lt;/div&gt;';
+    }
+
+    // ==========================================
+    // 5. ATTACHMENT EXTRACTION
+    // ==========================================
+    if (isApprovalAlert) {
+        var attGr = new GlideRecord('sys_attachment');
+        attGr.addQuery('table_name', 'x_birl3_clm_nt_limit_swap_request');
+        attGr.addQuery('table_sys_id', sysIdToView);
+        attGr.query();
+
+        if (attGr.hasNext()) {
+            html += '&lt;div style="margin-bottom: 35px; text-align: left;"&gt;';
+            html += '&lt;span style="display: block; font-size: 12px; color: #003A70; text-transform: uppercase; font-weight: bold; letter-spacing: 1px; margin-bottom: 10px; border-bottom: 2px solid #f0f0f0; padding-bottom: 5px;"&gt;Attached Documents&lt;/span&gt;';
+            
+            while (attGr.next()) {
+                var fileName = attGr.getValue('file_name');
+                var fileSysId = attGr.getUniqueValue();
+                var downloadUrl = instanceUrl + 'sys_attachment.do?sys_id=' + fileSysId;
+                
+                html += '&lt;a href="' + downloadUrl + '" style="color: #0056b3; text-decoration: none; font-size: 13px; font-weight: bold; display: block; padding: 6px 0; border-bottom: 1px dashed #e0e0e0;"&gt;]]&gt;📄&lt;![CDATA[ ' + fileName + '&lt;/a&gt;';
+            }
+            html += '&lt;/div&gt;';
+        }
+
+        // --- DIRECT MAILTO APPROVAL BUTTONS ---
+        var instanceEmailAddr = gs.getProperty('glide.email.user', 'abgdev@service-now.com');
+        if (instanceEmailAddr.indexOf('@') === -1) {
+            instanceEmailAddr += '@service-now.com';
+        }
+
+        // URL Encoded Subject and Body for mailto clients
+        var watermarkText = email.watermark ? email.watermark : '';
+        var mailToApprove = 'mailto:' + instanceEmailAddr + '?subject=Re: ' + encodeURIComponent(subjectLine) + ' - approve&amp;body=' + encodeURIComponent('\n\n' + watermarkText);
+        var mailToReject = 'mailto:' + instanceEmailAddr + '?subject=Re: ' + encodeURIComponent(subjectLine) + ' - reject&amp;body=' + encodeURIComponent('Please provide your rejection comments here:\n\n\n\n' + watermarkText);
+
+        html += '&lt;table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 15px;"&gt;&lt;tr&gt;';
+        html += '&lt;td align="center" style="padding-right: 8px; width: 50%;"&gt;';
+        html += '&lt;a href="' + mailToApprove + '" target="_blank" style="background-color: #28a745; font-size: 14px; font-family: \'Segoe UI\', Arial, sans-serif; color: #ffffff; text-decoration: none; padding: 12px 0; border-radius: 4px; display: block; font-weight: bold; text-align: center;"&gt;APPROVE SWAP&lt;/a&gt;';
+        html += '&lt;/td&gt;';
+        html += '&lt;td align="center" style="padding-left: 8px; width: 50%;"&gt;';
+        html += '&lt;a href="' + mailToReject + '" target="_blank" style="background-color: #C8102E; font-size: 14px; font-family: \'Segoe UI\', Arial, sans-serif; color: #ffffff; text-decoration: none; padding: 12px 0; border-radius: 4px; display: block; font-weight: bold; text-align: center;"&gt;REJECT SWAP&lt;/a&gt;';
+        html += '&lt;/td&gt;';
+        html += '&lt;/tr&gt;&lt;/table&gt;';
+    }
+
+    // Dynamic Call to Action Button (Fall-back to Portal)
+    html += '&lt;table width="100%" border="0" cellspacing="0" cellpadding="0"&gt;&lt;tr&gt;&lt;td align="center"&gt;';
+    html += '&lt;a href="' + portalLink + '" target="_blank" style="background-color: #003A70; font-size: 14px; font-family: \'Segoe UI\', Arial, sans-serif; color: #ffffff; text-decoration: none; padding: 12px 40px; border-radius: 4px; display: inline-block; font-weight: bold;"&gt;' + buttonText + '&lt;/a&gt;';
+    html += '&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;';
+
+    html += '&lt;/td&gt;';
+    html += '&lt;/tr&gt;';
+
+    // Footer
+    html += '&lt;tr&gt;';
+    html += '&lt;td align="center" style="background-color: #f8f9fa; border-top: 1px solid #eeeeee; padding: 25px; font-size: 12px; color: #999999; line-height: 1.5;"&gt;';
+    html += 'This is an automated notification from the &lt;strong&gt;UltraTech CLM Portal&lt;/strong&gt;.&lt;br&gt;Please do not reply directly to this email.';
+    html += '&lt;/td&gt;';
+    html += '&lt;/tr&gt;';
+
+    html += '&lt;/table&gt;'; 
+    html += '&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;';
+
+    template.print(html);
+
+})(current, template, email, email_action, event);]]&gt;&lt;/script&gt;&lt;sys_class_name&gt;sys_script_email&lt;/sys_class_name&gt;&lt;sys_created_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-07-14 07:48:17&lt;/sys_created_on&gt;&lt;sys_id&gt;794ea0ca978e4710be31fa17f053afc4&lt;/sys_id&gt;&lt;sys_mod_count&gt;5&lt;/sys_mod_count&gt;&lt;sys_name&gt;clm_limit_swap_email_template&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sys_script_email_794ea0ca978e4710be31fa17f053afc4&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-07-28 08:55:48&lt;/sys_updated_on&gt;&lt;/sys_script_email&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>-1203971967</payload_hash>
+        <record_name>clm_limit_swap_email_template</record_name>
+        <reverted_from/>
+        <source>57b38f622b2303104572f3745e91bf2a</source>
+        <source_table>sys_upgrade_history</source_table>
+        <state>previous</state>
+        <sys_created_by/>
+        <sys_created_on>2026-09-28 21:32:03</sys_created_on>
+        <sys_id>2afa3f4297ac5710be31fa17f053afca</sys_id>
+        <sys_mod_count/>
+        <sys_recorded_at>1a0e9ee98380000000</sys_recorded_at>
+        <sys_updated_by/>
+        <sys_updated_on/>
+        <type>Email Script</type>
+        <update_guid>e6fa3f42baac5710ddc3f2fbac53dbca</update_guid>
+        <update_guid_history>e6fa3f42baac5710ddc3f2fbac53dbca:-1203971967</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete/>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-16 05:19:14</sys_created_on>
+        <sys_db_object display_value="" name="sys_script_email">sys_script_email</sys_db_object>
+        <sys_id>01a677c57ae042768d5f1bf295973eb1</sys_id>
+        <sys_metadata>794ea0ca978e4710be31fa17f053afc4</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>clm_limit_swap_email_template</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sys_script_email_794ea0ca978e4710be31fa17f053afc4</sys_update_name>
+        <sys_update_version display_value="sys_script_email_794ea0ca978e4710be31fa17f053afc4">2afa3f4297ac5710be31fa17f053afca</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-16 05:19:14</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

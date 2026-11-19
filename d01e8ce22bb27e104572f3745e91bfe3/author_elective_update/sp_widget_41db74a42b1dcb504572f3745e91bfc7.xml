@@ -1,0 +1,2508 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="DELETE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $filter, $location, spUtil, $window) {
+    var c = this;
+
+    // List state
+    c.searchSwap = '';
+    c.listFilter = 'pending';
+    c.currentPage = 1;
+    c.itemsPerPage = 10;
+
+    // Bulk / Modal state
+    c.selectAll = false;
+    c.showRejectModal = false;
+    c.isBulkReject = false;
+    c.rejectReason = '';
+    c.pendingRejectIds = [];
+    c.isActing = false;
+
+    // Detail view state
+    c.selectedItem = null;
+    c.detailData = null;
+    c.isLoadingDetails = false;
+    c.data.isUploadingAttachment = false;
+
+    // OOB Widgets Tracking
+    c.data.ticketWidget = null;
+    c.data.attachmentWidget = null; 
+    c.data.isLoadingWidget = false;
+
+    c.pendingCount = 0;
+    c.historyCount = 0;
+
+    // ---- FORMATTING ----
+    c.formatINR = function(val) {
+        if (val === undefined || val === null || val === '') return '0.00';
+        var num = parseFloat(val);
+        if (isNaN(num)) return '0.00';
+        return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+
+    // ---- URL DEEP LINKING INITIALIZATION ----
+    var initUrlNumber = $location.search().number;
+    if (initUrlNumber) {
+        c.server.update().then(function() {
+            var targetSwap = c.data.list.find(function(s) { return s.number === initUrlNumber; });
+            if (targetSwap) {
+                c.viewDetails(targetSwap);
+            }
+        });
+    }
+
+    // ---- LIST HELPERS & COUNTS ----
+    c.updateCounts = function() {
+        if(!c.data.list) return;
+        c.pendingCount = c.data.list.filter(function(i) { return i.myApprovalState === 'requested'; }).length;
+        c.historyCount = c.data.list.filter(function(i) { return i.myApprovalState !== 'requested'; }).length;
+    };
+
+    c.setFilter = function(filterType) { 
+        c.listFilter = filterType; 
+        c.currentPage = 1;
+        c.selectAll = false;
+        c.toggleSelectAll(); // uncheck all
+    };
+
+    c.getFilteredList = function() {
+        var arr = c.data.list || [];
+        if (c.listFilter === 'pending') {
+            arr = arr.filter(function(b) { return b.myApprovalState === 'requested'; });
+        } else if (c.listFilter === 'history') {
+            arr = arr.filter(function(b) { return b.myApprovalState !== 'requested'; });
+        }
+        return $filter('filter')(arr, c.searchSwap);
+    };
+
+    c.getPaginatedList = function() {
+        var filtered = c.getFilteredList();
+        var start = (c.currentPage - 1) * c.itemsPerPage;
+        return filtered.slice(start, start + c.itemsPerPage);
+    };
+
+    c.totalPages = function() {
+        return Math.ceil(c.getFilteredList().length / c.itemsPerPage) || 1;
+    };
+
+    c.getMathMin = function(a, b) { return Math.min(a, b); };
+
+    c.changePage = function(delta) {
+        c.currentPage += delta;
+        c.selectAll = false;
+        c.checkSelection();
+    };
+
+    // ---- BULK SELECTION ----
+    c.toggleSelectAll = function() {
+        var list = c.getPaginatedList();
+        var allSelected = c.selectAll;
+        list.forEach(function(item) {
+            item.selected = allSelected;
+        });
+    };
+
+    c.checkSelection = function() {
+        var list = c.getPaginatedList();
+        if (list.length === 0) {
+            c.selectAll = false;
+            return;
+        }
+        c.selectAll = list.every(function(item) { return item.selected; });
+    };
+
+    c.getSelectedItems = function() {
+        if (!c.data.list) return [];
+        return c.data.list.filter(function(item) { return item.selected && item.myApprovalState === 'requested'; });
+    };
+
+    // ---- VIEW DETAILS ----
+    c.viewDetails = function(item) {
+        c.selectedItem = item;
+        c.isLoadingDetails = true;
+        c.detailData = null;
+        c.data.ticketWidget = null;
+        c.data.attachmentWidget = null;
+        
+        // Deep linking updates
+        $location.search('number', item.number);
+
+        c.server.get({
+            action: 'get_swap_details',
+            swapSysId: item.swap_sys_id
+        }).then(function(response) {
+            // HIGHLIGHT: SET VALUE - Applying mapped detailed logic back to front-end
+            c.detailData = {
+                approvals:  response.data.approvalData   || [],
+                extended:   response.data.extendedDetails || { donee: {}, donor: {} }
+            };
+            c.isLoadingDetails = false;
+            c.data.isLoadingWidget = true;
+
+            // 1. Inject Native OOB Ticket Attachments Widget
+            spUtil.get('ticket-attachments', {
+                sys_id: item.swap_sys_id,
+                table: 'x_birl3_clm_nt_limit_swap_request'
+            }).then(function(attWidget) {
+                c.data.attachmentWidget = attWidget;
+
+                // 2. Inject Native OOB Ticket Conversation Widget
+                spUtil.get('widget-ticket-conversation', {
+                    sys_id: item.swap_sys_id,
+                    table: 'x_birl3_clm_nt_limit_swap_request', 
+                    btnLabel: 'Post Reply'
+                }).then(function(convoWidget) {
+                    c.data.ticketWidget = convoWidget;
+                    c.data.isLoadingWidget = false;
+                });
+            });
+        });
+    };
+
+    // HIGHLIGHT: ACTION - Native File Attachments specific to Record Activity Stream
+    c.attachFileToStream = function(inputElement) {
+        if (!inputElement.files || inputElement.files.length === 0) return;
+        var file = inputElement.files[0];
+        
+        c.data.isUploadingAttachment = true;
+        $scope.$applyAsync(); // Force Angular Digest for UI Spinner Loader
+
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            var base64Data = e.target.result.split(',')[1];
+            
+            c.server.get({
+                action: 'upload_attachment',
+                swapSysId: c.selectedItem.swap_sys_id,
+                fileName: file.name,
+                contentType: file.type,
+                fileData: base64Data
+            }).then(function(response) {
+                c.data.isUploadingAttachment = false;
+                if (response.data.success) {
+                    spUtil.addInfoMessage("File '"+ file.name +"' securely attached to the request.");
+                    // Re-trigger the Drilldown to natively refresh both Conversation and Attachment widgets
+                    c.viewDetails(c.selectedItem); 
+                } else {
+                    spUtil.addErrorMessage("System Error: Unable to upload attachment securely.");
+                }
+            });
+        };
+        reader.readAsDataURL(file);
+    };
+
+    c.goBack = function() {
+        c.selectedItem = null;
+        c.detailData = null;
+        c.data.ticketWidget = null;
+        c.data.attachmentWidget = null;
+        c.isLoadingDetails = false;
+        $location.search('number', null);
+    };
+
+    // ---- ACTION: APPROVE ----
+    c.approve = function(item) {
+        c.isActing = true;
+        c.server.get({
+            action: 'approve_reject',
+            approvalSysIds: [item.approval_sys_id],
+            newState: 'approved'
+        }).then(function(response) {
+            c.data.list = response.data.list;
+            c.updateCounts();
+            c.isActing = false;
+        });
+    };
+
+    c.approveFromDetail = function(item) {
+        c.isActing = true;
+        c.server.get({
+            action: 'approve_reject',
+            approvalSysIds: [item.approval_sys_id],
+            newState: 'approved'
+        }).then(function(response) {
+            c.data.list = response.data.list;
+            c.updateCounts();
+            c.isActing = false;
+            c.selectedItem = null;
+            c.detailData = null;
+            $location.search('number', null);
+        });
+    };
+
+    c.bulkApprove = function() {
+        var selectedIds = c.getSelectedItems().map(function(i) { return i.approval_sys_id; });
+        if (selectedIds.length === 0) return;
+
+        c.isActing = true;
+        c.server.get({
+            action: 'approve_reject',
+            approvalSysIds: selectedIds,
+            newState: 'approved'
+        }).then(function(response) {
+            c.data.list = response.data.list;
+            c.updateCounts();
+            c.selectAll = false;
+            c.isActing = false;
+        });
+    };
+
+    // ---- ACTION: REJECT MODAL ----
+    c.openRejectModal = function(item, isBulk) {
+        c.isBulkReject = isBulk;
+        c.rejectReason = '';
+        if (isBulk) {
+            c.pendingRejectIds = c.getSelectedItems().map(function(i) { return i.approval_sys_id; });
+        } else {
+            c.pendingRejectIds = [item.approval_sys_id];
+        }
+        c.showRejectModal = true;
+    };
+
+    c.cancelReject = function() {
+        c.showRejectModal = false;
+        c.pendingRejectIds = [];
+        c.rejectReason = '';
+    };
+
+    c.confirmReject = function() {
+        if (c.pendingRejectIds.length === 0) return;
+        c.isActing = true;
+        c.showRejectModal = false;
+
+        var wasInDetail = (c.selectedItem && c.pendingRejectIds.indexOf(c.selectedItem.approval_sys_id) > -1);
+
+        c.server.get({
+            action: 'approve_reject',
+            approvalSysIds: c.pendingRejectIds,
+            newState: 'rejected',
+            rejectReason: c.rejectReason
+        }).then(function(response) {
+            c.data.list = response.data.list;
+            c.updateCounts();
+            c.pendingRejectIds = [];
+            c.rejectReason = '';
+            c.selectAll = false;
+            c.isActing = false;
+            
+            if (wasInDetail) {
+                c.selectedItem = null;
+                c.detailData = null;
+                $location.search('number', null);
+            }
+        });
+    };
+
+    // Run on Load
+    if(c.data.list) {
+        c.updateCounts();
+    }
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>/* Premium Enterprise Container Styling */
+.abg-widget-container { 
+  background-color: #FFFFFF; 
+  padding: 35px; 
+  border-radius: 6px; 
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05); 
+  font-family: 'Oxygen', "Helvetica Neue", Arial, sans-serif; 
+}
+
+/* Structural Core &amp; Alignment tools */
+.d-flex { display: flex; }
+.justify-content-between { justify-content: space-between; }
+.justify-content-end { justify-content: flex-end; }
+.align-items-center { align-items: center; }
+.align-items-stretch { align-items: stretch; }
+.align-items-end { align-items: flex-end; }
+.border-bottom { border-bottom: 1px solid #EAEAEA; }
+.border-top { border-top: 1px solid #EAEAEA; }
+.border { border: 1px solid #EAEAEA; }
+.rounded { border-radius: 6px; }
+.m-b-none { margin-bottom: 0 !important; }
+.m-b-xs { margin-bottom: 6px !important; }
+.m-b-sm { margin-bottom: 10px !important; }
+.m-b-md { margin-bottom: 20px !important; }
+.m-b-lg { margin-bottom: 30px !important; }
+.m-t-xs { margin-top: 6px !important; }
+.m-t-md { margin-top: 20px !important; }
+.m-t-lg { margin-top: 30px !important; }
+.m-l-md { margin-left: 20px !important; }
+.p-l-0 { padding-left: 0 !important; }
+.p-l-none { padding-left: 0 !important; }
+.p-l-xs { padding-left: 6px !important; }
+.p-r-xs { padding-right: 6px !important; }
+.p-b-md { padding-bottom: 15px !important; }
+.p-b-xl { padding-bottom: 45px !important; }
+.p-t-sm { padding-top: 10px !important; }
+.p-t-xs { padding-top: 6px !important; }
+.p-b-sm { padding-bottom: 10px !important; }
+.p-md { padding: 15px !important; }
+.p-sm { padding: 10px !important; }
+.p-lg { padding: 25px !important; }
+.p-xl { padding: 40px !important; }
+.m-r-xs { margin-right: 6px !important; }
+.m-l-sm { margin-left: 10px !important; }
+.m-r-sm { margin-right: 10px !important; }
+.font-weight-bold { font-weight: 700 !important; }
+.vertical-middle { vertical-align: middle !important; }
+.text-muted { color: #718096 !important; }
+.text-success { color: #2E7D32 !important; }
+.text-danger { color: #C8102E !important; }
+.text-warning { color: #D97706 !important; }
+.text-xs { font-size: 11px !important; letter-spacing: 0.3px; }
+.text-sm { font-size: 12.5px !important; }
+.text-dark { color: #1a1a1a; }
+.bg-light { background-color: #f8f9fa; }
+.bg-white { background-color: #FFFFFF !important; }
+
+.abg-header h2 { color: #2D3748; font-weight: 700; margin-top: 0; font-size: 24px; }
+.header-divider { border-bottom: 2px solid #F7FAFC; padding-bottom: 20px; margin-bottom: 25px; }
+.hover-red { transition: color 0.2s ease; }
+.hover-red:hover { color: #C8102E !important; text-decoration: none; }
+.section-title { font-size: 12.5px; color: #4A5568; letter-spacing: 0.8px; margin-bottom: 15px; }
+.clm-id-tag { background: #EDF2F7; color: #2B6CB0; padding: 3px 8px; border-radius: 4px; font-family: monospace; font-size: 13px; }
+.segment-badge { background-color: #4A5568; padding: 2px 6px; font-size: 10px; border-radius: 3px; display: inline-block; margin-top: 4px; color: #FFF; }
+
+/* Flexgrid Configurations */
+.flex-align-center { display: flex; flex-wrap: wrap; align-items: center; }
+.flex-cards { display: flex; flex-wrap: wrap; margin-left: -12px; margin-right: -12px; } 
+.flex-cards &gt; div { display: flex; flex-direction: column; margin-bottom: 24px; padding-left: 12px; padding-right: 12px; }
+
+/* HEADER ACTIONS &amp; PILLS */
+.header-actions-panel { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 15px; }
+.abg-pills { display: flex; list-style: none; margin: 0; padding: 0; }
+.abg-pills &gt; li &gt; a { display: inline-block; border-radius: 30px; color: #4A5568; font-weight: 700; padding: 6px 18px; margin-left: 8px; border: 1px solid #E2E8F0; font-size: 13px; background: #FFF; transition: all 0.2s; text-decoration: none; }
+.abg-pills &gt; li:first-child &gt; a { margin-left: 0; }
+.abg-pills &gt; li &gt; a:hover { background-color: #EDF2F7; color: #2D3748; }
+.abg-pills &gt; li.active &gt; a, .abg-pills &gt; li.active &gt; a:focus, .abg-pills &gt; li.active &gt; a:hover { background-color: #C8102E !important; color: #FFF !important; border-color: #C8102E; box-shadow: 0 3px 6px rgba(200, 16, 46, 0.25); }
+
+/* Pure flex search box */
+.search-box { width: 250px; display: flex; align-items: stretch; }
+.search-box .input-group-addon { background: #FFFFFF; border: 1px solid #CBD5E0; border-right: none; border-radius: 4px 0 0 4px; display: flex; align-items: center; padding: 0 12px; }
+.search-box .form-control { height: 36px; font-size: 13px; border: 1px solid #CBD5E0; border-left: none; border-radius: 0 4px 4px 0; box-shadow: none; }
+.search-box .form-control:focus { border-color: #C8102E; box-shadow: inset 0 -2px 0 rgba(200, 16, 46, 0.1); }
+
+/* BULK ACTION BAR */
+.bulk-action-panel { background: #EBF4FF; border: 1px solid #BEE3F8; border-radius: 6px; padding: 12px 18px; margin-top: 15px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; }
+.bulk-text { color: #2B6CB0; font-weight: 700; font-size: 14px; }
+.abg-checkbox { width: 16px; height: 16px; cursor: pointer; accent-color: #C8102E; }
+
+/* Master Overview Table Configuration */
+.widget-table-wrapper { border-radius: 6px; border: 1px solid #E2E8F0; margin: 15px 0 25px 0; }
+.abg-table { margin-bottom: 0; width: 100%; }
+.abg-table thead th { background-color: #F7FAFC; color: #4A5568; font-weight: 700; text-transform: uppercase; font-size: 11.5px; border-bottom: 2px solid #E2E8F0; padding: 14px 12px; white-space: nowrap; }
+.abg-table tbody tr { transition: background 0.15s ease; }
+.abg-table tbody tr:hover { background-color: #FFF5F5 !important; }
+.selected-row { background-color: #EBF4FF !important; }
+
+/* Status Badges Architecture */
+.status-pill { padding: 5px 14px; border-radius: 30px; font-size: 11.5px; font-weight: 700; display: inline-block; white-space: nowrap; text-transform: uppercase; letter-spacing: 0.5px; }
+.status-pending { background-color: #FEF3C7; color: #D97706; border: 1px solid #FCD34D; }
+.status-approved { background-color: #D1FAE5; color: #065F46; border: 1px solid #34D399; }
+.status-rejected { background-color: #FEE2E2; color: #991B1B; border: 1px solid #F87171; }
+.status-work { background-color: #DBEAFE; color: #1E40AF; border: 1px solid #60A5FA; }
+
+/* Interactive Buttons */
+.abg-btn-outline { background: transparent; border: 1px solid #C8102E; color: #C8102E; font-weight: 700; border-radius: 4px; padding: 6px 14px; transition: all 0.2s; white-space: nowrap; cursor: pointer; }
+.abg-btn-outline:hover:not([disabled]) { background: #C8102E; color: #FFF; box-shadow: 0 4px 8px rgba(200, 16, 46, 0.15); }
+.abg-btn-outline[disabled] { opacity: 0.6; cursor: not-allowed; }
+.abg-btn-primary { background-color: #C8102E; color: #FFFFFF; font-weight: 700; padding: 10px 22px; border: none; border-radius: 4px; transition: all 0.2s; }
+.abg-btn-primary:hover:not([disabled]) { background-color: #A00D25; box-shadow: 0 4px 12px rgba(160, 13, 37, 0.2); }
+.abg-btn-primary[disabled] { background-color: #E2E8F0; color: #A0AEC0; cursor: not-allowed; }
+.abg-btn-approve { background: #2E7D32; color: #FFF; font-weight: 700; border: none; border-radius: 4px; padding: 6px 14px; transition: all 0.2s; }
+.abg-btn-approve:hover:not([disabled]) { background: #1B5E20; box-shadow: 0 4px 10px rgba(46,125,50,0.2); color: #FFF; }
+.abg-btn-danger { background: #C8102E; color: #FFF; font-weight: 700; border: none; border-radius: 4px; padding: 6px 14px; transition: all 0.2s; }
+.abg-btn-danger:hover:not([disabled]) { background: #A00D25; box-shadow: 0 4px 10px rgba(200,16,46,0.2); color: #FFF; }
+.btn[disabled] { opacity: 0.6; cursor: not-allowed; }
+
+/* Modal */
+.abg-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+.abg-modal-box { background: #FFF; border-radius: 8px; width: 440px; max-width: 92vw; box-shadow: 0 20px 50px rgba(0,0,0,0.2); overflow: hidden; }
+.abg-modal-header { padding: 18px 24px; background: #FFF5F5; border-bottom: 1px solid #FEE2E2; font-size: 15px; color: #991B1B; }
+.abg-modal-body { padding: 20px 24px; }
+.abg-modal-footer { padding: 14px 24px; background: #F7FAFC; border-top: 1px solid #E2E8F0; text-align: right; }
+.custom-textarea { padding: 12px 16px; font-size: 14px; border: 1px solid #CBD5E0; border-radius: 4px; box-shadow: none; resize: vertical; }
+.custom-textarea:focus { border-color: #C8102E; outline: none; }
+
+/* PROFILE PANELS (UN-SQUISHED) */
+.abg-profile-panel { background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.02); width: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.border-top-success { border-top: 4px solid #2E7D32; }
+.border-top-danger { border-top: 4px solid #C8102E; }
+.panel-profile-header { padding: 20px 24px; border-bottom: 1px solid #EDF2F7; background: #FDFDFD; }
+.panel-profile-header .indicator-marker { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.panel-profile-header h3 { margin: 0; font-size: 22px; font-weight: 700; color: #1A202C; letter-spacing: -0.5px; }
+
+.panel-profile-body { padding: 10px 0 0 0; }
+.abg-profile-table { margin-bottom: 0; width: 100%; }
+.abg-profile-table tbody tr td { padding: 14px 24px !important; border-top: 1px solid #F0F4F8; color: #2D3748; font-size: 14px; vertical-align: middle; }
+.abg-profile-table tbody tr th { padding: 14px 24px !important; border-top: 1px solid #F0F4F8; color: #718096; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; vertical-align: middle; font-weight: 700; }
+
+.highlight-row-success { background-color: #F4FBF6; }
+.highlight-row-danger { background-color: #FFF5F5; }
+.highlight-total-success { background-color: #E6F4EA; border-top: 1px dashed #2E7D32 !important; }
+.highlight-total-danger { background-color: #FCE8EA; border-top: 1px dashed #C8102E !important; }
+.highlight-total-success td, .highlight-total-success th { font-size: 16px !important; padding: 16px 24px !important; color: #1a1a1a; }
+.highlight-total-danger td, .highlight-total-danger th { font-size: 16px !important; padding: 16px 24px !important; color: #1a1a1a; }
+
+/* RE-SIZED RATIONALE BOX */
+.rationale-panel { max-width: 1000px; }
+.style-rationale-box { background-color: #FAFAFA; border: 1px solid #EDF2F7; font-size: 13px; color: #4A5568; line-height: 1.5; border-radius: 4px; padding: 14px 20px; white-space: pre-wrap; }
+
+/* EXCEL-STYLE 6-MONTH BUCKET MATRIX */
+.abg-history-table { border: 1px solid #E2E8F0; width: 100%; }
+.abg-history-table th { background-color: #EDF2F7; color: #4A5568; font-size: 10px; text-transform: uppercase; padding: 8px 6px !important; border-bottom: 1px solid #E2E8F0; vertical-align: middle; text-align: center; }
+.abg-history-table th.text-left { text-align: left; padding-left: 12px !important;}
+.abg-history-table th.text-right { text-align: right; padding-right: 12px !important;}
+.abg-history-table td { padding: 8px 6px !important; font-size: 11.5px; color: #1A202C; border-top: 1px solid #E2E8F0; vertical-align: middle; text-align: center; white-space: nowrap; }
+.abg-history-table td.text-left { text-align: left; padding-left: 12px !important;}
+.abg-history-table td.text-right { text-align: right; padding-right: 12px !important;}
+.abg-history-table tbody tr:nth-child(even) { background-color: #F8FAFC; }
+.abg-history-table tbody tr:hover { background-color: #EDF2F7; }
+
+/* Timeline Approver Layouts (Horizontal Stepper) */
+.approval-stepper-wrapper { background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 6px; padding: 24px; box-shadow: 0 2px 4px rgba(0,0,0,0.01); }
+.approval-stepper { display: flex; justify-content: space-between; align-items: flex-start; position: relative; width: 100%; overflow-x: auto; padding: 10px 0; -webkit-overflow-scrolling: touch; }
+.approval-stepper::before { content: ''; position: absolute; top: 25px; left: 5%; right: 5%; height: 3px; background: #E2E8F0; z-index: 1; width: 90%; }
+.stepper-item { text-align: center; position: relative; z-index: 2; flex: 1; min-width: 120px; padding: 0 8px; }
+.stepper-icon { width: 34px; height: 34px; border-radius: 50%; background: #FFF; border: 3px solid #CBD5E0; margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; color: #A0AEC0; font-weight: 700; transition: all 0.2s ease; }
+.stepper-label { font-size: 13px; font-weight: 700; color: #2D3748; line-height: 1.3; margin-bottom: 2px; }
+.stepper-sub { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+
+.stepper-item.completed .stepper-icon { background: #2E7D32; border-color: #2E7D32; color: #FFF; }
+.stepper-item.current .stepper-icon { background: #FFF; border-color: #D97706; color: #D97706; box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.15); }
+.stepper-item.rejected .stepper-icon { background: #C8102E; border-color: #C8102E; color: #FFF; }
+.stepper-item.is-me .stepper-label { color: #C8102E; }
+.you-badge { display: inline-block; background: #C8102E; color: #FFF; font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px; text-transform: uppercase; margin-top: 4px; }
+
+/* OOB TICKET CONVERSATION WIDGET FIXES */
+.ticket-panel { border-radius: 6px; border: 1px solid #E2E8F0; overflow: hidden; }
+.ticket-body { padding: 30px 24px; min-height: 250px; }
+.timeline-container { padding: 0 !important; }
+.timeline-container .panel { box-shadow: none !important; border: none !important; }
+.timeline-container .panel-heading { display: none !important; }
+
+/* New Attachment Fixes */
+.ticket-attachments-wrapper .panel { background-color: transparent !important; margin-bottom: 0; }
+.ticket-attachments-wrapper .panel-heading { display: block !important; padding: 0 0 10px 0; background: transparent; border-bottom: 1px dashed #D1D5DB; }
+.ticket-attachments-wrapper .panel-title { font-size: 13px; font-weight: 700; color: #4A5568; }
+
+/* Utilities &amp; Animations */
+.shadow-sm { box-shadow: 0 4px 12px rgba(0,0,0,0.03); }
+.slide-down { animation: slideDownFade 0.25s ease-out; }
+@keyframes slideDownFade { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+.page-size-box { width: 110px; }
+.page-size-box .form-control { height: 30px; padding: 4px 8px; font-size: 12px; }
+.page-size-box .input-group-addon { padding: 4px 8px; font-size: 12px; }
+
+/* Mobile Responsiveness */
+@media (max-width: 991px) { .header-actions-panel .search-box { width: 180px; } }
+@media (max-width: 767px) {
+  .mobile-hidden { display: none !important; }
+  .mobile-visible { display: inline-block !important; }
+  .abg-widget-container { padding: 20px 15px; }
+  .flex-align-center { flex-direction: column; align-items: stretch; }
+  .m-b-sm-mobile { margin-bottom: 15px !important; }
+  .mobile-left { text-align: left !important; }
+  
+  .header-actions-panel { flex-direction: column; align-items: stretch; margin-top: 15px; gap: 12px; }
+  .abg-pills { justify-content: space-between; width: 100%; margin-right: 0; }
+  .abg-pills &gt; li { flex-grow: 1; margin: 0 2px; }
+  .abg-pills &gt; li &gt; a { display: block; text-align: center; margin: 0; padding: 8px 4px; font-size: 11px; }
+  .search-box { width: 100% !important; display: flex !important; }
+  .bulk-action-panel { flex-direction: column; gap: 10px; align-items: stretch; text-align: center; }
+  
+  .abg-profile-table tbody tr td, .abg-profile-table tbody tr th { padding: 12px 14px !important; font-size: 13px !important; }
+  .highlight-total-success td, .highlight-total-success th,
+  .highlight-total-danger td, .highlight-total-danger th { padding: 14px 14px !important; font-size: 14px !important; }
+}</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id/>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Limit Swap Approval</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+
+    // Global Segment Mapping Enforcer
+    var segmentMapping = { 'UTCL': 'Cement', 'URMX': 'RMC', 'GIL': 'BPD' };
+
+    function getInternalState(stateStr) {
+        var s = (stateStr || '').toLowerCase();
+        if (s.indexOf('pending') > -1 || s.indexOf('requested') > -1) return 'pending';
+        if (s.indexOf('approved') > -1 || s.indexOf('complete') > -1 || s.indexOf('3') > -1) return 'approved';
+        if (s.indexOf('reject') > -1 || s.indexOf('cancel') > -1 || s.indexOf('4') > -1) return 'rejected';
+        return 'work';
+    }
+
+    // HIGHLIGHT: GET VALUE - Geography Name(Code) display mapping specifically for GlideRecords inside loops
+    function getFormattedGeo(gr, nameField, codeField) {
+        var name = gr.getValue(nameField) || '';
+        var code = gr.getValue(codeField) || '';
+        if (name && code) return name + ' (' + code + ')';
+        if (name) return name;
+        if (code) return code;
+        return 'N/A';
+    }
+
+    // HIGHLIGHT: GET VALUE - Geography Name(Code) fallback explicitly dot-walking Reference Fields natively
+    function formatRefGeo(grRecord, nameField, codeField) {
+        var name = grRecord.getElement(nameField).toString() || '';
+        var code = grRecord.getElement(codeField).toString() || '';
+        if (name && code) return name + ' (' + code + ')';
+        if (name) return name;
+        if (code) return code;
+        return 'N/A';
+    }
+
+    // HIGHLIGHT: GET VALUE - Safety hook function to pull the real-time Live Outstanding specifically for master-grid view
+    function getLiveOutstanding(customerCode) {
+        if(!customerCode) return 0;
+        var outRec = new GlideRecord('x_birl3_clm_customer_outstanding');
+        outRec.addQuery('customer', customerCode);
+        outRec.orderByDesc('created_on');
+        outRec.setLimit(1);
+        outRec.query();
+        if (outRec.next()) {
+            return parseFloat(outRec.getValue('outstanding') || 0);
+        }
+        return 0;
+    }
+
+    var userId = gs.getUserID();
+
+    // ========== ACTION 1: GET SWAP DETAILS & BUCKET AGING ==========
+    if (input && input.action == 'get_swap_details') {
+        var swapSysId = input.swapSysId;
+
+        // Approvals & Role extraction via document_id mapping to Task
+        data.approvalData = [];
+        var allAppGr = new GlideRecord('sysapproval_approver');
+        var qc = allAppGr.addQuery('sysapproval', swapSysId);
+        qc.addOrCondition('document_id', swapSysId); 
+        allAppGr.orderBy('sys_created_on');
+        allAppGr.query();
+        
+        while (allAppGr.next()) {
+            
+            // HIGHLIGHT: SET VALUE - Pulling role specifically from the newly requested "approval_journal_column"
+            var customRole = allAppGr.getValue('approval_journal_column') || allAppGr.getValue('u_role') || allAppGr.getValue('u_approval_level') || 'Approver';
+            if (customRole && customRole.length > 25) { customRole = 'Approver'; } // Clean fallback
+            
+            data.approvalData.push({
+                approver: allAppGr.getDisplayValue('approver'),
+                state:    allAppGr.getDisplayValue('state'),
+                role:     customRole,
+                updated:  allAppGr.getValue('sys_updated_on') || '',
+                isMe:     allAppGr.getValue('approver') == userId
+            });
+        }
+
+        // Site profile cards with Exact Bucket-Wise Aging targeting new architecture
+        data.extendedDetails = { donee: {}, donor: {} };
+        try {
+            var swapGr = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+            if (swapGr.get(swapSysId)) {
+                
+                function getCustDetails(sysId) {
+                    var details = {
+                        name: 'N/A', code: 'N/A', zone: 'N/A',
+                        region: 'N/A', depot: 'N/A',
+                        segment: 'N/A', limit: 0, outstanding: 0,
+                        history: []
+                    };
+                    if (!sysId) return details;
+                    
+                    var cGr = new GlideRecord('x_birl3_clm_customer');
+                    if (cGr.get('customer_code', sysId) || cGr.get(sysId)) {
+                        details.name      = cGr.getValue('name') || 'N/A';
+                        details.code      = cGr.getValue('customer_code') || 'N/A';
+                        
+                        // HIGHLIGHT: SET VALUE - Formatting Name(Code) directly using the previously formulated custom functions
+                        details.zone      = getFormattedGeo(cGr, 'zone_name', 'customer_group');
+                        details.region    = getFormattedGeo(cGr, 'region_name', 'cg4'); 
+                        details.depot     = getFormattedGeo(cGr, 'depot_name', 'sales_office');
+                        
+                        var compCode = cGr.getValue('company_code') || '';
+                        details.segment = segmentMapping[compCode] || cGr.getDisplayValue('company_code') || 'N/A';
+                        
+                        details.limit     = parseFloat(cGr.getValue('credit_limit') || 0);
+
+                        // Fetch Bucket-wise outstanding exposure
+                        var outRec = new GlideRecord('x_birl3_clm_customer_outstanding');
+                        outRec.addQuery('customer', details.code);
+                        outRec.orderByDesc('created_on');
+                        outRec.setLimit(6); // Grabbing exactly 6 months of data
+                        outRec.query();
+                        
+                        var isFirst = true;
+                        while (outRec.next()) {
+                            var outVal = parseFloat(outRec.getValue('outstanding') || 0);
+                            if (isFirst) {
+                                details.outstanding = outVal; // Set current outstanding to the most recent record
+                                isFirst = false;
+                            }
+                            
+                            // Map the detailed bucket history row
+                            var rawDate = outRec.getDisplayValue('created_on') || '';
+                            details.history.push({
+                                date:   rawDate.split(' ')[0], // Extracts YYYY-MM-DD
+                                total:  outVal,
+                                a0_3:   parseFloat(outRec.getValue('ageing0_3') || 0),
+                                a4_7:   parseFloat(outRec.getValue('ageing4_7') || 0),
+                                a8_21:  parseFloat(outRec.getValue('ageing8_21') || 0),
+                                a22_30: parseFloat(outRec.getValue('ageing22_30') || 0),
+                                a31_45: parseFloat(outRec.getValue('ageing31_45') || 0),
+                                a46_60: parseFloat(outRec.getValue('ageing46_60') || 0),
+                                a61_75: parseFloat(outRec.getValue('ageing61_75') || 0),
+                                a76_90: parseFloat(outRec.getValue('ageing76_90') || 0),
+                                a_gt90: parseFloat(outRec.getValue('ageing_gt90') || 0)
+                            });
+                        }
+                    }
+                    return details;
+                }
+
+                var doneeCode = swapGr.donee_site_code.customer_code || swapGr.getValue('donee_site_code');
+                var donorCode = swapGr.donor_site_code.customer_code || swapGr.getValue('donor_site_code');
+
+                data.extendedDetails.donee = getCustDetails(doneeCode);
+                data.extendedDetails.donor = getCustDetails(donorCode);
+            }
+        } catch(e) {
+            gs.warn('CLM Pending Approvals - extendedDetails error: ' + e.message);
+        }
+
+        return;
+    }
+
+    // ========== ACTION 2: BULK APPROVE / REJECT ==========
+    if (input && input.action == 'approve_reject') {
+        var approvalIds = input.approvalSysIds || [];
+        for (var i = 0; i < approvalIds.length; i++) {
+            var approvalGr = new GlideRecord('sysapproval_approver');
+            if (approvalGr.get(approvalIds[i])) {
+                // Security check: Only update if it is currently pending
+                if (approvalGr.state == 'requested') {
+                    approvalGr.setValue('state', input.newState);
+                    if (input.newState === 'rejected' && input.rejectReason) {
+                        approvalGr.setValue('comments', input.rejectReason);
+                    }
+                    approvalGr.update();
+                }
+            }
+        }
+        // Fall through to re-fetch list below
+    }
+
+    // HIGHLIGHT: ACTION - Safe native Attachment Upload Handler logic
+    if (input && input.action == 'upload_attachment') {
+        try {
+            var swapGrAttach = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+            if (swapGrAttach.get(input.swapSysId)) {
+                
+                // Natively write Base64 content via sys_attachment 
+                var attachSysId = new GlideSysAttachment().writeBase64(
+                    swapGrAttach,
+                    input.fileName,
+                    input.contentType || 'application/octet-stream',
+                    input.fileData
+                );
+                
+                if (attachSysId) {
+                    // Pushing a note into the comments will natively trigger the OOB Activity Stream refresh 
+                    swapGrAttach.comments = "]]>📎<![CDATA[ Secure Attachment Formally Uploaded: " + input.fileName;
+                    swapGrAttach.update();
+                    data.success = true;
+                } else {
+                    data.success = false;
+                }
+            }
+        } catch(e) {
+            data.success = false;
+        }
+        return;
+    }
+
+    // ========== MAIN LIST (Runs on load + after actions) ==========
+    data.list = [];
+
+    var appGr = new GlideRecord('sysapproval_approver');
+    appGr.addQuery('approver', userId);
+    
+    // Fetch ALL approvals for this user regarding NT Limit Swaps
+    appGr.addQuery('source_table', 'x_birl3_clm_nt_limit_swap_request').addOrCondition('sysapproval.sys_class_name', 'x_birl3_clm_nt_limit_swap_request');
+    appGr.orderByDesc('sys_created_on');
+    appGr.query();
+
+    while (appGr.next()) {
+        
+        var swapId = appGr.getValue('document_id') || appGr.getValue('sysapproval'); 
+        if (!swapId) continue;
+
+        var swGr = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+        if (!swGr.get(swapId)) continue;
+
+        var myState = appGr.getValue('state'); // My personal approval status
+        var swapStateDisplay =  swGr.getDisplayValue('approval'); // Overall Record Status
+
+        // Customer Code + Name Formatting
+        var doneeCodeVal = swGr.donee_site_code.customer_code || swGr.getValue('donee_site_code') || '';
+        var doneeName = swGr.donee_site_code.name || swGr.getDisplayValue('donee_site_code') || '';
+        var doneeCombined = doneeCodeVal ? (doneeCodeVal + ' — ' + doneeName) : doneeName;
+
+        var donorCodeVal = swGr.donor_site_code.customer_code || swGr.getValue('donor_site_code') || '';
+        var donorName = swGr.donor_site_code.name || swGr.getDisplayValue('donor_site_code') || '';
+        var donorCombined = donorCodeVal ? (donorCodeVal + ' — ' + donorName) : donorName;
+
+        // Front Grid Geographies directly formatted via Dot-Walking Name(Code) Logic
+        var fDoneeZone   = formatRefGeo(swGr, 'donee_site_code.zone_name', 'donee_site_code.customer_group');
+        var fDoneeRegion = formatRefGeo(swGr, 'donee_site_code.region_name', 'donee_site_code.cg4');
+        var fDoneeDepot  = formatRefGeo(swGr, 'donee_site_code.depot_name', 'donee_site_code.sales_office');
+
+        var fDonorZone   = formatRefGeo(swGr, 'donor_site_code.zone_name', 'donor_site_code.customer_group');
+        var fDonorRegion = formatRefGeo(swGr, 'donor_site_code.region_name', 'donor_site_code.cg4');
+        var fDonorDepot  = formatRefGeo(swGr, 'donor_site_code.depot_name', 'donor_site_code.sales_office');
+
+        // Fetch Local Outstanding for the Table view Grid explicitly
+        var lOutDonee = getLiveOutstanding(doneeCodeVal);
+        var lOutDonor = getLiveOutstanding(donorCodeVal);
+
+        // Segment Mapping Fallback
+        var rawDoneeSeg = swGr.getValue('donee_segment') || swGr.donee_site_code.company_code || '';
+        var mappedDoneeSeg = segmentMapping[rawDoneeSeg] || rawDoneeSeg;
+
+        var rawDonorSeg = swGr.getValue('donor_segment') || swGr.donor_site_code.company_code || '';
+        var mappedDonorSeg = segmentMapping[rawDonorSeg] || rawDonorSeg;
+
+        data.list.push({
+            approval_sys_id: appGr.getUniqueValue(),
+            swap_sys_id:     swapId,
+            number:          swGr.getValue('number') || '',
+            pan:             swGr.getDisplayValue('donee_site_code.pan') || swGr.getDisplayValue('donor_site_code.pan') || 'N/A',
+            
+            donee_site:        doneeCombined,
+            donee_segment:     mappedDoneeSeg,
+            donee_zone:        fDoneeZone,
+            donee_region:      fDoneeRegion,
+            donee_depot:       fDoneeDepot,
+            donee_outstanding: lOutDonee, // HIGHLIGHT: SET VALUE - New Outstanding Prop for Donee
+            
+            donor_site:        donorCombined,
+            donor_segment:     mappedDonorSeg,
+            donor_zone:        fDonorZone,
+            donor_region:      fDonorRegion,
+            donor_depot:       fDonorDepot,
+            donor_outstanding: lOutDonor, // HIGHLIGHT: SET VALUE - New Outstanding Prop for Donor
+            
+            amount:          parseFloat(swGr.getValue('requested_amount') || swGr.getValue('donee_amount') || 0),
+            state:           swapStateDisplay,
+            internalState:   getInternalState(swapStateDisplay), 
+            myApprovalState: myState, 
+            created_on:      swGr.getDisplayValue('sys_created_on').split(' ')[0],
+            requested_by:    swGr.getDisplayValue('requested_by') || swGr.getDisplayValue('sys_created_by') || '',
+            comments:        swGr.getValue('justification') || swGr.getValue('comments') || '',
+            selected:        false
+        });
+    }
+
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>sounder.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-02 10:09:08</sys_created_on>
+        <sys_id>41db74a42b1dcb504572f3745e91bfc7</sys_id>
+        <sys_mod_count>42</sys_mod_count>
+        <sys_name>UCLM Limit Swap Approval</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_41db74a42b1dcb504572f3745e91bfc7</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 06:28:49</sys_updated_on>
+        <template><![CDATA[<div class="abg-widget-container">
+
+  <div class="abg-modal-overlay" ng-if="c.showRejectModal">
+    <div class="abg-modal-box slide-down">
+      <div class="abg-modal-header">
+        <i class="fa fa-times-circle text-danger m-r-xs"></i>
+        <strong>Confirm Rejection</strong>
+      </div>
+      <div class="abg-modal-body">
+        <p class="text-muted m-b-sm" style="font-size:13px;">
+          Please provide a business rationale for rejecting <strong ng-if="c.isBulkReject">{{c.getSelectedItems().length}} selected requests</strong><strong ng-if="!c.isBulkReject">this request</strong>. This will be logged against the approval record(s).
+        </p>
+        <textarea class="form-control custom-textarea" rows="3"
+          ng-model="c.rejectReason"
+          placeholder="Enter rejection reason (Mandatory)...">
+        </textarea>
+      </div>
+      <div class="abg-modal-footer">
+        <button class="btn btn-default btn-sm m-r-sm font-weight-bold" ng-click="c.cancelReject()">Cancel</button>
+        <button class="btn abg-btn-danger btn-sm font-weight-bold" ng-disabled="!c.rejectReason" ng-click="c.confirmReject()">
+          <i class="fa fa-times m-r-xs"></i> Confirm Reject
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div ng-if="!c.selectedItem">
+
+    <div class="abg-header row flex-align-center m-b-md">
+      <div class="col-xs-12 col-sm-5 col-md-5 m-b-sm-mobile">
+        <h2>Limit Swap Approvals</h2>
+        <p class="m-b-none text-muted">Review, bulk-approve, or reject credit limit reallocation requests.</p>
+      </div>
+      <div class="col-xs-12 col-sm-7 col-md-7 text-right mobile-left">
+        <div class="header-actions-panel">
+          <ul class="abg-pills">
+            <li ng-class="{'active': c.listFilter == 'pending'}">
+              <a href="javascript:void(0)" ng-click="c.setFilter('pending')">
+                Pending <span class="badge" style="background:#FFF; color:#C8102E; margin-left:4px;" ng-if="c.listFilter == 'pending' && c.pendingCount > 0">{{c.pendingCount}}</span>
+              </a>
+            </li>
+            <li ng-class="{'active': c.listFilter == 'history'}">
+              <a href="javascript:void(0)" ng-click="c.setFilter('history')">History</a>
+            </li>
+          </ul>
+          <div class="search-box">
+            <span class="input-group-addon"><i class="fa fa-search text-muted"></i></span>
+            <input type="text" class="form-control" ng-model="c.searchSwap" ng-change="c.currentPage = 1; c.checkSelection()" placeholder="Search PAN or Number...">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="text-center p-xl" ng-if="c.isActing">
+      <i class="fa fa-spinner fa-spin fa-3x text-muted m-b-sm"></i>
+      <p class="text-muted font-weight-bold">Processing your decision...</p>
+    </div>
+
+    <div ng-if="!c.isActing && c.getFilteredList().length == 0">
+      <div class="text-center text-muted p-xl" style="background: #f9f9f9; border: 1px dashed #E2E8F0; border-radius: 6px; margin-top: 15px;">
+        <i class="fa fa-check-circle-o fa-3x m-b-sm" style="color:#2E7D32;"></i>
+        <h4 class="font-weight-bold" style="color:#2D3748;">All Caught Up!</h4>
+        <p class="m-b-none text-muted">There are no limit swap requests in this view matching your criteria.</p>
+      </div>
+    </div>
+
+    <div ng-if="!c.isActing && c.getFilteredList().length > 0">
+      
+      <div class="bulk-action-panel slide-down" ng-if="c.listFilter == 'pending' && c.getSelectedItems().length > 0">
+        <div class="bulk-text"><i class="fa fa-check-square-o m-r-xs"></i> {{c.getSelectedItems().length}} Request(s) Selected</div>
+        <div>
+          <button class="btn abg-btn-danger btn-sm m-r-sm" ng-click="c.openRejectModal(null, true)"><i class="fa fa-times m-r-xs"></i> Reject Selected</button>
+          <button class="btn abg-btn-approve btn-sm" ng-click="c.bulkApprove()"><i class="fa fa-check m-r-xs"></i> Approve Selected</button>
+        </div>
+      </div>
+
+      <div class="table-responsive shadow-sm widget-table-wrapper">
+        <table class="table abg-table table-hover m-b-none">
+          <thead>
+            <tr>
+              <th width="4%" class="text-center" ng-if="c.listFilter == 'pending'">
+                <input type="checkbox" ng-model="c.selectAll" ng-change="c.toggleSelectAll()" class="abg-checkbox">
+              </th>
+              <th width="16%">Swap Request Details</th>
+              <th width="22%">Donee (Receiving Unit)</th>
+              <th width="22%">Donor (Deducting Unit)</th>
+              <th width="13%">Transfer Amount</th>
+              <th width="10%">Status</th>
+              <th width="13%" class="text-center">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr ng-repeat="item in c.getPaginatedList()" ng-class="{'selected-row': item.selected}">
+              <td class="vertical-middle text-center" ng-if="c.listFilter == 'pending'">
+                <input type="checkbox" ng-model="item.selected" ng-change="c.checkSelection()" class="abg-checkbox">
+              </td>
+              <td class="vertical-middle">
+                <span class="clm-id-tag font-weight-bold">{{::item.number}}</span><br>
+                <small class="text-muted font-weight-bold">PAN: {{::item.pan}}</small><br>
+                <small class="text-muted"><i class="fa fa-user m-r-xs"></i> {{::item.requested_by}}</small>
+              </td>
+              <td class="vertical-middle">
+                <strong class="text-success" style="font-size:13.5px;">{{::item.donee_site}}</strong><br>
+                <div class="text-xs text-muted m-t-xs m-b-xs">
+                  <i class="fa fa-map-marker text-success m-r-xs"></i> {{::item.donee_zone}} | {{::item.donee_region}} | {{::item.donee_depot}}
+                </div>
+                <div class="text-xs m-b-xs font-weight-bold text-dark">
+                   <i class="fa fa-bar-chart m-r-xs text-success"></i> Out: ₹ {{::c.formatINR(item.donee_outstanding)}}
+                </div>
+                <span class="badge segment-badge" ng-if="item.donee_segment">{{::item.donee_segment}}</span>
+              </td>
+              <td class="vertical-middle">
+                <strong class="text-danger" style="font-size:13.5px;">{{::item.donor_site}}</strong><br>
+                <div class="text-xs text-muted m-t-xs m-b-xs">
+                  <i class="fa fa-map-marker text-danger m-r-xs"></i> {{::item.donor_zone}} | {{::item.donor_region}} | {{::item.donor_depot}}
+                </div>
+                <div class="text-xs m-b-xs font-weight-bold text-dark">
+                   <i class="fa fa-bar-chart m-r-xs text-danger"></i> Out: ₹ {{::c.formatINR(item.donor_outstanding)}}
+                </div>
+                <span class="badge segment-badge" ng-if="item.donor_segment">{{::item.donor_segment}}</span>
+              </td>
+              <td class="vertical-middle">
+                <strong style="font-size: 15px; color:#1a1a1a;">₹ {{::c.formatINR(item.amount)}}</strong>
+              </td>
+              <td class="vertical-middle">
+                <span class="status-pill status-{{item.internalState}}">{{::item.state}}</span>
+              </td>
+              <td class="vertical-middle text-center">
+                <div style="display:flex; flex-direction:column; gap:6px; align-items:center;">
+                  <span ng-if="c.listFilter == 'pending'" style="display:flex; gap:6px;">
+                    <button class="btn abg-btn-approve btn-sm" ng-click="c.approve(item)" title="Quick Approve"><i class="fa fa-check"></i></button>
+                    <button class="btn abg-btn-danger btn-sm" ng-click="c.openRejectModal(item, false)" title="Quick Reject"><i class="fa fa-times"></i></button>
+                  </span>
+                  <button class="btn btn-default btn-sm font-weight-bold" style="width: 100%; max-width: 80px;" ng-click="c.viewDetails(item)">Review</button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="row flex-align-center m-t-md" ng-if="c.getFilteredList().length > 0">
+        <div class="col-xs-12 col-sm-4 col-md-4 m-b-sm-mobile">
+          <div class="input-group page-size-box">
+            <span class="input-group-addon bg-light">Show</span>
+            <select class="form-control" ng-model="c.itemsPerPage" ng-change="c.currentPage = 1; c.checkSelection()" ng-options="size for size in [10, 25, 50, 100, 250, 500]"></select>
+          </div>
+        </div>
+        <div class="col-xs-12 col-sm-4 col-md-4 text-center text-muted hidden-xs">
+          Showing {{ c.getFilteredList().length === 0 ? 0 : (c.currentPage - 1) * c.itemsPerPage + 1 }} to 
+          {{ c.getMathMin(c.currentPage * c.itemsPerPage, c.getFilteredList().length) }} 
+          of {{ c.getFilteredList().length }} entries
+        </div>
+        <div class="col-xs-12 col-sm-4 col-md-4 text-right text-center-mobile m-t-sm-mobile">
+          <button class="btn btn-default btn-sm" ng-click="c.changePage(-1)" ng-disabled="c.currentPage == 1"><i class="fa fa-chevron-left"></i> Prev</button>
+          <span class="m-l-sm m-r-sm font-weight-bold">Page {{c.currentPage}} / {{c.totalPages()}}</span>
+          <button class="btn btn-default btn-sm" ng-click="c.changePage(1)" ng-disabled="c.currentPage == c.totalPages() || c.totalPages() == 0">Next <i class="fa fa-chevron-right"></i></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <div class="slide-down" ng-if="c.selectedItem">
+    
+    <div class="abg-header header-divider">
+      <button class="btn btn-link text-muted p-l-0 m-b-sm hover-red font-weight-bold" ng-click="c.goBack()">&#8592; Back to Approvals Grid</button>
+      <div class="row flex-align-center">
+        <div class="col-xs-12 col-sm-7 col-md-7">
+          <h2 class="m-b-xs">{{c.selectedItem.number}} <small style="color:#C8102E; font-weight:700;">| Corporate PAN: {{c.selectedItem.pan}}</small></h2>
+          <p class="m-b-none text-muted"><i class="fa fa-user m-r-xs"></i> Initiated by: <strong>{{c.selectedItem.requested_by}}</strong> &nbsp;|&nbsp; <i class="fa fa-clock-o m-r-xs"></i> {{c.selectedItem.created_on}}</p>
+        </div>
+        
+        <div class="col-xs-12 col-sm-5 col-md-5 text-right mobile-left m-t-sm-mobile" ng-if="c.selectedItem.myApprovalState == 'requested'">
+          <button class="btn abg-btn-danger btn-md font-weight-bold m-r-sm" ng-click="c.openRejectModal(c.selectedItem, false)" ng-disabled="c.isActing">
+            <i class="fa fa-times m-r-xs"></i> Reject Request
+          </button>
+          <button class="btn abg-btn-approve btn-md font-weight-bold" ng-click="c.approveFromDetail(c.selectedItem)" ng-disabled="c.isActing">
+            <i class="fa fa-check m-r-xs"></i> Approve Request
+          </button>
+        </div>
+        <div class="col-xs-12 col-sm-5 col-md-5 text-right mobile-left m-t-sm-mobile" ng-if="c.selectedItem.myApprovalState != 'requested'">
+          <span class="status-pill status-{{c.selectedItem.internalState}}" style="font-size: 14px; padding: 6px 18px; font-weight:700;">
+            Overall Status: {{c.selectedItem.state}}
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="text-center p-xl" ng-if="c.isLoadingDetails || c.isActing">
+       <i class="fa fa-spinner fa-spin fa-3x text-muted m-b-sm"></i>
+       <p class="text-muted">{{c.isActing ? 'Processing your approval decision...' : 'Resolving operational site profiles & histories...'}}</p>
+    </div>
+
+    <div ng-if="!c.isLoadingDetails && !c.isActing">
+
+      <div class="approval-stepper-wrapper m-b-lg slide-down">
+        <h4 class="font-weight-bold m-b-md text-uppercase section-title"><i class="fa fa-sitemap m-r-xs"></i> Authorization Pipeline</h4>
+        
+        <div class="text-center text-muted p-md shadow-inner bg-light rounded" ng-if="c.detailData.approvals.length == 0">
+          <i class="fa fa-info-circle m-b-xs"></i> Systemic approval workflows are either routing or not required for this request.
+        </div>
+
+        <div class="approval-stepper" ng-if="c.detailData.approvals.length > 0">
+          <div class="stepper-item" ng-class="{'completed': app.state == 'Approved', 'current': app.state == 'Requested', 'rejected': app.state == 'Rejected', 'is-me': app.isMe}" ng-repeat="app in c.detailData.approvals">
+            <div class="stepper-icon">
+              <i class="fa fa-check" ng-if="app.state == 'Approved'"></i>
+              <i class="fa fa-spinner fa-spin" ng-if="app.state == 'Requested'"></i>
+              <i class="fa fa-times" ng-if="app.state == 'Rejected'"></i>
+              <i class="fa fa-circle" ng-if="app.state != 'Approved' && app.state != 'Requested' && app.state != 'Rejected'"></i>
+            </div>
+            <div class="stepper-label text-dark">{{::app.role}}</div>
+            <div class="stepper-sub text-muted m-b-xs">{{::app.approver}}</div>
+            
+            <div class="stepper-sub" ng-class="{'text-success': app.state == 'Approved', 'text-warning': app.state == 'Requested', 'text-danger': app.state == 'Rejected'}">
+              {{::app.state}}
+            </div>
+            <div class="you-badge" ng-if="app.isMe && app.state == 'Requested'">Action Required</div>
+          </div>
+        </div>
+      </div>
+
+      <h4 class="font-weight-bold m-b-md text-uppercase section-title slide-down" style="animation-delay: 0.1s; animation-fill-mode: both;"><i class="fa fa-database m-r-xs"></i> Customer Entity Profile Matrix</h4>
+      
+      <div class="row flex-cards m-b-lg slide-down" style="animation-delay: 0.15s; animation-fill-mode: both;">
+        
+        <div class="col-xs-12 col-sm-6">
+          <div class="abg-profile-panel border-top-success">
+            <div class="panel-profile-header">
+               <span class="indicator-marker text-success"><i class="fa fa-arrow-circle-down"></i> Receiving Unit (Donee Site)</span>
+               <div class="d-flex justify-content-between align-items-center">
+                 <h3 style="font-size: 18px;">{{c.detailData.extended.donee.code || 'N/A'}} - {{c.detailData.extended.donee.name}}</h3>
+                 <span class="badge" style="background:#4A5568; font-size:12px;" ng-if="c.detailData.extended.donee.segment">{{c.detailData.extended.donee.segment}}</span>
+               </div>
+            </div>
+            <div class="panel-profile-body">
+              <table class="table abg-profile-table m-b-none">
+                <tbody>
+                  <tr><th width="35%">Zone</th><td>{{c.detailData.extended.donee.zone}}</td></tr>
+                  <tr><th>Region</th><td>{{c.detailData.extended.donee.region}}</td></tr>
+                  <tr><th>Depot</th><td>{{c.detailData.extended.donee.depot}}</td></tr>
+                  <tr class="highlight-row-success"><th>Current Limit</th><td><strong>₹ {{c.formatINR(c.detailData.extended.donee.limit)}}</strong></td></tr>
+                  <tr class="highlight-row-success"><th>Latest Outstanding</th><td><strong>₹ {{c.formatINR(c.detailData.extended.donee.outstanding)}}</strong></td></tr>
+                  <tr class="highlight-total-success"><th>Allocation Impact</th>
+                    <td><span class="text-success font-weight-bold">+ ₹ {{c.formatINR(c.selectedItem.amount)}}</span></td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <div class="bg-light p-sm border-top">
+                 <div class="text-xs text-uppercase font-weight-bold text-muted m-b-sm m-l-sm m-t-sm">
+                    <i class="fa fa-history m-r-xs"></i> 6-Month Bucket-Wise Aging Trend
+                 </div>
+                 <div class="table-responsive p-sm">
+                   <table class="table table-bordered abg-history-table m-b-none text-center" ng-if="c.detailData.extended.donee.history.length > 0">
+                     <thead>
+                       <tr>
+                         <th class="text-left" style="min-width: 90px;">Date</th>
+                         <th>0-3 D</th>
+                         <th>4-7 D</th>
+                         <th>8-21 D</th>
+                         <th>22-30 D</th>
+                         <th>31-45 D</th>
+                         <th>46-60 D</th>
+                         <th>61-75 D</th>
+                         <th>76-90 D</th>
+                         <th>>90 D</th>
+                         <th class="text-right">Total Out.</th>
+                       </tr>
+                     </thead>
+                     <tbody>
+                       <tr ng-repeat="hist in c.detailData.extended.donee.history">
+                         <td class="text-left font-weight-bold">{{::hist.date}}</td>
+                         <td>{{::c.formatINR(hist.a0_3)}}</td>
+                         <td>{{::c.formatINR(hist.a4_7)}}</td>
+                         <td>{{::c.formatINR(hist.a8_21)}}</td>
+                         <td>{{::c.formatINR(hist.a22_30)}}</td>
+                         <td>{{::c.formatINR(hist.a31_45)}}</td>
+                         <td>{{::c.formatINR(hist.a46_60)}}</td>
+                         <td ng-class="{'text-warning font-weight-bold': hist.a61_75 > 0}">{{::c.formatINR(hist.a61_75)}}</td>
+                         <td ng-class="{'text-danger font-weight-bold': hist.a76_90 > 0}">{{::c.formatINR(hist.a76_90)}}</td>
+                         <td ng-class="{'text-danger font-weight-bold': hist.a_gt90 > 0}">{{::c.formatINR(hist.a_gt90)}}</td>
+                         <td class="text-right font-weight-bold text-dark" style="background: #EAEAEA;">₹ {{::c.formatINR(hist.total)}}</td>
+                       </tr>
+                     </tbody>
+                   </table>
+                   <div ng-if="c.detailData.extended.donee.history.length == 0" class="text-muted text-xs p-t-xs p-l-xs">
+                      No historical outstanding data available.
+                   </div>
+                 </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <div class="col-xs-12 col-sm-6">
+          <div class="abg-profile-panel border-top-danger">
+            <div class="panel-profile-header">
+              <span class="indicator-marker text-danger"><i class="fa fa-arrow-circle-up"></i> Deducting Unit (Donor Site)</span>
+              <div class="d-flex justify-content-between align-items-center">
+                 <h3 style="font-size: 18px;">{{c.detailData.extended.donor.code || 'N/A'}} - {{c.detailData.extended.donor.name}}</h3>
+                 <span class="badge" style="background:#4A5568; font-size:12px;" ng-if="c.detailData.extended.donor.segment">{{c.detailData.extended.donor.segment}}</span>
+               </div>
+            </div>
+            <div class="panel-profile-body">
+              <table class="table abg-profile-table m-b-none">
+                <tbody>
+                  <tr><th width="35%">Zone</th><td>{{c.detailData.extended.donor.zone}}</td></tr>
+                  <tr><th>Region</th><td>{{c.detailData.extended.donor.region}}</td></tr>
+                  <tr><th>Depot</th><td>{{c.detailData.extended.donor.depot}}</td></tr>
+                  <tr class="highlight-row-danger"><th>Current Limit</th><td><strong>₹ {{c.formatINR(c.detailData.extended.donor.limit)}}</strong></td></tr>
+                  <tr class="highlight-row-danger"><th>Latest Outstanding</th><td><strong>₹ {{c.formatINR(c.detailData.extended.donor.outstanding)}}</strong></td></tr>
+                  <tr class="highlight-total-danger"><th>Allocation Impact</th>
+                    <td><span class="text-danger font-weight-bold">- ₹ {{c.formatINR(c.selectedItem.amount)}}</span></td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <div class="bg-light p-sm border-top">
+                 <div class="text-xs text-uppercase font-weight-bold text-muted m-b-sm m-l-sm m-t-sm">
+                    <i class="fa fa-history m-r-xs"></i> 6-Month Bucket-Wise Aging Trend
+                 </div>
+                 <div class="table-responsive p-sm">
+                   <table class="table table-bordered abg-history-table m-b-none text-center" ng-if="c.detailData.extended.donor.history.length > 0">
+                     <thead>
+                       <tr>
+                         <th class="text-left" style="min-width: 90px;">Date</th>
+                         <th>0-3 D</th>
+                         <th>4-7 D</th>
+                         <th>8-21 D</th>
+                         <th>22-30 D</th>
+                         <th>31-45 D</th>
+                         <th>46-60 D</th>
+                         <th>61-75 D</th>
+                         <th>76-90 D</th>
+                         <th>>90 D</th>
+                         <th class="text-right">Total Out.</th>
+                       </tr>
+                     </thead>
+                     <tbody>
+                       <tr ng-repeat="hist in c.detailData.extended.donor.history">
+                         <td class="text-left font-weight-bold">{{::hist.date}}</td>
+                         <td>{{::c.formatINR(hist.a0_3)}}</td>
+                         <td>{{::c.formatINR(hist.a4_7)}}</td>
+                         <td>{{::c.formatINR(hist.a8_21)}}</td>
+                         <td>{{::c.formatINR(hist.a22_30)}}</td>
+                         <td>{{::c.formatINR(hist.a31_45)}}</td>
+                         <td>{{::c.formatINR(hist.a46_60)}}</td>
+                         <td ng-class="{'text-warning font-weight-bold': hist.a61_75 > 0}">{{::c.formatINR(hist.a61_75)}}</td>
+                         <td ng-class="{'text-danger font-weight-bold': hist.a76_90 > 0}">{{::c.formatINR(hist.a76_90)}}</td>
+                         <td ng-class="{'text-danger font-weight-bold': hist.a_gt90 > 0}">{{::c.formatINR(hist.a_gt90)}}</td>
+                         <td class="text-right font-weight-bold text-dark" style="background: #EAEAEA;">₹ {{::c.formatINR(hist.total)}}</td>
+                       </tr>
+                     </tbody>
+                   </table>
+                   <div ng-if="c.detailData.extended.donor.history.length == 0" class="text-muted text-xs p-t-xs p-l-xs">
+                      No historical outstanding data available.
+                   </div>
+                 </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="panel panel-default shadow-sm m-b-lg rationale-panel slide-down" style="animation-delay: 0.2s; animation-fill-mode: both;" ng-if="c.selectedItem.comments">
+        <div class="panel-heading bg-white" style="border-bottom: 1px solid #EAEAEA; padding: 10px 15px;">
+           <strong class="text-muted text-uppercase text-xs"><i class="fa fa-file-text-o m-r-xs"></i> Initiator Business Rationale</strong>
+        </div>
+        <div class="panel-body style-rationale-box">
+           {{c.selectedItem.comments}}
+        </div>
+      </div>
+
+      <h4 class="font-weight-bold m-b-sm text-uppercase section-title slide-down" style="animation-delay: 0.25s; animation-fill-mode: both;"><i class="fa fa-comments-o m-r-xs"></i> Collaborative Audit & Communication Stream</h4>
+      
+      <div class="panel panel-default shadow-sm ticket-panel slide-down" style="animation-delay: 0.3s; animation-fill-mode: both;">
+         <div class="panel-body ticket-body bg-light timeline-container">
+             
+             <div ng-if="c.data.isLoadingWidget" class="text-center p-xl">
+                 <i class="fa fa-spinner fa-spin fa-2x text-muted m-b-sm"></i>
+                 <p class="text-muted">Loading secure communication stream & attachment interfaces...</p>
+             </div>
+             
+             <div ng-if="!c.data.isLoadingWidget" class="m-b-sm p-sm bg-white border rounded shadow-sm d-flex align-items-center">
+                 <label class="btn abg-btn-outline btn-sm m-b-none" ng-disabled="c.data.isUploadingAttachment">
+                     <i class="fa fa-paperclip m-r-xs"></i> Upload Attachment
+                     <input type="file" style="display:none" onchange="angular.element(this).scope().c.attachFileToStream(this)" multiple>
+                 </label>
+                 <span class="m-l-md text-muted text-sm" ng-if="c.data.isUploadingAttachment">
+                     <i class="fa fa-spinner fa-spin text-danger m-r-xs"></i> Processing secure upload...
+                 </span>
+                 <span class="m-l-md text-muted text-xs" ng-if="!c.data.isUploadingAttachment">
+                     Supported formats: PDF, DOCX, XLSX, JPEG, PNG
+                 </span>
+             </div>
+
+             <div ng-if="!c.data.isLoadingWidget" class="m-b-md p-b-md border-bottom ticket-attachments-wrapper">
+                 <sp-widget widget="c.data.attachmentWidget"></sp-widget>
+             </div>
+
+             <sp-widget widget="c.data.ticketWidget" ng-if="!c.data.isLoadingWidget"></sp-widget>
+
+         </div>
+      </div>
+
+    </div>
+  </div>
+</div>]]></template>
+    </sp_widget>
+    <sys_es_latest_script action="DELETE">
+        <id>41db74a42b1dcb504572f3745e91bfc7</id>
+        <sys_created_by>sounder.k@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-06-02 10:09:08</sys_created_on>
+        <sys_id>49db74a42b1dcb504572f3745e91bfce</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_updated_by>sounder.k@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-06-02 10:09:08</sys_updated_on>
+        <table>sp_widget</table>
+        <use_es_latest>true</use_es_latest>
+    </sys_es_latest_script>
+    <sys_update_version action="INSERT_OR_UPDATE">
+        <action>DELETE</action>
+        <application display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</application>
+        <file_path/>
+        <instance_id>98adf2203ba22210a80ce0bf55e45ac7</instance_id>
+        <instance_name>abgdev</instance_name>
+        <name>sp_widget_41db74a42b1dcb504572f3745e91bfc7</name>
+        <payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sp_widget"&gt;&lt;sp_widget action="INSERT_OR_UPDATE"&gt;&lt;category&gt;custom&lt;/category&gt;&lt;client_script&gt;&lt;![CDATA[api.controller = function($scope, $filter, $location, spUtil, $window) {
+    var c = this;
+
+    // List state
+    c.searchSwap = '';
+    c.listFilter = 'pending';
+    c.currentPage = 1;
+    c.itemsPerPage = 10;
+
+    // Bulk / Modal state
+    c.selectAll = false;
+    c.showRejectModal = false;
+    c.isBulkReject = false;
+    c.rejectReason = '';
+    c.pendingRejectIds = [];
+    c.isActing = false;
+
+    // Detail view state
+    c.selectedItem = null;
+    c.detailData = null;
+    c.isLoadingDetails = false;
+    c.data.isUploadingAttachment = false;
+
+    // OOB Widgets Tracking
+    c.data.ticketWidget = null;
+    c.data.attachmentWidget = null; 
+    c.data.isLoadingWidget = false;
+
+    c.pendingCount = 0;
+    c.historyCount = 0;
+
+    // ---- FORMATTING ----
+    c.formatINR = function(val) {
+        if (val === undefined || val === null || val === '') return '0.00';
+        var num = parseFloat(val);
+        if (isNaN(num)) return '0.00';
+        return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+
+    // ---- URL DEEP LINKING INITIALIZATION ----
+    var initUrlNumber = $location.search().number;
+    if (initUrlNumber) {
+        c.server.update().then(function() {
+            var targetSwap = c.data.list.find(function(s) { return s.number === initUrlNumber; });
+            if (targetSwap) {
+                c.viewDetails(targetSwap);
+            }
+        });
+    }
+
+    // ---- LIST HELPERS &amp; COUNTS ----
+    c.updateCounts = function() {
+        if(!c.data.list) return;
+        c.pendingCount = c.data.list.filter(function(i) { return i.myApprovalState === 'requested'; }).length;
+        c.historyCount = c.data.list.filter(function(i) { return i.myApprovalState !== 'requested'; }).length;
+    };
+
+    c.setFilter = function(filterType) { 
+        c.listFilter = filterType; 
+        c.currentPage = 1;
+        c.selectAll = false;
+        c.toggleSelectAll(); // uncheck all
+    };
+
+    c.getFilteredList = function() {
+        var arr = c.data.list || [];
+        if (c.listFilter === 'pending') {
+            arr = arr.filter(function(b) { return b.myApprovalState === 'requested'; });
+        } else if (c.listFilter === 'history') {
+            arr = arr.filter(function(b) { return b.myApprovalState !== 'requested'; });
+        }
+        return $filter('filter')(arr, c.searchSwap);
+    };
+
+    c.getPaginatedList = function() {
+        var filtered = c.getFilteredList();
+        var start = (c.currentPage - 1) * c.itemsPerPage;
+        return filtered.slice(start, start + c.itemsPerPage);
+    };
+
+    c.totalPages = function() {
+        return Math.ceil(c.getFilteredList().length / c.itemsPerPage) || 1;
+    };
+
+    c.getMathMin = function(a, b) { return Math.min(a, b); };
+
+    c.changePage = function(delta) {
+        c.currentPage += delta;
+        c.selectAll = false;
+        c.checkSelection();
+    };
+
+    // ---- BULK SELECTION ----
+    c.toggleSelectAll = function() {
+        var list = c.getPaginatedList();
+        var allSelected = c.selectAll;
+        list.forEach(function(item) {
+            item.selected = allSelected;
+        });
+    };
+
+    c.checkSelection = function() {
+        var list = c.getPaginatedList();
+        if (list.length === 0) {
+            c.selectAll = false;
+            return;
+        }
+        c.selectAll = list.every(function(item) { return item.selected; });
+    };
+
+    c.getSelectedItems = function() {
+        if (!c.data.list) return [];
+        return c.data.list.filter(function(item) { return item.selected &amp;&amp; item.myApprovalState === 'requested'; });
+    };
+
+    // ---- VIEW DETAILS ----
+    c.viewDetails = function(item) {
+        c.selectedItem = item;
+        c.isLoadingDetails = true;
+        c.detailData = null;
+        c.data.ticketWidget = null;
+        c.data.attachmentWidget = null;
+        
+        // Deep linking updates
+        $location.search('number', item.number);
+
+        c.server.get({
+            action: 'get_swap_details',
+            swapSysId: item.swap_sys_id
+        }).then(function(response) {
+            // HIGHLIGHT: SET VALUE - Applying mapped detailed logic back to front-end
+            c.detailData = {
+                approvals:  response.data.approvalData   || [],
+                extended:   response.data.extendedDetails || { donee: {}, donor: {} }
+            };
+            c.isLoadingDetails = false;
+            c.data.isLoadingWidget = true;
+
+            // 1. Inject Native OOB Ticket Attachments Widget
+            spUtil.get('ticket-attachments', {
+                sys_id: item.swap_sys_id,
+                table: 'x_birl3_clm_nt_limit_swap_request'
+            }).then(function(attWidget) {
+                c.data.attachmentWidget = attWidget;
+
+                // 2. Inject Native OOB Ticket Conversation Widget
+                spUtil.get('widget-ticket-conversation', {
+                    sys_id: item.swap_sys_id,
+                    table: 'x_birl3_clm_nt_limit_swap_request', 
+                    btnLabel: 'Post Reply'
+                }).then(function(convoWidget) {
+                    c.data.ticketWidget = convoWidget;
+                    c.data.isLoadingWidget = false;
+                });
+            });
+        });
+    };
+
+    // HIGHLIGHT: ACTION - Native File Attachments specific to Record Activity Stream
+    c.attachFileToStream = function(inputElement) {
+        if (!inputElement.files || inputElement.files.length === 0) return;
+        var file = inputElement.files[0];
+        
+        c.data.isUploadingAttachment = true;
+        $scope.$applyAsync(); // Force Angular Digest for UI Spinner Loader
+
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            var base64Data = e.target.result.split(',')[1];
+            
+            c.server.get({
+                action: 'upload_attachment',
+                swapSysId: c.selectedItem.swap_sys_id,
+                fileName: file.name,
+                contentType: file.type,
+                fileData: base64Data
+            }).then(function(response) {
+                c.data.isUploadingAttachment = false;
+                if (response.data.success) {
+                    spUtil.addInfoMessage("File '"+ file.name +"' securely attached to the request.");
+                    // Re-trigger the Drilldown to natively refresh both Conversation and Attachment widgets
+                    c.viewDetails(c.selectedItem); 
+                } else {
+                    spUtil.addErrorMessage("System Error: Unable to upload attachment securely.");
+                }
+            });
+        };
+        reader.readAsDataURL(file);
+    };
+
+    c.goBack = function() {
+        c.selectedItem = null;
+        c.detailData = null;
+        c.data.ticketWidget = null;
+        c.data.attachmentWidget = null;
+        c.isLoadingDetails = false;
+        $location.search('number', null);
+    };
+
+    // ---- ACTION: APPROVE ----
+    c.approve = function(item) {
+        c.isActing = true;
+        c.server.get({
+            action: 'approve_reject',
+            approvalSysIds: [item.approval_sys_id],
+            newState: 'approved'
+        }).then(function(response) {
+            c.data.list = response.data.list;
+            c.updateCounts();
+            c.isActing = false;
+        });
+    };
+
+    c.approveFromDetail = function(item) {
+        c.isActing = true;
+        c.server.get({
+            action: 'approve_reject',
+            approvalSysIds: [item.approval_sys_id],
+            newState: 'approved'
+        }).then(function(response) {
+            c.data.list = response.data.list;
+            c.updateCounts();
+            c.isActing = false;
+            c.selectedItem = null;
+            c.detailData = null;
+            $location.search('number', null);
+        });
+    };
+
+    c.bulkApprove = function() {
+        var selectedIds = c.getSelectedItems().map(function(i) { return i.approval_sys_id; });
+        if (selectedIds.length === 0) return;
+
+        c.isActing = true;
+        c.server.get({
+            action: 'approve_reject',
+            approvalSysIds: selectedIds,
+            newState: 'approved'
+        }).then(function(response) {
+            c.data.list = response.data.list;
+            c.updateCounts();
+            c.selectAll = false;
+            c.isActing = false;
+        });
+    };
+
+    // ---- ACTION: REJECT MODAL ----
+    c.openRejectModal = function(item, isBulk) {
+        c.isBulkReject = isBulk;
+        c.rejectReason = '';
+        if (isBulk) {
+            c.pendingRejectIds = c.getSelectedItems().map(function(i) { return i.approval_sys_id; });
+        } else {
+            c.pendingRejectIds = [item.approval_sys_id];
+        }
+        c.showRejectModal = true;
+    };
+
+    c.cancelReject = function() {
+        c.showRejectModal = false;
+        c.pendingRejectIds = [];
+        c.rejectReason = '';
+    };
+
+    c.confirmReject = function() {
+        if (c.pendingRejectIds.length === 0) return;
+        c.isActing = true;
+        c.showRejectModal = false;
+
+        var wasInDetail = (c.selectedItem &amp;&amp; c.pendingRejectIds.indexOf(c.selectedItem.approval_sys_id) &gt; -1);
+
+        c.server.get({
+            action: 'approve_reject',
+            approvalSysIds: c.pendingRejectIds,
+            newState: 'rejected',
+            rejectReason: c.rejectReason
+        }).then(function(response) {
+            c.data.list = response.data.list;
+            c.updateCounts();
+            c.pendingRejectIds = [];
+            c.rejectReason = '';
+            c.selectAll = false;
+            c.isActing = false;
+            
+            if (wasInDetail) {
+                c.selectedItem = null;
+                c.detailData = null;
+                $location.search('number', null);
+            }
+        });
+    };
+
+    // Run on Load
+    if(c.data.list) {
+        c.updateCounts();
+    }
+};]]&gt;&lt;/client_script&gt;&lt;controller_as&gt;c&lt;/controller_as&gt;&lt;css&gt;/* Premium Enterprise Container Styling */
+.abg-widget-container { 
+  background-color: #FFFFFF; 
+  padding: 35px; 
+  border-radius: 6px; 
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05); 
+  font-family: 'Oxygen', "Helvetica Neue", Arial, sans-serif; 
+}
+
+/* Structural Core &amp;amp; Alignment tools */
+.d-flex { display: flex; }
+.justify-content-between { justify-content: space-between; }
+.justify-content-end { justify-content: flex-end; }
+.align-items-center { align-items: center; }
+.align-items-stretch { align-items: stretch; }
+.align-items-end { align-items: flex-end; }
+.border-bottom { border-bottom: 1px solid #EAEAEA; }
+.border-top { border-top: 1px solid #EAEAEA; }
+.border { border: 1px solid #EAEAEA; }
+.rounded { border-radius: 6px; }
+.m-b-none { margin-bottom: 0 !important; }
+.m-b-xs { margin-bottom: 6px !important; }
+.m-b-sm { margin-bottom: 10px !important; }
+.m-b-md { margin-bottom: 20px !important; }
+.m-b-lg { margin-bottom: 30px !important; }
+.m-t-xs { margin-top: 6px !important; }
+.m-t-md { margin-top: 20px !important; }
+.m-t-lg { margin-top: 30px !important; }
+.m-l-md { margin-left: 20px !important; }
+.p-l-0 { padding-left: 0 !important; }
+.p-l-none { padding-left: 0 !important; }
+.p-l-xs { padding-left: 6px !important; }
+.p-r-xs { padding-right: 6px !important; }
+.p-b-md { padding-bottom: 15px !important; }
+.p-b-xl { padding-bottom: 45px !important; }
+.p-t-sm { padding-top: 10px !important; }
+.p-t-xs { padding-top: 6px !important; }
+.p-b-sm { padding-bottom: 10px !important; }
+.p-md { padding: 15px !important; }
+.p-sm { padding: 10px !important; }
+.p-lg { padding: 25px !important; }
+.p-xl { padding: 40px !important; }
+.m-r-xs { margin-right: 6px !important; }
+.m-l-sm { margin-left: 10px !important; }
+.m-r-sm { margin-right: 10px !important; }
+.font-weight-bold { font-weight: 700 !important; }
+.vertical-middle { vertical-align: middle !important; }
+.text-muted { color: #718096 !important; }
+.text-success { color: #2E7D32 !important; }
+.text-danger { color: #C8102E !important; }
+.text-warning { color: #D97706 !important; }
+.text-xs { font-size: 11px !important; letter-spacing: 0.3px; }
+.text-sm { font-size: 12.5px !important; }
+.text-dark { color: #1a1a1a; }
+.bg-light { background-color: #f8f9fa; }
+.bg-white { background-color: #FFFFFF !important; }
+
+.abg-header h2 { color: #2D3748; font-weight: 700; margin-top: 0; font-size: 24px; }
+.header-divider { border-bottom: 2px solid #F7FAFC; padding-bottom: 20px; margin-bottom: 25px; }
+.hover-red { transition: color 0.2s ease; }
+.hover-red:hover { color: #C8102E !important; text-decoration: none; }
+.section-title { font-size: 12.5px; color: #4A5568; letter-spacing: 0.8px; margin-bottom: 15px; }
+.clm-id-tag { background: #EDF2F7; color: #2B6CB0; padding: 3px 8px; border-radius: 4px; font-family: monospace; font-size: 13px; }
+.segment-badge { background-color: #4A5568; padding: 2px 6px; font-size: 10px; border-radius: 3px; display: inline-block; margin-top: 4px; color: #FFF; }
+
+/* Flexgrid Configurations */
+.flex-align-center { display: flex; flex-wrap: wrap; align-items: center; }
+.flex-cards { display: flex; flex-wrap: wrap; margin-left: -12px; margin-right: -12px; } 
+.flex-cards &amp;gt; div { display: flex; flex-direction: column; margin-bottom: 24px; padding-left: 12px; padding-right: 12px; }
+
+/* HEADER ACTIONS &amp;amp; PILLS */
+.header-actions-panel { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 15px; }
+.abg-pills { display: flex; list-style: none; margin: 0; padding: 0; }
+.abg-pills &amp;gt; li &amp;gt; a { display: inline-block; border-radius: 30px; color: #4A5568; font-weight: 700; padding: 6px 18px; margin-left: 8px; border: 1px solid #E2E8F0; font-size: 13px; background: #FFF; transition: all 0.2s; text-decoration: none; }
+.abg-pills &amp;gt; li:first-child &amp;gt; a { margin-left: 0; }
+.abg-pills &amp;gt; li &amp;gt; a:hover { background-color: #EDF2F7; color: #2D3748; }
+.abg-pills &amp;gt; li.active &amp;gt; a, .abg-pills &amp;gt; li.active &amp;gt; a:focus, .abg-pills &amp;gt; li.active &amp;gt; a:hover { background-color: #C8102E !important; color: #FFF !important; border-color: #C8102E; box-shadow: 0 3px 6px rgba(200, 16, 46, 0.25); }
+
+/* Pure flex search box */
+.search-box { width: 250px; display: flex; align-items: stretch; }
+.search-box .input-group-addon { background: #FFFFFF; border: 1px solid #CBD5E0; border-right: none; border-radius: 4px 0 0 4px; display: flex; align-items: center; padding: 0 12px; }
+.search-box .form-control { height: 36px; font-size: 13px; border: 1px solid #CBD5E0; border-left: none; border-radius: 0 4px 4px 0; box-shadow: none; }
+.search-box .form-control:focus { border-color: #C8102E; box-shadow: inset 0 -2px 0 rgba(200, 16, 46, 0.1); }
+
+/* BULK ACTION BAR */
+.bulk-action-panel { background: #EBF4FF; border: 1px solid #BEE3F8; border-radius: 6px; padding: 12px 18px; margin-top: 15px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; }
+.bulk-text { color: #2B6CB0; font-weight: 700; font-size: 14px; }
+.abg-checkbox { width: 16px; height: 16px; cursor: pointer; accent-color: #C8102E; }
+
+/* Master Overview Table Configuration */
+.widget-table-wrapper { border-radius: 6px; border: 1px solid #E2E8F0; margin: 15px 0 25px 0; }
+.abg-table { margin-bottom: 0; width: 100%; }
+.abg-table thead th { background-color: #F7FAFC; color: #4A5568; font-weight: 700; text-transform: uppercase; font-size: 11.5px; border-bottom: 2px solid #E2E8F0; padding: 14px 12px; white-space: nowrap; }
+.abg-table tbody tr { transition: background 0.15s ease; }
+.abg-table tbody tr:hover { background-color: #FFF5F5 !important; }
+.selected-row { background-color: #EBF4FF !important; }
+
+/* Status Badges Architecture */
+.status-pill { padding: 5px 14px; border-radius: 30px; font-size: 11.5px; font-weight: 700; display: inline-block; white-space: nowrap; text-transform: uppercase; letter-spacing: 0.5px; }
+.status-pending { background-color: #FEF3C7; color: #D97706; border: 1px solid #FCD34D; }
+.status-approved { background-color: #D1FAE5; color: #065F46; border: 1px solid #34D399; }
+.status-rejected { background-color: #FEE2E2; color: #991B1B; border: 1px solid #F87171; }
+.status-work { background-color: #DBEAFE; color: #1E40AF; border: 1px solid #60A5FA; }
+
+/* Interactive Buttons */
+.abg-btn-outline { background: transparent; border: 1px solid #C8102E; color: #C8102E; font-weight: 700; border-radius: 4px; padding: 6px 14px; transition: all 0.2s; white-space: nowrap; cursor: pointer; }
+.abg-btn-outline:hover:not([disabled]) { background: #C8102E; color: #FFF; box-shadow: 0 4px 8px rgba(200, 16, 46, 0.15); }
+.abg-btn-outline[disabled] { opacity: 0.6; cursor: not-allowed; }
+.abg-btn-primary { background-color: #C8102E; color: #FFFFFF; font-weight: 700; padding: 10px 22px; border: none; border-radius: 4px; transition: all 0.2s; }
+.abg-btn-primary:hover:not([disabled]) { background-color: #A00D25; box-shadow: 0 4px 12px rgba(160, 13, 37, 0.2); }
+.abg-btn-primary[disabled] { background-color: #E2E8F0; color: #A0AEC0; cursor: not-allowed; }
+.abg-btn-approve { background: #2E7D32; color: #FFF; font-weight: 700; border: none; border-radius: 4px; padding: 6px 14px; transition: all 0.2s; }
+.abg-btn-approve:hover:not([disabled]) { background: #1B5E20; box-shadow: 0 4px 10px rgba(46,125,50,0.2); color: #FFF; }
+.abg-btn-danger { background: #C8102E; color: #FFF; font-weight: 700; border: none; border-radius: 4px; padding: 6px 14px; transition: all 0.2s; }
+.abg-btn-danger:hover:not([disabled]) { background: #A00D25; box-shadow: 0 4px 10px rgba(200,16,46,0.2); color: #FFF; }
+.btn[disabled] { opacity: 0.6; cursor: not-allowed; }
+
+/* Modal */
+.abg-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+.abg-modal-box { background: #FFF; border-radius: 8px; width: 440px; max-width: 92vw; box-shadow: 0 20px 50px rgba(0,0,0,0.2); overflow: hidden; }
+.abg-modal-header { padding: 18px 24px; background: #FFF5F5; border-bottom: 1px solid #FEE2E2; font-size: 15px; color: #991B1B; }
+.abg-modal-body { padding: 20px 24px; }
+.abg-modal-footer { padding: 14px 24px; background: #F7FAFC; border-top: 1px solid #E2E8F0; text-align: right; }
+.custom-textarea { padding: 12px 16px; font-size: 14px; border: 1px solid #CBD5E0; border-radius: 4px; box-shadow: none; resize: vertical; }
+.custom-textarea:focus { border-color: #C8102E; outline: none; }
+
+/* PROFILE PANELS (UN-SQUISHED) */
+.abg-profile-panel { background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.02); width: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.border-top-success { border-top: 4px solid #2E7D32; }
+.border-top-danger { border-top: 4px solid #C8102E; }
+.panel-profile-header { padding: 20px 24px; border-bottom: 1px solid #EDF2F7; background: #FDFDFD; }
+.panel-profile-header .indicator-marker { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.panel-profile-header h3 { margin: 0; font-size: 22px; font-weight: 700; color: #1A202C; letter-spacing: -0.5px; }
+
+.panel-profile-body { padding: 10px 0 0 0; }
+.abg-profile-table { margin-bottom: 0; width: 100%; }
+.abg-profile-table tbody tr td { padding: 14px 24px !important; border-top: 1px solid #F0F4F8; color: #2D3748; font-size: 14px; vertical-align: middle; }
+.abg-profile-table tbody tr th { padding: 14px 24px !important; border-top: 1px solid #F0F4F8; color: #718096; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; vertical-align: middle; font-weight: 700; }
+
+.highlight-row-success { background-color: #F4FBF6; }
+.highlight-row-danger { background-color: #FFF5F5; }
+.highlight-total-success { background-color: #E6F4EA; border-top: 1px dashed #2E7D32 !important; }
+.highlight-total-danger { background-color: #FCE8EA; border-top: 1px dashed #C8102E !important; }
+.highlight-total-success td, .highlight-total-success th { font-size: 16px !important; padding: 16px 24px !important; color: #1a1a1a; }
+.highlight-total-danger td, .highlight-total-danger th { font-size: 16px !important; padding: 16px 24px !important; color: #1a1a1a; }
+
+/* RE-SIZED RATIONALE BOX */
+.rationale-panel { max-width: 1000px; }
+.style-rationale-box { background-color: #FAFAFA; border: 1px solid #EDF2F7; font-size: 13px; color: #4A5568; line-height: 1.5; border-radius: 4px; padding: 14px 20px; white-space: pre-wrap; }
+
+/* EXCEL-STYLE 6-MONTH BUCKET MATRIX */
+.abg-history-table { border: 1px solid #E2E8F0; width: 100%; }
+.abg-history-table th { background-color: #EDF2F7; color: #4A5568; font-size: 10px; text-transform: uppercase; padding: 8px 6px !important; border-bottom: 1px solid #E2E8F0; vertical-align: middle; text-align: center; }
+.abg-history-table th.text-left { text-align: left; padding-left: 12px !important;}
+.abg-history-table th.text-right { text-align: right; padding-right: 12px !important;}
+.abg-history-table td { padding: 8px 6px !important; font-size: 11.5px; color: #1A202C; border-top: 1px solid #E2E8F0; vertical-align: middle; text-align: center; white-space: nowrap; }
+.abg-history-table td.text-left { text-align: left; padding-left: 12px !important;}
+.abg-history-table td.text-right { text-align: right; padding-right: 12px !important;}
+.abg-history-table tbody tr:nth-child(even) { background-color: #F8FAFC; }
+.abg-history-table tbody tr:hover { background-color: #EDF2F7; }
+
+/* Timeline Approver Layouts (Horizontal Stepper) */
+.approval-stepper-wrapper { background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 6px; padding: 24px; box-shadow: 0 2px 4px rgba(0,0,0,0.01); }
+.approval-stepper { display: flex; justify-content: space-between; align-items: flex-start; position: relative; width: 100%; overflow-x: auto; padding: 10px 0; -webkit-overflow-scrolling: touch; }
+.approval-stepper::before { content: ''; position: absolute; top: 25px; left: 5%; right: 5%; height: 3px; background: #E2E8F0; z-index: 1; width: 90%; }
+.stepper-item { text-align: center; position: relative; z-index: 2; flex: 1; min-width: 120px; padding: 0 8px; }
+.stepper-icon { width: 34px; height: 34px; border-radius: 50%; background: #FFF; border: 3px solid #CBD5E0; margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; color: #A0AEC0; font-weight: 700; transition: all 0.2s ease; }
+.stepper-label { font-size: 13px; font-weight: 700; color: #2D3748; line-height: 1.3; margin-bottom: 2px; }
+.stepper-sub { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+
+.stepper-item.completed .stepper-icon { background: #2E7D32; border-color: #2E7D32; color: #FFF; }
+.stepper-item.current .stepper-icon { background: #FFF; border-color: #D97706; color: #D97706; box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.15); }
+.stepper-item.rejected .stepper-icon { background: #C8102E; border-color: #C8102E; color: #FFF; }
+.stepper-item.is-me .stepper-label { color: #C8102E; }
+.you-badge { display: inline-block; background: #C8102E; color: #FFF; font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px; text-transform: uppercase; margin-top: 4px; }
+
+/* OOB TICKET CONVERSATION WIDGET FIXES */
+.ticket-panel { border-radius: 6px; border: 1px solid #E2E8F0; overflow: hidden; }
+.ticket-body { padding: 30px 24px; min-height: 250px; }
+.timeline-container { padding: 0 !important; }
+.timeline-container .panel { box-shadow: none !important; border: none !important; }
+.timeline-container .panel-heading { display: none !important; }
+
+/* New Attachment Fixes */
+.ticket-attachments-wrapper .panel { background-color: transparent !important; margin-bottom: 0; }
+.ticket-attachments-wrapper .panel-heading { display: block !important; padding: 0 0 10px 0; background: transparent; border-bottom: 1px dashed #D1D5DB; }
+.ticket-attachments-wrapper .panel-title { font-size: 13px; font-weight: 700; color: #4A5568; }
+
+/* Utilities &amp;amp; Animations */
+.shadow-sm { box-shadow: 0 4px 12px rgba(0,0,0,0.03); }
+.slide-down { animation: slideDownFade 0.25s ease-out; }
+@keyframes slideDownFade { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+.page-size-box { width: 110px; }
+.page-size-box .form-control { height: 30px; padding: 4px 8px; font-size: 12px; }
+.page-size-box .input-group-addon { padding: 4px 8px; font-size: 12px; }
+
+/* Mobile Responsiveness */
+@media (max-width: 991px) { .header-actions-panel .search-box { width: 180px; } }
+@media (max-width: 767px) {
+  .mobile-hidden { display: none !important; }
+  .mobile-visible { display: inline-block !important; }
+  .abg-widget-container { padding: 20px 15px; }
+  .flex-align-center { flex-direction: column; align-items: stretch; }
+  .m-b-sm-mobile { margin-bottom: 15px !important; }
+  .mobile-left { text-align: left !important; }
+  
+  .header-actions-panel { flex-direction: column; align-items: stretch; margin-top: 15px; gap: 12px; }
+  .abg-pills { justify-content: space-between; width: 100%; margin-right: 0; }
+  .abg-pills &amp;gt; li { flex-grow: 1; margin: 0 2px; }
+  .abg-pills &amp;gt; li &amp;gt; a { display: block; text-align: center; margin: 0; padding: 8px 4px; font-size: 11px; }
+  .search-box { width: 100% !important; display: flex !important; }
+  .bulk-action-panel { flex-direction: column; gap: 10px; align-items: stretch; text-align: center; }
+  
+  .abg-profile-table tbody tr td, .abg-profile-table tbody tr th { padding: 12px 14px !important; font-size: 13px !important; }
+  .highlight-total-success td, .highlight-total-success th,
+  .highlight-total-danger td, .highlight-total-danger th { padding: 14px 14px !important; font-size: 14px !important; }
+}&lt;/css&gt;&lt;data_table&gt;sp_instance&lt;/data_table&gt;&lt;demo_data/&gt;&lt;description/&gt;&lt;docs/&gt;&lt;field_list/&gt;&lt;has_preview&gt;true&lt;/has_preview&gt;&lt;id/&gt;&lt;internal&gt;false&lt;/internal&gt;&lt;link&gt;&lt;![CDATA[function link(scope, element, attrs, controller) {  }]]&gt;&lt;/link&gt;&lt;name&gt;UCLM Limit Swap Approval&lt;/name&gt;&lt;option_schema/&gt;&lt;public&gt;false&lt;/public&gt;&lt;roles/&gt;&lt;script&gt;&lt;![CDATA[(function() {
+
+    // Global Segment Mapping Enforcer
+    var segmentMapping = { 'UTCL': 'Cement', 'URMX': 'RMC', 'GIL': 'BPD' };
+
+    function getInternalState(stateStr) {
+        var s = (stateStr || '').toLowerCase();
+        if (s.indexOf('pending') &gt; -1 || s.indexOf('requested') &gt; -1) return 'pending';
+        if (s.indexOf('approved') &gt; -1 || s.indexOf('complete') &gt; -1 || s.indexOf('3') &gt; -1) return 'approved';
+        if (s.indexOf('reject') &gt; -1 || s.indexOf('cancel') &gt; -1 || s.indexOf('4') &gt; -1) return 'rejected';
+        return 'work';
+    }
+
+    // HIGHLIGHT: GET VALUE - Geography Name(Code) display mapping specifically for GlideRecords inside loops
+    function getFormattedGeo(gr, nameField, codeField) {
+        var name = gr.getValue(nameField) || '';
+        var code = gr.getValue(codeField) || '';
+        if (name &amp;&amp; code) return name + ' (' + code + ')';
+        if (name) return name;
+        if (code) return code;
+        return 'N/A';
+    }
+
+    // HIGHLIGHT: GET VALUE - Geography Name(Code) fallback explicitly dot-walking Reference Fields natively
+    function formatRefGeo(grRecord, nameField, codeField) {
+        var name = grRecord.getElement(nameField).toString() || '';
+        var code = grRecord.getElement(codeField).toString() || '';
+        if (name &amp;&amp; code) return name + ' (' + code + ')';
+        if (name) return name;
+        if (code) return code;
+        return 'N/A';
+    }
+
+    // HIGHLIGHT: GET VALUE - Safety hook function to pull the real-time Live Outstanding specifically for master-grid view
+    function getLiveOutstanding(customerCode) {
+        if(!customerCode) return 0;
+        var outRec = new GlideRecord('x_birl3_clm_customer_outstanding');
+        outRec.addQuery('customer', customerCode);
+        outRec.orderByDesc('created_on');
+        outRec.setLimit(1);
+        outRec.query();
+        if (outRec.next()) {
+            return parseFloat(outRec.getValue('outstanding') || 0);
+        }
+        return 0;
+    }
+
+    var userId = gs.getUserID();
+
+    // ========== ACTION 1: GET SWAP DETAILS &amp; BUCKET AGING ==========
+    if (input &amp;&amp; input.action == 'get_swap_details') {
+        var swapSysId = input.swapSysId;
+
+        // Approvals &amp; Role extraction via document_id mapping to Task
+        data.approvalData = [];
+        var allAppGr = new GlideRecord('sysapproval_approver');
+        var qc = allAppGr.addQuery('sysapproval', swapSysId);
+        qc.addOrCondition('document_id', swapSysId); 
+        allAppGr.orderBy('sys_created_on');
+        allAppGr.query();
+        
+        while (allAppGr.next()) {
+            
+            // HIGHLIGHT: SET VALUE - Pulling role specifically from the newly requested "approval_journal_column"
+            var customRole = allAppGr.getValue('approval_journal_column') || allAppGr.getValue('u_role') || allAppGr.getValue('u_approval_level') || 'Approver';
+            if (customRole &amp;&amp; customRole.length &gt; 25) { customRole = 'Approver'; } // Clean fallback
+            
+            data.approvalData.push({
+                approver: allAppGr.getDisplayValue('approver'),
+                state:    allAppGr.getDisplayValue('state'),
+                role:     customRole,
+                updated:  allAppGr.getValue('sys_updated_on') || '',
+                isMe:     allAppGr.getValue('approver') == userId
+            });
+        }
+
+        // Site profile cards with Exact Bucket-Wise Aging targeting new architecture
+        data.extendedDetails = { donee: {}, donor: {} };
+        try {
+            var swapGr = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+            if (swapGr.get(swapSysId)) {
+                
+                function getCustDetails(sysId) {
+                    var details = {
+                        name: 'N/A', code: 'N/A', zone: 'N/A',
+                        region: 'N/A', depot: 'N/A',
+                        segment: 'N/A', limit: 0, outstanding: 0,
+                        history: []
+                    };
+                    if (!sysId) return details;
+                    
+                    var cGr = new GlideRecord('x_birl3_clm_customer');
+                    if (cGr.get('customer_code', sysId) || cGr.get(sysId)) {
+                        details.name      = cGr.getValue('name') || 'N/A';
+                        details.code      = cGr.getValue('customer_code') || 'N/A';
+                        
+                        // HIGHLIGHT: SET VALUE - Formatting Name(Code) directly using the previously formulated custom functions
+                        details.zone      = getFormattedGeo(cGr, 'zone_name', 'customer_group');
+                        details.region    = getFormattedGeo(cGr, 'region_name', 'cg4'); 
+                        details.depot     = getFormattedGeo(cGr, 'depot_name', 'sales_office');
+                        
+                        var compCode = cGr.getValue('company_code') || '';
+                        details.segment = segmentMapping[compCode] || cGr.getDisplayValue('company_code') || 'N/A';
+                        
+                        details.limit     = parseFloat(cGr.getValue('credit_limit') || 0);
+
+                        // Fetch Bucket-wise outstanding exposure
+                        var outRec = new GlideRecord('x_birl3_clm_customer_outstanding');
+                        outRec.addQuery('customer', details.code);
+                        outRec.orderByDesc('created_on');
+                        outRec.setLimit(6); // Grabbing exactly 6 months of data
+                        outRec.query();
+                        
+                        var isFirst = true;
+                        while (outRec.next()) {
+                            var outVal = parseFloat(outRec.getValue('outstanding') || 0);
+                            if (isFirst) {
+                                details.outstanding = outVal; // Set current outstanding to the most recent record
+                                isFirst = false;
+                            }
+                            
+                            // Map the detailed bucket history row
+                            var rawDate = outRec.getDisplayValue('created_on') || '';
+                            details.history.push({
+                                date:   rawDate.split(' ')[0], // Extracts YYYY-MM-DD
+                                total:  outVal,
+                                a0_3:   parseFloat(outRec.getValue('ageing0_3') || 0),
+                                a4_7:   parseFloat(outRec.getValue('ageing4_7') || 0),
+                                a8_21:  parseFloat(outRec.getValue('ageing8_21') || 0),
+                                a22_30: parseFloat(outRec.getValue('ageing22_30') || 0),
+                                a31_45: parseFloat(outRec.getValue('ageing31_45') || 0),
+                                a46_60: parseFloat(outRec.getValue('ageing46_60') || 0),
+                                a61_75: parseFloat(outRec.getValue('ageing61_75') || 0),
+                                a76_90: parseFloat(outRec.getValue('ageing76_90') || 0),
+                                a_gt90: parseFloat(outRec.getValue('ageing_gt90') || 0)
+                            });
+                        }
+                    }
+                    return details;
+                }
+
+                var doneeCode = swapGr.donee_site_code.customer_code || swapGr.getValue('donee_site_code');
+                var donorCode = swapGr.donor_site_code.customer_code || swapGr.getValue('donor_site_code');
+
+                data.extendedDetails.donee = getCustDetails(doneeCode);
+                data.extendedDetails.donor = getCustDetails(donorCode);
+            }
+        } catch(e) {
+            gs.warn('CLM Pending Approvals - extendedDetails error: ' + e.message);
+        }
+
+        return;
+    }
+
+    // ========== ACTION 2: BULK APPROVE / REJECT ==========
+    if (input &amp;&amp; input.action == 'approve_reject') {
+        var approvalIds = input.approvalSysIds || [];
+        for (var i = 0; i &lt; approvalIds.length; i++) {
+            var approvalGr = new GlideRecord('sysapproval_approver');
+            if (approvalGr.get(approvalIds[i])) {
+                // Security check: Only update if it is currently pending
+                if (approvalGr.state == 'requested') {
+                    approvalGr.setValue('state', input.newState);
+                    if (input.newState === 'rejected' &amp;&amp; input.rejectReason) {
+                        approvalGr.setValue('comments', input.rejectReason);
+                    }
+                    approvalGr.update();
+                }
+            }
+        }
+        // Fall through to re-fetch list below
+    }
+
+    // HIGHLIGHT: ACTION - Safe native Attachment Upload Handler logic
+    if (input &amp;&amp; input.action == 'upload_attachment') {
+        try {
+            var swapGrAttach = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+            if (swapGrAttach.get(input.swapSysId)) {
+                
+                // Natively write Base64 content via sys_attachment 
+                var attachSysId = new GlideSysAttachment().writeBase64(
+                    swapGrAttach,
+                    input.fileName,
+                    input.contentType || 'application/octet-stream',
+                    input.fileData
+                );
+                
+                if (attachSysId) {
+                    // Pushing a note into the comments will natively trigger the OOB Activity Stream refresh 
+                    swapGrAttach.comments = "]]&gt;📎&lt;![CDATA[ Secure Attachment Formally Uploaded: " + input.fileName;
+                    swapGrAttach.update();
+                    data.success = true;
+                } else {
+                    data.success = false;
+                }
+            }
+        } catch(e) {
+            data.success = false;
+        }
+        return;
+    }
+
+    // ========== MAIN LIST (Runs on load + after actions) ==========
+    data.list = [];
+
+    var appGr = new GlideRecord('sysapproval_approver');
+    appGr.addQuery('approver', userId);
+    
+    // Fetch ALL approvals for this user regarding NT Limit Swaps
+    appGr.addQuery('source_table', 'x_birl3_clm_nt_limit_swap_request').addOrCondition('sysapproval.sys_class_name', 'x_birl3_clm_nt_limit_swap_request');
+    appGr.orderByDesc('sys_created_on');
+    appGr.query();
+
+    while (appGr.next()) {
+        
+        var swapId = appGr.getValue('document_id') || appGr.getValue('sysapproval'); 
+        if (!swapId) continue;
+
+        var swGr = new GlideRecord('x_birl3_clm_nt_limit_swap_request');
+        if (!swGr.get(swapId)) continue;
+
+        var myState = appGr.getValue('state'); // My personal approval status
+        var swapStateDisplay =  swGr.getDisplayValue('approval'); // Overall Record Status
+
+        // Customer Code + Name Formatting
+        var doneeCodeVal = swGr.donee_site_code.customer_code || swGr.getValue('donee_site_code') || '';
+        var doneeName = swGr.donee_site_code.name || swGr.getDisplayValue('donee_site_code') || '';
+        var doneeCombined = doneeCodeVal ? (doneeCodeVal + ' — ' + doneeName) : doneeName;
+
+        var donorCodeVal = swGr.donor_site_code.customer_code || swGr.getValue('donor_site_code') || '';
+        var donorName = swGr.donor_site_code.name || swGr.getDisplayValue('donor_site_code') || '';
+        var donorCombined = donorCodeVal ? (donorCodeVal + ' — ' + donorName) : donorName;
+
+        // Front Grid Geographies directly formatted via Dot-Walking Name(Code) Logic
+        var fDoneeZone   = formatRefGeo(swGr, 'donee_site_code.zone_name', 'donee_site_code.customer_group');
+        var fDoneeRegion = formatRefGeo(swGr, 'donee_site_code.region_name', 'donee_site_code.cg4');
+        var fDoneeDepot  = formatRefGeo(swGr, 'donee_site_code.depot_name', 'donee_site_code.sales_office');
+
+        var fDonorZone   = formatRefGeo(swGr, 'donor_site_code.zone_name', 'donor_site_code.customer_group');
+        var fDonorRegion = formatRefGeo(swGr, 'donor_site_code.region_name', 'donor_site_code.cg4');
+        var fDonorDepot  = formatRefGeo(swGr, 'donor_site_code.depot_name', 'donor_site_code.sales_office');
+
+        // Fetch Local Outstanding for the Table view Grid explicitly
+        var lOutDonee = getLiveOutstanding(doneeCodeVal);
+        var lOutDonor = getLiveOutstanding(donorCodeVal);
+
+        // Segment Mapping Fallback
+        var rawDoneeSeg = swGr.getValue('donee_segment') || swGr.donee_site_code.company_code || '';
+        var mappedDoneeSeg = segmentMapping[rawDoneeSeg] || rawDoneeSeg;
+
+        var rawDonorSeg = swGr.getValue('donor_segment') || swGr.donor_site_code.company_code || '';
+        var mappedDonorSeg = segmentMapping[rawDonorSeg] || rawDonorSeg;
+
+        data.list.push({
+            approval_sys_id: appGr.getUniqueValue(),
+            swap_sys_id:     swapId,
+            number:          swGr.getValue('number') || '',
+            pan:             swGr.getDisplayValue('donee_site_code.pan') || swGr.getDisplayValue('donor_site_code.pan') || 'N/A',
+            
+            donee_site:        doneeCombined,
+            donee_segment:     mappedDoneeSeg,
+            donee_zone:        fDoneeZone,
+            donee_region:      fDoneeRegion,
+            donee_depot:       fDoneeDepot,
+            donee_outstanding: lOutDonee, // HIGHLIGHT: SET VALUE - New Outstanding Prop for Donee
+            
+            donor_site:        donorCombined,
+            donor_segment:     mappedDonorSeg,
+            donor_zone:        fDonorZone,
+            donor_region:      fDonorRegion,
+            donor_depot:       fDonorDepot,
+            donor_outstanding: lOutDonor, // HIGHLIGHT: SET VALUE - New Outstanding Prop for Donor
+            
+            amount:          parseFloat(swGr.getValue('requested_amount') || swGr.getValue('donee_amount') || 0),
+            state:           swapStateDisplay,
+            internalState:   getInternalState(swapStateDisplay), 
+            myApprovalState: myState, 
+            created_on:      swGr.getDisplayValue('sys_created_on').split(' ')[0],
+            requested_by:    swGr.getDisplayValue('requested_by') || swGr.getDisplayValue('sys_created_by') || '',
+            comments:        swGr.getValue('justification') || swGr.getValue('comments') || '',
+            selected:        false
+        });
+    }
+
+})();]]&gt;&lt;/script&gt;&lt;servicenow&gt;false&lt;/servicenow&gt;&lt;sys_class_name&gt;sp_widget&lt;/sys_class_name&gt;&lt;sys_created_by&gt;sounder.k@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-06-02 10:09:08&lt;/sys_created_on&gt;&lt;sys_id&gt;41db74a42b1dcb504572f3745e91bfc7&lt;/sys_id&gt;&lt;sys_mod_count&gt;42&lt;/sys_mod_count&gt;&lt;sys_name&gt;UCLM Limit Swap Approval&lt;/sys_name&gt;&lt;sys_package display_value="CLM" source="x_birl3_clm"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="CLM"&gt;d01e8ce22bb27e104572f3745e91bfe3&lt;/sys_scope&gt;&lt;sys_update_name&gt;sp_widget_41db74a42b1dcb504572f3745e91bfc7&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;gaurav.gorane@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-09-08 06:28:49&lt;/sys_updated_on&gt;&lt;template&gt;&lt;![CDATA[&lt;div class="abg-widget-container"&gt;
+
+  &lt;div class="abg-modal-overlay" ng-if="c.showRejectModal"&gt;
+    &lt;div class="abg-modal-box slide-down"&gt;
+      &lt;div class="abg-modal-header"&gt;
+        &lt;i class="fa fa-times-circle text-danger m-r-xs"&gt;&lt;/i&gt;
+        &lt;strong&gt;Confirm Rejection&lt;/strong&gt;
+      &lt;/div&gt;
+      &lt;div class="abg-modal-body"&gt;
+        &lt;p class="text-muted m-b-sm" style="font-size:13px;"&gt;
+          Please provide a business rationale for rejecting &lt;strong ng-if="c.isBulkReject"&gt;{{c.getSelectedItems().length}} selected requests&lt;/strong&gt;&lt;strong ng-if="!c.isBulkReject"&gt;this request&lt;/strong&gt;. This will be logged against the approval record(s).
+        &lt;/p&gt;
+        &lt;textarea class="form-control custom-textarea" rows="3"
+          ng-model="c.rejectReason"
+          placeholder="Enter rejection reason (Mandatory)..."&gt;
+        &lt;/textarea&gt;
+      &lt;/div&gt;
+      &lt;div class="abg-modal-footer"&gt;
+        &lt;button class="btn btn-default btn-sm m-r-sm font-weight-bold" ng-click="c.cancelReject()"&gt;Cancel&lt;/button&gt;
+        &lt;button class="btn abg-btn-danger btn-sm font-weight-bold" ng-disabled="!c.rejectReason" ng-click="c.confirmReject()"&gt;
+          &lt;i class="fa fa-times m-r-xs"&gt;&lt;/i&gt; Confirm Reject
+        &lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;div ng-if="!c.selectedItem"&gt;
+
+    &lt;div class="abg-header row flex-align-center m-b-md"&gt;
+      &lt;div class="col-xs-12 col-sm-5 col-md-5 m-b-sm-mobile"&gt;
+        &lt;h2&gt;Limit Swap Approvals&lt;/h2&gt;
+        &lt;p class="m-b-none text-muted"&gt;Review, bulk-approve, or reject credit limit reallocation requests.&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class="col-xs-12 col-sm-7 col-md-7 text-right mobile-left"&gt;
+        &lt;div class="header-actions-panel"&gt;
+          &lt;ul class="abg-pills"&gt;
+            &lt;li ng-class="{'active': c.listFilter == 'pending'}"&gt;
+              &lt;a href="javascript:void(0)" ng-click="c.setFilter('pending')"&gt;
+                Pending &lt;span class="badge" style="background:#FFF; color:#C8102E; margin-left:4px;" ng-if="c.listFilter == 'pending' &amp;&amp; c.pendingCount &gt; 0"&gt;{{c.pendingCount}}&lt;/span&gt;
+              &lt;/a&gt;
+            &lt;/li&gt;
+            &lt;li ng-class="{'active': c.listFilter == 'history'}"&gt;
+              &lt;a href="javascript:void(0)" ng-click="c.setFilter('history')"&gt;History&lt;/a&gt;
+            &lt;/li&gt;
+          &lt;/ul&gt;
+          &lt;div class="search-box"&gt;
+            &lt;span class="input-group-addon"&gt;&lt;i class="fa fa-search text-muted"&gt;&lt;/i&gt;&lt;/span&gt;
+            &lt;input type="text" class="form-control" ng-model="c.searchSwap" ng-change="c.currentPage = 1; c.checkSelection()" placeholder="Search PAN or Number..."&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="text-center p-xl" ng-if="c.isActing"&gt;
+      &lt;i class="fa fa-spinner fa-spin fa-3x text-muted m-b-sm"&gt;&lt;/i&gt;
+      &lt;p class="text-muted font-weight-bold"&gt;Processing your decision...&lt;/p&gt;
+    &lt;/div&gt;
+
+    &lt;div ng-if="!c.isActing &amp;&amp; c.getFilteredList().length == 0"&gt;
+      &lt;div class="text-center text-muted p-xl" style="background: #f9f9f9; border: 1px dashed #E2E8F0; border-radius: 6px; margin-top: 15px;"&gt;
+        &lt;i class="fa fa-check-circle-o fa-3x m-b-sm" style="color:#2E7D32;"&gt;&lt;/i&gt;
+        &lt;h4 class="font-weight-bold" style="color:#2D3748;"&gt;All Caught Up!&lt;/h4&gt;
+        &lt;p class="m-b-none text-muted"&gt;There are no limit swap requests in this view matching your criteria.&lt;/p&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div ng-if="!c.isActing &amp;&amp; c.getFilteredList().length &gt; 0"&gt;
+      
+      &lt;div class="bulk-action-panel slide-down" ng-if="c.listFilter == 'pending' &amp;&amp; c.getSelectedItems().length &gt; 0"&gt;
+        &lt;div class="bulk-text"&gt;&lt;i class="fa fa-check-square-o m-r-xs"&gt;&lt;/i&gt; {{c.getSelectedItems().length}} Request(s) Selected&lt;/div&gt;
+        &lt;div&gt;
+          &lt;button class="btn abg-btn-danger btn-sm m-r-sm" ng-click="c.openRejectModal(null, true)"&gt;&lt;i class="fa fa-times m-r-xs"&gt;&lt;/i&gt; Reject Selected&lt;/button&gt;
+          &lt;button class="btn abg-btn-approve btn-sm" ng-click="c.bulkApprove()"&gt;&lt;i class="fa fa-check m-r-xs"&gt;&lt;/i&gt; Approve Selected&lt;/button&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div class="table-responsive shadow-sm widget-table-wrapper"&gt;
+        &lt;table class="table abg-table table-hover m-b-none"&gt;
+          &lt;thead&gt;
+            &lt;tr&gt;
+              &lt;th width="4%" class="text-center" ng-if="c.listFilter == 'pending'"&gt;
+                &lt;input type="checkbox" ng-model="c.selectAll" ng-change="c.toggleSelectAll()" class="abg-checkbox"&gt;
+              &lt;/th&gt;
+              &lt;th width="16%"&gt;Swap Request Details&lt;/th&gt;
+              &lt;th width="22%"&gt;Donee (Receiving Unit)&lt;/th&gt;
+              &lt;th width="22%"&gt;Donor (Deducting Unit)&lt;/th&gt;
+              &lt;th width="13%"&gt;Transfer Amount&lt;/th&gt;
+              &lt;th width="10%"&gt;Status&lt;/th&gt;
+              &lt;th width="13%" class="text-center"&gt;Action&lt;/th&gt;
+            &lt;/tr&gt;
+          &lt;/thead&gt;
+          &lt;tbody&gt;
+            &lt;tr ng-repeat="item in c.getPaginatedList()" ng-class="{'selected-row': item.selected}"&gt;
+              &lt;td class="vertical-middle text-center" ng-if="c.listFilter == 'pending'"&gt;
+                &lt;input type="checkbox" ng-model="item.selected" ng-change="c.checkSelection()" class="abg-checkbox"&gt;
+              &lt;/td&gt;
+              &lt;td class="vertical-middle"&gt;
+                &lt;span class="clm-id-tag font-weight-bold"&gt;{{::item.number}}&lt;/span&gt;&lt;br&gt;
+                &lt;small class="text-muted font-weight-bold"&gt;PAN: {{::item.pan}}&lt;/small&gt;&lt;br&gt;
+                &lt;small class="text-muted"&gt;&lt;i class="fa fa-user m-r-xs"&gt;&lt;/i&gt; {{::item.requested_by}}&lt;/small&gt;
+              &lt;/td&gt;
+              &lt;td class="vertical-middle"&gt;
+                &lt;strong class="text-success" style="font-size:13.5px;"&gt;{{::item.donee_site}}&lt;/strong&gt;&lt;br&gt;
+                &lt;div class="text-xs text-muted m-t-xs m-b-xs"&gt;
+                  &lt;i class="fa fa-map-marker text-success m-r-xs"&gt;&lt;/i&gt; {{::item.donee_zone}} | {{::item.donee_region}} | {{::item.donee_depot}}
+                &lt;/div&gt;
+                &lt;div class="text-xs m-b-xs font-weight-bold text-dark"&gt;
+                   &lt;i class="fa fa-bar-chart m-r-xs text-success"&gt;&lt;/i&gt; Out: ₹ {{::c.formatINR(item.donee_outstanding)}}
+                &lt;/div&gt;
+                &lt;span class="badge segment-badge" ng-if="item.donee_segment"&gt;{{::item.donee_segment}}&lt;/span&gt;
+              &lt;/td&gt;
+              &lt;td class="vertical-middle"&gt;
+                &lt;strong class="text-danger" style="font-size:13.5px;"&gt;{{::item.donor_site}}&lt;/strong&gt;&lt;br&gt;
+                &lt;div class="text-xs text-muted m-t-xs m-b-xs"&gt;
+                  &lt;i class="fa fa-map-marker text-danger m-r-xs"&gt;&lt;/i&gt; {{::item.donor_zone}} | {{::item.donor_region}} | {{::item.donor_depot}}
+                &lt;/div&gt;
+                &lt;div class="text-xs m-b-xs font-weight-bold text-dark"&gt;
+                   &lt;i class="fa fa-bar-chart m-r-xs text-danger"&gt;&lt;/i&gt; Out: ₹ {{::c.formatINR(item.donor_outstanding)}}
+                &lt;/div&gt;
+                &lt;span class="badge segment-badge" ng-if="item.donor_segment"&gt;{{::item.donor_segment}}&lt;/span&gt;
+              &lt;/td&gt;
+              &lt;td class="vertical-middle"&gt;
+                &lt;strong style="font-size: 15px; color:#1a1a1a;"&gt;₹ {{::c.formatINR(item.amount)}}&lt;/strong&gt;
+              &lt;/td&gt;
+              &lt;td class="vertical-middle"&gt;
+                &lt;span class="status-pill status-{{item.internalState}}"&gt;{{::item.state}}&lt;/span&gt;
+              &lt;/td&gt;
+              &lt;td class="vertical-middle text-center"&gt;
+                &lt;div style="display:flex; flex-direction:column; gap:6px; align-items:center;"&gt;
+                  &lt;span ng-if="c.listFilter == 'pending'" style="display:flex; gap:6px;"&gt;
+                    &lt;button class="btn abg-btn-approve btn-sm" ng-click="c.approve(item)" title="Quick Approve"&gt;&lt;i class="fa fa-check"&gt;&lt;/i&gt;&lt;/button&gt;
+                    &lt;button class="btn abg-btn-danger btn-sm" ng-click="c.openRejectModal(item, false)" title="Quick Reject"&gt;&lt;i class="fa fa-times"&gt;&lt;/i&gt;&lt;/button&gt;
+                  &lt;/span&gt;
+                  &lt;button class="btn btn-default btn-sm font-weight-bold" style="width: 100%; max-width: 80px;" ng-click="c.viewDetails(item)"&gt;Review&lt;/button&gt;
+                &lt;/div&gt;
+              &lt;/td&gt;
+            &lt;/tr&gt;
+          &lt;/tbody&gt;
+        &lt;/table&gt;
+      &lt;/div&gt;
+
+      &lt;div class="row flex-align-center m-t-md" ng-if="c.getFilteredList().length &gt; 0"&gt;
+        &lt;div class="col-xs-12 col-sm-4 col-md-4 m-b-sm-mobile"&gt;
+          &lt;div class="input-group page-size-box"&gt;
+            &lt;span class="input-group-addon bg-light"&gt;Show&lt;/span&gt;
+            &lt;select class="form-control" ng-model="c.itemsPerPage" ng-change="c.currentPage = 1; c.checkSelection()" ng-options="size for size in [10, 25, 50, 100, 250, 500]"&gt;&lt;/select&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class="col-xs-12 col-sm-4 col-md-4 text-center text-muted hidden-xs"&gt;
+          Showing {{ c.getFilteredList().length === 0 ? 0 : (c.currentPage - 1) * c.itemsPerPage + 1 }} to 
+          {{ c.getMathMin(c.currentPage * c.itemsPerPage, c.getFilteredList().length) }} 
+          of {{ c.getFilteredList().length }} entries
+        &lt;/div&gt;
+        &lt;div class="col-xs-12 col-sm-4 col-md-4 text-right text-center-mobile m-t-sm-mobile"&gt;
+          &lt;button class="btn btn-default btn-sm" ng-click="c.changePage(-1)" ng-disabled="c.currentPage == 1"&gt;&lt;i class="fa fa-chevron-left"&gt;&lt;/i&gt; Prev&lt;/button&gt;
+          &lt;span class="m-l-sm m-r-sm font-weight-bold"&gt;Page {{c.currentPage}} / {{c.totalPages()}}&lt;/span&gt;
+          &lt;button class="btn btn-default btn-sm" ng-click="c.changePage(1)" ng-disabled="c.currentPage == c.totalPages() || c.totalPages() == 0"&gt;Next &lt;i class="fa fa-chevron-right"&gt;&lt;/i&gt;&lt;/button&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+
+  &lt;div class="slide-down" ng-if="c.selectedItem"&gt;
+    
+    &lt;div class="abg-header header-divider"&gt;
+      &lt;button class="btn btn-link text-muted p-l-0 m-b-sm hover-red font-weight-bold" ng-click="c.goBack()"&gt;&amp;#8592; Back to Approvals Grid&lt;/button&gt;
+      &lt;div class="row flex-align-center"&gt;
+        &lt;div class="col-xs-12 col-sm-7 col-md-7"&gt;
+          &lt;h2 class="m-b-xs"&gt;{{c.selectedItem.number}} &lt;small style="color:#C8102E; font-weight:700;"&gt;| Corporate PAN: {{c.selectedItem.pan}}&lt;/small&gt;&lt;/h2&gt;
+          &lt;p class="m-b-none text-muted"&gt;&lt;i class="fa fa-user m-r-xs"&gt;&lt;/i&gt; Initiated by: &lt;strong&gt;{{c.selectedItem.requested_by}}&lt;/strong&gt; &amp;nbsp;|&amp;nbsp; &lt;i class="fa fa-clock-o m-r-xs"&gt;&lt;/i&gt; {{c.selectedItem.created_on}}&lt;/p&gt;
+        &lt;/div&gt;
+        
+        &lt;div class="col-xs-12 col-sm-5 col-md-5 text-right mobile-left m-t-sm-mobile" ng-if="c.selectedItem.myApprovalState == 'requested'"&gt;
+          &lt;button class="btn abg-btn-danger btn-md font-weight-bold m-r-sm" ng-click="c.openRejectModal(c.selectedItem, false)" ng-disabled="c.isActing"&gt;
+            &lt;i class="fa fa-times m-r-xs"&gt;&lt;/i&gt; Reject Request
+          &lt;/button&gt;
+          &lt;button class="btn abg-btn-approve btn-md font-weight-bold" ng-click="c.approveFromDetail(c.selectedItem)" ng-disabled="c.isActing"&gt;
+            &lt;i class="fa fa-check m-r-xs"&gt;&lt;/i&gt; Approve Request
+          &lt;/button&gt;
+        &lt;/div&gt;
+        &lt;div class="col-xs-12 col-sm-5 col-md-5 text-right mobile-left m-t-sm-mobile" ng-if="c.selectedItem.myApprovalState != 'requested'"&gt;
+          &lt;span class="status-pill status-{{c.selectedItem.internalState}}" style="font-size: 14px; padding: 6px 18px; font-weight:700;"&gt;
+            Overall Status: {{c.selectedItem.state}}
+          &lt;/span&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="text-center p-xl" ng-if="c.isLoadingDetails || c.isActing"&gt;
+       &lt;i class="fa fa-spinner fa-spin fa-3x text-muted m-b-sm"&gt;&lt;/i&gt;
+       &lt;p class="text-muted"&gt;{{c.isActing ? 'Processing your approval decision...' : 'Resolving operational site profiles &amp; histories...'}}&lt;/p&gt;
+    &lt;/div&gt;
+
+    &lt;div ng-if="!c.isLoadingDetails &amp;&amp; !c.isActing"&gt;
+
+      &lt;div class="approval-stepper-wrapper m-b-lg slide-down"&gt;
+        &lt;h4 class="font-weight-bold m-b-md text-uppercase section-title"&gt;&lt;i class="fa fa-sitemap m-r-xs"&gt;&lt;/i&gt; Authorization Pipeline&lt;/h4&gt;
+        
+        &lt;div class="text-center text-muted p-md shadow-inner bg-light rounded" ng-if="c.detailData.approvals.length == 0"&gt;
+          &lt;i class="fa fa-info-circle m-b-xs"&gt;&lt;/i&gt; Systemic approval workflows are either routing or not required for this request.
+        &lt;/div&gt;
+
+        &lt;div class="approval-stepper" ng-if="c.detailData.approvals.length &gt; 0"&gt;
+          &lt;div class="stepper-item" ng-class="{'completed': app.state == 'Approved', 'current': app.state == 'Requested', 'rejected': app.state == 'Rejected', 'is-me': app.isMe}" ng-repeat="app in c.detailData.approvals"&gt;
+            &lt;div class="stepper-icon"&gt;
+              &lt;i class="fa fa-check" ng-if="app.state == 'Approved'"&gt;&lt;/i&gt;
+              &lt;i class="fa fa-spinner fa-spin" ng-if="app.state == 'Requested'"&gt;&lt;/i&gt;
+              &lt;i class="fa fa-times" ng-if="app.state == 'Rejected'"&gt;&lt;/i&gt;
+              &lt;i class="fa fa-circle" ng-if="app.state != 'Approved' &amp;&amp; app.state != 'Requested' &amp;&amp; app.state != 'Rejected'"&gt;&lt;/i&gt;
+            &lt;/div&gt;
+            &lt;div class="stepper-label text-dark"&gt;{{::app.role}}&lt;/div&gt;
+            &lt;div class="stepper-sub text-muted m-b-xs"&gt;{{::app.approver}}&lt;/div&gt;
+            
+            &lt;div class="stepper-sub" ng-class="{'text-success': app.state == 'Approved', 'text-warning': app.state == 'Requested', 'text-danger': app.state == 'Rejected'}"&gt;
+              {{::app.state}}
+            &lt;/div&gt;
+            &lt;div class="you-badge" ng-if="app.isMe &amp;&amp; app.state == 'Requested'"&gt;Action Required&lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;h4 class="font-weight-bold m-b-md text-uppercase section-title slide-down" style="animation-delay: 0.1s; animation-fill-mode: both;"&gt;&lt;i class="fa fa-database m-r-xs"&gt;&lt;/i&gt; Customer Entity Profile Matrix&lt;/h4&gt;
+      
+      &lt;div class="row flex-cards m-b-lg slide-down" style="animation-delay: 0.15s; animation-fill-mode: both;"&gt;
+        
+        &lt;div class="col-xs-12 col-sm-6"&gt;
+          &lt;div class="abg-profile-panel border-top-success"&gt;
+            &lt;div class="panel-profile-header"&gt;
+               &lt;span class="indicator-marker text-success"&gt;&lt;i class="fa fa-arrow-circle-down"&gt;&lt;/i&gt; Receiving Unit (Donee Site)&lt;/span&gt;
+               &lt;div class="d-flex justify-content-between align-items-center"&gt;
+                 &lt;h3 style="font-size: 18px;"&gt;{{c.detailData.extended.donee.code || 'N/A'}} - {{c.detailData.extended.donee.name}}&lt;/h3&gt;
+                 &lt;span class="badge" style="background:#4A5568; font-size:12px;" ng-if="c.detailData.extended.donee.segment"&gt;{{c.detailData.extended.donee.segment}}&lt;/span&gt;
+               &lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class="panel-profile-body"&gt;
+              &lt;table class="table abg-profile-table m-b-none"&gt;
+                &lt;tbody&gt;
+                  &lt;tr&gt;&lt;th width="35%"&gt;Zone&lt;/th&gt;&lt;td&gt;{{c.detailData.extended.donee.zone}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;th&gt;Region&lt;/th&gt;&lt;td&gt;{{c.detailData.extended.donee.region}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;th&gt;Depot&lt;/th&gt;&lt;td&gt;{{c.detailData.extended.donee.depot}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-row-success"&gt;&lt;th&gt;Current Limit&lt;/th&gt;&lt;td&gt;&lt;strong&gt;₹ {{c.formatINR(c.detailData.extended.donee.limit)}}&lt;/strong&gt;&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-row-success"&gt;&lt;th&gt;Latest Outstanding&lt;/th&gt;&lt;td&gt;&lt;strong&gt;₹ {{c.formatINR(c.detailData.extended.donee.outstanding)}}&lt;/strong&gt;&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-total-success"&gt;&lt;th&gt;Allocation Impact&lt;/th&gt;
+                    &lt;td&gt;&lt;span class="text-success font-weight-bold"&gt;+ ₹ {{c.formatINR(c.selectedItem.amount)}}&lt;/span&gt;&lt;/td&gt;
+                  &lt;/tr&gt;
+                &lt;/tbody&gt;
+              &lt;/table&gt;
+
+              &lt;div class="bg-light p-sm border-top"&gt;
+                 &lt;div class="text-xs text-uppercase font-weight-bold text-muted m-b-sm m-l-sm m-t-sm"&gt;
+                    &lt;i class="fa fa-history m-r-xs"&gt;&lt;/i&gt; 6-Month Bucket-Wise Aging Trend
+                 &lt;/div&gt;
+                 &lt;div class="table-responsive p-sm"&gt;
+                   &lt;table class="table table-bordered abg-history-table m-b-none text-center" ng-if="c.detailData.extended.donee.history.length &gt; 0"&gt;
+                     &lt;thead&gt;
+                       &lt;tr&gt;
+                         &lt;th class="text-left" style="min-width: 90px;"&gt;Date&lt;/th&gt;
+                         &lt;th&gt;0-3 D&lt;/th&gt;
+                         &lt;th&gt;4-7 D&lt;/th&gt;
+                         &lt;th&gt;8-21 D&lt;/th&gt;
+                         &lt;th&gt;22-30 D&lt;/th&gt;
+                         &lt;th&gt;31-45 D&lt;/th&gt;
+                         &lt;th&gt;46-60 D&lt;/th&gt;
+                         &lt;th&gt;61-75 D&lt;/th&gt;
+                         &lt;th&gt;76-90 D&lt;/th&gt;
+                         &lt;th&gt;&gt;90 D&lt;/th&gt;
+                         &lt;th class="text-right"&gt;Total Out.&lt;/th&gt;
+                       &lt;/tr&gt;
+                     &lt;/thead&gt;
+                     &lt;tbody&gt;
+                       &lt;tr ng-repeat="hist in c.detailData.extended.donee.history"&gt;
+                         &lt;td class="text-left font-weight-bold"&gt;{{::hist.date}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a0_3)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a4_7)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a8_21)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a22_30)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a31_45)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a46_60)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-warning font-weight-bold': hist.a61_75 &gt; 0}"&gt;{{::c.formatINR(hist.a61_75)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-danger font-weight-bold': hist.a76_90 &gt; 0}"&gt;{{::c.formatINR(hist.a76_90)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-danger font-weight-bold': hist.a_gt90 &gt; 0}"&gt;{{::c.formatINR(hist.a_gt90)}}&lt;/td&gt;
+                         &lt;td class="text-right font-weight-bold text-dark" style="background: #EAEAEA;"&gt;₹ {{::c.formatINR(hist.total)}}&lt;/td&gt;
+                       &lt;/tr&gt;
+                     &lt;/tbody&gt;
+                   &lt;/table&gt;
+                   &lt;div ng-if="c.detailData.extended.donee.history.length == 0" class="text-muted text-xs p-t-xs p-l-xs"&gt;
+                      No historical outstanding data available.
+                   &lt;/div&gt;
+                 &lt;/div&gt;
+              &lt;/div&gt;
+
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+        &lt;div class="col-xs-12 col-sm-6"&gt;
+          &lt;div class="abg-profile-panel border-top-danger"&gt;
+            &lt;div class="panel-profile-header"&gt;
+              &lt;span class="indicator-marker text-danger"&gt;&lt;i class="fa fa-arrow-circle-up"&gt;&lt;/i&gt; Deducting Unit (Donor Site)&lt;/span&gt;
+              &lt;div class="d-flex justify-content-between align-items-center"&gt;
+                 &lt;h3 style="font-size: 18px;"&gt;{{c.detailData.extended.donor.code || 'N/A'}} - {{c.detailData.extended.donor.name}}&lt;/h3&gt;
+                 &lt;span class="badge" style="background:#4A5568; font-size:12px;" ng-if="c.detailData.extended.donor.segment"&gt;{{c.detailData.extended.donor.segment}}&lt;/span&gt;
+               &lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class="panel-profile-body"&gt;
+              &lt;table class="table abg-profile-table m-b-none"&gt;
+                &lt;tbody&gt;
+                  &lt;tr&gt;&lt;th width="35%"&gt;Zone&lt;/th&gt;&lt;td&gt;{{c.detailData.extended.donor.zone}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;th&gt;Region&lt;/th&gt;&lt;td&gt;{{c.detailData.extended.donor.region}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;th&gt;Depot&lt;/th&gt;&lt;td&gt;{{c.detailData.extended.donor.depot}}&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-row-danger"&gt;&lt;th&gt;Current Limit&lt;/th&gt;&lt;td&gt;&lt;strong&gt;₹ {{c.formatINR(c.detailData.extended.donor.limit)}}&lt;/strong&gt;&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-row-danger"&gt;&lt;th&gt;Latest Outstanding&lt;/th&gt;&lt;td&gt;&lt;strong&gt;₹ {{c.formatINR(c.detailData.extended.donor.outstanding)}}&lt;/strong&gt;&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr class="highlight-total-danger"&gt;&lt;th&gt;Allocation Impact&lt;/th&gt;
+                    &lt;td&gt;&lt;span class="text-danger font-weight-bold"&gt;- ₹ {{c.formatINR(c.selectedItem.amount)}}&lt;/span&gt;&lt;/td&gt;
+                  &lt;/tr&gt;
+                &lt;/tbody&gt;
+              &lt;/table&gt;
+
+              &lt;div class="bg-light p-sm border-top"&gt;
+                 &lt;div class="text-xs text-uppercase font-weight-bold text-muted m-b-sm m-l-sm m-t-sm"&gt;
+                    &lt;i class="fa fa-history m-r-xs"&gt;&lt;/i&gt; 6-Month Bucket-Wise Aging Trend
+                 &lt;/div&gt;
+                 &lt;div class="table-responsive p-sm"&gt;
+                   &lt;table class="table table-bordered abg-history-table m-b-none text-center" ng-if="c.detailData.extended.donor.history.length &gt; 0"&gt;
+                     &lt;thead&gt;
+                       &lt;tr&gt;
+                         &lt;th class="text-left" style="min-width: 90px;"&gt;Date&lt;/th&gt;
+                         &lt;th&gt;0-3 D&lt;/th&gt;
+                         &lt;th&gt;4-7 D&lt;/th&gt;
+                         &lt;th&gt;8-21 D&lt;/th&gt;
+                         &lt;th&gt;22-30 D&lt;/th&gt;
+                         &lt;th&gt;31-45 D&lt;/th&gt;
+                         &lt;th&gt;46-60 D&lt;/th&gt;
+                         &lt;th&gt;61-75 D&lt;/th&gt;
+                         &lt;th&gt;76-90 D&lt;/th&gt;
+                         &lt;th&gt;&gt;90 D&lt;/th&gt;
+                         &lt;th class="text-right"&gt;Total Out.&lt;/th&gt;
+                       &lt;/tr&gt;
+                     &lt;/thead&gt;
+                     &lt;tbody&gt;
+                       &lt;tr ng-repeat="hist in c.detailData.extended.donor.history"&gt;
+                         &lt;td class="text-left font-weight-bold"&gt;{{::hist.date}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a0_3)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a4_7)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a8_21)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a22_30)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a31_45)}}&lt;/td&gt;
+                         &lt;td&gt;{{::c.formatINR(hist.a46_60)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-warning font-weight-bold': hist.a61_75 &gt; 0}"&gt;{{::c.formatINR(hist.a61_75)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-danger font-weight-bold': hist.a76_90 &gt; 0}"&gt;{{::c.formatINR(hist.a76_90)}}&lt;/td&gt;
+                         &lt;td ng-class="{'text-danger font-weight-bold': hist.a_gt90 &gt; 0}"&gt;{{::c.formatINR(hist.a_gt90)}}&lt;/td&gt;
+                         &lt;td class="text-right font-weight-bold text-dark" style="background: #EAEAEA;"&gt;₹ {{::c.formatINR(hist.total)}}&lt;/td&gt;
+                       &lt;/tr&gt;
+                     &lt;/tbody&gt;
+                   &lt;/table&gt;
+                   &lt;div ng-if="c.detailData.extended.donor.history.length == 0" class="text-muted text-xs p-t-xs p-l-xs"&gt;
+                      No historical outstanding data available.
+                   &lt;/div&gt;
+                 &lt;/div&gt;
+              &lt;/div&gt;
+
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+
+      &lt;/div&gt;
+
+      &lt;div class="panel panel-default shadow-sm m-b-lg rationale-panel slide-down" style="animation-delay: 0.2s; animation-fill-mode: both;" ng-if="c.selectedItem.comments"&gt;
+        &lt;div class="panel-heading bg-white" style="border-bottom: 1px solid #EAEAEA; padding: 10px 15px;"&gt;
+           &lt;strong class="text-muted text-uppercase text-xs"&gt;&lt;i class="fa fa-file-text-o m-r-xs"&gt;&lt;/i&gt; Initiator Business Rationale&lt;/strong&gt;
+        &lt;/div&gt;
+        &lt;div class="panel-body style-rationale-box"&gt;
+           {{c.selectedItem.comments}}
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;h4 class="font-weight-bold m-b-sm text-uppercase section-title slide-down" style="animation-delay: 0.25s; animation-fill-mode: both;"&gt;&lt;i class="fa fa-comments-o m-r-xs"&gt;&lt;/i&gt; Collaborative Audit &amp; Communication Stream&lt;/h4&gt;
+      
+      &lt;div class="panel panel-default shadow-sm ticket-panel slide-down" style="animation-delay: 0.3s; animation-fill-mode: both;"&gt;
+         &lt;div class="panel-body ticket-body bg-light timeline-container"&gt;
+             
+             &lt;div ng-if="c.data.isLoadingWidget" class="text-center p-xl"&gt;
+                 &lt;i class="fa fa-spinner fa-spin fa-2x text-muted m-b-sm"&gt;&lt;/i&gt;
+                 &lt;p class="text-muted"&gt;Loading secure communication stream &amp; attachment interfaces...&lt;/p&gt;
+             &lt;/div&gt;
+             
+             &lt;div ng-if="!c.data.isLoadingWidget" class="m-b-sm p-sm bg-white border rounded shadow-sm d-flex align-items-center"&gt;
+                 &lt;label class="btn abg-btn-outline btn-sm m-b-none" ng-disabled="c.data.isUploadingAttachment"&gt;
+                     &lt;i class="fa fa-paperclip m-r-xs"&gt;&lt;/i&gt; Upload Attachment
+                     &lt;input type="file" style="display:none" onchange="angular.element(this).scope().c.attachFileToStream(this)" multiple&gt;
+                 &lt;/label&gt;
+                 &lt;span class="m-l-md text-muted text-sm" ng-if="c.data.isUploadingAttachment"&gt;
+                     &lt;i class="fa fa-spinner fa-spin text-danger m-r-xs"&gt;&lt;/i&gt; Processing secure upload...
+                 &lt;/span&gt;
+                 &lt;span class="m-l-md text-muted text-xs" ng-if="!c.data.isUploadingAttachment"&gt;
+                     Supported formats: PDF, DOCX, XLSX, JPEG, PNG
+                 &lt;/span&gt;
+             &lt;/div&gt;
+
+             &lt;div ng-if="!c.data.isLoadingWidget" class="m-b-md p-b-md border-bottom ticket-attachments-wrapper"&gt;
+                 &lt;sp-widget widget="c.data.attachmentWidget"&gt;&lt;/sp-widget&gt;
+             &lt;/div&gt;
+
+             &lt;sp-widget widget="c.data.ticketWidget" ng-if="!c.data.isLoadingWidget"&gt;&lt;/sp-widget&gt;
+
+         &lt;/div&gt;
+      &lt;/div&gt;
+
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;]]&gt;&lt;/template&gt;&lt;/sp_widget&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;41db74a42b1dcb504572f3745e91bfc7&lt;/id&gt;&lt;sys_created_by&gt;sounder.k@mindsprint.com&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-06-02 10:09:08&lt;/sys_created_on&gt;&lt;sys_id&gt;49db74a42b1dcb504572f3745e91bfce&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;sounder.k@mindsprint.com&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-06-02 10:09:08&lt;/sys_updated_on&gt;&lt;table&gt;sp_widget&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+        <payload_hash>1540437613</payload_hash>
+        <record_name>UCLM Limit Swap Approval</record_name>
+        <reverted_from/>
+        <source>0d1e00262bb27e104572f3745e91bf51</source>
+        <source_table>sys_update_set</source_table>
+        <state>previous</state>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-08 06:28:49</sys_created_on>
+        <sys_id>cd35f4cc97d74b10be31fa17f053af73</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_recorded_at>1a07fb479d40000001</sys_recorded_at>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 06:28:49</sys_updated_on>
+        <type>Widget</type>
+        <update_guid>4135f4ccd5d74b10575621fd0b142d73</update_guid>
+        <update_guid_history>4135f4ccd5d74b10575621fd0b142d73:1540437613,7e1fbb61f14e03107cc1bd13b5df6e03:2102738693,2a2ad4bc1b468750c25b00893e28ba34:-166690087,56267fa8798e4750a990398c580044d2:-1866849017,511bf9e7bfe1c7105636a67bbead6545:-46977366,7ee9eda73c21c7101de2784351776e28:1447355915,1fd6a92f92ed8710336f09aeef1fd93b:-1440999746,8b8d251f06a90710a818ac51d7d5ef41:1720003016,966d2ddbd7a90710a76d79cb407e1470:-1610694100,ff3d2d9bdaa90710ebb0571ef178c15e:1125043961,6f1d2d9bd0a9071051d82020d704bc45:1484041337,5edc259b9ca90710b4bb6f6d0481ec39:1720003016,c1cca19b5aa907105508da4162bcdb97:-1146566304,7b9b6d977ca9071047d45a8838c66798:-1345808935,67a8e5df30690710d48bd8394e32bfd8:-814292968,9587e55f4f69071086edff0e117b2d11:1694356752,83636d53b86907101e327e077da2d3b6:-1537281585,2e336553ed69071031ccdb25c13e396d:-681422240,8523a153e26907101052c4d023ed7ba7:-1738423602,a5132153a26907108334cfb31ea4c6cc:196932002,e013e113a46907103bbaa50fa6fad291:670050058,5412259ff5290710fe1dbbec73efeab7:-1295796314,fe806d5b4a2907102e11248b9d1397b8:-1537640080,ef3e91175f290710ca637014ca4e242c:-2029447647,937f09538865c3109a56aabb1f5a371c:359691720,6bde09df7125c310bd6342e5e6159b1c:163704242,bddc701faf61c31096f91b03a146012b:1401250687,8b9b38934061c310b8cbfd4fedd99d79:465812570,cfa4ac1f7c2d8310fc16bfcfc320153f:1410926603,5543ac5bc42d8310931f3a3449185344:-1187555541,8ce375c3cded43104643854c96235250:-1708738261,10627dcf2dad4310a70d0a439e9a3850:-1534382981,40dfd147682d43106bcd910af33ff39a:-1852245859,b6dd7ffd59e9c39067dcad2e4fff63b0:-2071268996,6d5db7bd8fe9c39019814ae875a88123:-274553879,5dce6030d0a10b50c4f3a69de955ba71:2091967124,e83c68b812610b50628aced09ce79083:1853495883,8f1c24b01a610b5096ddfde779248e9e:-729879717,e5004eb821d5cb50f5bb96599fe53a19:-1148576287,c53731f00195cb5047d5bc0c2b045ef0:-756111932,132731f09995cb50078eb66921108648:493010404,cd2159ac38950b5009af815cf5ff1119:1164964862,c1db74a42a1dcb505f4df2f12c2354cc:1611655258</update_guid_history>
+    </sys_update_version>
+    <sys_metadata_delete action="INSERT_OR_UPDATE">
+        <sys_audit_delete display_value="">f455f8cc97d74b10be31fa17f053af89</sys_audit_delete>
+        <sys_class_name>sys_metadata_delete</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-08 06:29:20</sys_created_on>
+        <sys_db_object display_value="" name="sp_widget">sp_widget</sys_db_object>
+        <sys_id>54397393809249969d77fdf05f343b31</sys_id>
+        <sys_metadata>41db74a42b1dcb504572f3745e91bfc7</sys_metadata>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>UCLM Limit Swap Approval</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_parent/>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_scope_delete display_value="">431098f1bc7841e8aa949dbdab0b30e4</sys_scope_delete>
+        <sys_update_name>sp_widget_41db74a42b1dcb504572f3745e91bfc7</sys_update_name>
+        <sys_update_version display_value="sp_widget_41db74a42b1dcb504572f3745e91bfc7">cd35f4cc97d74b10be31fa17f053af73</sys_update_version>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-09-08 06:29:20</sys_updated_on>
+    </sys_metadata_delete>
+</record_update>

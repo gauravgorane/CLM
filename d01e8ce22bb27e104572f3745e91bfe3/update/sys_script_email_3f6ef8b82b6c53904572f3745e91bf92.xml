@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_script_email">
+    <sys_script_email action="INSERT_OR_UPDATE">
+        <name>clm_nt_swap_status_script</name>
+        <new_lines_to_html>false</new_lines_to_html>
+        <script><![CDATA[// Notification Email Script name: clm_nt_swap_status_script
+// Notification table: x_birl3_clm_nt_limit_swap_request
+// Handles Submitted, Approved, and Rejected states for Limit Swap with unified CredX UI
+(function runMailScript(current, template, email, email_action, event) {
+    try {
+        // ── 1. Helpers & Parsers (Aligned with Trade CredX UI) ─────────────
+        function s(v) { return (v === null || v === undefined) ? '' : String(v).trim(); }
+
+        function parseNum(v) {
+            if (!v && v !== 0) return 0;
+            var strVal = String(v);
+            if (strVal.indexOf(';') > -1) strVal = strVal.split(';')[1];
+            var num = parseFloat(strVal);
+            return isNaN(num) ? 0 : num;
+        }
+
+        function inr(n) {
+            var str = Math.round(Math.abs(parseNum(n))).toString();
+            var last = str.slice(-3), rest = str.slice(0, -3);
+            if (rest) last = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last;
+            return last;
+        }
+
+        function rupee(n) {
+            var num = parseNum(n);
+            return (num < 0 ? '- &#8377; ' : '&#8377; ') + inr(num);
+        }
+
+        function esc(str) {
+            return GlideStringUtil.escapeHTML(s(str));
+        }
+
+        // ── Shared CredX UI Component Builders ─────────────────────────────
+        var TILE   = 'border:1px solid #e0e6ed; border-radius:6px; padding:12px 14px; background-color:#fafbfc;';
+        var TILE_K = 'font-size:10px; text-transform:uppercase; letter-spacing:.8px; color:#5a6a7a; font-weight:700;';
+
+        function sec(title, top) {
+            return '<h3 style="margin:' + (top || 24) + 'px 0 8px 0; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#1a1a1a; border-bottom:2px solid #F3D54E; padding-bottom:6px;">' + title + '</h3>';
+        }
+
+        // ── 2. Determine Action State & Visual Styling (Swap Logic Preserved) ──
+        var rawState    = s(current.getValue('state')).toLowerCase();
+        var rawApproval = s(current.getValue('approval')).toLowerCase();
+
+        var isApproved  = (rawState === '4');
+        var isRejected  = (rawApproval === 'rejected');
+        var isSubmitted = !isApproved && !isRejected;
+
+        var statusTitle  = 'Limit Swap Request Submitted';
+        var headlineText = 'Your limit swap request has been submitted';
+        var sublineText  = 'Your credit limit reallocation request has been logged and routed for approval.';
+        var bannerStyle  = 'background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px;';
+        var statusPill   = '<span style="display:inline-block; background-color:#eaf4fb; color:#1a5276; border:1px solid #aed6f1; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">Submitted</span>';
+
+        if (isApproved) {
+            statusTitle  = 'Limit Swap Request Approved';
+            headlineText = 'Your limit swap request has been approved';
+            sublineText  = 'The approved limit reallocation between Donor and Donee sites has been queued for SAP update.';
+            bannerStyle  = 'background-color:#eafaf1; border:1px solid #a9dfbf; border-radius:6px;';
+            statusPill   = '<span style="display:inline-block; background-color:#eafaf1; color:#1e8449; border:1px solid #a9dfbf; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">&#10004; Approved</span>';
+        } else if (isRejected) {
+            statusTitle  = 'Limit Swap Request Rejected';
+            headlineText = 'Your limit swap request has been rejected';
+            sublineText  = 'Please review the approver remarks below for details regarding this decision.';
+            bannerStyle  = 'background-color:#FDEDEC; border:1px solid #f5b7b1; border-radius:6px;';
+            statusPill   = '<span style="display:inline-block; background-color:#FDEDEC; color:#C8102E; border:1px solid #f5b7b1; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">&#10006; Rejected</span>';
+        }
+
+        var swapTypePill = ' <span style="display:inline-block; background-color:#d6eaf8; color:#2980b9; border:1px solid #aed6f1; border-radius:4px; padding:3px 10px; font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;">Limit Swap</span>';
+
+        var reqNumber  = s(current.getValue('number'));
+        var swapAmount = parseNum(current.getValue('requested_amount'));
+
+        // ── 3. Resolve Donor & Donee Customer Information ──────────────────
+        var donorGr = current.donor.getRefRecord();
+        var doneeGr = current.donee.getRefRecord();
+
+        var donorCode = (donorGr && donorGr.isValidRecord())
+            ? (donorGr.getValue('customer_code_sap') || donorGr.getValue('customer_code') || '')
+            : s(current.getValue('donor_site_code'));
+        var donorName = (donorGr && donorGr.isValidRecord())
+            ? (donorGr.getValue('customer_name') || donorGr.getValue('group_customer_name') || '')
+            : s(current.getDisplayValue('donor'));
+
+        var doneeCode = (doneeGr && doneeGr.isValidRecord())
+            ? (doneeGr.getValue('customer_code_sap') || doneeGr.getValue('customer_code') || '')
+            : s(current.getValue('donee_site_code'));
+        var doneeName = (doneeGr && doneeGr.isValidRecord())
+            ? (doneeGr.getValue('customer_name') || doneeGr.getValue('group_customer_name') || '')
+            : s(current.getDisplayValue('donee'));
+
+        var donorSegment = s(current.getValue('donor_segment')) || (donorGr && donorGr.isValidRecord() ? donorGr.getDisplayValue('segment') : 'Non-Trade');
+        var doneeSegment = s(current.getValue('donee_segment')) || (doneeGr && doneeGr.isValidRecord() ? doneeGr.getDisplayValue('segment') : 'Non-Trade');
+
+        var donorCurrentLimit = parseNum(current.getValue('donor_current_limit'));
+        var doneeCurrentLimit = parseNum(current.getValue('donee_current_limit'));
+
+        var donorPostLimit = donorCurrentLimit - swapAmount;
+        var doneePostLimit = doneeCurrentLimit + swapAmount;
+
+        // Set Dynamic Subject Line
+        email.setSubject('[CredX] ' + statusTitle + ' - ' + reqNumber + ' (' + donorCode + ' → ' + doneeCode + ')');
+
+        // Target Portal URL
+        var instanceUrl = gs.getProperty('glide.servlet.uri');
+        if (!instanceUrl.endsWith('/')) instanceUrl += '/';
+        var portalUrl = instanceUrl + 'uclm?id=uclm_limit_swap_view_request&number=' + encodeURIComponent(reqNumber);
+
+        // ── 4. Render HTML Output (CredX UI System) ────────────────────────
+        var h = '';
+
+        // Headline + Subtitle + Request Banner
+        h += '<h1 style="margin:0 0 6px 0; font-size:22px; line-height:1.3; color:#1a1a1a; font-weight:700;">' + esc(headlineText) + '</h1>';
+        h += '<p style="margin:0 0 20px 0; font-size:14px; color:#5a6a7a;">' + esc(sublineText) + '</p>';
+
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="' + bannerStyle + '"><tbody><tr>';
+        h += '<td style="padding:12px 16px;">';
+        h += '<div style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#5a6a7a; font-weight:700;">Request Number</div>';
+        h += '<div style="font-size:18px; font-weight:700; color:#1a1a1a;">' + esc(reqNumber) + '</div>';
+        h += '<div style="font-size:12px; padding-top:3px;"><a href="' + portalUrl + '" style="color:#AF272F; font-weight:700; text-decoration:none;">View in CredX &rarr;</a></div>';
+        h += '</td>';
+        h += '<td align="right" valign="middle" style="padding:12px 16px;">' + statusPill + swapTypePill + '</td>';
+        h += '</tr></tbody></table>';
+
+        // Rejection Remarks Callout (Rendered only on Rejection)
+        if (isRejected) {
+            var rejectComment = '';
+
+            var apprGr = new GlideRecord('sysapproval_approver');
+            var q = apprGr.addQuery('sysapproval', current.getUniqueValue());
+            q.addOrCondition('document_id', current.getUniqueValue());
+            apprGr.addQuery('state', 'rejected');
+            apprGr.orderByDesc('sys_updated_on');
+            apprGr.setLimit(1);
+            apprGr.query();
+
+            if (apprGr.next()) {
+                var jfGr = new GlideRecord('sys_journal_field');
+                jfGr.addQuery('element_id', apprGr.getUniqueValue());
+                jfGr.addQuery('element', 'comments');
+                jfGr.orderByDesc('sys_created_on');
+                jfGr.setLimit(1);
+                jfGr.query();
+                if (jfGr.next()) {
+                    rejectComment = s(jfGr.getValue('value'));
+                }
+
+                if (!rejectComment && apprGr.comments) {
+                    var apprEntry = s(apprGr.comments.getJournalEntry(1));
+                    if (apprEntry) {
+                        var lines = apprEntry.split('\n');
+                        if (lines.length > 1) {
+                            lines.shift();
+                            rejectComment = lines.join('\n').trim();
+                        } else {
+                            rejectComment = apprEntry.trim();
+                        }
+                    }
+                }
+
+                if (!rejectComment) {
+                    rejectComment = s(apprGr.getValue('comments')) || s(apprGr.getValue('approval_reason'));
+                }
+            }
+
+            if (!rejectComment) {
+                var taskEntry = s(current.comments.getJournalEntry(1));
+                if (taskEntry) {
+                    var tLines = taskEntry.split('\n');
+                    if (tLines.length > 1) {
+                        tLines.shift();
+                        rejectComment = tLines.join('\n').trim();
+                    } else {
+                        rejectComment = taskEntry.trim();
+                    }
+                }
+            }
+
+            if (!rejectComment) {
+                rejectComment = 'No specific comments provided by the approver.';
+            }
+
+            h += sec('Rejection Remarks', 28);
+            h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#FDEDEC; border-left:4px solid #E23D28; border-radius:4px;"><tbody><tr><td style="padding:14px 16px;">';
+            h += '<div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; color:#b3261e; margin-bottom:6px;">&#9888; Reason for Rejection / Approver Comments</div>';
+            h += '<div style="font-size:14px; line-height:1.6; color:#1a1a1a; white-space:pre-wrap; word-break:break-word;">' + esc(rejectComment) + '</div>';
+            h += '</td></tr></tbody></table>';
+        }
+
+        // ── 5. 3-Tile Reallocation Summary Strip ───────────────────────────
+        h += sec('Reallocation Summary', 28);
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tbody><tr>';
+        h += '<td width="33%" valign="top" style="padding-right:6px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Donor Site (&minus;)</div><div style="font-size:16px; font-family:monospace; font-weight:700; color:#E23D28; padding-top:4px;">' + esc(donorCode || '&mdash;') + '</div></div></td>';
+        h += '<td width="34%" valign="top" style="padding:0 3px;"><div style="' + TILE + '"><div style="' + TILE_K + '">Donee Site (+)</div><div style="font-size:16px; font-family:monospace; font-weight:700; color:#1e8449; padding-top:4px;">' + esc(doneeCode || '&mdash;') + '</div></div></td>';
+
+        if (isApproved) {
+            h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#eafaf1; border:1px solid #27ae60; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + ' color:#1e8449;">Approved Swap Amount</div><div style="font-size:17px; font-weight:700; color:#1e8449; padding-top:3px;">' + rupee(swapAmount) + '</div></div></td>';
+        } else if (isRejected) {
+            h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#FDEDEC; border:1px solid #f5b7b1; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + ' color:#C8102E;">Requested Swap Amount</div><div style="font-size:17px; font-weight:700; color:#C8102E; padding-top:3px;">' + rupee(swapAmount) + '</div></div></td>';
+        } else {
+            h += '<td width="33%" valign="top" style="padding-left:6px;"><div style="background-color:#fffcf0; border:1px solid #F3D54E; border-radius:6px; padding:12px 14px;"><div style="' + TILE_K + '">Swapped Limit Amount</div><div style="font-size:17px; font-weight:700; padding-top:3px;">' + rupee(swapAmount) + '</div></div></td>';
+        }
+        h += '</tr></tbody></table>';
+
+        // ── 6. Donor vs Donee Comparison Table (CredX Table Style) ─────────
+        h += sec('Site Limit Comparison');
+        var TH = 'padding:9px 12px; background-color:#eef1f5; color:#2b3440; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; text-align:left; border-bottom:1px solid #dde3ea;';
+        var TD = 'padding:10px 12px; font-size:13px; color:#1a1a1a; border-bottom:1px solid #eef1f5; vertical-align:top;';
+
+        h += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #dde3ea; border-radius:6px;">';
+        h += '<thead><tr>';
+        h += '<th style="' + TH + ' width:24%;">Attribute</th>';
+        h += '<th style="' + TH + ' width:38%; color:#E23D28;">Donor Site (Limit Reduced &minus;)</th>';
+        h += '<th style="' + TH + ' width:38%; color:#1e8449;">Donee Site (Limit Increased +)</th>';
+        h += '</tr></thead><tbody>';
+
+        h += '<tr>';
+        h += '<td style="' + TD + ' color:#5a6a7a;">Customer Site Code</td>';
+        h += '<td style="' + TD + ' font-family:monospace; font-weight:700;">' + esc(donorCode || '&mdash;') + '</td>';
+        h += '<td style="' + TD + ' font-family:monospace; font-weight:700;">' + esc(doneeCode || '&mdash;') + '</td>';
+        h += '</tr>';
+
+        h += '<tr>';
+        h += '<td style="' + TD + ' color:#5a6a7a;">Customer Name</td>';
+        h += '<td style="' + TD + ' font-weight:600;">' + esc(donorName || '&mdash;') + '</td>';
+        h += '<td style="' + TD + ' font-weight:600;">' + esc(doneeName || '&mdash;') + '</td>';
+        h += '</tr>';
+
+        h += '<tr>';
+        h += '<td style="' + TD + ' color:#5a6a7a;">Segment</td>';
+        h += '<td style="' + TD + '">' + esc(donorSegment) + '</td>';
+        h += '<td style="' + TD + '">' + esc(doneeSegment) + '</td>';
+        h += '</tr>';
+
+        h += '<tr>';
+        h += '<td style="' + TD + ' color:#5a6a7a;">Current Limit</td>';
+        h += '<td style="' + TD + ' font-weight:600;">' + rupee(donorCurrentLimit) + '</td>';
+        h += '<td style="' + TD + ' font-weight:600;">' + rupee(doneeCurrentLimit) + '</td>';
+        h += '</tr>';
+
+        h += '<tr>';
+        h += '<td style="' + TD + ' border-bottom:none; color:#5a6a7a;">' + (isApproved ? 'Updated Post-Swap Limit' : 'Proposed Post-Swap Limit') + '</td>';
+        h += '<td style="' + TD + ' border-bottom:none; color:#E23D28; font-weight:700;">' + rupee(donorPostLimit) + '</td>';
+        h += '<td style="' + TD + ' border-bottom:none; color:#1e8449; font-weight:700;">' + rupee(doneePostLimit) + '</td>';
+        h += '</tr>';
+
+        h += '</tbody></table>';
+
+        // ── 7. CTA Button (Trade Charcoal + Yellow Accent Style) ─────────────
+        h += '<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:28px;"><tbody><tr>';
+        h += '<td align="center" style="background-color:#1a1a1a; border-radius:6px; border-bottom:3px solid #F3D54E;">';
+        h += '<a href="' + portalUrl + '" target="_blank" style="display:inline-block; padding:12px 28px; font-size:13px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; color:#ffffff; text-decoration:none;">View Limit Swap in CredX</a>';
+        h += '</td></tr></tbody></table>';
+        h += '<p style="margin:14px 0 0 0; font-size:12px; color:#8a96a3;">Open the swap request in CredX to view full details and approval history.</p>';
+
+        template.print(h);
+
+    } catch (ex) {
+        gs.error('CLM MailScript clm_nt_swap_status_script error: ' + ex.message);
+        template.print('<div style="font-family: Arial, sans-serif; color: #d9534f;">Error loading limit swap summary details.</div>');
+    }
+})(current, template, email, email_action, event);]]></script>
+        <sys_class_name>sys_script_email</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-11-11 18:30:22</sys_created_on>
+        <sys_id>3f6ef8b82b6c53904572f3745e91bf92</sys_id>
+        <sys_mod_count>3</sys_mod_count>
+        <sys_name>clm_nt_swap_status_script</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sys_script_email_3f6ef8b82b6c53904572f3745e91bf92</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-12 13:04:58</sys_updated_on>
+    </sys_script_email>
+</record_update>

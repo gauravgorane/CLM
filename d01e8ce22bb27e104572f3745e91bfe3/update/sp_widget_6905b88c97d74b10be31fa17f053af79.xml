@@ -1,0 +1,2070 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sp_widget">
+    <sp_widget action="INSERT_OR_UPDATE">
+        <category>custom</category>
+        <client_script><![CDATA[api.controller = function($scope, $window, spUtil, $timeout) {
+    var c = this;
+
+    c.data.currentStep    = 1;
+    c.data.isSubmitting   = false;
+    c.data.isFetching     = false;
+    c.data.panSearchText  = '';
+    c.data.panSuggestions = [];
+    c.data.allSites       = [];
+
+    // Donee Dropdown & Search State
+    c.showDoneeDropdown   = false;
+    c.doneeSearch         = '';
+
+    // Donor Tabs, Pagination & Search State
+    c.donorView           = 'eligible';
+    c.donorSearch         = '';
+    c.donorCurrentPage    = 1;
+    c.donorItemsPerPage   = 5;
+
+    // Supporting documents
+    c.UPLOAD = {
+        MAX_FILES: 5,
+        MAX_MB: 5,
+        MAX_TOTAL_MB: 10,
+        BLOCKED_EXT: ['exe', 'bat', 'cmd', 'com', 'msi', 'sh', 'ps1', 'vbs', 'js', 'jar', 'scr', 'dll']
+    };
+    c.attachments    = [];
+    c.isReadingFiles = false;
+
+    c.selected = {
+        pan: '',
+        doneeSite: '',
+        doneeSiteDisplayCode: '',
+        doneeSiteDisplayName: '',
+        doneeSiteName: '',
+        doneeAmount: null,
+        donorSite: '',
+        donorSiteName: '',
+        donorAvailable: null,
+        comments: ''
+    };
+
+    c.server.update().then(function() {
+        c.data.isInitialized = true;
+    });
+
+    $window.onclick = function(event) {
+        if (!event.target.closest('.abg-custom-select')) {
+            c.showDoneeDropdown = false;
+            $scope.$applyAsync();
+        }
+    };
+
+    // ==========================================
+    // FORMATTERS
+    // ==========================================
+    c.formatINR = function(val) {
+        if (val === null || val === undefined || isNaN(val)) return '0.00';
+        var num = Number(val);
+        return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+
+    c.getMathMin = function(a, b) {
+        return Math.min(a, b);
+    };
+
+    c.fmtLoc = function(name, code) {
+        name = (name || '').toString().trim();
+        code = (code || '').toString().trim();
+        if (name && code) return name + ' (' + code + ')';
+        return name || code || '—';
+    };
+
+    c.formatSize = function(bytes) {
+        if (!bytes) return '0 KB';
+        if (bytes < 1024 * 1024) return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    };
+
+    c.fileExt = function(name) {
+        var i = (name || '').lastIndexOf('.');
+        return i > -1 ? name.substring(i + 1).substring(0, 5) : 'file';
+    };
+
+    // ==========================================
+    // SITE LOOK-UPS
+    // ==========================================
+    c.getSiteById = function(id) {
+        if (!id || !c.data.allSites) return null;
+        for (var i = 0; i < c.data.allSites.length; i++) {
+            if (c.data.allSites[i].sys_id === id) return c.data.allSites[i];
+        }
+        return null;
+    };
+
+    c.getSelectedDonee = function() { return c.getSiteById(c.selected.doneeSite); };
+    c.getSelectedDonor = function() { return c.getSiteById(c.selected.donorSite); };
+
+    // ==========================================
+    // SWAP TYPE
+    // ==========================================
+    var SWAP_TYPES = {
+        A: { code: 'A', cls: 'st-a', label: 'Intra-Territory', hint: 'Same TSH',
+             name: 'Scenario A · Intra-Territory Swap',
+             route: ['Donee TSH', 'TSH / Auto-Approval'] },
+        B: { code: 'B', cls: 'st-b', label: 'Intra-Region', hint: 'Diff. TSH · Same RHM',
+             name: 'Scenario B · Intra-Region Swap',
+             route: ['Donee TSH', 'Donor TSH', 'RHM'] },
+        C: { code: 'C', cls: 'st-c', label: 'Intra-Zone', hint: 'Diff. Region · Same ZHM',
+             name: 'Scenario C · Intra-Zone Swap',
+             route: ['Donee TSH', 'Donor TSH', 'Donor RHM', 'ZHM'] },
+        D: { code: 'D', cls: 'st-d', label: 'Inter-Zone', hint: 'Diff. Zone · Same Segment',
+             name: 'Scenario D · Inter-Zone Swap',
+             route: ['Donee TSH', 'Donor TSH', 'Donor RHM', 'Donor ZHM', 'NSH'] }
+    };
+
+    var CROSS_SEGMENT = {
+        CEMENT: { code: 'E', cls: 'st-e', label: 'Cross-Segment', hint: 'Donor: Cement',
+                  name: 'Scenario E · Cross-Segment Swap (Donor Cement)',
+                  route: ['Donee TSH', 'Donor TSH', 'Donor RHM', 'Donor ZHM', 'NSH'] },
+        RMC:    { code: 'E', cls: 'st-e', label: 'Cross-Segment', hint: 'Donor: RMC',
+                  name: 'Scenario E · Cross-Segment Swap (Donor RMC)',
+                  route: ['Donee TSH', 'Donor TSM', 'RH / ZH', 'ZH', 'Head RMC'] },
+        BPD:    { code: 'E', cls: 'st-e', label: 'Cross-Segment', hint: 'Donor: BPD',
+                  name: 'Scenario E · Cross-Segment Swap (Donor BPD)',
+                  route: ['Donee TSH', 'Donor TSH', 'ZHBPD', 'HSBPD', 'HBPD'] }
+    };
+
+    function segmentKey(site) {
+        var s = ((site.segment || '') + ' ' + (site.segmentValue || '')).toUpperCase();
+        if (s.indexOf('RMC') > -1) return 'RMC';
+        if (s.indexOf('BPD') > -1) return 'BPD';
+        return 'CEMENT';
+    }
+
+    c.getSwapType = function(donor) {
+        var donee = c.getSelectedDonee();
+        if (!donee || !donor) return SWAP_TYPES.D;
+
+        if ((donee.segmentValue || '') !== (donor.segmentValue || '')) {
+            return CROSS_SEGMENT[segmentKey(donor)];
+        }
+        if ((donee.rawDepot && donee.rawDepot === donor.rawDepot) ||
+            (donee.is_own_site && donor.is_own_site)) {
+            return SWAP_TYPES.A;
+        }
+        if (donee.rawRegion && donee.rawRegion === donor.rawRegion) return SWAP_TYPES.B;
+        if (donee.rawZone && donee.rawZone === donor.rawZone) return SWAP_TYPES.C;
+        return SWAP_TYPES.D;
+    };
+
+    // ==========================================
+    // PAN SEARCH
+    // ==========================================
+    c.handlePanInput = function() {
+        c.selected.pan = '';
+        c.data.allSites = [];
+        c.clearDonee();
+        c.clearDonor();
+
+        var query = c.data.panSearchText ? c.data.panSearchText.toUpperCase().trim() : '';
+        if (query.length >= 3) {
+            c.data.action = 'fetch_pan_suggestions';
+            c.server.update().then(function() {
+                c.data.action = '';
+            });
+        } else {
+            c.data.panSuggestions = [];
+        }
+    };
+
+    c.selectPan = function(selectedPan) {
+        c.selected.pan = selectedPan;
+        c.data.panSearchText = selectedPan;
+        c.data.panSuggestions = [];
+        c.clearDonee();
+        c.clearDonor();
+
+        c.data.action = 'fetch_all_sites';
+        c.data.isFetching = true;
+        c.server.update().then(function() {
+            c.data.action = '';
+            c.data.isFetching = false;
+        });
+    };
+
+    // ==========================================
+    // DONEE
+    // ==========================================
+    c.toggleDoneeDropdown = function(event) {
+        if (event) event.stopPropagation();
+        c.showDoneeDropdown = !c.showDoneeDropdown;
+        if (c.showDoneeDropdown) {
+            c.doneeSearch = '';
+        }
+    };
+
+    function matchesSearch(s, q) {
+        return (s.customer_code && s.customer_code.toLowerCase().indexOf(q) > -1) ||
+               (s.name && s.name.toLowerCase().indexOf(q) > -1) ||
+               (s.depot && s.depot.toLowerCase().indexOf(q) > -1) ||
+               (s.zone && s.zone.toLowerCase().indexOf(q) > -1) ||
+               (s.region && s.region.toLowerCase().indexOf(q) > -1) ||
+               (s.segment && s.segment.toLowerCase().indexOf(q) > -1);
+    }
+
+    c.getFilteredDoneeSites = function() {
+        if (!c.data.allSites) return [];
+        if (!c.doneeSearch) return c.data.allSites;
+        var q = c.doneeSearch.toLowerCase().trim();
+        return c.data.allSites.filter(function(s) { return matchesSearch(s, q); });
+    };
+
+    c.selectDonee = function(site) {
+        c.selected.doneeSite = site.sys_id;
+        c.selected.doneeSiteDisplayCode = site.customer_code;
+        c.selected.doneeSiteDisplayName = site.name;
+        c.selected.doneeSiteName = site.customer_code + ' — ' + site.name;
+
+        c.showDoneeDropdown = false;
+        c.doneeSearch = '';
+        c.clearDonor();
+    };
+
+    c.clearDonee = function() {
+        c.selected.doneeSite = '';
+        c.selected.doneeSiteDisplayCode = '';
+        c.selected.doneeSiteDisplayName = '';
+        c.selected.doneeSiteName = '';
+    };
+
+    c.clearDonor = function() {
+        c.selected.donorSite = '';
+        c.selected.donorSiteName = '';
+        c.selected.donorAvailable = null;
+        c.donorCurrentPage = 1;
+    };
+
+    // ==========================================
+    // DONOR — tabs, filter & pagination
+    // ==========================================
+    c.isEligibleDonor = function(site) {
+        return !!site && !site.has_ongoing_request && site.available >= c.selected.doneeAmount;
+    };
+
+    c.getDonorSites = function() {
+        if (!c.data.allSites) return [];
+        return c.data.allSites.filter(function(site) {
+            return site.sys_id !== c.selected.doneeSite;
+        });
+    };
+
+    c.countDonors = function(view) {
+        var donors = c.getDonorSites();
+        if (view === 'eligible') return donors.filter(c.isEligibleDonor).length;
+        return donors.length;
+    };
+
+    c.setDonorView = function(view) {
+        c.donorView = view;
+        c.donorCurrentPage = 1;
+    };
+
+    c.getFilteredDonors = function() {
+        var donors = c.getDonorSites();
+        if (c.donorView === 'eligible') {
+            donors = donors.filter(c.isEligibleDonor);
+        }
+        if (c.donorSearch) {
+            var q = c.donorSearch.toLowerCase().trim();
+            donors = donors.filter(function(s) { return matchesSearch(s, q); });
+        }
+        return donors;
+    };
+
+    c.getPaginatedDonors = function() {
+        var filtered = c.getFilteredDonors();
+        var start = (c.donorCurrentPage - 1) * c.donorItemsPerPage;
+        return filtered.slice(start, start + c.donorItemsPerPage);
+    };
+
+    c.totalDonorPages = function() {
+        return Math.ceil(c.getFilteredDonors().length / c.donorItemsPerPage) || 1;
+    };
+
+    c.hasOnlyInsufficientSites = function() {
+        var donors = c.getDonorSites();
+        if (donors.length === 0) return false;
+        return donors.every(function(site) {
+            return site.available < c.selected.doneeAmount || site.has_ongoing_request;
+        });
+    };
+
+    c.selectDonor = function(site) {
+        if (!c.isEligibleDonor(site)) return;
+        c.selected.donorSite = site.sys_id;
+        c.selected.donorSiteName = site.customer_code + ' — ' + site.name;
+        c.selected.donorAvailable = site.available;
+    };
+
+    // Validation relies strictly on site choices; no PAN block check
+    c.isStep1Valid = function() {
+        return c.selected.pan &&
+               c.selected.doneeSite &&
+               c.selected.doneeAmount > 0 &&
+               c.selected.donorSite;
+    };
+
+    c.goToReview = function() {
+        c.data.currentStep = 2;
+    };
+
+    c.goToDashboard = function() {
+        $window.location.href = '?id=uclm_limit_swap';
+    };
+
+    // ==========================================
+    // SUPPORTING DOCUMENTS
+    // ==========================================
+    function totalAttachmentBytes() {
+        return c.attachments.reduce(function(sum, f) { return sum + (f.size || 0); }, 0);
+    }
+
+    function readFile(file) {
+        return new Promise(function(resolve, reject) {
+            var reader = new FileReader();
+            reader.onload = function() {
+                var result = reader.result || '';
+                resolve({
+                    name: file.name,
+                    size: file.size,
+                    type: file.type || 'application/octet-stream',
+                    base64: result.substring(result.indexOf(',') + 1)
+                });
+            };
+            reader.onerror = function() { reject(file.name); };
+            reader.readAsDataURL(file);
+        });
+    }
+
+    c.addFiles = function(fileList) {
+        if (!fileList || !fileList.length || c.data.isSubmitting) return;
+
+        var maxBytes = c.UPLOAD.MAX_MB * 1024 * 1024;
+        var maxTotal = c.UPLOAD.MAX_TOTAL_MB * 1024 * 1024;
+        var runningTotal = totalAttachmentBytes();
+        var toRead = [];
+        var errors = [];
+
+        for (var i = 0; i < fileList.length; i++) {
+            var f = fileList[i];
+            var ext = c.fileExt(f.name).toLowerCase();
+
+            if (c.attachments.length + toRead.length >= c.UPLOAD.MAX_FILES) {
+                errors.push('Only ' + c.UPLOAD.MAX_FILES + ' files can be attached.');
+                break;
+            }
+            if (c.UPLOAD.BLOCKED_EXT.indexOf(ext) > -1) {
+                errors.push(f.name + ': executable / script files are not allowed.');
+                continue;
+            }
+            if (f.size > maxBytes) {
+                errors.push(f.name + ' is larger than ' + c.UPLOAD.MAX_MB + ' MB.');
+                continue;
+            }
+            if (runningTotal + f.size > maxTotal) {
+                errors.push(f.name + ': total attachment size cannot exceed ' + c.UPLOAD.MAX_TOTAL_MB + ' MB.');
+                continue;
+            }
+            var duplicate = c.attachments.some(function(a) { return a.name === f.name && a.size === f.size; });
+            if (duplicate) continue;
+
+            runningTotal += f.size;
+            toRead.push(f);
+        }
+
+        errors.forEach(function(msg) { spUtil.addErrorMessage(msg); });
+        if (!toRead.length) { $scope.$applyAsync(); return; }
+
+        c.isReadingFiles = true;
+        $scope.$applyAsync();
+
+        Promise.all(toRead.map(readFile)).then(function(results) {
+            c.attachments = c.attachments.concat(results);
+        }).catch(function(name) {
+            spUtil.addErrorMessage('Unable to read file: ' + name);
+        }).then(function() {
+            c.isReadingFiles = false;
+            $scope.$applyAsync();
+        });
+    };
+
+    c.removeAttachment = function(index) {
+        c.attachments.splice(index, 1);
+    };
+
+    function bindUploadControls() {
+        var input = document.getElementById('clmLsFileInput');
+        var zone  = document.getElementById('clmLsDropZone');
+
+        if (input && !input._clmBound) {
+            input._clmBound = true;
+            input.addEventListener('change', function(e) {
+                c.addFiles(e.target.files);
+                input.value = '';
+            });
+        }
+        if (zone && !zone._clmBound) {
+            zone._clmBound = true;
+            zone.addEventListener('dragover', function(e) {
+                e.preventDefault();
+                zone.classList.add('is-dragover');
+            });
+            zone.addEventListener('dragleave', function() {
+                zone.classList.remove('is-dragover');
+            });
+            zone.addEventListener('drop', function(e) {
+                e.preventDefault();
+                zone.classList.remove('is-dragover');
+                if (e.dataTransfer) c.addFiles(e.dataTransfer.files);
+            });
+        }
+    }
+
+    $scope.$watch(function() { return c.data.currentStep; }, function(step) {
+        if (step == 2) $timeout(bindUploadControls, 0);
+    });
+
+    // ==========================================
+    // SUBMIT
+    // ==========================================
+    c.submitSwap = function() {
+        if (!c.selected.comments || !c.selected.comments.trim()) {
+            spUtil.addErrorMessage("Business rationale is mandatory.");
+            return;
+        }
+
+        c.data.isSubmitting = true;
+        c.data.serverError = '';
+        c.data.action = 'submitSwap';
+        c.data.payload = c.selected;
+        c.data.attachments = c.attachments.map(function(f) {
+            return { name: f.name, type: f.type, size: f.size, base64: f.base64 };
+        });
+
+        c.server.update().then(function() {
+            c.data.isSubmitting = false;
+            c.data.action = '';
+            c.data.attachments = [];
+
+            if (c.data.serverError) {
+                spUtil.addErrorMessage(c.data.serverError);
+                c.data.currentStep = 2;
+                return;
+            }
+            c.attachments = [];
+            c.data.currentStep = 3;
+        }).catch(function() {
+            c.data.isSubmitting = false;
+            c.data.attachments = [];
+            spUtil.addErrorMessage("System communication error. Please try again.");
+        });
+    };
+
+    c.resetForm = function() {
+        c.data.currentStep    = 1;
+        c.data.swapNumber     = null;
+        c.data.attachedCount  = 0;
+        c.data.attachmentWarning = '';
+        c.data.attachments    = [];
+        c.data.panSearchText  = '';
+        c.data.panSuggestions = [];
+        c.data.allSites       = [];
+        c.showDoneeDropdown   = false;
+        c.doneeSearch         = '';
+        c.donorView           = 'eligible';
+        c.donorSearch         = '';
+        c.donorCurrentPage    = 1;
+        c.donorItemsPerPage   = 5;
+        c.attachments         = [];
+        c.isReadingFiles      = false;
+
+        c.selected = {
+            pan: '', doneeSite: '', doneeSiteDisplayCode: '', doneeSiteDisplayName: '',
+            doneeSiteName: '', doneeAmount: null, donorSite: '', donorSiteName: '',
+            donorAvailable: null, comments: ''
+        };
+    };
+};]]></client_script>
+        <controller_as>c</controller_as>
+        <css>@import url('https://fonts.googleapis.com/css2?family=Oxygen:wght@300;400;700&amp;display=swap');
+
+/* ---------------------------------------------------------------------
+0. Page wrapper
+--------------------------------------------------------------------- */
+.clm-widget {
+  background: white;
+  padding: 24px 32px;
+  border-radius: 8px;
+  color: #1a1a1a;
+}
+
+/* ---------------------------------------------------------------------
+1. Page header banner — ABG rising sun
+--------------------------------------------------------------------- */
+.clm-hero {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px 24px;
+  flex-wrap: wrap;
+  min-height: 132px;
+  padding: 28px 32px;
+  border-radius: 12px;
+  overflow: hidden;
+  color: #fff;
+  box-shadow: 0 10px 28px rgba(122, 16, 18, .25);
+  background:
+    /* maroon text zone fading into the rays */
+    linear-gradient(90deg, #7A1012 0%, #9E1715 40%, rgba(158, 23, 21, .82) 52%, rgba(158, 23, 21, 0) 70%),
+    /* segmented half-sun on the bottom edge */
+    radial-gradient(circle at 72% 100%,
+      #F3CE52 0 30px, #9E1715 30px 33px,
+      #F9A04A 33px 44px, #9E1715 44px 47px,
+      #F3712A 47px 56px, transparent 56px),
+    /* fine texture over the rays */
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, .05) 0 2px, transparent 2px 6px),
+    /* sun rays */
+    repeating-conic-gradient(from -90deg at 72% 100%,
+      #F3CE52 0deg 7deg, #F3712A 7deg 14deg, #9E1715 14deg 21deg, #DA1D26 21deg 28deg),
+    #9E1715;
+}
+/* Breadcrumb trail inside Hero */
+.clm-hero-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fbe3cf;
+}
+
+.clm-hero-breadcrumb .clm-breadcrumb-link {
+  color: #F3CE52;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: opacity 0.2s ease, text-decoration 0.2s ease;
+}
+
+.clm-hero-breadcrumb .clm-breadcrumb-link:hover {
+  text-decoration: underline;
+  opacity: 0.9;
+}
+
+.clm-hero-breadcrumb .clm-breadcrumb-sep {
+  font-size: 12px;
+  opacity: 0.7;
+  color: #fff;
+}
+
+.clm-hero-breadcrumb .clm-breadcrumb-curr {
+  color: #ffffff;
+  font-weight: 700;
+}
+.clm-hero-text { position: relative; z-index: 1; max-width: 640px; }
+.clm-hero-bar {
+  width: 44px; height: 6px; border-radius: 3px; margin-bottom: 12px;
+  background: linear-gradient(90deg, #F3CE52, #F3712A);
+}
+.clm-hero-title { margin: 0; font-size: 26px; font-weight: 700; line-height: 1.25; color: #fff; }
+.clm-hero-accent { color: #F3CE52; }
+.clm-hero-sub { margin: 6px 0 0; font-size: 15px; color: #fbe3cf; }
+
+.clm-hero-actions { position: relative; z-index: 1; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.clm-hero-stat {
+  padding: 10px 18px 10px 16px;
+  background: rgba(122, 16, 18, .92);
+  border-left: 4px solid #F3CE52;
+  border-radius: 8px;
+  text-align: left;
+}
+.clm-hero-stat-v { font-size: 34px; font-weight: 700; line-height: 1; letter-spacing: 1px; color: #F3CE52; }
+.clm-hero-stat-k { margin-top: 4px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; color: #fbd9bd; }
+.clm-hero-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 18px;
+  background: #F3CE52; color: #7A1012;
+  border: none; border-radius: 8px;
+  font-size: 14px; font-weight: 700;
+  box-shadow: 0 0 0 3px rgba(122, 16, 18, .45);
+  cursor: pointer; transition: background .15s ease;
+}
+.clm-hero-btn:hover:not([disabled]) { background: #f7da72; }
+.clm-hero-btn[disabled] { opacity: .6; cursor: not-allowed; }
+
+/* ---------------------------------------------------------------------
+2. Content panel + sections
+--------------------------------------------------------------------- */
+.clm-panel {
+  margin-top: 20px;
+  background: #fff;
+  border: 1px solid #e0e6ed;
+  border-radius: 10px;
+  /* visible so the donee dropdown / PAN suggestions are not clipped */
+  overflow: visible;
+}
+.clm-section { padding: 28px 32px; border-top: 1px solid #eef1f5; }
+.clm-panel &gt; .clm-section:first-child,
+.clm-panel &gt; .slide-down:first-child &gt; .clm-section:first-child { border-top: none; }
+.clm-section-title {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 20px;
+  font-size: 14px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; letter-spacing: 1px;
+}
+.clm-section-num {
+  width: 26px; height: 26px; border-radius: 50%; background: #F3D54E; color: #1a1a1a;
+  font-size: 13px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center;
+  letter-spacing: 0; flex-shrink: 0;
+}
+.clm-section-note {
+  font-size: 12px; font-weight: 400; color: #5a6a7a; text-transform: none; letter-spacing: 0;
+}
+
+/* ---------------------------------------------------------------------
+3. Cards (blocks) and chips
+--------------------------------------------------------------------- */
+.clm-block { margin-top: 16px; background: #fff; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden; }
+.clm-block-head { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap;
+  padding: 14px 20px; background: #fafbfc; border-bottom: 1px solid #dde3ea; }
+.clm-block-title { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 700; color: #1a1a1a;
+  text-transform: uppercase; letter-spacing: .8px; }
+.clm-block-title::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: #F3D54E; flex-shrink: 0; }
+.clm-block-sub { margin: 4px 0 0 14px; font-size: 12px; color: #5a6a7a; }
+.clm-block-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.clm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: #fff;
+  border: 1px solid #dde3ea; border-radius: 12px; font-size: 12px; font-weight: 700; color: #1a1a1a; white-space: nowrap; }
+.clm-chip-k { font-weight: 400; color: #5a6a7a; }
+.clm-chip-live { background: #eaf7ee; border-color: #b9e3c6; color: #1e8449; }
+.clm-chip-req  { background: #fff8e1; border-color: #f3d54e; color: #7a5a00; }
+.clm-chip-dev  { background: #fdecea; border-color: #f5c2bc; color: #b3261e; }
+.clm-chip-live .clm-chip-k, .clm-chip-req .clm-chip-k, .clm-chip-dev .clm-chip-k { color: inherit; opacity: .8; }
+.clm-tw-body { padding: 18px 20px; }
+
+/* deviation card */
+.clm-block-dev { border-color: #f3c2bc; }
+.clm-block-dev .clm-block-head { background: #fef5f4; border-bottom: none; }
+.clm-block-dev .clm-block-title { color: #b3261e; }
+.clm-block-dev .clm-block-title::before { background: #E23D28; }
+
+/* ---------------------------------------------------------------------
+4. Data table (light header, group row, dividers)
+--------------------------------------------------------------------- */
+.clm-table-wrap { overflow-x: auto; border: 1px solid #dde3ea; border-radius: 8px; background: #fff; }
+.clm-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.clm-table th { background: #eef1f5; color: #2b3440; padding: 12px 14px; font-size: 12px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .6px; text-align: center; white-space: nowrap; border: 1px solid #dde3ea; }
+.clm-table td { padding: 14px; color: #1a1a1a; text-align: center; white-space: nowrap; border: 1px solid #e6eaef; vertical-align: middle; }
+.clm-table tr &gt; :first-child { border-left: 0; text-align: left; }
+.clm-table tr &gt; :last-child  { border-right: 0; }
+.clm-table thead tr:first-child th { border-top: 0; }
+.clm-table tbody tr:last-child td  { border-bottom: 0; }
+.clm-table .grp { border-left: 2px solid #c9d1db !important; }
+
+.clm-table tr.super th { letter-spacing: 1px; padding: 11px 14px; }
+.clm-table th.bg-blank  { background: #f7f8fa; }
+.clm-table th.bg-code   { background: #e3eefa; color: #0b5394; }
+.clm-table th.bg-seg    { background: #f1f3f7; color: #3a4451; }
+.clm-table th.bg-req    { background: #e6f4ea; color: #2e7d32; }
+.clm-table th.bg-assess { background: #efe9f9; color: #6a3fb5; }
+
+.clm-cust-name { font-weight: 700; color: #1a1a1a; }
+.clm-cust-code { margin-top: 2px; font-size: 12px; font-weight: 600; color: #5a6a7a; }
+
+.v-ok  { color: #1e8449; font-weight: 700; }
+.v-bad { color: #c0392b; font-weight: 700; }
+
+/* ---------------------------------------------------------------------
+5. Factor tiles and result row
+--------------------------------------------------------------------- */
+.clm-tw-factors { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.clm-tw-factor { padding: 12px 14px; border: 1px solid #e0e6ed; border-radius: 6px; background: #fafbfc; min-width: 0; }
+.clm-tw-factor-k { font-size: 12px; color: #5a6a7a; margin-bottom: 4px; }
+.clm-tw-factor-v { font-size: 16px; font-weight: 700; color: #1a1a1a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.clm-tw-factor-s { font-size: 11px; color: #7f8c9a; margin-top: 4px; }
+.clm-tw-factor.is-ok  { background: #f4fbf6; border-color: #cfead8; }
+.clm-tw-factor.is-ok  .clm-tw-factor-v { color: #1e8449; }
+.clm-tw-factor.is-bad { background: #fef5f4; border-color: #f5c2bc; }
+.clm-tw-factor.is-bad .clm-tw-factor-v { color: #c0392b; }
+
+.clm-tw-res { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap;
+  padding: 16px 20px; background: #fffcf0; border-top: 1px solid #f1e2a0; }
+.clm-tw-res-k { font-size: 13px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-tw-res-f { margin-top: 3px; font-size: 12px; color: #7f8c9a; }
+.clm-tw-res-v { margin-left: auto; font-size: 30px; font-weight: 700; line-height: 1.1; color: #1a1a1a; white-space: nowrap; }
+.clm-tw-res.is-ok  { background: #f4fbf6; border-top-color: #b9e3c6; }
+.clm-tw-res.is-ok  .clm-tw-res-v { color: #1e8449; }
+
+/* =====================================================================
+6. LIMIT SWAP — widget-specific (clm-ls-)
+===================================================================== */
+.clm-ls-mt0 { margin-top: 0; }
+
+/* Form fields */
+.clm-ls-field { position: relative; margin-bottom: 0; }
+.clm-ls-field label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 700; color: #1a1a1a; }
+.clm-req { color: #E23D28; }
+.clm-ls-hint { margin-top: 6px; font-size: 12px; color: #7f8c9a; }
+
+.clm-ls-input.form-control {
+  height: 42px; padding: 9px 14px;
+  border: 1px solid #d6dde5; border-radius: 6px; box-shadow: none;
+  font-size: 14px; color: #1a1a1a; background: #fff;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.clm-ls-input.form-control:focus {
+  border-color: #1a1a1a; outline: none;
+  box-shadow: 0 0 0 3px rgba(243, 213, 78, .45);
+}
+.clm-ls-input-sm.form-control { height: 36px; padding: 6px 12px; font-size: 13px; }
+.clm-ls-input-icon-pad.form-control { padding-left: 36px; }
+.clm-ls-textarea.form-control { height: auto; min-height: 110px; resize: vertical; line-height: 1.5; }
+.clm-ls-amount.form-control { font-size: 16px; font-weight: 700; }
+.clm-ls-input-icon {
+  position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
+  color: #8a96a3; font-size: 13px; pointer-events: none; z-index: 2;
+}
+
+/* PAN typeahead */
+.clm-ls-pan { max-width: 640px; }
+.clm-ls-typeahead { position: relative; }
+.clm-ls-suggest {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 1000;
+  margin: 4px 0 0; padding: 0; list-style: none;
+  max-height: 260px; overflow-y: auto;
+  background: #fff; border: 1px solid #dde3ea; border-radius: 8px;
+  box-shadow: 0 8px 20px rgba(26, 26, 26, .12);
+}
+.clm-ls-suggest li a {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 11px 14px; border-bottom: 1px solid #eef1f5;
+  color: #1a1a1a; text-decoration: none; font-size: 13px;
+}
+.clm-ls-suggest li:last-child a { border-bottom: none; }
+.clm-ls-suggest li a:hover { background: #fffcf0; box-shadow: inset 3px 0 0 #F3D54E; }
+.clm-ls-suggest-pan { font-weight: 700; letter-spacing: .5px; }
+.clm-ls-suggest-name { color: #5a6a7a; }
+
+/* Loader card */
+.clm-ls-loader .clm-tw-body { padding: 32px 20px; text-align: center; }
+.clm-ls-loader-icon { font-size: 30px; color: #E87722; margin-bottom: 12px; }
+.clm-ls-loader-title { font-size: 15px; font-weight: 700; color: #1a1a1a; }
+.clm-ls-loader-sub { margin-top: 4px; font-size: 12px; color: #5a6a7a; }
+
+/* Donee grid */
+.clm-ls-grid-donee { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px 20px; align-items: start; }
+.clm-ls-code { font-weight: 600; color: #5a6a7a; }
+
+/* Donee custom select (outer class .abg-custom-select is used by the client script) */
+.clm-ls-select { position: relative; width: 100%; user-select: none; }
+.clm-ls-select-display {
+  position: relative; display: flex; align-items: center;
+  min-height: 42px; padding: 9px 38px 9px 14px;
+  background: #fff; border: 1px solid #d6dde5; border-radius: 6px;
+  font-size: 14px; cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease;
+}
+.clm-ls-select.open .clm-ls-select-display { border-color: #1a1a1a; box-shadow: 0 0 0 3px rgba(243, 213, 78, .45); }
+.clm-ls-placeholder { color: #8a96a3; }
+.clm-ls-select-value { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clm-ls-caret { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); color: #8a96a3; font-size: 12px; }
+.clm-ls-select-dropdown {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1050;
+  background: #fff; border: 1px solid #dde3ea; border-radius: 8px; overflow: hidden;
+  box-shadow: 0 10px 24px rgba(26, 26, 26, .14);
+}
+.clm-ls-select-search { position: relative; padding: 10px 12px; background: #fafbfc; border-bottom: 1px solid #dde3ea; }
+.clm-ls-select-search .clm-ls-input-icon { left: 25px; }
+.clm-ls-clear {
+  position: absolute; right: 20px; top: 50%; transform: translateY(-50%);
+  border: none; background: transparent; color: #8a96a3; padding: 4px 6px; cursor: pointer;
+}
+.clm-ls-options { max-height: 280px; overflow-y: auto; }
+.clm-ls-option { padding: 12px 16px; border-bottom: 1px solid #eef1f5; cursor: pointer; transition: background .12s ease; }
+.clm-ls-option:last-child { border-bottom: none; }
+.clm-ls-option:hover:not(.is-disabled) { background: #fffcf0; box-shadow: inset 3px 0 0 #F3D54E; }
+.clm-ls-option.is-selected { background: #FFF8D6; box-shadow: inset 4px 0 0 #F3D54E; }
+.clm-ls-option.is-disabled { opacity: .6; cursor: not-allowed; background: #fafbfc; }
+.clm-ls-option-top { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.clm-ls-option-name { font-size: 13px; font-weight: 700; color: #1a1a1a; }
+.clm-ls-option-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.clm-ls-option-chips .clm-chip { font-size: 11.5px; padding: 3px 8px; }
+.clm-ls-option-meta { margin-top: 5px; font-size: 12px; color: #5a6a7a; }
+.clm-ls-option-meta strong { color: #3a4451; }
+.clm-ls-empty { padding: 18px; text-align: center !important; color: #7f8c9a; font-size: 13px; white-space: normal !important; }
+
+.clm-live-dot { font-size: 7px; }
+.clm-ls-factors-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.clm-ls-factors-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+/* Donor card toolbar */
+.clm-ls-toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 14px 20px; border-bottom: 1px solid #eef1f5;
+}
+.clm-ls-search { position: relative; flex: 1 1 280px; max-width: 460px; margin-right: auto; }
+.clm-ls-pagesize { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700;
+  color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-ls-pagesize select.form-control { width: 84px; }
+
+/* Donor table — flush inside the card */
+.clm-ls-table-wrap { border: none; border-radius: 0; }
+.clm-ls-table tbody tr { cursor: pointer; transition: background .12s ease; }
+.clm-ls-table tbody tr:hover td { background: #fffcf0; }
+.clm-ls-table tbody tr.is-selected td { background: #FFF8D6; }
+.clm-ls-table tbody tr.is-selected td:first-child { box-shadow: inset 4px 0 0 #F3D54E; }
+.clm-ls-table tbody tr.is-disabled { cursor: not-allowed; }
+.clm-ls-table tbody tr.is-disabled td { background: #fafbfc; color: #7f8c9a; }
+.clm-ls-table tbody tr.is-disabled .clm-cust-name { color: #7f8c9a; }
+.clm-ls-table tr.clm-ls-empty-row { cursor: default; }
+.clm-ls-table tr.clm-ls-empty-row:hover td { background: #fff; }
+.clm-ls-table .clm-ls-sel { width: 64px; text-align: center !important; }
+.clm-ls-table .clm-ls-sel input[type="radio"] { width: 16px; height: 16px; margin: 0; accent-color: #1a1a1a; cursor: pointer; }
+.clm-ls-table .clm-ls-sel input[type="radio"][disabled] { cursor: not-allowed; }
+.clm-ls-namecell { white-space: normal !important; min-width: 200px; text-align: left !important; }
+.clm-ls-table thead tr:last-child th:nth-child(2), .clm-ls-table tr.super th.bg-code { text-align: left; }
+.clm-ls-seg { display: inline-block; padding: 2px 8px; border: 1px solid #dde3ea; border-radius: 4px;
+  background: #f1f3f7; color: #3a4451; font-size: 11.5px; font-weight: 700; }
+
+/* Pagination footer */
+.clm-ls-pager { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  padding: 12px 20px; border-top: 1px solid #dde3ea; background: #fafbfc; }
+.clm-ls-pager-info { font-size: 12.5px; color: #5a6a7a; }
+.clm-ls-pager-info strong { color: #1a1a1a; }
+.clm-ls-pager-btns { display: flex; gap: 8px; }
+
+/* Buttons */
+.clm-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 10px 20px; border: 1px solid #cdd4dc; border-radius: 6px; background: #fff;
+  font-size: 13px; font-weight: 700; color: #1a1a1a; cursor: pointer; white-space: nowrap;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.clm-btn:hover:not([disabled]) { border-color: #1a1a1a; }
+.clm-btn[disabled] { opacity: .5; cursor: not-allowed; }
+.clm-btn-sm { padding: 6px 12px; font-size: 12px; }
+.clm-btn-primary { background: #1a1a1a; border-color: #1a1a1a; color: #fff; }
+.clm-btn-primary:hover:not([disabled]) { color: #F3D54E; }
+.clm-btn-primary[disabled] { background: #e3e7ec; border-color: #e3e7ec; color: #8a96a3; opacity: 1; }
+
+/* Action bar */
+.clm-ls-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap;
+  padding: 18px 32px; border-top: 1px solid #dde3ea; background: #fafbfc; border-radius: 0 0 10px 10px; }
+.clm-ls-submitting { margin-right: auto; font-size: 12.5px; color: #5a6a7a; }
+
+/* Review: donor → donee flow */
+.clm-ls-flow { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 16px; align-items: center; }
+.clm-ls-party { padding: 16px; border: 1px solid #e0e6ed; border-radius: 8px; background: #fff; min-width: 0; }
+.clm-ls-party-k { font-size: 12px; font-weight: 700; color: #3a4451; text-transform: uppercase; letter-spacing: .6px; }
+.clm-ls-party-k .fa { color: #8a96a3; margin-right: 4px; }
+.clm-ls-party-name { margin: 6px 0 12px; font-size: 15px; font-weight: 700; color: #1a1a1a; }
+.clm-ls-flow-arrow {
+  width: 40px; height: 40px; border-radius: 50%; background: #1a1a1a; color: #F3D54E;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 18px;
+}
+
+/* Success */
+.clm-ls-success .clm-tw-body { padding: 40px 20px; text-align: center; }
+.clm-ls-success-icon {
+  width: 64px; height: 64px; margin: 0 auto 16px; border-radius: 50%;
+  background: #eaf7ee; border: 2px solid #27ae60; color: #1e8449;
+  display: flex; align-items: center; justify-content: center; font-size: 28px;
+}
+.clm-ls-success-title { font-size: 20px; font-weight: 700; color: #1a1a1a; }
+.clm-ls-success-num { margin-top: 12px; }
+.clm-ls-success-sub { margin: 12px auto 22px; max-width: 520px; font-size: 13px; color: #5a6a7a; }
+.clm-ls-success-btns { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
+
+/* Animation */
+.slide-down { animation: clmLsSlide .25s ease-out; }
+@keyframes clmLsSlide {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------------------------------------------------------------------
+7. Responsive
+--------------------------------------------------------------------- */
+@media (max-width: 1100px) {
+  .clm-ls-factors-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .clm-ls-flow { grid-template-columns: minmax(0, 1fr); }
+  .clm-ls-flow-arrow { margin: 0 auto; transform: rotate(90deg); }
+}
+
+@media (max-width: 992px) {
+  .clm-hero-title { font-size: 22px; }
+}
+
+@media (max-width: 768px) {
+  .clm-widget { padding: 16px; }
+  .clm-section { padding: 22px 18px; }
+  .clm-ls-actions { padding: 16px 18px; }
+  .clm-ls-grid-donee { grid-template-columns: minmax(0, 1fr); }
+
+  /* donor table → label / value cards */
+  .clm-ls-table thead { display: none; }
+  .clm-ls-table, .clm-ls-table tbody, .clm-ls-table tr, .clm-ls-table td { display: block; width: 100%; }
+  .clm-ls-table tbody tr { position: relative; padding: 12px 14px 12px 48px; border-bottom: 1px solid #dde3ea; }
+  .clm-ls-table tbody tr:last-child { border-bottom: none; }
+  .clm-ls-table td {
+    display: flex; justify-content: space-between; gap: 12px;
+    padding: 5px 0; border: none !important; text-align: right !important; white-space: normal;
+  }
+  .clm-ls-table td::before {
+    content: attr(data-label); flex-shrink: 0;
+    font-size: 11.5px; font-weight: 700; color: #5a6a7a; text-transform: uppercase; letter-spacing: .5px; text-align: left;
+  }
+  .clm-ls-table td.clm-ls-sel { position: absolute; left: 14px; top: 14px; width: auto; padding: 0; }
+  .clm-ls-table td.clm-ls-sel::before { display: none; }
+  .clm-ls-table td.clm-ls-namecell { display: block; text-align: left !important; min-width: 0; padding-bottom: 8px; }
+  .clm-ls-table td.clm-ls-namecell::before { display: none; }
+  .clm-ls-table td.grp { border-left: 0 !important; }
+  .clm-ls-table tbody tr td,
+  .clm-ls-table tbody tr:hover td,
+  .clm-ls-table tbody tr.is-selected td,
+  .clm-ls-table tbody tr.is-disabled td { background: transparent; }
+  .clm-ls-table tbody tr.is-disabled { background: #fafbfc; }
+  .clm-ls-table tbody tr.is-selected td:first-child { box-shadow: none; }
+  .clm-ls-table tbody tr.is-selected { box-shadow: inset 4px 0 0 #F3D54E; background: #FFF8D6; }
+  .clm-ls-table td.clm-ls-empty { display: block; text-align: center !important; }
+  .clm-ls-table td.clm-ls-empty::before { display: none; }
+  .clm-ls-table tr.clm-ls-empty-row { padding: 0; }
+}
+
+@media (max-width: 640px) {
+  .clm-hero { flex-direction: column; align-items: flex-start; padding: 22px 20px 72px;
+    background:
+      linear-gradient(180deg, #7A1012 0%, #9E1715 45%, rgba(158, 23, 21, .7) 68%, rgba(158, 23, 21, 0) 100%),
+      radial-gradient(circle at 78% 100%,
+        #F3CE52 0 26px, #9E1715 26px 29px,
+        #F9A04A 29px 38px, #9E1715 38px 41px,
+        #F3712A 41px 48px, transparent 48px),
+      repeating-linear-gradient(135deg, rgba(255, 255, 255, .05) 0 2px, transparent 2px 6px),
+      repeating-conic-gradient(from -90deg at 78% 100%,
+        #F3CE52 0deg 7deg, #F3712A 7deg 14deg, #9E1715 14deg 21deg, #DA1D26 21deg 28deg),
+      #9E1715;
+  }
+  .clm-hero-title { font-size: 20px; }
+  .clm-hero-sub { font-size: 13px; }
+  .clm-hero-actions { width: 100%; }
+  .clm-hero-stat-v { font-size: 28px; }
+
+  .clm-tw-factors, .clm-ls-factors-3, .clm-ls-factors-4 { grid-template-columns: minmax(0, 1fr); }
+  .clm-tw-res-v { font-size: 24px; margin-left: 0; }
+  .clm-block-sub { margin-left: 14px; }
+  .clm-ls-toolbar { flex-direction: column; align-items: stretch; }
+  .clm-ls-search { max-width: none; flex-basis: auto; }
+  .clm-ls-pager { flex-direction: column; align-items: stretch; text-align: center; }
+  .clm-ls-pager-btns .clm-btn { flex: 1; }
+  .clm-ls-actions { flex-direction: column-reverse; align-items: stretch; }
+  .clm-ls-actions .clm-btn { width: 100%; }
+  .clm-ls-submitting { margin: 0; text-align: center; }
+  .clm-ls-success-btns .clm-btn { width: 100%; }
+}
+
+
+/* =====================================================================
+7a. v2.1 additions (clm-ls- / reference grid)
+===================================================================== */
+.clm-ls-mb16 { margin-bottom: 16px; }
+
+/* header sub-label, left headers */
+.clm-table th.clm-th-left { text-align: left; }
+.clm-th-sub { margin-top: 3px; font-size: 10.5px; font-weight: 400; color: #7f8c9a; text-transform: none; letter-spacing: 0; }
+
+/* customer cell: name + (code) + segment pill + status */
+.clm-cust-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.clm-cust-line .clm-cust-code { margin-top: 0; }
+.clm-seg-pill {
+  display: inline-block; padding: 2px 10px; border: 1px solid #dde3ea; border-radius: 12px;
+  background: #f1f3f7; color: #1a1a1a; font-size: 12px; font-weight: 700; line-height: 1.5;
+}
+.clm-chip-xs { padding: 2px 8px; font-size: 11px; }
+
+/* territory cell */
+.clm-ls-loccell { text-align: left !important; white-space: normal !important; min-width: 220px; }
+.clm-loc-main { font-size: 13px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; }
+.clm-loc-sub { margin-top: 3px; font-size: 12px; color: #5a6a7a; text-transform: uppercase; }
+
+/* swap type scenario tag */
+.clm-swap-tag {
+  display: inline-flex; align-items: center; padding: 3px 10px;
+  border: 1px solid; border-radius: 12px; font-size: 11.5px; font-weight: 700; white-space: nowrap; cursor: help;
+}
+.clm-swap-hint { margin-top: 4px; font-size: 11px; color: #7f8c9a; }
+.st-a { background: #eaf7ee; border-color: #b9e3c6; color: #1e8449; }
+.st-b { background: #e3eefa; border-color: #b7d3f0; color: #0b5394; }
+.st-c { background: #efe9f9; border-color: #d4c6ef; color: #6a3fb5; }
+.st-d { background: #fdf3e1; border-color: #f6d39a; color: #a35400; }
+.st-e { background: #fdecea; border-color: #f5c2bc; color: #b3261e; }
+.clm-ls-table tbody tr.is-disabled .clm-swap-tag { opacity: .75; }
+
+/* donee select value: name + territory */
+.clm-ls-select-value { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; min-width: 0; white-space: normal; }
+.clm-ls-sv-name { font-weight: 700; }
+.clm-ls-sv-loc { font-size: 12px; font-weight: 700; color: #5a6a7a; text-transform: uppercase; }
+.clm-ls-sv-loc .fa { color: #E87722; margin-right: 2px; }
+.clm-ls-option-loc { font-size: 12px; color: #5a6a7a; text-transform: uppercase; }
+.clm-ls-option-loc strong { color: #3a4451; }
+
+/* donee territory strip */
+.clm-ls-terr { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 12px;
+  border: 1px solid #e0e6ed; border-radius: 6px; background: #fff; }
+.clm-ls-terr-item { padding: 10px 14px; border-left: 1px solid #eef1f5; min-width: 0; }
+.clm-ls-terr-item:first-child { border-left: none; }
+.clm-ls-terr-k { font-size: 11.5px; font-weight: 700; color: #5a6a7a; text-transform: uppercase; letter-spacing: .6px; }
+.clm-ls-terr-v { margin-top: 3px; font-size: 13px; font-weight: 700; color: #1a1a1a; text-transform: uppercase; }
+
+/* eligible / all sites pill toggle (top-left of toolbar) */
+.clm-ls-toggle { display: inline-flex; flex-shrink: 0; padding: 2px; border: 1px solid #dde3ea; border-radius: 20px; background: #fff; }
+.clm-ls-toggle-btn {
+  padding: 7px 16px; border: none; border-radius: 18px; background: transparent; cursor: pointer;
+  font-size: 13px; font-weight: 700; color: #3a4451; white-space: nowrap; transition: background .15s ease, color .15s ease;
+}
+.clm-ls-toggle-btn:hover:not(.is-active) { color: #1a1a1a; background: #f4f5f7; }
+.clm-ls-toggle-btn.is-active { background: #1a1a1a; color: #F3D54E; }
+.clm-ls-empty a { font-weight: 700; color: #1a1a1a; text-decoration: underline; }
+
+/* review: party location + approval route */
+.clm-ls-party .clm-ls-party-name { margin-bottom: 0; }
+.clm-ls-party-loc { margin: 10px 0 12px; padding: 8px 12px; border-left: 3px solid #F3D54E; background: #fafbfc; border-radius: 0 6px 6px 0; }
+
+/* document upload */
+.clm-ls-file-input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; pointer-events: none; }
+.clm-ls-drop {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; margin: 0;
+  padding: 22px 16px; border: 2px dashed #cdd4dc; border-radius: 8px; background: #fafbfc;
+  text-align: center; cursor: pointer; font-weight: 400; transition: border-color .15s ease, background .15s ease;
+}
+.clm-ls-drop:hover, .clm-ls-drop.is-dragover { border-color: #F3D54E; background: #fffcf0; }
+.clm-ls-drop.is-disabled { opacity: .55; cursor: not-allowed; }
+.clm-ls-drop-icon { font-size: 26px; color: #8a96a3; }
+.clm-ls-drop-title { font-size: 13px; font-weight: 700; color: #1a1a1a; }
+.clm-ls-drop-sub { font-size: 12px; color: #7f8c9a; }
+.clm-ls-reading { margin-top: 10px; font-size: 12px; color: #5a6a7a; }
+.clm-ls-files { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.clm-ls-file { display: flex; align-items: center; gap: 12px; padding: 8px 10px 8px 8px;
+  border: 1px solid #e0e6ed; border-radius: 6px; background: #fff; }
+.clm-ls-file-ext { min-width: 44px; padding: 4px 6px; border-radius: 4px; background: #1a1a1a; color: #F3D54E;
+  font-size: 10.5px; font-weight: 700; text-align: center; text-transform: uppercase; }
+.clm-ls-file-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 700; color: #1a1a1a;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clm-ls-file-size { font-size: 12px; color: #7f8c9a; white-space: nowrap; }
+.clm-ls-file-del { border: none; background: transparent; color: #8a96a3; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
+.clm-ls-file-del:hover:not([disabled]) { background: #fdecea; color: #b3261e; }
+.clm-ls-success-num { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; }
+.clm-ls-success-warn { margin: -10px auto 18px; max-width: 520px; font-size: 12.5px; color: #a35400; }
+
+@media (max-width: 768px) {
+  .clm-ls-table td.clm-ls-loccell { display: block; min-width: 0; text-align: left !important; }
+  .clm-ls-table td.clm-ls-loccell::before { display: block; margin-bottom: 4px; }
+  .clm-ls-toggle { width: 100%; }
+  .clm-ls-toggle-btn { flex: 1; padding: 7px 8px; }
+  .clm-swap-hint { display: none; }
+}
+@media (max-width: 640px) {
+  .clm-ls-terr { grid-template-columns: minmax(0, 1fr); }
+  .clm-ls-terr-item { border-left: none; border-top: 1px solid #eef1f5; }
+  .clm-ls-terr-item:first-child { border-top: none; }
+  .clm-ls-sv-loc { flex-basis: 100%; }
+}
+
+/* ---------------------------------------------------------------------
+8. One font family (keep LAST)
+--------------------------------------------------------------------- */
+.clm-widget, .clm-widget *, .clm-widget input, .clm-widget select,
+.clm-widget textarea, .clm-widget button, .clm-widget table {
+  font-family: "Oxygen", "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+}
+.clm-widget .fa { font-family: FontAwesome !important; }
+</css>
+        <data_table>sp_instance</data_table>
+        <demo_data/>
+        <description/>
+        <docs/>
+        <field_list/>
+        <has_preview>true</has_preview>
+        <id>uclm_limit_swap_request</id>
+        <internal>false</internal>
+        <link><![CDATA[function link(scope, element, attrs, controller) {  }]]></link>
+        <name>UCLM Limit Swap Request</name>
+        <option_schema/>
+        <public>false</public>
+        <roles/>
+        <script><![CDATA[(function() {
+    var CONFIG = {
+        TABLES: {
+            CUSTOMER:     'x_birl3_clm_clm_customer_master1',
+            SWAP_REQUEST: 'x_birl3_clm_nt_limit_swap_request',
+            SITE_REQUEST: 'x_birl3_clm_nt_site_request',
+            MATRIX:       'x_birl3_clm_approval_matrix'
+        },
+        UPLOAD: {
+            MAX_FILES: 5,
+            MAX_BYTES: 5 * 1024 * 1024,
+            MAX_TOTAL_BYTES: 10 * 1024 * 1024,
+            BLOCKED_EXT: ['exe', 'bat', 'cmd', 'com', 'msi', 'sh', 'ps1', 'vbs', 'js', 'jar', 'scr', 'dll']
+        }
+    };
+
+    var userId = gs.getUserID();
+
+    function getUserPermissions(targetUserId) {
+        var permissions = [];
+        var mxGr = new GlideRecord(CONFIG.TABLES.MATRIX);
+        mxGr.addQuery('approver_user', targetUserId);
+        mxGr.addQuery('customer_type', 'non_trade');
+        var qc = mxGr.addQuery('role_name', 'CONTAINS', 'TSH');
+        qc.addOrCondition('role_name', 'CONTAINS', 'TSM');
+        mxGr.query();
+
+        while (mxGr.next()) {
+            permissions.push({
+                segment: (mxGr.getValue('segment') || '').toUpperCase(),
+                zone:    (mxGr.getValue('zone') || '').toUpperCase(),
+                region:  (mxGr.getValue('region') || '').toUpperCase(),
+                depot:   (mxGr.getValue('depot') || '').toUpperCase()
+            });
+        }
+        return permissions;
+    }
+
+    function matchesUserPortfolio(siteSeg, siteZone, siteReg, siteDepot, userPerms) {
+        var sSeg = (siteSeg || '').toUpperCase();
+        var sZone = (siteZone || '').toUpperCase();
+        var sReg = (siteReg || '').toUpperCase();
+        var sDepot = (siteDepot || '').toUpperCase();
+
+        for (var i = 0; i < userPerms.length; i++) {
+            var p = userPerms[i];
+            if (p.segment && p.segment !== sSeg) continue;
+            if (p.zone && p.zone !== sZone) continue;
+            if (p.region && p.region !== sReg) continue;
+            if (p.depot && p.depot !== sDepot) continue;
+            return true;
+        }
+        return false;
+    }
+
+    function isUserAuthorizedForSite(siteSeg, siteZone, siteReg, siteDepot, userPerms) {
+        if (gs.hasRole('x_birl3_clm.admin')) return true;
+        return matchesUserPortfolio(siteSeg, siteZone, siteReg, siteDepot, userPerms);
+    }
+
+    // --- YOUR EXACT FUNCTION ---
+    function getActiveRequestType(custSysId) {
+        var activeReqGr = new GlideRecord(CONFIG.TABLES.SITE_REQUEST);
+        activeReqGr.addQuery('customer_site_code', custSysId);
+        var stateQc = activeReqGr.addQuery('approval', 'NOT IN', 'approved,rejected');
+        //stateQc.addOrCondition('state', 'NOT IN', '3,7');
+        activeReqGr.setLimit(1);
+        activeReqGr.query();
+        if (activeReqGr.hasNext()) return 'CL';
+
+        var swapReqGr = new GlideRecord(CONFIG.TABLES.SWAP_REQUEST);
+        var swapQc = swapReqGr.addQuery('donee', custSysId);
+        swapQc.addOrCondition('donor', custSysId);
+        var swapStateQc = swapReqGr.addQuery('approval', 'NOT IN', 'approved,rejected');
+        swapStateQc.addOrCondition('state', 'NOT IN', '3,7');
+        swapReqGr.setLimit(1);
+        swapReqGr.query();
+        return swapReqGr.hasNext() ? 'Swap' : '';
+    }
+
+    function calculateSwapType(donee, donor) {
+        if (donee.segment !== donor.segment) return 'E';
+        if ((donee.depot && donee.depot === donor.depot) || (donee.ownSite && donor.ownSite)) return 'A';
+        if (donee.region && donee.region === donor.region) return 'B';
+        if (donee.zone && donee.zone === donor.zone) return 'C';
+        return 'D';
+    }
+
+    function fileExtension(name) {
+        var i = (name || '').lastIndexOf('.');
+        return i > -1 ? name.substring(i + 1).toLowerCase() : '';
+    }
+
+    function attachSupportingDocuments(record, files) {
+        var result = { attached: 0, skipped: [] };
+        if (!files || !files.length) return result;
+
+        var sa = new GlideSysAttachment();
+        var total = 0;
+
+        for (var i = 0; i < files.length; i++) {
+            var f = files[i] || {};
+            var name = (f.name || '').toString();
+            var b64 = (f.base64 || '').toString();
+            var approxBytes = Math.floor(b64.length * 3 / 4);
+
+            if (!name || !b64) { result.skipped.push(name || 'unnamed file'); continue; }
+            if (result.attached >= CONFIG.UPLOAD.MAX_FILES) { result.skipped.push(name); continue; }
+            if (CONFIG.UPLOAD.BLOCKED_EXT.indexOf(fileExtension(name)) > -1) { result.skipped.push(name); continue; }
+            if (approxBytes > CONFIG.UPLOAD.MAX_BYTES || total + approxBytes > CONFIG.UPLOAD.MAX_TOTAL_BYTES) {
+                result.skipped.push(name);
+                continue;
+            }
+
+            try {
+                var attId = sa.writeBase64(record, name, f.type || 'application/octet-stream', b64);
+                if (attId) {
+                    result.attached++;
+                    total += approxBytes;
+                } else {
+                    result.skipped.push(name);
+                }
+            } catch (e) {
+                gs.error('Limit Swap attachment error (' + name + '): ' + e.message);
+                result.skipped.push(name);
+            }
+        }
+        return result;
+    }
+
+    var userPermissions = getUserPermissions(userId);
+
+    if (!input) {
+        data.isInitialized = true;
+        return;
+    }
+
+    // --- 1. Typeahead PAN & Name Search ---
+    if (input.action === 'fetch_pan_suggestions') {
+        var searchString = input.panSearchText ? input.panSearchText.toUpperCase() : '';
+        data.panSuggestions = [];
+
+        var ga = new GlideRecord(CONFIG.TABLES.CUSTOMER);
+        ga.addQuery('cg1', 'N01');
+        ga.addEncodedQuery('panSTARTSWITH' + searchString + '^ORcustomer_nameLIKE' + searchString);
+        ga.orderBy('pan');
+        ga.setLimit(15);
+        ga.query();
+
+        var addedPans = {};
+        while (ga.next()) {
+            var panVal = ga.getValue('pan');
+            var nameVal = ga.getValue('customer_name');
+            if (panVal && !addedPans[panVal]) {
+                data.panSuggestions.push({ pan: panVal, name: nameVal });
+                addedPans[panVal] = true;
+            }
+        }
+        return;
+    }
+
+    // --- 2. Fetch Sites for Selected PAN ---
+    if (input.action === 'fetch_all_sites') {
+        data.allSites = [];
+        var panVal = (input.panSearchText || '').toUpperCase();
+
+        var gr = new GlideRecord(CONFIG.TABLES.CUSTOMER);
+        gr.addQuery('pan', panVal);
+        gr.addQuery('cg1', 'N01');
+        gr.orderBy('customer_code_sap');
+        gr.query();
+
+        while (gr.next()) {
+            var siteSysId  = gr.getUniqueValue();
+            var custCode   = gr.getValue('customer_code_sap') || gr.getValue('customer_code') || '';
+            var salesOrg   = gr.getValue('salesorg');
+            var segDisplay = gr.getDisplayValue('segment') || gr.getValue('segment') || '';
+            var segValue   = gr.getValue('segment') || '';
+
+            var liveLimit = 0;
+            var liveOutstanding = 0;
+
+            try {
+                var wsdl = new x_birl3_clm.CLM_NEW_WSDL1();
+                var res = wsdl.getCreditDetails(custCode, salesOrg);
+                if (res) {
+                    var parsed = JSON.parse(res);
+                    liveLimit = parseFloat(parsed.creditLimit) || 0;
+                    liveOutstanding = parseFloat(parsed.outstandingAmount) || 0;
+                }
+            } catch (e) {
+                gs.error("Limit Swap SAP Fetch Error for " + custCode + ": " + e.message);
+                liveLimit = parseFloat(gr.getValue('credit_limit')) || 0;
+                liveOutstanding = 0;
+            }
+
+            var zoneCode = gr.getValue('zone') || '';
+            var zoneName = gr.getValue('zone_name') || '';
+            var regCode  = gr.getValue('region') || '';
+            var regName  = gr.getValue('region_name') || '';
+            var depCode  = gr.getValue('depot') || '';
+            var depName  = gr.getValue('depot_name') || '';
+
+            var zoneStr  = zoneCode + (zoneName ? ' - ' + zoneName : '');
+            var regStr   = regCode  + (regName ? ' - ' + regName : '');
+            var depStr   = depCode  + (depName ? ' - ' + depName : '');
+
+            var isAllowed = isUserAuthorizedForSite(segValue, zoneCode, regCode, depCode, userPermissions);
+            var isOwn     = matchesUserPortfolio(segValue, zoneCode, regCode, depCode, userPermissions);
+
+            // Determine active request type using your function
+            var reqType = getActiveRequestType(siteSysId);
+
+            data.allSites.push({
+                sys_id:              siteSysId,
+                customer_code:       custCode,
+                name:                gr.getValue('customer_name') || gr.getValue('name') || '',
+                segment:             segDisplay,
+                segmentValue:        segValue,
+                zone:                zoneStr,
+                region:              regStr,
+                depot:               depStr,
+                rawZone:             zoneCode,
+                rawRegion:           regCode,
+                rawDepot:            depCode,
+                zoneName:            zoneName,
+                regionName:          regName,
+                depotName:           depName,
+                credit_limit:        liveLimit,
+                outstanding:         liveOutstanding,
+                available:           Math.max(0, liveLimit - liveOutstanding),
+                is_allowed_donee:    isAllowed,
+                is_own_site:         isOwn,
+                has_ongoing_request: (reqType !== ''),
+                ongoing_label:       reqType ? ('Ongoing ' + reqType + ' Request') : ''
+            });
+        }
+        return;
+    }
+
+    // --- 3. Submit Limit Swap ---
+    if (input.action === 'submitSwap') {
+        var p = input.payload;
+
+        var donorRec = new GlideRecord(CONFIG.TABLES.CUSTOMER);
+        var doneeRec = new GlideRecord(CONFIG.TABLES.CUSTOMER);
+
+        if (!donorRec.get(p.donorSite)) {
+            data.serverError = 'Unable to locate donor site record.';
+            return;
+        }
+        if (!doneeRec.get(p.doneeSite)) {
+            data.serverError = 'Unable to locate donee site record.';
+            return;
+        }
+
+        var donorCode = donorRec.getValue('customer_code_sap') || donorRec.getValue('customer_code');
+        var doneeCode = doneeRec.getValue('customer_code_sap') || doneeRec.getValue('customer_code');
+
+        // Validation using getActiveRequestType
+        var doneeReqType = getActiveRequestType(p.doneeSite);
+        if (doneeReqType) {
+            data.serverError = 'The selected Donee site (' + doneeCode + ') has an Ongoing ' + doneeReqType + ' Request pending.';
+            return;
+        }
+
+        var donorReqType = getActiveRequestType(p.donorSite);
+        if (donorReqType) {
+            data.serverError = 'The selected Donor site (' + donorCode + ') has an Ongoing ' + donorReqType + ' Request pending.';
+            return;
+        }
+
+        var doneeSegVal = doneeRec.getValue('segment') || '';
+        var doneeSeg    = doneeRec.getDisplayValue('segment') || doneeSegVal;
+        var doneeZone   = doneeRec.getValue('zone') || '';
+        var doneeReg    = doneeRec.getValue('region') || '';
+        var doneeDep    = doneeRec.getValue('depot') || '';
+
+        if (!isUserAuthorizedForSite(doneeSegVal, doneeZone, doneeReg, doneeDep, userPermissions)) {
+            data.serverError = 'Security Violation: You are not authorized to raise a request for this Donee Site.';
+            return;
+        }
+
+        // Live Balance for Donee
+        var doneeSalesOrg = doneeRec.getValue('salesorg');
+        var doneeLimit = 0;
+        var doneeOutstanding = 0;
+        try {
+            var doneeWsdl = new x_birl3_clm.CLM_NEW_WSDL1();
+            var doneeRes = doneeWsdl.getCreditDetails(doneeCode, doneeSalesOrg);
+            if (doneeRes) {
+                var dnParsed = JSON.parse(doneeRes);
+                doneeLimit = parseFloat(dnParsed.creditLimit) || 0;
+                doneeOutstanding = parseFloat(dnParsed.outstandingAmount) || 0;
+            }
+        } catch (e) {
+            gs.error("Limit Swap Donee Balance Error: " + e.message);
+            doneeLimit = parseFloat(doneeRec.getValue('credit_limit')) || 0;
+        }
+        var doneeAvailable = Math.max(0, doneeLimit - doneeOutstanding);
+
+        // Live Balance for Donor
+        var donorSalesOrg = donorRec.getValue('salesorg');
+        var donorSegVal   = donorRec.getValue('segment') || '';
+        var donorSeg      = donorRec.getDisplayValue('segment') || donorSegVal;
+        var donorZone     = donorRec.getValue('zone') || '';
+        var donorReg      = donorRec.getValue('region') || '';
+        var donorDep      = donorRec.getValue('depot') || '';
+        var donorLimit    = 0;
+        var donorOutstanding = 0;
+
+        try {
+            var donorWsdl = new x_birl3_clm.CLM_NEW_WSDL1();
+            var donorRes = donorWsdl.getCreditDetails(donorCode, donorSalesOrg);
+            if (donorRes) {
+                var dParsed = JSON.parse(donorRes);
+                donorLimit = parseFloat(dParsed.creditLimit) || 0;
+                donorOutstanding = parseFloat(dParsed.outstandingAmount) || 0;
+            }
+        } catch (e) {
+            gs.error("Limit Swap Donor Balance Error: " + e.message);
+            donorLimit = parseFloat(donorRec.getValue('credit_limit')) || 0;
+        }
+
+        var donorAvailable = Math.max(0, donorLimit - donorOutstanding);
+        var requestedAmt = parseFloat(p.doneeAmount) || 0;
+
+        if (donorAvailable < requestedAmt) {
+            data.serverError = 'Donor site balance is insufficient. Live Available: ₹' + donorAvailable.toFixed(2);
+            return;
+        }
+
+        var doneeObj = {
+            segment: doneeSegVal, zone: doneeZone, region: doneeReg, depot: doneeDep,
+            ownSite: matchesUserPortfolio(doneeSegVal, doneeZone, doneeReg, doneeDep, userPermissions)
+        };
+        var donorObj = {
+            segment: donorSegVal, zone: donorZone, region: donorReg, depot: donorDep,
+            ownSite: matchesUserPortfolio(donorSegVal, donorZone, donorReg, donorDep, userPermissions)
+        };
+        var swapType = calculateSwapType(doneeObj, donorObj);
+
+        var files = input.attachments || [];
+
+        var swapGr = new GlideRecord(CONFIG.TABLES.SWAP_REQUEST);
+        swapGr.initialize();
+
+        swapGr.setValue('pan',                   p.pan);
+        swapGr.setValue('donee',                 p.doneeSite);
+        swapGr.setValue('donor',                 p.donorSite);
+        swapGr.setValue('donee_segment',         doneeSeg);
+        swapGr.setValue('donee_current_limit',   doneeLimit);
+        swapGr.setValue('donee_outstanding',     doneeOutstanding);
+        swapGr.setValue('donee_available_limit', doneeAvailable);
+        swapGr.setValue('donor_segment',         donorSeg);
+        swapGr.setValue('donor_current_limit',   donorLimit);
+        swapGr.setValue('donor_outstanding',     donorOutstanding);
+        swapGr.setValue('donor_available_limit', donorAvailable);
+        swapGr.setValue('requested_amount',      requestedAmt);
+        swapGr.setValue('swap_type',             swapType);
+        swapGr.setValue('approval',              'requested');
+        swapGr.setValue('state',                 1);
+
+        var justificationText = (p.comments || '').trim();
+        swapGr.setValue('description', justificationText);
+
+        var commentNarrative = [
+            "=== LIMIT SWAP INITIATION DETAILS ===",
+            "Corporate PAN: " + p.pan,
+            "Swap Type: " + swapType,
+            "Transfer Amount: ₹" + requestedAmt.toFixed(2),
+            "",
+            "DONOR SITE (" + donorCode + "):",
+            " - Current Limit: ₹" + donorLimit.toFixed(2),
+            " - Outstanding: ₹" + donorOutstanding.toFixed(2),
+            " - Available Limit: ₹" + donorAvailable.toFixed(2),
+            "",
+            "DONEE SITE (" + doneeCode + "):",
+            " - Current Limit: ₹" + doneeLimit.toFixed(2),
+            " - Outstanding: ₹" + doneeOutstanding.toFixed(2),
+            " - Available Limit: ₹" + doneeAvailable.toFixed(2),
+            "",
+            "SUPPORTING DOCUMENTS: " + (files.length ? files.length + " file(s) submitted" : "None"),
+            "",
+            "USER RATIONALE:",
+            justificationText ? justificationText : "No comments provided."
+        ].join('\n');
+
+        swapGr.comments = commentNarrative;
+
+        var swapSysId = swapGr.insert();
+        if (swapSysId) {
+            var created = new GlideRecord(CONFIG.TABLES.SWAP_REQUEST);
+            if (created.get(swapSysId)) {
+                data.swapNumber = created.getValue('number') || created.getDisplayValue();
+
+                var attResult = attachSupportingDocuments(created, files);
+                data.attachedCount = attResult.attached;
+                data.attachmentWarning = attResult.skipped.length
+                    ? 'Request created, but these files could not be attached: ' + attResult.skipped.join(', ')
+                    : '';
+            }
+        } else {
+            data.serverError = 'Failed to create swap request record. System error.';
+        }
+    }
+})();]]></script>
+        <servicenow>false</servicenow>
+        <sys_class_name>sp_widget</sys_class_name>
+        <sys_created_by>gaurav.gorane@mindsprint.com</sys_created_by>
+        <sys_created_on>2026-09-08 06:28:01</sys_created_on>
+        <sys_id>6905b88c97d74b10be31fa17f053af79</sys_id>
+        <sys_mod_count>38</sys_mod_count>
+        <sys_name>UCLM Limit Swap Request</sys_name>
+        <sys_package display_value="CLM" source="x_birl3_clm">d01e8ce22bb27e104572f3745e91bfe3</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="CLM">d01e8ce22bb27e104572f3745e91bfe3</sys_scope>
+        <sys_update_name>sp_widget_6905b88c97d74b10be31fa17f053af79</sys_update_name>
+        <sys_updated_by>gaurav.gorane@mindsprint.com</sys_updated_by>
+        <sys_updated_on>2026-11-03 09:16:57</sys_updated_on>
+        <template><![CDATA[<div class="clm-widget clm-ls">
+  <div ng-if="c.data.isInitialized">
+
+    <!-- =======================================================
+         PAGE HEADER BANNER (ABG rising sun with Breadcrumbs)
+         ======================================================= -->
+    <div class="clm-hero">
+      <div class="clm-hero-text">
+        <!-- Breadcrumb Navigation Trail -->
+        <nav class="clm-hero-breadcrumb" aria-label="Breadcrumb">
+          <a href="?id=uclm_limit_swap" class="clm-breadcrumb-link">Home</a>
+          <span class="clm-breadcrumb-sep"><i class="fa fa-angle-right"></i></span>
+          <span class="clm-breadcrumb-curr">Limit Swap Request</span>
+        </nav>
+
+        <div class="clm-hero-bar"></div>
+        <h1 class="clm-hero-title">
+          <span ng-if="c.data.currentStep == 1">Initiate <span class="clm-hero-accent">Limit Swap</span> Request</span>
+          <span ng-if="c.data.currentStep == 2">Review &amp; Submit <span class="clm-hero-accent">Limit Swap</span></span>
+          <span ng-if="c.data.currentStep == 3"><span class="clm-hero-accent">Limit Swap</span> Request Submitted</span>
+        </h1>
+        <p class="clm-hero-sub" ng-if="c.data.currentStep == 1">Enter a Corporate PAN or Name to retrieve all associated Customer Sites.</p>
+        <p class="clm-hero-sub" ng-if="c.data.currentStep == 2">Please confirm the reallocation details before submitting the request.</p>
+        <p class="clm-hero-sub" ng-if="c.data.currentStep == 3">Your request has been created and routed through the escalation workflow.</p>
+      </div>
+
+      <div class="clm-hero-actions">
+        <div class="clm-hero-stat" ng-if="c.data.currentStep == 1 && c.selected.pan && c.data.allSites.length > 0 && !c.data.isFetching">
+          <div class="clm-hero-stat-v">{{c.data.allSites.length}}</div>
+          <div class="clm-hero-stat-k">Total Sites</div>
+        </div>
+
+        <!-- Back button retained only for Step 2 -->
+        <button type="button" class="clm-hero-btn" ng-if="c.data.currentStep == 2" ng-click="c.data.currentStep = 1" ng-disabled="c.data.isSubmitting">
+          <i class="fa fa-arrow-left"></i> Back to Site Selection
+        </button>
+      </div>
+    </div>
+
+    <!-- =======================================================
+         STEP 1: PAN & SITE SELECTION
+         ======================================================= -->
+    <div class="clm-panel slide-down" ng-if="c.data.currentStep == 1">
+
+      <!-- SECTION 1: CUSTOMER PAN -->
+      <div class="clm-section">
+        <div class="clm-section-title"><span class="clm-section-num">1</span> Customer PAN</div>
+
+        <div class="clm-ls-field clm-ls-pan">
+          <label>Customer PAN or Name <span class="clm-req">*</span></label>
+          <div class="clm-ls-typeahead">
+            <i class="fa fa-search clm-ls-input-icon"></i>
+            <input type="text" class="form-control clm-ls-input clm-ls-input-icon-pad text-uppercase"
+                   ng-model="c.data.panSearchText"
+                   ng-change="c.handlePanInput()"
+                   placeholder="Type at least 3 characters of PAN or Name to search..."
+                   autocomplete="off">
+
+            <ul class="clm-ls-suggest" ng-if="c.data.panSuggestions.length > 0">
+              <li ng-repeat="suggested in c.data.panSuggestions">
+                <a href="javascript:void(0)" ng-click="c.selectPan(suggested.pan)">
+                  <span class="clm-ls-suggest-pan">{{::suggested.pan}}</span>
+                  <span class="clm-ls-suggest-name">{{::suggested.name}}</span>
+                </a>
+              </li>
+            </ul>
+          </div>
+          <div class="clm-ls-hint">Only Non-Trade customers are listed. Selecting a PAN fetches live limits from SAP for every site.</div>
+        </div>
+
+        <!-- FETCHING LOADER -->
+        <div class="clm-block clm-ls-loader slide-down" ng-if="c.data.isFetching">
+          <div class="clm-tw-body">
+            <i class="fa fa-spinner fa-spin clm-ls-loader-icon"></i>
+            <div class="clm-ls-loader-title">Fetching Live Site Data...</div>
+            <div class="clm-ls-loader-sub">Retrieving comprehensive site limits and outstanding details from SAP.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SECTIONS 2 & 3 WRAPPER -->
+      <div class="slide-down" ng-if="c.selected.pan && c.data.allSites.length > 0 && !c.data.isFetching">
+
+        <!-- SECTION 2: DONEE SELECTION -->
+        <div class="clm-section">
+          <div class="clm-section-title"><span class="clm-section-num">2</span> Donee Site <span class="clm-section-note">Receiving Limit</span></div>
+
+          <div class="clm-ls-grid-donee">
+            <div class="clm-ls-field">
+              <label>Donee Site <span class="clm-req">*</span></label>
+              <div class="abg-custom-select clm-ls-select" ng-class="{'open': c.showDoneeDropdown}">
+                <div class="clm-ls-select-display" ng-click="c.toggleDoneeDropdown($event)">
+                  <span class="clm-ls-placeholder" ng-if="!c.selected.doneeSite">-- Select Donee Site --</span>
+                  <span ng-if="c.selected.doneeSite" class="clm-ls-select-value">
+                    <span class="clm-ls-sv-name">{{c.selected.doneeSiteDisplayName}} <span class="clm-ls-code">({{c.selected.doneeSiteDisplayCode}})</span></span>
+                    <span class="clm-ls-sv-loc" ng-if="c.getSelectedDonee()">
+                      <i class="fa fa-map-marker"></i>
+                      {{c.fmtLoc(c.getSelectedDonee().depotName, c.getSelectedDonee().rawDepot)}} ·
+                      {{c.fmtLoc(c.getSelectedDonee().regionName, c.getSelectedDonee().rawRegion)}} ·
+                      {{c.fmtLoc(c.getSelectedDonee().zoneName, c.getSelectedDonee().rawZone)}}
+                    </span>
+                  </span>
+                  <i class="fa fa-chevron-down clm-ls-caret"></i>
+                </div>
+
+                <div class="clm-ls-select-dropdown" ng-show="c.showDoneeDropdown">
+                  <!-- Search Bar Inside Dropdown -->
+                  <div class="clm-ls-select-search" ng-click="$event.stopPropagation()">
+                    <i class="fa fa-search clm-ls-input-icon"></i>
+                    <input type="text" class="form-control clm-ls-input clm-ls-input-sm clm-ls-input-icon-pad"
+                           ng-model="c.doneeSearch"
+                           placeholder="Search site code, name, depot..."
+                           ng-click="$event.stopPropagation()">
+                    <button class="clm-ls-clear" type="button" ng-if="c.doneeSearch" ng-click="c.doneeSearch = ''">
+                      <i class="fa fa-times"></i>
+                    </button>
+                  </div>
+
+                  <!-- Dropdown Options Scroll List -->
+                  <div class="clm-ls-options">
+                    <div class="clm-ls-option" ng-repeat="site in c.getFilteredDoneeSites()"
+                         ng-class="{'is-disabled': !site.is_allowed_donee || site.has_ongoing_request, 'is-selected': c.selected.doneeSite === site.sys_id}"
+                         ng-click="(site.is_allowed_donee && !site.has_ongoing_request) && c.selectDonee(site)">
+                      <div class="clm-ls-option-top">
+                        <div class="clm-ls-option-name">{{site.name}}</div>
+                        <div class="clm-ls-option-chips">
+                          <span class="clm-chip clm-chip-live" title="Live Credit Limit"><span class="clm-chip-k">CL</span> ₹ {{c.formatINR(site.credit_limit)}}</span>
+                          <span class="clm-chip clm-chip-req" ng-if="site.has_ongoing_request"><i class="fa fa-clock-o"></i> {{site.ongoing_label || 'Ongoing Request'}}</span>
+                          <span class="clm-chip clm-chip-dev" ng-if="!site.is_allowed_donee && !site.has_ongoing_request"><i class="fa fa-ban"></i> Unauthorized</span>
+                        </div>
+                      </div>
+                      <div class="clm-cust-line">
+                        <span class="clm-cust-code">({{site.customer_code}})</span>
+                        <span class="clm-seg-pill" ng-if="site.segment">{{site.segment}}</span>
+                        <span class="clm-ls-option-loc">
+                          <strong>{{c.fmtLoc(site.depotName, site.rawDepot)}}</strong> ·
+                          {{c.fmtLoc(site.regionName, site.rawRegion)}} ·
+                          {{c.fmtLoc(site.zoneName, site.rawZone)}}
+                        </span>
+                      </div>
+                    </div>
+                    <div class="clm-ls-empty" ng-if="c.getFilteredDoneeSites().length === 0">
+                      No customer sites found matching "{{c.doneeSearch}}".
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="clm-ls-field">
+              <label>Enhancement Amount (₹) <span class="clm-req">*</span></label>
+              <input type="number" class="form-control clm-ls-input clm-ls-amount" ng-model="c.selected.doneeAmount" ng-change="c.clearDonor()" placeholder="e.g. 500000" min="1">
+              <div class="clm-ls-hint" ng-if="c.selected.doneeAmount > 0">₹ {{c.formatINR(c.selected.doneeAmount)}}</div>
+            </div>
+          </div>
+
+          <!-- Selected donee snapshot -->
+          <div class="clm-block slide-down" ng-if="c.selected.doneeSite && c.getSelectedDonee()">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Donee Credit Profile</div>
+                <div class="clm-block-sub">
+                  <strong>{{c.getSelectedDonee().name}}</strong> ({{c.getSelectedDonee().customer_code}})
+                </div>
+              </div>
+              <div class="clm-block-meta">
+                <span class="clm-chip clm-chip-live"><i class="fa fa-circle clm-live-dot"></i> Live SAP</span>
+              </div>
+            </div>
+            <div class="clm-tw-body">
+              <!-- Territory strip -->
+              <div class="clm-ls-terr">
+                <div class="clm-ls-terr-item">
+                  <div class="clm-ls-terr-k">Depot</div>
+                  <div class="clm-ls-terr-v">{{c.fmtLoc(c.getSelectedDonee().depotName, c.getSelectedDonee().rawDepot)}}</div>
+                </div>
+                <div class="clm-ls-terr-item">
+                  <div class="clm-ls-terr-k">Region</div>
+                  <div class="clm-ls-terr-v">{{c.fmtLoc(c.getSelectedDonee().regionName, c.getSelectedDonee().rawRegion)}}</div>
+                </div>
+                <div class="clm-ls-terr-item">
+                  <div class="clm-ls-terr-k">Zone</div>
+                  <div class="clm-ls-terr-v">{{c.fmtLoc(c.getSelectedDonee().zoneName, c.getSelectedDonee().rawZone)}}</div>
+                </div>
+              </div>
+
+              <div class="clm-tw-factors clm-ls-factors-4">
+                <div class="clm-tw-factor">
+                  <div class="clm-tw-factor-k">Segment</div>
+                  <div class="clm-tw-factor-v">{{c.getSelectedDonee().segment || '—'}}</div>
+                </div>
+                <div class="clm-tw-factor">
+                  <div class="clm-tw-factor-k">Current CL</div>
+                  <div class="clm-tw-factor-v">₹ {{c.formatINR(c.getSelectedDonee().credit_limit)}}</div>
+                </div>
+                <div class="clm-tw-factor">
+                  <div class="clm-tw-factor-k">Current OS</div>
+                  <div class="clm-tw-factor-v">₹ {{c.formatINR(c.getSelectedDonee().outstanding)}}</div>
+                </div>
+                <div class="clm-tw-factor is-ok">
+                  <div class="clm-tw-factor-k">Available</div>
+                  <div class="clm-tw-factor-v">₹ {{c.formatINR(c.getSelectedDonee().available)}}</div>
+                  <div class="clm-tw-factor-s" ng-if="c.selected.doneeAmount > 0">After swap: ₹ {{c.formatINR(c.getSelectedDonee().available + c.selected.doneeAmount)}}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SECTION 3: DONOR SELECTION -->
+        <div class="clm-section slide-down" ng-if="c.selected.doneeSite && c.selected.doneeAmount > 0">
+          <div class="clm-section-title"><span class="clm-section-num">3</span> Donor Site <span class="clm-section-note">Deducting Limit</span></div>
+
+          <div class="clm-block clm-block-dev clm-ls-mt0 clm-ls-mb16" ng-if="c.hasOnlyInsufficientSites()">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">No valid Donor Sites found</div>
+                <div class="clm-block-sub">Other sites under this PAN either do not have enough available credit balance or have an ongoing CL/Swap request. Switch to "All Sites" to review them.</div>
+              </div>
+              <div class="clm-block-meta">
+                <span class="clm-chip clm-chip-req"><span class="clm-chip-k">Required</span> ₹ {{c.formatINR(c.selected.doneeAmount)}}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="clm-block clm-ls-mt0" ng-if="c.getDonorSites().length > 0">
+            <div class="clm-block-head">
+              <div class="clm-block-heading">
+                <div class="clm-block-title">Donor Sites</div>
+                <div class="clm-block-sub">Eligible sites have available balance ≥ the required amount and no ongoing request. The swap type tag is based on the selected donee.</div>
+              </div>
+              <div class="clm-block-meta">
+                <span class="clm-chip clm-chip-req"><span class="clm-chip-k">Required</span> ₹ {{c.formatINR(c.selected.doneeAmount)}}</span>
+                <span class="clm-chip">
+                  <span class="clm-chip-k">Showing</span>
+                  {{ c.getFilteredDonors().length ? (c.donorCurrentPage - 1) * c.donorItemsPerPage + 1 : 0 }}–{{ c.getMathMin(c.donorCurrentPage * c.donorItemsPerPage, c.getFilteredDonors().length) }}
+                  <span class="clm-chip-k">of</span> {{ c.getFilteredDonors().length }}
+                </span>
+              </div>
+            </div>
+
+            <!-- Toolbar: view toggle (top-left) + search + page size -->
+            <div class="clm-ls-toolbar">
+              <div class="clm-ls-toggle" role="tablist">
+                <button type="button" role="tab" class="clm-ls-toggle-btn" ng-class="{'is-active': c.donorView === 'eligible'}" ng-click="c.setDonorView('eligible')">
+                  Eligible sites ({{c.countDonors('eligible')}})
+                </button>
+                <button type="button" role="tab" class="clm-ls-toggle-btn" ng-class="{'is-active': c.donorView === 'all'}" ng-click="c.setDonorView('all')">
+                  All sites ({{c.countDonors('all')}})
+                </button>
+              </div>
+              <div class="clm-ls-search">
+                <i class="fa fa-search clm-ls-input-icon"></i>
+                <input type="text" class="form-control clm-ls-input clm-ls-input-sm clm-ls-input-icon-pad" ng-model="c.donorSearch" ng-change="c.donorCurrentPage = 1" placeholder="Search site code, name, zone, region, depot...">
+              </div>
+              <div class="clm-ls-pagesize">
+                <span>Show</span>
+                <select class="form-control clm-ls-input clm-ls-input-sm" ng-model="c.donorItemsPerPage" ng-change="c.donorCurrentPage = 1" ng-options="size for size in [5, 25, 50, 100]"></select>
+              </div>
+            </div>
+
+            <!-- DONOR SITES TABLE -->
+            <div class="clm-table-wrap clm-ls-table-wrap">
+              <table class="clm-table clm-ls-table">
+                <thead>
+                  <tr class="super">
+                    <th class="bg-blank"></th>
+                    <th class="bg-code">Customer</th>
+                    <th class="bg-seg grp">Location</th>
+                    <th class="bg-assess grp">Swap</th>
+                    <th class="bg-req grp" colspan="3">Live Credit (₹)</th>
+                  </tr>
+                  <tr>
+                    <th class="clm-ls-sel">Select</th>
+                    <th class="clm-th-left">Customer · Segment · Status</th>
+                    <th class="grp clm-th-left">Territory<div class="clm-th-sub">Depot · Region · Zone</div></th>
+                    <th class="grp">Swap Type</th>
+                    <th class="grp">Current CL</th>
+                    <th>Current OS</th>
+                    <th>Available</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr ng-repeat="site in c.getPaginatedDonors()"
+                      ng-click="c.isEligibleDonor(site) && c.selectDonor(site)"
+                      ng-class="{'is-selected': c.selected.donorSite === site.sys_id, 'is-disabled': !c.isEligibleDonor(site)}">
+                    <td class="clm-ls-sel" data-label="Select">
+                      <input type="radio" name="donorSelection"
+                             ng-checked="c.selected.donorSite === site.sys_id"
+                             ng-disabled="!c.isEligibleDonor(site)"
+                             ng-click="$event.stopPropagation(); c.isEligibleDonor(site) && c.selectDonor(site)">
+                    </td>
+                    <td class="clm-ls-namecell" data-label="Customer">
+                      <div class="clm-cust-name">{{::site.name}}</div>
+                      <div class="clm-cust-line">
+                        <span class="clm-cust-code">({{::site.customer_code}})</span>
+                        <span class="clm-seg-pill" ng-if="site.segment">{{::site.segment}}</span>
+                        <span class="clm-chip clm-chip-req clm-chip-xs" ng-if="site.has_ongoing_request"><i class="fa fa-clock-o"></i> {{site.ongoing_label || 'Ongoing Request'}}</span>
+                        <span class="clm-chip clm-chip-dev clm-chip-xs" ng-if="!site.has_ongoing_request && site.available < c.selected.doneeAmount">Insufficient Balance</span>
+                      </div>
+                    </td>
+                    <td class="grp clm-ls-loccell" data-label="Territory">
+                      <div class="clm-loc-main">{{c.fmtLoc(site.depotName, site.rawDepot)}}</div>
+                      <div class="clm-loc-sub">{{c.fmtLoc(site.regionName, site.rawRegion)}} · {{c.fmtLoc(site.zoneName, site.rawZone)}}</div>
+                    </td>
+                    <td class="grp" data-label="Swap Type">
+                      <span class="clm-swap-tag" ng-class="c.getSwapType(site).cls"
+                            title="{{c.getSwapType(site).label}} — {{c.getSwapType(site).hint}}">{{c.getSwapType(site).label}}</span>
+                      <div class="clm-swap-hint">{{c.getSwapType(site).hint}}</div>
+                    </td>
+                    <td class="grp" data-label="Current CL">₹ {{c.formatINR(site.credit_limit)}}</td>
+                    <td data-label="Current OS">₹ {{c.formatINR(site.outstanding)}}</td>
+                    <td data-label="Available">
+                      <span ng-class="c.isEligibleDonor(site) ? 'v-ok' : 'v-bad'">₹ {{c.formatINR(site.available)}}</span>
+                    </td>
+                  </tr>
+                  <tr ng-if="c.getPaginatedDonors().length === 0" class="clm-ls-empty-row">
+                    <td colspan="7" class="clm-ls-empty">
+                      <span ng-if="c.donorSearch">No donor sites match your search criteria.</span>
+                      <span ng-if="!c.donorSearch && c.donorView === 'eligible'">No eligible donor sites for this amount. <a href="javascript:void(0)" ng-click="c.setDonorView('all')">View all sites</a></span>
+                      <span ng-if="!c.donorSearch && c.donorView === 'all'">No other sites under this PAN.</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Pagination -->
+            <div class="clm-ls-pager">
+              <span class="clm-ls-pager-info">Page <strong>{{c.donorCurrentPage}}</strong> of <strong>{{c.totalDonorPages()}}</strong></span>
+              <div class="clm-ls-pager-btns">
+                <button class="clm-btn clm-btn-sm" ng-click="c.donorCurrentPage = c.donorCurrentPage - 1" ng-disabled="c.donorCurrentPage == 1">
+                  <i class="fa fa-chevron-left"></i> Prev
+                </button>
+                <button class="clm-btn clm-btn-sm" ng-click="c.donorCurrentPage = c.donorCurrentPage + 1" ng-disabled="c.donorCurrentPage == c.totalDonorPages()">
+                  Next <i class="fa fa-chevron-right"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ACTION BAR -->
+        <div class="clm-ls-actions">
+          <button class="clm-btn" ng-click="c.resetForm()"><i class="fa fa-refresh"></i> Reset Form</button>
+          <button class="clm-btn clm-btn-primary" ng-disabled="!c.isStep1Valid()" ng-click="c.goToReview()">
+            Proceed to Request Review <i class="fa fa-arrow-right"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- =======================================================
+         STEP 2: REVIEW & SUBMIT
+         ======================================================= -->
+    <div class="clm-panel slide-down" ng-if="c.data.currentStep == 2">
+
+      <div class="clm-section">
+        <div class="clm-section-title"><span class="clm-section-num">1</span> Reallocation Summary</div>
+
+        <div class="clm-block clm-ls-mt0">
+          <div class="clm-block-head">
+            <div class="clm-block-heading">
+              <div class="clm-block-title">Limit Swap Details</div>
+              <div class="clm-block-sub">Limit moves from the donor site to the donee site under the same PAN.</div>
+            </div>
+            <div class="clm-block-meta">
+              <span class="clm-chip"><span class="clm-chip-k">PAN</span> {{c.selected.pan}}</span>
+              <span class="clm-swap-tag" ng-if="c.getSelectedDonor()" ng-class="c.getSwapType(c.getSelectedDonor()).cls">
+                {{c.getSwapType(c.getSelectedDonor()).label}}
+              </span>
+            </div>
+          </div>
+
+          <div class="clm-tw-body">
+            <div class="clm-ls-flow">
+              <!-- Donor -->
+              <div class="clm-ls-party" ng-if="c.getSelectedDonor()">
+                <div class="clm-ls-party-k"><i class="fa fa-arrow-circle-up"></i> Donor Site · Deducting</div>
+                <div class="clm-ls-party-name">{{c.getSelectedDonor().name}}</div>
+                <div class="clm-cust-line">
+                  <span class="clm-cust-code">({{c.getSelectedDonor().customer_code}})</span>
+                  <span class="clm-seg-pill" ng-if="c.getSelectedDonor().segment">{{c.getSelectedDonor().segment}}</span>
+                </div>
+                <div class="clm-ls-party-loc">
+                  <div class="clm-loc-main">{{c.fmtLoc(c.getSelectedDonor().depotName, c.getSelectedDonor().rawDepot)}}</div>
+                  <div class="clm-loc-sub">{{c.fmtLoc(c.getSelectedDonor().regionName, c.getSelectedDonor().rawRegion)}} · {{c.fmtLoc(c.getSelectedDonor().zoneName, c.getSelectedDonor().rawZone)}}</div>
+                </div>
+                <div class="clm-tw-factors clm-ls-factors-3">
+                  <div class="clm-tw-factor">
+                    <div class="clm-tw-factor-k">Current CL</div>
+                    <div class="clm-tw-factor-v">₹ {{c.formatINR(c.getSelectedDonor().credit_limit)}}</div>
+                  </div>
+                  <div class="clm-tw-factor">
+                    <div class="clm-tw-factor-k">Current OS</div>
+                    <div class="clm-tw-factor-v">₹ {{c.formatINR(c.getSelectedDonor().outstanding)}}</div>
+                  </div>
+                  <div class="clm-tw-factor is-ok">
+                    <div class="clm-tw-factor-k">Available</div>
+                    <div class="clm-tw-factor-v">₹ {{c.formatINR(c.selected.donorAvailable)}}</div>
+                    <div class="clm-tw-factor-s">After swap: ₹ {{c.formatINR(c.selected.donorAvailable - c.selected.doneeAmount)}}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="clm-ls-flow-arrow"><i class="fa fa-long-arrow-right"></i></div>
+
+              <!-- Donee -->
+              <div class="clm-ls-party" ng-if="c.getSelectedDonee()">
+                <div class="clm-ls-party-k"><i class="fa fa-arrow-circle-down"></i> Donee Site · Receiving</div>
+                <div class="clm-ls-party-name">{{c.getSelectedDonee().name}}</div>
+                <div class="clm-cust-line">
+                  <span class="clm-cust-code">({{c.getSelectedDonee().customer_code}})</span>
+                  <span class="clm-seg-pill" ng-if="c.getSelectedDonee().segment">{{c.getSelectedDonee().segment}}</span>
+                </div>
+                <div class="clm-ls-party-loc">
+                  <div class="clm-loc-main">{{c.fmtLoc(c.getSelectedDonee().depotName, c.getSelectedDonee().rawDepot)}}</div>
+                  <div class="clm-loc-sub">{{c.fmtLoc(c.getSelectedDonee().regionName, c.getSelectedDonee().rawRegion)}} · {{c.fmtLoc(c.getSelectedDonee().zoneName, c.getSelectedDonee().rawZone)}}</div>
+                </div>
+                <div class="clm-tw-factors clm-ls-factors-3">
+                  <div class="clm-tw-factor">
+                    <div class="clm-tw-factor-k">Current CL</div>
+                    <div class="clm-tw-factor-v">₹ {{c.formatINR(c.getSelectedDonee().credit_limit)}}</div>
+                  </div>
+                  <div class="clm-tw-factor">
+                    <div class="clm-tw-factor-k">Current OS</div>
+                    <div class="clm-tw-factor-v">₹ {{c.formatINR(c.getSelectedDonee().outstanding)}}</div>
+                  </div>
+                  <div class="clm-tw-factor">
+                    <div class="clm-tw-factor-k">Available</div>
+                    <div class="clm-tw-factor-v">₹ {{c.formatINR(c.getSelectedDonee().available)}}</div>
+                    <div class="clm-tw-factor-s">After swap: ₹ {{c.formatINR(c.getSelectedDonee().available + c.selected.doneeAmount)}}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="clm-tw-res">
+            <div>
+              <div class="clm-tw-res-k">Limit to Transfer</div>
+              <div class="clm-tw-res-f">{{c.selected.donorSiteName}} → {{c.selected.doneeSiteName}}</div>
+            </div>
+            <div class="clm-tw-res-v">₹ {{c.formatINR(c.selected.doneeAmount)}}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="clm-section">
+        <div class="clm-section-title"><span class="clm-section-num">2</span> Documents &amp; Justification</div>
+
+        <!-- Supporting documents (optional) -->
+        <div class="clm-block clm-ls-mt0">
+          <div class="clm-block-head">
+            <div class="clm-block-heading">
+              <div class="clm-block-title">Supporting Documents</div>
+              <div class="clm-block-sub">Attach any supporting file (PDF, image, Excel, Word…). Up to {{c.UPLOAD.MAX_FILES}} files, {{c.UPLOAD.MAX_MB}} MB each.</div>
+            </div>
+            <div class="clm-block-meta">
+              <span class="clm-chip">Optional</span>
+            </div>
+          </div>
+          <div class="clm-tw-body">
+            <label for="clmLsFileInput" id="clmLsDropZone" class="clm-ls-drop"
+                   ng-class="{'is-disabled': c.data.isSubmitting || c.attachments.length >= c.UPLOAD.MAX_FILES}">
+              <i class="fa fa-cloud-upload clm-ls-drop-icon"></i>
+              <span class="clm-ls-drop-title">Drag &amp; drop files here, or <u>browse</u></span>
+              <span class="clm-ls-drop-sub">Any document type · max {{c.UPLOAD.MAX_MB}} MB per file</span>
+            </label>
+            <input type="file" id="clmLsFileInput" class="clm-ls-file-input" multiple
+                   ng-disabled="c.data.isSubmitting || c.attachments.length >= c.UPLOAD.MAX_FILES">
+
+            <div class="clm-ls-reading" ng-if="c.isReadingFiles"><i class="fa fa-spinner fa-spin"></i> Reading file...</div>
+
+            <ul class="clm-ls-files" ng-if="c.attachments.length > 0">
+              <li class="clm-ls-file" ng-repeat="f in c.attachments track by $index">
+                <span class="clm-ls-file-ext">{{c.fileExt(f.name)}}</span>
+                <span class="clm-ls-file-name" title="{{f.name}}">{{f.name}}</span>
+                <span class="clm-ls-file-size">{{c.formatSize(f.size)}}</span>
+                <button type="button" class="clm-ls-file-del" ng-click="c.removeAttachment($index)" ng-disabled="c.data.isSubmitting" title="Remove">
+                  <i class="fa fa-times"></i>
+                </button>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Business comments -->
+        <div class="clm-block">
+          <div class="clm-block-head">
+            <div class="clm-block-heading">
+              <div class="clm-block-title">Business Comments</div>
+              <div class="clm-block-sub">State the justification for this swap request. It is shared with every approver.</div>
+            </div>
+            <div class="clm-block-meta">
+              <span class="clm-chip clm-chip-req">Required</span>
+            </div>
+          </div>
+          <div class="clm-tw-body">
+            <textarea class="form-control clm-ls-input clm-ls-textarea" rows="4" ng-model="c.selected.comments" placeholder="State justification for this swap request..."></textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="clm-ls-actions">
+        <span class="clm-ls-submitting" ng-if="c.data.isSubmitting">
+          <i class="fa fa-spinner fa-spin"></i> Processing Request &amp; Logging Activity Trail...
+        </span>
+        <button class="clm-btn" ng-click="c.data.currentStep = 1" ng-disabled="c.data.isSubmitting"><i class="fa fa-arrow-left"></i> Back</button>
+        <button class="clm-btn clm-btn-primary" ng-click="c.submitSwap()" ng-disabled="c.data.isSubmitting || c.isReadingFiles || !c.selected.comments.trim()">
+          Confirm &amp; Submit Request
+        </button>
+      </div>
+    </div>
+
+    <!-- =======================================================
+         STEP 3: SUCCESS CONFIRMATION
+         ======================================================= -->
+    <div class="clm-panel slide-down" ng-if="c.data.currentStep == 3">
+      <div class="clm-section">
+        <div class="clm-block clm-ls-mt0 clm-ls-success">
+          <div class="clm-tw-body">
+            <div class="clm-ls-success-icon"><i class="fa fa-check"></i></div>
+            <div class="clm-ls-success-title">Swap Request Submitted Successfully!</div>
+            <div class="clm-ls-success-num">
+              <span class="clm-chip clm-chip-live"><span class="clm-chip-k">Request</span> {{c.data.swapNumber}}</span>
+              <span class="clm-chip" ng-if="c.data.attachedCount > 0"><span class="clm-chip-k">Documents</span> {{c.data.attachedCount}}</span>
+            </div>
+            <p class="clm-ls-success-sub">
+              Your limit swap request has been created and routed through the escalation workflow.
+            </p>
+            <p class="clm-ls-success-warn" ng-if="c.data.attachmentWarning">
+              <i class="fa fa-exclamation-triangle"></i> {{c.data.attachmentWarning}}
+            </p>
+            <div class="clm-ls-success-btns">
+              <button class="clm-btn" ng-click="c.resetForm()">
+                <i class="fa fa-refresh"></i> Raise Another Swap
+              </button>
+              <button class="clm-btn clm-btn-primary" ng-click="c.goToDashboard()">
+                <i class="fa fa-list-alt"></i> Back to Dashboard
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>]]></template>
+    </sp_widget>
+</record_update>
